@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/concurrency-plan.schema.json",
+  "title": "ReviewSensei concurrency plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workflow"],
+  "properties": {
+    "workflow": {"$ref": "#/$defs/concurrencyGroup"},
+    "provider": {
+      "anyOf": [{"$ref": "#/$defs/concurrencyGroup"}, {"type": "null"}]
+    }
+  },
+  "$defs": {
+    "concurrencyGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "max_active", "cancel_in_progress"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "max_active": {"type": "integer", "minimum": 1},
+        "cancel_in_progress": {"type": "boolean"}
+      }
+    }
+  }
+}

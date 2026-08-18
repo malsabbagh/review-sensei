@@ -1,0 +1,7 @@
+{
+  "summary": "The guard change is straightforward and has no actionable finding.",
+  "comments": [],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": []
+}

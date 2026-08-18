@@ -1,0 +1,15 @@
+{
+  "summary": "The discount calculation is placed in the order module without a clear domain boundary.",
+  "comments": [
+    {
+      "path": "src/order.py",
+      "line": 5,
+      "body": "Discount policy should live in a pricing module rather than the order aggregate.",
+      "severity": "suggestion",
+      "category": "architecture"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": []
+}

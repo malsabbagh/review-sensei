@@ -1,0 +1,15 @@
+{
+  "summary": "The command runner now executes untrusted input through a shell.",
+  "comments": [
+    {
+      "path": "src/runner.py",
+      "line": 2,
+      "body": "Using shell=True allows command injection when the command contains untrusted input.",
+      "severity": "bug",
+      "category": "security"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": []
+}

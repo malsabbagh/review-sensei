@@ -1,0 +1,8 @@
+{
+  "id": "tests",
+  "title": "Tests",
+  "focus": [
+    "Missing regression coverage for changed behavior",
+    "Tests that miss boundary and failure cases or can pass without proving behavior"
+  ]
+}

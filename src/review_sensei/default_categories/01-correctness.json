@@ -1,0 +1,8 @@
+{
+  "id": "correctness",
+  "title": "Correctness",
+  "focus": [
+    "Broken control flow, invalid assumptions, and incorrect results",
+    "Boundary conditions, error handling, and data integrity"
+  ]
+}

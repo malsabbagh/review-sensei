@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "corpus": {
+    "id": "review-sensei-synthetic-v1",
+    "version": "1.0",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "run": {
+    "mode": "fixture",
+    "review_sensei_version": "0.1.0",
+    "provider": "fixture",
+    "provider_version": null,
+    "model": "fixture-v1",
+    "endpoint_scope": "none",
+    "package_stage_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "configuration_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "configuration": {
+    "review_configuration_id": "packaged-defaults-v1"
+  },
+  "privacy": {
+    "status": "clean",
+    "scanned_inventory_count": 1
+  },
+  "cases": [
+    {
+      "id": "example",
+      "kind": "quality",
+      "category": "correctness",
+      "status": "passed",
+      "expected_matches": 0,
+      "actual_matches": 0,
+      "false_positives": 0,
+      "location_valid": true,
+      "category_valid": true,
+      "elapsed_ms": 0,
+      "provider_calls": 1,
+      "prompt_bytes": 0,
+      "response_bytes": 0
+    }
+  ],
+  "metrics": {
+    "provider_calls": 1,
+    "prompt_bytes": 0,
+    "response_bytes": 0,
+    "token_proxy_4_bytes": 0,
+    "elapsed_total_ms": 0,
+    "elapsed_mean_ms": 0,
+    "elapsed_p95_ms": 0
+  },
+  "deterministic": {
+    "exact_fixture_result_rate": 1.0,
+    "expected_contract_rejection_rate": 1.0
+  },
+  "quality": {
+    "actionable_precision": 0.0,
+    "false_positive_rate": 0.0,
+    "expected_finding_recall": 1.0,
+    "location_validity": 1.0,
+    "category_coverage": 1.0
+  },
+  "threshold_failures": [],
+  "passed": true
+}

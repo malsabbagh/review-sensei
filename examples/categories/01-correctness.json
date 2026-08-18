@@ -1,0 +1,8 @@
+{
+  "id": "correctness",
+  "title": "Correctness",
+  "focus": [
+    "Incorrect behavior and invalid assumptions",
+    "Boundary conditions and error handling"
+  ]
+}

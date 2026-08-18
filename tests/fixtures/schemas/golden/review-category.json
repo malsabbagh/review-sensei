@@ -1,0 +1,22 @@
+{
+  "id": "architecture",
+  "title": "Architecture",
+  "focus": [
+    "Layer boundaries, dependency direction, and separation of concerns"
+  ],
+  "applies_to": ["**"],
+  "context": {
+    "learnings": {
+      "categories": ["architecture"],
+      "include_uncategorized": true
+    },
+    "documents": [
+      {
+        "path": "docs/architecture",
+        "include": ["**/*.md"],
+        "exclude": ["drafts/**"],
+        "required": false
+      }
+    ]
+  }
+}

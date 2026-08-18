@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and attest release bundle
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Check tag and version consistency
+        run: python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+
+      - name: Install build frontend
+        run: python -m pip install --disable-pip-version-check build
+
+      - name: Build source distribution and wheel
+        run: python -m build --sdist --wheel --outdir dist
+
+      - name: Validate release artifacts
+        run: python scripts/validate_release.py dist --version "${GITHUB_REF_NAME#v}"
+
+      - name: Smoke test the wheel outside the checkout
+        env:
+          WHEEL_ENV: ${{ runner.temp }}/review-sensei-wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          wheels=()
+          while IFS= read -r -d '' wheel; do
+            wheels+=("$wheel")
+          done < <(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -type f -name '*.whl' -print0)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "expected exactly one wheel in dist/" >&2
+            exit 1
+          fi
+          python -m venv "$WHEEL_ENV"
+          "$WHEEL_ENV/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+          "$WHEEL_ENV/bin/python" -m pip check
+          "$WHEEL_ENV/bin/review-sensei" --help
+
+      - name: Create release checksums
+        run: |
+          mkdir -p release
+          (cd dist && sha256sum *.tar.gz *.whl) > release/SHA256SUMS
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@da167eac915b4e86f08b264dbdbc867b61be6f0c # v0.20.5
+        with:
+          path: .
+          format: spdx-json
+          output-file: release/review-sensei-sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Attest package checksums
+        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Upload validated release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-release-bundle
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+            release/SHA256SUMS
+            release/review-sensei-sbom.spdx.json
+
+  publish:
+    name: Publish to PyPI with Trusted Publishing
+    needs: build
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    environment:
+      name: pypi
+      url: https://pypi.org/p/review-sensei
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download validated release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review-sensei-release-bundle
+          path: .
+
+      - name: Publish wheel and source distribution
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+          verify-metadata: true
+          skip-existing: false
+          attestations: true
+
+  github-release:
+    name: Create GitHub release assets
+    needs: build
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review-sensei-release-bundle
+          path: .
+
+      - name: Create tagged GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sdists=(dist/*.tar.gz)
+          wheels=(dist/*.whl)
+          if (( ${#sdists[@]} != 1 || ${#wheels[@]} != 1 )); then
+            echo "expected exactly one sdist and one wheel" >&2
+            exit 1
+          fi
+          assets=("${sdists[0]}" "${wheels[0]}" release/SHA256SUMS release/review-sensei-sbom.spdx.json)
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag --generate-notes --title "ReviewSensei $GITHUB_REF_NAME"

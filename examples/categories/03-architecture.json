@@ -1,0 +1,22 @@
+{
+  "id": "architecture",
+  "title": "Architecture",
+  "focus": [
+    "Layer boundaries, dependency direction, and separation of concerns",
+    "Public contracts, module ownership, and data ownership",
+    "Consistency with architecture documents and accepted decision records"
+  ],
+  "applies_to": ["**"],
+  "context": {
+    "learnings": {
+      "categories": ["architecture"],
+      "include_uncategorized": true
+    },
+    "documents": [
+      {"path": "AGENTS.md"},
+      {"path": "docs/architecture.md"},
+      {"path": "docs/architecture", "include": ["**/*.md"]},
+      {"path": "docs/adr", "include": ["**/*.md"]}
+    ]
+  }
+}

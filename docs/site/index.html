@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#070913" />
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+<link rel="canonical" href="https://reviewsensei.dev/" />
+<title>ReviewSensei — Open-source, provider-neutral AI code review</title>
+<meta name="description" content="ReviewSensei is an open-source, provider-neutral code review engine with repository context, specialist reviewers, and actionable findings. Bring your own model, self-host, and keep review memory in your Git workflow." />
+
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://reviewsensei.dev/" />
+<meta property="og:title" content="ReviewSensei — Open-source, provider-neutral AI code review" />
+<meta property="og:description" content="ReviewSensei combines specialist review passes, repository context, and durable learnings to produce fewer noisy comments and more findings your team can defend, discuss, and act on." />
+<meta property="og:image" content="https://reviewsensei.dev/assets/favicon.svg" />
+<meta property="og:site_name" content="ReviewSensei" />
+
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="ReviewSensei — Open-source, provider-neutral AI code review" />
+<meta name="twitter:description" content="Specialist review passes, repository context, and durable learnings. Bring your own model and keep review memory in your Git workflow." />
+<meta name="twitter:image" content="https://reviewsensei.dev/assets/favicon.svg" />
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "ReviewSensei",
+  "applicationCategory": "DeveloperTools",
+  "operatingSystem": "Cross-platform",
+  "url": "https://reviewsensei.dev/",
+  "downloadUrl": "https://github.com/malsabbagh/review-sensei",
+  "license": "https://github.com/malsabbagh/review-sensei/blob/main/LICENSE",
+  "description": "Open-source, provider-neutral AI code review engine with repository context, specialist reviewers, and actionable findings.",
+  "author": { "@type": "Person", "name": "Mohamad Alsabbagh", "url": "https://github.com/malsabbagh" },
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+
+<style>
+:root{
+  --ink:#090a0c;
+  --ink-2:#0f1114;
+  --ink-3:#15181d;
+  --paper:#f2efe7;
+  --paper-dim:#c9c5ba;
+  --muted:#8f928f;
+  --muted-2:#696d6a;
+  --line:#262a2f;
+  --line-strong:#343941;
+
+  --red:#e15a42;
+  --red-deep:#b83d2d;
+  --red-soft:#f07a63;
+
+  --jade:#55b89b;
+  --jade-bright:#74cdb1;
+  --amber:#d9a24d;
+  --danger:#df5f73;
+
+  --radius:18px;
+  --shadow:0 24px 70px rgba(0,0,0,.34);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  color:var(--paper);
+  background:
+    radial-gradient(circle at 10% 0%, rgba(225,90,66,.045), transparent 28%),
+    linear-gradient(180deg,#08090b 0%,#0a0b0e 48%,#090a0c 100%);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  overflow-x:hidden;
+  letter-spacing:-.01em;
+}
+body:before{
+  content:"";
+  position:fixed; inset:0; z-index:-3; pointer-events:none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:64px 64px;
+  mask-image:linear-gradient(to bottom,rgba(0,0,0,.45),transparent 86%);
+}
+body:after{
+  content:"";
+  position:fixed;left:0;top:0;bottom:0;width:3px;z-index:80;
+  background:linear-gradient(180deg,var(--red),rgba(225,90,66,.15),transparent 85%);
+}
+a{color:inherit;text-decoration:none}
+button,input{font:inherit}
+.container{width:min(1180px,calc(100% - 36px));margin-inline:auto}
+.skip-link{
+  position:absolute;left:-9999px;top:0;z-index:100;
+  padding:10px 16px;background:var(--red);color:#0b0c0e;font-weight:700;border-radius:0 0 8px 0;
+}
+.skip-link:focus{left:0}
+
+.nav{
+  position:sticky; top:0; z-index:50;
+  backdrop-filter:blur(16px);
+  background:rgba(9,10,12,.82);
+  border-bottom:1px solid rgba(255,255,255,.055);
+}
+.nav-inner{display:flex;align-items:center;justify-content:space-between;height:72px}
+.brand{display:flex;align-items:center;gap:12px;font-weight:760;letter-spacing:-.03em}
+.logo{
+  width:38px;height:38px;display:grid;place-items:center;border-radius:10px;
+  background:#111318;
+  border:1px solid #2a2f35;
+  box-shadow:inset 0 1px rgba(255,255,255,.04);
+}
+.logo svg{width:25px;height:25px}
+.dev{color:var(--red)}
+.nav-links{display:flex;align-items:center;gap:26px;color:#a5aaa7;font-size:14px}
+.nav-links a:hover{color:#fff}
+.nav-links a:focus-visible{outline:2px solid var(--red-soft);outline-offset:2px;border-radius:4px}
+.nav-cta{
+  padding:10px 15px;border-radius:10px;border:1px solid rgba(225,90,66,.45);
+  background:rgba(225,90,66,.08);
+  color:#fff !important;font-weight:700;
+}
+
+.hero{padding:88px 0 66px;position:relative}
+.hero-grid{display:grid;grid-template-columns:.92fr 1.08fr;gap:58px;align-items:center}
+
+.eyebrow{
+  display:inline-flex;align-items:center;gap:9px;padding:7px 11px;border-radius:999px;
+  border:1px solid #2a2f35;background:#101216;
+  color:#b9b6ad;font-size:12px;font-weight:750;letter-spacing:.04em;text-transform:uppercase;
+}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--jade);box-shadow:none}
+
+h1{
+  margin:22px 0 20px;font-size:clamp(50px,6vw,80px);line-height:.97;letter-spacing:-.06em;
+  max-width:800px;
+}
+.grad{
+  color:var(--paper);
+  background:none;
+  -webkit-background-clip:unset;background-clip:unset;
+}
+.hero h1:after{
+  content:"REVIEW";
+  display:block;
+  width:max-content;
+  margin-top:10px;
+  padding:4px 8px 3px;
+  border:1px solid rgba(225,90,66,.32);
+  color:var(--red-soft);
+  font-size:11px;
+  line-height:1;
+  letter-spacing:.22em;
+  transform:rotate(-1.4deg);
+}
+.lede{
+  font-size:18px;line-height:1.7;color:#a4a8a5;max-width:610px;margin:0 0 30px;
+}
+.actions{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:27px}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:10px;
+  padding:13px 18px;border-radius:11px;border:1px solid transparent;font-weight:760;
+  transition:.18s ease;cursor:pointer;
+}
+.btn:focus-visible{outline:2px solid var(--red-soft);outline-offset:2px}
+.btn-primary{
+  background:var(--red); color:#0b0c0e; border-color:var(--red);
+  box-shadow:none;
+}
+.btn-primary:hover{transform:translateY(-1px);background:var(--red-soft)}
+.btn-ghost{
+  border-color:#2c3036;background:#111318;color:#dedbd2;
+}
+.btn-ghost:hover{background:#171a1f;transform:translateY(-1px)}
+.meta{display:flex;gap:22px;flex-wrap:wrap;color:#7e837f;font-size:13px}
+.meta span{display:flex;align-items:center;gap:8px}
+.meta i{width:5px;height:5px;border-radius:50%;background:#505650}
+
+.hero-card{
+  position:relative;border-radius:22px;padding:1px;
+  background:#292d33;
+  box-shadow:var(--shadow);
+}
+.hero-card:before{
+  content:"";position:absolute;inset:16px -16px -16px 16px;z-index:-1;
+  border:1px solid rgba(225,90,66,.16);border-radius:22px;
+}
+.review-shell{
+  border-radius:21px;background:#0d0f12;
+  overflow:hidden;min-height:555px;
+}
+.window-bar{
+  height:54px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;
+  border-bottom:1px solid #23272c;background:#111318;
+}
+.win-left,.win-right{display:flex;align-items:center;gap:10px;font-size:12px;color:#a1a59f}
+.circle{width:9px;height:9px;border-radius:50%;background:#373b42}.circle:nth-child(2){background:#444950}.circle:nth-child(3){background:#5a5e63}
+.pr-pill{padding:5px 8px;border-radius:7px;background:#191c21;color:#c7c4ba;border:1px solid #2d3137}
+.delta-plus{color:var(--jade-bright)}.delta-minus{color:#ee7589}
+
+.code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12.5px;line-height:1.72;color:#b6b9b4;padding:18px 16px 8px;
+}
+.line{display:grid;grid-template-columns:34px 18px 1fr;padding:2px 6px;border-radius:4px}
+.ln{color:#50555e;text-align:right;padding-right:8px}.sym{color:#5c626a}
+.line.del{background:rgba(225,90,66,.09);color:#ef9b8b}
+.line.add{background:rgba(85,184,155,.08);color:#9adbc8}
+.line.focus{
+  border-left:2px solid var(--red);
+  background:linear-gradient(90deg,rgba(225,90,66,.10),rgba(225,90,66,.02));
+}
+
+.review-comments{padding:12px 16px 18px;display:grid;gap:10px}
+.comment{
+  display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:start;
+  padding:12px;border-radius:12px;background:#111419;
+  border:1px solid #272c32;
+}
+.comment:nth-child(1){border-left:3px solid var(--red)}
+.comment:nth-child(2){border-left:3px solid var(--amber)}
+.comment:nth-child(3){border-left:3px solid var(--jade)}
+.cicon{
+  width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
+  background:#1a1d22;color:#e7e3db;border:1px solid #2b3036;
+}
+.comment:nth-child(1) .cicon{color:var(--red-soft)}
+.comment:nth-child(2) .cicon{color:#efc56f}
+.comment:nth-child(3) .cicon{color:var(--jade-bright)}
+.ctitle{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:800}
+.bot{font-weight:650;color:#8f948f;background:#1a1d22;padding:2px 6px;border-radius:5px}
+.cbody{font-size:12px;color:#a6aba7;line-height:1.45;margin-top:5px}
+.cpath{font-size:10px;color:#666d68;margin-top:5px}
+.badge{
+  font-size:10px;padding:4px 7px;border-radius:999px;background:#171a1f;
+  color:#b4b0a6;border:1px solid #2b2f35;
+}
+
+.specialists{
+  position:absolute;right:-44px;top:106px;display:grid;gap:8px;width:170px;
+}
+.spec{
+  border:1px solid #2a2f35;background:#101216;
+  border-radius:11px;padding:9px 10px;
+  box-shadow:0 12px 26px rgba(0,0,0,.24);
+  font-size:10px;color:#8e938f;display:flex;align-items:center;gap:8px;
+}
+.spec b{display:block;color:#e9e5dc;font-size:10.5px;margin-bottom:1px}
+.spec-mark{
+  width:23px;height:23px;border-radius:7px;display:grid;place-items:center;
+  background:#191c21;color:#c6c2b8;border:1px solid #2b3036;
+}
+.spec:nth-child(1) .spec-mark{color:var(--red-soft)}
+.spec:nth-child(2) .spec-mark{color:#d5aa55}
+.spec:nth-child(3) .spec-mark{color:var(--jade-bright)}
+.spec:nth-child(4) .spec-mark{color:#d7d2c8}
+
+.trust{padding:20px 0 72px}
+.trust-strip{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;border:1px solid #24282d;
+  background:#24282d;border-radius:14px;overflow:hidden;
+}
+.trust-item{padding:18px 20px;background:#0d0f12}
+.trust-item strong{display:block;font-size:15px}
+.trust-item span{color:#818681;font-size:12px}
+
+.section{padding:92px 0}
+.section-head{max-width:720px;margin-bottom:42px}
+.kicker{
+  color:var(--red-soft);font-size:12px;text-transform:uppercase;letter-spacing:.18em;font-weight:850;
+}
+h2{font-size:clamp(34px,4vw,50px);line-height:1.06;letter-spacing:-.045em;margin:11px 0 14px}
+.section-head p{color:#969b96;font-size:17px;line-height:1.7;margin:0}
+
+.feature-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.feature{
+  position:relative;padding:24px;border-radius:16px;overflow:hidden;
+  background:#0f1114;border:1px solid #24292f;min-height:238px;
+  transition:.18s ease;
+}
+.feature:hover{transform:translateY(-2px);border-color:#343941}
+.feature:after{
+  content:"";position:absolute;left:24px;right:24px;bottom:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--red),transparent);
+  opacity:.0;transition:.18s ease;
+}
+.feature:hover:after{opacity:.55}
+.ficon{
+  width:40px;height:40px;border-radius:10px;display:grid;place-items:center;margin-bottom:28px;
+  background:#171a1e;border:1px solid #2a2f35;color:#ddd9cf;
+}
+.feature:nth-child(1) .ficon,.feature:nth-child(4) .ficon{color:var(--red-soft)}
+.feature:nth-child(2) .ficon,.feature:nth-child(5) .ficon{color:var(--jade-bright)}
+.feature:nth-child(3) .ficon,.feature:nth-child(6) .ficon{color:#e0b665}
+.feature h3{font-size:18px;margin:0 0 9px;letter-spacing:-.02em}
+.feature p{margin:0;color:#858a85;line-height:1.65;font-size:14px}
+.feature .tag{
+  position:absolute;top:20px;right:20px;font-size:10px;color:#737873;
+  border:1px solid #282d33;border-radius:999px;padding:5px 7px;background:#13161a;
+}
+
+.flow-wrap{
+  display:grid;grid-template-columns:.95fr 1.05fr;gap:34px;align-items:center;
+  padding:32px;border-radius:20px;border:1px solid #272c32;
+  background:#0d0f12;
+}
+.flow-copy ul{list-style:none;padding:0;margin:25px 0 0;display:grid;gap:14px}
+.flow-copy li{display:grid;grid-template-columns:28px 1fr;gap:11px;color:#929792;font-size:14px;line-height:1.5}
+.flow-copy li b{color:#ece8de}
+.num{
+  width:26px;height:26px;border-radius:7px;display:grid;place-items:center;
+  background:#171a1e;color:var(--red-soft);font-size:11px;font-weight:850;border:1px solid #2b3036;
+}
+.pipeline{display:grid;gap:10px}
+.pipe{
+  display:grid;grid-template-columns:44px 1fr auto;align-items:center;gap:12px;
+  padding:13px 14px;border-radius:12px;background:#111419;border:1px solid #282d33
+}
+.pipe-icon{
+  width:38px;height:38px;border-radius:10px;display:grid;place-items:center;
+  background:#1a1d22;color:#d7d3ca;border:1px solid #2b3036
+}
+.pipe:nth-child(1) .pipe-icon{color:var(--red-soft)}
+.pipe:nth-child(2) .pipe-icon{color:#e0b665}
+.pipe:nth-child(3) .pipe-icon{color:var(--jade-bright)}
+.pipe:nth-child(4) .pipe-icon{color:#cfcac0}
+.pipe h4{margin:0 0 3px;font-size:13px}.pipe p{margin:0;font-size:11px;color:#777d78}
+.status{
+  font-size:10px;color:var(--jade-bright);border:1px solid rgba(85,184,155,.22);
+  padding:4px 7px;border-radius:999px;background:rgba(85,184,155,.05)
+}
+.final{
+  margin-top:3px;padding:16px;border-radius:13px;
+  background:rgba(85,184,155,.045);
+  border:1px solid rgba(85,184,155,.25);
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+}
+.final strong{font-size:17px}.final span{display:block;color:#82938d;font-size:11px;margin-top:3px}
+.score{font-size:30px;font-weight:800;color:var(--jade-bright)}
+
+.install{
+  padding:28px;border-radius:18px;border:1px solid #272c32;
+  background:#0d0f12;box-shadow:0 22px 60px rgba(0,0,0,.22)
+}
+.tabs{display:flex;gap:7px;margin-bottom:16px}
+.tab{
+  border:1px solid transparent;border-radius:8px;padding:8px 10px;background:transparent;
+  color:#777d78;cursor:pointer;font-size:12px
+}
+.tab.active{background:#171a1e;color:#dedad1;border-color:#2c3137}
+.tab:focus-visible{outline:2px solid var(--red-soft);outline-offset:2px}
+.command{
+  position:relative;background:#07090b;border:1px solid #252a30;border-radius:11px;
+  padding:18px 54px 18px 18px;color:#b7bbb6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;overflow:auto
+}
+.command a{color:var(--red-soft);font-weight:700}
+.command .accent{color:var(--red-soft)}
+.copy{
+  position:absolute;right:9px;top:9px;border:1px solid #2b3036;background:#121419;
+  color:#878d88;border-radius:7px;padding:7px 9px;cursor:pointer
+}
+.copy:hover{color:#fff}
+.copy:focus-visible{outline:2px solid var(--red-soft);outline-offset:2px}
+.install-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}
+.mini{padding:16px;border:1px solid #252a30;border-radius:11px;background:#101216}
+.mini b{font-size:13px}.mini p{font-size:12px;color:#7d827d;line-height:1.55;margin:6px 0 0}
+
+.cta{
+  margin:32px auto 92px;padding:42px;border-radius:22px;text-align:center;
+  border:1px solid #292e34;background:#0d0f12;
+  box-shadow:0 30px 70px rgba(0,0,0,.24);
+  position:relative;overflow:hidden;
+}
+.cta:before{
+  content:"";position:absolute;left:50%;top:0;transform:translateX(-50%);
+  width:160px;height:3px;background:var(--red)
+}
+.cta h2{max-width:760px;margin-inline:auto}
+.cta p{color:#8e938e;max-width:680px;margin:0 auto 24px;line-height:1.65}
+
+.footer{border-top:1px solid #24282d;padding:28px 0 40px;color:#70756f;font-size:12px}
+.footer-inner{display:flex;justify-content:space-between;gap:20px;align-items:center;flex-wrap:wrap}
+.footer-links{display:flex;gap:18px}
+.footer-links a:focus-visible{outline:2px solid var(--red-soft);outline-offset:2px;border-radius:4px}
+
+.review-seal{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  margin-top:22px;
+  width:90px;
+  height:90px;
+  border-radius:50%;
+  border:1px solid rgba(225,90,66,.35);
+  color:var(--red-soft);
+  font-weight:850;
+  font-size:11px;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  transform:rotate(-7deg);
+  position:relative;
+}
+.review-seal:before,.review-seal:after{
+  content:"";
+  position:absolute;
+  border-radius:50%;
+  border:1px solid rgba(225,90,66,.14);
+}
+.review-seal:before{inset:7px}
+.review-seal:after{inset:14px}
+
+.reveal{transform:translateY(14px);transition:.55s ease}
+.js-reveal .reveal{opacity:0}
+.reveal.visible{opacity:1;transform:none}
+
+@media (max-width:980px){
+  .nav-links a:not(.nav-cta){display:none}
+  .hero{padding-top:60px}
+  .hero-grid,.flow-wrap{grid-template-columns:1fr}
+  .hero-grid{gap:38px}
+  .specialists{right:18px;top:92px}
+  .feature-grid{grid-template-columns:repeat(2,1fr)}
+  .trust-strip{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:640px){
+  .container{width:min(100% - 24px,1180px)}
+  .nav-inner{height:66px}.nav-cta{padding:9px 11px}
+  .hero{padding:44px 0 38px}
+  h1{font-size:49px}
+  .lede{font-size:16px}
+  .hero-card{border-radius:18px}.review-shell{border-radius:17px;min-height:0}
+  .specialists{display:none}
+  .window-bar{padding:0 12px}.win-right{display:none}
+  .code{font-size:10.5px;padding-inline:8px}.line{grid-template-columns:27px 13px 1fr;padding-inline:3px}
+  .comment{grid-template-columns:auto 1fr}.comment .badge{display:none}
+  .trust-strip{grid-template-columns:1fr}
+  .feature-grid{grid-template-columns:1fr}
+  .section{padding:68px 0}
+  .section-head{margin-bottom:28px}
+  .flow-wrap{padding:18px}
+  .install-grid{grid-template-columns:1fr}
+  .cta{padding:30px 18px;margin-bottom:60px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{scroll-behavior:auto !important;animation:none !important;transition:none !important}
+  .reveal,.js-reveal .reveal{opacity:1;transform:none}
+}
+</style>
+
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/" aria-label="ReviewSensei home">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="none">
+          <path d="M14 14 31 3v17L17 29v18L6 40V24L14 14Z" fill="url(#g1)"/>
+          <path d="m50 14-17-11v17l14 9v18l11-7V24L50 14Z" fill="url(#g2)"/>
+          <path d="M21 45 32 55l11-10 7 4-18 12L14 49l7-4Z" fill="url(#g3)"/>
+          <path d="m25 33 5 5 10-12" stroke="#74CDB1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="g1" x1="10" y1="10" x2="30" y2="45"><stop stop-color="#F2EFE7"/><stop offset="1" stop-color="#B83D2D"/></linearGradient>
+            <linearGradient id="g2" x1="53" y1="10" x2="34" y2="45"><stop stop-color="#F2EFE7"/><stop offset="1" stop-color="#E15A42"/></linearGradient>
+            <linearGradient id="g3" x1="16" y1="43" x2="48" y2="55"><stop stop-color="#55B89B"/><stop offset="1" stop-color="#F2EFE7"/></linearGradient>
+          </defs>
+        </svg>
+      </span>
+      <span>ReviewSensei<span class="dev">.dev</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="#opensource">Open source</a>
+      <a class="nav-cta" href="#install">Get ReviewSensei</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero">
+  <div class="container hero-grid">
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Open source · Repository-aware · GitHub-native</div>
+      <h1><span class="grad">Code review with judgment.</span><br/>Context your team actually owns.</h1>
+      <p class="lede">
+        ReviewSensei combines specialist review passes, repository context, and durable learnings to produce fewer noisy comments and more findings your team can defend, discuss, and act on.
+      </p>
+      <div class="actions">
+        <a class="btn btn-primary" href="#install">Install ReviewSensei <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="#how">See how it reviews</a>
+      </div>
+      <div class="meta">
+        <span><i></i>Bring your own model</span>
+        <span><i></i>Self-host friendly</span>
+        <span><i></i>Repository-owned memory</span>
+      </div>
+      <div class="review-seal" aria-hidden="true">Reviewed<br>with context</div>
+    </div>
+
+    <div class="hero-card" aria-label="ReviewSensei product preview">
+      <div class="review-shell">
+        <div class="window-bar">
+          <div class="win-left">
+            <span class="circle"></span><span class="circle"></span><span class="circle"></span>
+            <span style="margin-left:5px">feat: add checkout flow</span><span class="pr-pill">#241</span>
+          </div>
+          <div class="win-right">
+            <span class="delta-plus">+42</span><span class="delta-minus">−17</span>
+          </div>
+        </div>
+
+        <div class="code" aria-hidden="true">
+          <div class="line"><span class="ln">32</span><span class="sym"></span><span>async function createOrder(input) {</span></div>
+          <div class="line del"><span class="ln">34</span><span class="sym">−</span><span>const order = new Order(input);</span></div>
+          <div class="line del"><span class="ln">35</span><span class="sym">−</span><span>order.calculateTotal();</span></div>
+          <div class="line add"><span class="ln">38</span><span class="sym">+</span><span>const order = new Order(input);</span></div>
+          <div class="line add"><span class="ln">39</span><span class="sym">+</span><span>await order.calculateTotal();</span></div>
+          <div class="line add focus"><span class="ln">40</span><span class="sym">+</span><span>order.applyDiscounts(input.coupon);</span></div>
+          <div class="line add"><span class="ln">41</span><span class="sym">+</span><span>await order.validate();</span></div>
+          <div class="line"><span class="ln">43</span><span class="sym"></span><span>return order;</span></div>
+        </div>
+
+        <div class="review-comments">
+          <div class="comment">
+            <div class="cicon">✦</div>
+            <div>
+              <div class="ctitle">ReviewSensei <span class="bot">bot</span></div>
+              <div class="cbody"><strong style="color:#e6eafd">Potential missing validation.</strong><br/>What if <code>input.coupon</code> is invalid or expired?</div>
+              <div class="cpath">src/checkout/service.ts:40</div>
+            </div>
+            <span class="badge">High impact</span>
+          </div>
+          <div class="comment">
+            <div class="cicon">⌘</div>
+            <div>
+              <div class="ctitle">ReviewSensei <span class="bot">bot</span></div>
+              <div class="cbody">This discount logic appears in two flows. Consider extracting it into the pricing domain.</div>
+              <div class="cpath">src/checkout/service.ts:39</div>
+            </div>
+            <span class="badge">Architecture</span>
+          </div>
+          <div class="comment">
+            <div class="cicon">✓</div>
+            <div>
+              <div class="ctitle">ReviewSensei <span class="bot">bot</span></div>
+              <div class="cbody">No security regressions found in the changed authorization path.</div>
+              <div class="cpath">review summary</div>
+            </div>
+            <span class="badge">Verified</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="specialists" aria-hidden="true">
+        <div class="spec"><span class="spec-mark">✓</span><span><b>Correctness</b>logic & edge cases</span></div>
+        <div class="spec"><span class="spec-mark">⌘</span><span><b>Architecture</b>boundaries & design</span></div>
+        <div class="spec"><span class="spec-mark">◈</span><span><b>Security</b>risk & trust boundaries</span></div>
+        <div class="spec"><span class="spec-mark">↗</span><span><b>Performance</b>cost & scalability</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="trust">
+  <div class="container trust-strip reveal">
+    <div class="trust-item"><strong>Repository-aware</strong><span>Understands local architecture and rules.</span></div>
+    <div class="trust-item"><strong>Model-independent</strong><span>Use Ollama or your preferred provider.</span></div>
+    <div class="trust-item"><strong>Evidence-first</strong><span>Findings point back to code and context.</span></div>
+    <div class="trust-item"><strong>Learnings you own</strong><span>Keep review memory in your Git workflow.</span></div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="kicker">A review system, not a chatbot</div>
+      <h2>Fewer opinions. Better review evidence.</h2>
+      <p>ReviewSensei is designed around the things that make review trustworthy: focused passes, repository knowledge, traceable evidence, and a final synthesis that removes duplication.</p>
+    </div>
+
+    <div class="feature-grid">
+      <article class="feature reveal"><span class="tag">Core</span><div class="ficon">⌘</div><h3>Multi-stage review</h3><p>Run correctness, architecture, security, performance, tests, and maintainability as separate review stages instead of one overloaded prompt.</p></article>
+      <article class="feature reveal"><span class="tag">Context</span><div class="ficon">◎</div><h3>Repository memory</h3><p>Carry forward conventions, architectural decisions, prior findings, and accepted review guidance without locking that knowledge inside a vendor.</p></article>
+      <article class="feature reveal"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Evidence-backed findings</h3><p>Every important comment should explain why it matters and connect to the changed code, repository rule, or prior learning that supports it.</p></article>
+      <article class="feature reveal"><span class="tag">Choice</span><div class="ficon">↔</div><h3>Bring your own model</h3><p>Keep the review engine provider-neutral. Switch models as they improve without replacing your workflow, repository memory, or review policy.</p></article>
+      <article class="feature reveal"><span class="tag">GitHub</span><div class="ficon">⌁</div><h3>Native pull-request workflow</h3><p>ReviewSensei is built around PRs, comments, checks, and actionable findings—not a separate dashboard developers have to remember to visit.</p></article>
+      <article class="feature reveal"><span class="tag">Open</span><div class="ficon">{"</>"}</div><h3>Open-source by design</h3><p>Inspect how the reviewer works, self-host it, extend stages, add providers, and keep sensitive code review execution under your control.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="how">
+  <div class="container">
+    <div class="flow-wrap reveal">
+      <div class="flow-copy">
+        <div class="kicker">How it works</div>
+        <h2>One pull request. Several specialist perspectives.</h2>
+        <p style="color:#95a1bf;line-height:1.7;margin:0">Instead of asking one model to "review this code," ReviewSensei decomposes review into focused stages and then synthesizes the results.</p>
+        <ul>
+          <li><span class="num">1</span><span><b>Build context.</b> Load the diff, relevant files, repository policy, architecture notes, and approved learnings.</span></li>
+          <li><span class="num">2</span><span><b>Run specialists.</b> Each reviewer looks for a narrower class of failure with its own criteria.</span></li>
+          <li><span class="num">3</span><span><b>Validate findings.</b> Remove duplicates, weak guesses, and findings unsupported by the codebase.</span></li>
+          <li><span class="num">4</span><span><b>Export a clean review.</b> High-signal findings and a final verdict are written to a validated artifact ready for your chosen integration.</span></li>
+        </ul>
+      </div>
+      <div class="pipeline">
+        <div class="pipe"><div class="pipe-icon">✓</div><div><h4>Correctness reviewer</h4><p>Logic, error paths, state transitions, edge cases</p></div><span class="status">complete</span></div>
+        <div class="pipe"><div class="pipe-icon">⌘</div><div><h4>Architecture reviewer</h4><p>Boundaries, coupling, maintainability, design drift</p></div><span class="status">complete</span></div>
+        <div class="pipe"><div class="pipe-icon">◈</div><div><h4>Security reviewer</h4><p>Trust boundaries, authz, data exposure, risky patterns</p></div><span class="status">complete</span></div>
+        <div class="pipe"><div class="pipe-icon">↗</div><div><h4>Performance reviewer</h4><p>Scaling risks, hot paths, unnecessary work</p></div><span class="status">complete</span></div>
+        <div class="final"><div><strong>Final synthesis: Looks good</strong><span>3 useful findings · 0 duplicate comments · 92% confidence</span></div><div class="score">92</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="install">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="kicker">Start small</div>
+      <h2>Install it where your code already lives.</h2>
+      <p>ReviewSensei supports a GitHub App path and customer-owned execution. Install from source or use the GitHub Action with your own Ollama instance.</p>
+    </div>
+
+    <div class="install reveal">
+    <div class="tabs" role="tablist" aria-label="Install examples">
+      <button class="tab active" data-command="gh" role="tab" aria-selected="true" aria-controls="command" id="tab-gh" tabindex="0">GitHub App</button>
+      <button class="tab" data-command="action" role="tab" aria-selected="false" aria-controls="command" id="tab-action" tabindex="-1">GitHub Action</button>
+      <button class="tab" data-command="cli" role="tab" aria-selected="false" aria-controls="command" id="tab-cli" tabindex="-1">CLI</button>
+    </div>
+      <div class="command" id="command" role="tabpanel" aria-labelledby="tab-gh"><span class="accent"># Install the ReviewSensei GitHub App</span><br/><a href="https://github.com/apps/reviewsensei">Open the ReviewSensei GitHub App on GitHub →</a><br/>Need a custom or self-hosted App? Read the <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/github-app-registration.md">GitHub App registration guide</a>.<button class="copy" type="button" id="copyBtn" aria-label="Copy install command">Copy</button></div>
+      <div class="install-grid">
+        <div class="mini"><b>Your model credentials stay yours</b><p>Configure your provider in your own execution environment. ReviewSensei should not need to become the owner of your model account.</p></div>
+        <div class="mini"><b>Your review memory stays portable</b><p>Repository-specific learnings can live in Git so they remain reviewable, versioned, and independent from any individual LLM vendor.</p></div>
+      </div>
+    </div>
+
+    <div class="section-head reveal" style="margin-top:52px">
+      <div class="kicker">Documentation</div>
+      <h2>Everything you need to get started.</h2>
+      <p>Installation, configuration, data handling, security, and architecture docs live in the public repository.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature"><span class="tag">Setup</span><div class="ficon">⌁</div><h3>Installation guide</h3><p>Install from source, configure your provider, and run your first review. Covers local Ollama and Ollama Cloud.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md" style="color:var(--red-soft);font-weight:700">Read the install guide →</a></p></article>
+      <article class="feature"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Security & data handling</h3><p>ReviewSensei sends diffs to your configured provider and stores nothing. Understand the trust boundary before you connect a model.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md" style="color:var(--red-soft);font-weight:700">Security policy →</a> · <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/data-handling.md" style="color:var(--red-soft);font-weight:700">Data handling →</a></p></article>
+      <article class="feature"><span class="tag">Architecture</span><div class="ficon">⌘</div><h3>Architecture & contracts</h3><p>Provider-neutral review engine, structured stages, versioned JSON schemas, and public compatibility guarantees.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/architecture.md" style="color:var(--red-soft);font-weight:700">Architecture docs →</a> · <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/public-contracts.md" style="color:var(--red-soft);font-weight:700">Public contracts →</a></p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="opensource">
+  <div class="container">
+    <div class="cta reveal">
+      <div class="kicker">Open source</div>
+      <h2>Keep the reviewer inspectable. Keep the judgment yours.</h2>
+      <p>Inspect the reviewer, choose the models, own the memory, and evolve the workflow with your repository instead of handing institutional knowledge to another closed review service.</p>
+      <div class="actions" style="justify-content:center;margin-bottom:0">
+        <a class="btn btn-primary" href="https://github.com/malsabbagh/review-sensei">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/malsabbagh/review-sensei/blob/main/CONTRIBUTING.md">Contributing</a>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="brand" style="font-size:13px"><span>ReviewSensei<span class="dev">.dev</span></span><span style="font-weight:500;color:#65718f">Open-source code review intelligence</span></div>
+    <div class="footer-links">
+      <a href="https://github.com/malsabbagh/review-sensei">GitHub</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">Docs</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/malsabbagh/review-sensei/issues">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+const commands = {
+  gh: '<span class="accent"># Install the ReviewSensei GitHub App</span><br><a href="https://github.com/apps/reviewsensei">Open the ReviewSensei GitHub App on GitHub →</a><br>Need a custom or self-hosted App? Read the <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/github-app-registration.md">GitHub App registration guide</a>.',
+  action: '<span class="accent"># Add ReviewSensei to a GitHub Actions workflow</span><br># See the example workflow:<br>https://github.com/malsabbagh/review-sensei/blob/main/examples/github-actions/review-sensei-review.yml',
+  cli: '<span class="accent"># Install and run locally</span><br>pip install review-sensei<br>review-sensei prepare-diff --repository . --base-ref main --head-ref feature --output pr.patch<br>review-sensei --diff pr.patch --repository owner/repo --pull-request 42 --output review.json'
+};
+const tabs = Array.from(document.querySelectorAll(".tab"));
+function selectTab(tab){
+  tabs.forEach(t=>{t.classList.remove("active");t.setAttribute("aria-selected","false");t.setAttribute("tabindex","-1");});
+  tab.classList.add("active");
+  tab.setAttribute("aria-selected","true");
+  tab.setAttribute("tabindex","0");
+  tab.focus();
+  document.querySelector("#command").innerHTML = commands[tab.dataset.command] + '<button class="copy" type="button" id="copyBtn" aria-label="Copy install command">Copy</button>';
+  document.querySelector("#command").setAttribute("aria-labelledby", tab.id);
+  bindCopy();
+}
+tabs.forEach((tab, i)=>{
+  tab.addEventListener("click",()=>selectTab(tab));
+  tab.addEventListener("keydown",e=>{
+    if(e.key==="ArrowRight"){e.preventDefault();selectTab(tabs[(i+1)%tabs.length]);}
+    if(e.key==="ArrowLeft"){e.preventDefault();selectTab(tabs[(i-1+tabs.length)%tabs.length]);}
+    if(e.key==="Home"){e.preventDefault();selectTab(tabs[0]);}
+    if(e.key==="End"){e.preventDefault();selectTab(tabs[tabs.length-1]);}
+  });
+});
+function bindCopy(){
+  const btn=document.querySelector("#copyBtn");
+  if(!btn) return;
+  btn.addEventListener("click",async()=>{
+    const text=document.querySelector("#command").innerText.replace("Copy","").trim();
+    try{
+      await navigator.clipboard.writeText(text);
+      btn.textContent="Copied";
+      setTimeout(()=>btn.textContent="Copy",1200);
+    }catch{
+      btn.textContent="Select";
+    }
+  });
+}
+bindCopy();
+
+if(typeof IntersectionObserver === "function"){
+  document.documentElement.classList.add("js-reveal");
+  const observer = new IntersectionObserver(entries=>{
+    entries.forEach(entry=>{
+      if(entry.isIntersecting){entry.target.classList.add("visible");observer.unobserve(entry.target);}
+    });
+  },{threshold:.12});
+  document.querySelectorAll(".reveal").forEach(el=>observer.observe(el));
+}
+</script>
+</body>
+</html>

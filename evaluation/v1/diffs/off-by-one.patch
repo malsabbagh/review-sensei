@@ -1,0 +1,9 @@
+diff --git a/src/pagination.py b/src/pagination.py
+--- a/src/pagination.py
++++ b/src/pagination.py
+@@ -1,2 +1,3 @@
+-def page_items(items, page_size):
+-    return items[0:page_size]
++def page_items(items, page_size, page=1):
++    start = (page - 1) * page_size
++    return items[start : start + page_size]

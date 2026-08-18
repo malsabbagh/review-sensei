@@ -1,0 +1,9 @@
+diff --git a/src/order.py b/src/order.py
+--- a/src/order.py
++++ b/src/order.py
+@@ -1,2 +1,5 @@
+ def total(order):
+     return sum(item.price for item in order.items)
++
++def apply_discount(order, rate):
++    return total(order) * (1 - rate)

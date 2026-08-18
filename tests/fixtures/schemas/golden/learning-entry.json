@@ -1,0 +1,10 @@
+{
+  "id": "provider-boundary",
+  "title": "Keep provider calls behind adapters",
+  "rule": "Review business logic must not import provider SDKs.",
+  "scope": ["src/**"],
+  "rationale": "Provider changes should not alter review behavior.",
+  "category": "architecture",
+  "source": "https://github.com/owner/repository/pull/123",
+  "status": "active"
+}

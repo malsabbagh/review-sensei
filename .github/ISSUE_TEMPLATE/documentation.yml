@@ -1,0 +1,47 @@
+name: Documentation request
+description: Report a documentation gap or propose clearer guidance.
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Documentation requests help make ReviewSensei easier to install, operate, and contribute to. Do not include credentials, private diffs, private source code, personal data, or raw provider responses.
+  - type: textarea
+    id: gap
+    attributes:
+      label: Documentation gap
+      description: What is missing, inaccurate, ambiguous, or difficult to find?
+    validations:
+      required: true
+  - type: textarea
+    id: desired_docs
+    attributes:
+      label: Desired documentation
+      description: What wording, example, page, or decision would resolve the gap? Links to the relevant current page are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: affected_areas
+    attributes:
+      label: Affected areas
+      description: Identify the README, docs page, API/schema reference, workflow, or contributor guidance involved.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How can a reader or maintainer verify that the documentation is complete and accurate?
+    validations:
+      required: true
+  - type: checkboxes
+    id: security_privacy
+    attributes:
+      label: Security and privacy check
+      options:
+        - label: I have not included credentials, private diffs/source, personal data, or raw provider responses.
+          required: true
+        - label: I understand that a security vulnerability must be reported through SECURITY.md, not a public documentation issue.
+          required: true

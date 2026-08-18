@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-result.schema.json",
+  "title": "ReviewSensei review result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "comments", "provider"],
+  "properties": {
+    "summary": {"type": "string", "minLength": 1},
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "body"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "line": {"type": "integer", "minimum": 1},
+          "body": {"type": "string", "minLength": 1},
+          "severity": {"type": "string", "minLength": 1},
+          "category": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "provider": {"type": "string", "minLength": 1},
+    "model": {
+      "anyOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"}
+      ]
+    },
+    "learning_proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "rule", "scope"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1},
+          "rule": {"type": "string", "minLength": 1},
+          "scope": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "rationale": {"type": "string", "minLength": 1},
+          "category": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

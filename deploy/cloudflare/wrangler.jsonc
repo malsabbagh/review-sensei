@@ -1,0 +1,33 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "reviewsensei-github-app",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-08-16",
+	"workers_dev": true,
+	"preview_urls": true,
+	"routes": [
+		{
+			"pattern": "github.reviewsensei.dev",
+			"zone_name": "reviewsensei.dev",
+			"custom_domain": true,
+			"enabled": true,
+			"previews_enabled": false
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "DELIVERY_LEDGER",
+				"class_name": "DeliveryLedger"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"DeliveryLedger"
+			]
+		}
+	]
+}

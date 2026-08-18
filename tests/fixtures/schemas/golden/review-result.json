@@ -1,0 +1,23 @@
+{
+  "summary": "The change is straightforward and only needs a small cleanup.",
+  "comments": [
+    {
+      "path": "src/app.py",
+      "line": 2,
+      "body": "Use a named constant instead of a magic value.",
+      "severity": "suggestion",
+      "category": "maintainability"
+    }
+  ],
+  "provider": "ollama",
+  "model": "deepseek-v4-pro:cloud",
+  "learning_proposals": [
+    {
+      "title": "Keep adapters isolated",
+      "rule": "Review business logic must not import provider SDKs.",
+      "scope": ["src/review_sensei/providers/**"],
+      "rationale": "Provider changes should not alter review behavior.",
+      "category": "architecture"
+    }
+  ]
+}
