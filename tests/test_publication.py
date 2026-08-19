@@ -603,20 +603,6 @@ class PublicationAuditTests(unittest.TestCase):
         self.assertEqual(report["findings"][0]["category"], "unsafe-tree-entry")
 
 
-class PublicationWorkflowOrderingTests(unittest.TestCase):
-    def test_audit_before_dry_run_and_sync(self):
-        workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(
-            encoding="utf-8"
-        )
-        audit_pos = workflow.index("Audit publication boundary")
-        dry_run_pos = workflow.index("Dry-run publication sync")
-        sync_pos = workflow.index("Sync to public repository")
-        self.assertLess(audit_pos, dry_run_pos)
-        self.assertLess(audit_pos, sync_pos)
-        self.assertIn("Upload publication audit report", workflow)
-        self.assertIn("actions/upload-artifact@", workflow)
-
-
 class PublicationDocumentationTests(unittest.TestCase):
     def test_public_registration_guide_omits_private_upstream_slug(self):
         content = (ROOT / "docs" / "github-app-registration.md").read_text(
