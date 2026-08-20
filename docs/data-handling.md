@@ -139,3 +139,24 @@ scope, repository permissions, uninstall behavior, and the exact GitHub data it
 forwards to a model provider. Any future learning PR path must keep proposals
 unmerged until maintainer review and load future learnings from the target
 branch rather than the PR head.
+
+## Setup-v3 and broker boundary
+
+The issue-64 setup-v3 path keeps review execution in the customer repository.
+The Worker receives only bounded webhook metadata and a short-lived Actions
+OIDC assertion for capability issuance. Its Durable Object stores hashed `jti`
+and scope identities plus bounded replay/rate counters. Pre-auth admission uses
+only a hashed assertion digest and a sanitized source-address scope; public JWKS
+keys are cached briefly in Worker memory. The signed assertion is claimed
+before repository or installation API reads. The Worker never stores source,
+diffs, prompts, results, replies, provider credentials, assertions, or
+installation-token values. Worker responses are `no-store`, the token route
+does not support CORS, and errors are sanitized.
+
+The generated workflow may reference the existing customer-owned secret by
+name only (`secrets.OLLAMA_API_KEY`) when invoking the immutable public
+workflow. The App and setup bootstrap never create, retrieve, reveal, log,
+persist, or interpolate its value into generated files. Cloud provider egress
+is explicit and limited to the configured provider step; local mode uses the
+operator's Ollama runner. Review results are reconstructed and validated,
+including exact diff locations and reply bounds, before any App-authored write.

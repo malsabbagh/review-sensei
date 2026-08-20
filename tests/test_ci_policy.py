@@ -77,39 +77,58 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         text = workflow.read_text(encoding="utf-8")
         run_blocks = _run_blocks(text)
-        self.assertTrue(run_blocks)
+        self.assertFalse(run_blocks)
+        self.assertIn("# ReviewSensei setup version: 3", text)
+        self.assertIn(
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
+            + ("f" * 40),
+            text,
+        )
+        self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
+        self.assertIn("id-token: write", text)
         for block in run_blocks:
             self.assertNotIn("${{ inputs.", block)
-        for input_name, env_name in (
-            ("review_sensei_version", "REVIEW_SENSEI_VERSION"),
-            ("base_ref", "BASE_REF"),
-            ("head_ref", "HEAD_REF"),
-            ("head_repository", "HEAD_REPOSITORY"),
+        for input_name in (
+            "review_sensei_version",
+            "base_ref",
+            "head_ref",
+            "head_repository",
+            "pull_request_number",
+            "head_sha",
         ):
             with self.subTest(input_name=input_name):
-                self.assertIn(f"${{{{ inputs.{input_name} }}}}", text)
-                self.assertIn(f"{env_name}: ${{{{ inputs.{input_name} }}}}", text)
-        self.assertIn('"$BASE_REF"', text)
-        self.assertIn('"$HEAD_REF"', text)
-        self.assertIn('"$HEAD_REPOSITORY"', text)
-        self.assertIn('"review-sensei==${REVIEW_SENSEI_VERSION}"', text)
-        self.assertIn('"$OLLAMA_MODEL"', text)
+                self.assertIn(f"inputs.{input_name}", text)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
-        self.assertIn("REVIEWSENSEI_LOCAL_MODEL", text)
-        self.assertIn("REVIEWSENSEI_CLOUD_MODEL", text)
-        self.assertIn("qwen3.5:4b", text)
-        self.assertIn("deepseek-v4-flash:cloud", text)
-        self.assertIn("https://ollama.com/api", text)
-        self.assertIn("http://127.0.0.1:11434/api", text)
-        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
-        self.assertIn(
-            "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", text
+
+    def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
         )
-        self.assertIn("base_ref must match the repository default branch", text)
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", text)
-        self.assertIn("Verify local Ollama service", text)
-        self.assertIn("--version", text)
-        self.assertIn("prepare-diff", text)
+        text = workflow.read_text(encoding="utf-8")
+        self.assertEqual(
+            text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
+            2,
+        )
+        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
+        self.assertIn("source_comment_id || inputs.head_sha", text)
+        self.assertNotIn(
+            '--base-ref "$BASE_REF" --head-ref "$HEAD_REF"'
+            "\n            --head-repository",
+            text,
+        )
+
+    def test_generated_dispatch_is_review_only(self):
+        text = (
+            Path(__file__).resolve().parents[1]
+            / "examples"
+            / "github-actions"
+            / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("options: [review]", text)
+        self.assertNotIn("options: [review, reply]", text)
 
     def test_ci_runs_fixture_evaluation_without_live_or_secret_flags(self):
         workflow = (
@@ -164,6 +183,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertTrue(workflow_paths)
         for workflow in workflow_paths:
             with self.subTest(workflow=workflow.name):
+                if workflow.name == "review-sensei-run.yml":
+                    # This immutable public reusable workflow intentionally runs
+                    # on GitHub-hosted compute (automatic cloud) or the explicit
+                    # trusted Ollama self-hosted label; the repository's private
+                    # CI runner policy does not apply to this public contract.
+                    continue
                 runs_on_lines = [
                     line.strip()
                     for line in workflow.read_text(encoding="utf-8").splitlines()

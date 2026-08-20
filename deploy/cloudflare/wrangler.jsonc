@@ -5,6 +5,9 @@
 	"compatibility_date": "2026-08-16",
 	"workers_dev": true,
 	"preview_urls": true,
+	"vars": {
+		"PUBLIC_WORKFLOW_SHA": "REPLACE_WITH_PUBLIC_WORKFLOW_SHA"
+	},
 	"routes": [
 		{
 			"pattern": "github.reviewsensei.dev",
@@ -19,6 +22,10 @@
 			{
 				"name": "DELIVERY_LEDGER",
 				"class_name": "DeliveryLedger"
+			},
+			{
+				"name": "BROKER_LEDGER",
+				"class_name": "BrokerLedger"
 			}
 		]
 	},
@@ -27,6 +34,12 @@
 			"tag": "v1",
 			"new_sqlite_classes": [
 				"DeliveryLedger"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"BrokerLedger"
 			]
 		}
 	]

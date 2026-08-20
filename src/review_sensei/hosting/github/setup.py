@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 import threading
@@ -31,8 +32,13 @@ MAX_SETUP_RESPONSE_BYTES = 512 * 1024
 MAX_SETUP_FILE_BYTES = 128 * 1024
 DEFAULT_SETUP_BRANCH = "review-sensei/setup"
 DEFAULT_SETUP_TITLE = "ReviewSensei review setup"
-REQUIRED_SETUP_PERMISSIONS = frozenset({"contents", "pull_requests", "variables"})
-SETUP_VERSION = 2
+SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files"
+SETUP_BRANCH_PREFIX = "review-sensei/setup-v3"
+SETUP_APP_LOGIN = "reviewsensei[bot]"
+REQUIRED_SETUP_PERMISSIONS = frozenset(
+    {"contents", "pull_requests", "variables", "workflows"}
+)
+SETUP_VERSION = 3
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
@@ -44,8 +50,20 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
+    ("REVIEWSENSEI_VERSION", "0.1.0"),
+    ("REVIEWSENSEI_AUTO_REVIEW", "false"),
+    ("REVIEWSENSEI_GITHUB_WRITES", "false"),
+    ("REVIEWSENSEI_LEARNING_PRS", "false"),
+    ("REVIEWSENSEI_MENTION_REPLIES", "false"),
+    ("REVIEWSENSEI_UPLOAD_ARTIFACTS", "false"),
 )
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
+PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
+# The Python builder is also used by local contract tests and by older setup
+# transports that do not have Worker configuration. The Worker always passes
+# its explicitly configured value through ``public_workflow_sha`` and rejects
+# the fallback before any GitHub write.
+DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
 SETUP_VERSION_PATTERN = re.compile(
     r"(?m)^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(?P<version>[0-9]+)[ \t]*$"
 )
@@ -62,33 +80,63 @@ def _setup_marker_version(content: str) -> int | None:
         return None
 
 
+LEGACY_SHA256 = {
+    WORKFLOW_PATH: frozenset(
+        {
+            # Released setup-v2 Python output.
+            "415ae46804c95dc388c4daa8f31db195a4dfba97ab6de03e1837c7f34d4db3d6",
+            # Released setup-v2 Worker output.
+            "f32527ebe4476eeadc7fc607d2529190a42a4c39820c9c35e3ae3497c1dc15b2",
+            # Pre-marker Worker and Python outputs released in 8afa49f.
+            "f273b9c220a4e1e8336b776f919f7a83b78d9cc6473ad8920f9a7cd1fe250078",
+            "bb43f1cf081a46e03fa83baa4906759e202a9b8915c9f38db2cb0cd7ddd79be8",
+        }
+    ),
+    UNINSTALL_WORKFLOW_PATH: frozenset(
+        {
+            "6d330e41a8df5fe7e1a54875091ffc353bbacf6fde727dc28d7bbdc76aedeca0",
+            "350dcf9960e1c325a2ce1e6189ffeb5d993dfc053511791991c67044a0a3edf3",
+        }
+    ),
+    CONFIG_PATH: frozenset(
+        {
+            "a1ebe48445cab35ffde125b7a8a66253d7a007cbed11dc03118c0b9b14d9a58b",
+            "d20c350134df752db4d03a67676c5ee244b1f7421650c620e36fa8ecb22e24af",
+        }
+    ),
+}
+
+
 def _looks_like_legacy_setup(path: str, content: str) -> bool:
-    """Recognize only the known pre-versioned generated setup files."""
+    """Recognize only byte-exact generated files from the released v2 catalog."""
 
-    if path == WORKFLOW_PATH:
-        return all(
-            marker in content
-            for marker in (
-                "name: ReviewSensei review",
-                "review_sensei_version:",
-                "prepare-diff",
-            )
-        )
-    if path == UNINSTALL_WORKFLOW_PATH:
-        return all(
-            marker in content
-            for marker in (
-                "name: Remove ReviewSensei setup",
-                "git rm",
-                "Remove ReviewSensei setup",
-            )
-        )
-    if path == CONFIG_PATH:
-        return all(marker in content for marker in ("provider: ollama", "base_url:"))
-    return False
+    expected = LEGACY_SHA256.get(path)
+    if expected is None:
+        return False
+    return hashlib.sha256(content.encode("utf-8")).hexdigest() in expected
 
 
-def _classify_setup_files(files: dict[str, str | None]) -> str:
+def _looks_like_current_setup(
+    path: str,
+    content: str,
+    *,
+    public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
+) -> bool:
+    """Recognize only the exact configured setup-v3 generated artifact."""
+
+    expected = {
+        WORKFLOW_PATH: _immutable_workflow(public_workflow_sha),
+        UNINSTALL_WORKFLOW_PATH: _uninstall_workflow(),
+        CONFIG_PATH: _config_file(),
+    }
+    return expected.get(path) == content
+
+
+def _classify_setup_files(
+    files: dict[str, str | None],
+    *,
+    public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
+) -> str:
     """Return absent, migration, current, or unknown for known setup paths.
 
     A setup is migrated only when every present file is either a current file,
@@ -112,8 +160,16 @@ def _classify_setup_files(files: dict[str, str | None]) -> str:
             if marker > SETUP_VERSION:
                 return "unknown"
             if marker == SETUP_VERSION:
+                if not _looks_like_current_setup(
+                    path,
+                    content,
+                    public_workflow_sha=public_workflow_sha,
+                ):
+                    return "unknown"
                 has_current = True
                 continue
+            if not _looks_like_legacy_setup(path, content):
+                return "unknown"
             has_legacy = True
             continue
         if _looks_like_legacy_setup(path, content):
@@ -154,14 +210,47 @@ class SetupPlan:
     files: tuple[SetupFile, ...]
 
 
-def _immutable_workflow() -> str:
-    return """\
-# ReviewSensei setup version: 2
+def _validate_public_workflow_sha(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or PUBLIC_WORKFLOW_SHA_PATTERN.fullmatch(value) is None
+    ):
+        raise GitHubSetupError(
+            "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _setup_branch(base_sha: str, public_workflow_sha: str) -> str:
+    if (
+        not isinstance(base_sha, str)
+        or PUBLIC_WORKFLOW_SHA_PATTERN.fullmatch(base_sha) is None
+    ):
+        raise GitHubSetupError("Setup branch inputs were invalid")
+    public_sha = _validate_public_workflow_sha(public_workflow_sha)
+    return f"{SETUP_BRANCH_PREFIX}-{base_sha[:12]}-{public_sha[:12]}"
+
+
+def _immutable_workflow(public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA) -> str:
+    """Return the thin setup-v3 caller for the immutable public workflow."""
+
+    sha = _validate_public_workflow_sha(public_workflow_sha)
+    reusable = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + sha
+    return f"""\
+# ReviewSensei setup version: 3
 name: ReviewSensei review
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
+      operation:
+        description: Review the selected pull request
+        required: true
+        default: review
+        type: choice
+        options: [review]
       base_ref:
         description: Repository default branch (must match the repository setting)
         required: true
@@ -171,175 +260,126 @@ on:
       head_repository:
         description: Optional owner/repo slug for fork review
         required: false
+      pull_request_number:
+        description: Pull request number to review for manual dispatch
+        required: true
+      head_sha:
+        description: Exact pull request head commit SHA
+        required: true
+      base_sha:
+        description: Exact reviewed base commit SHA
+        required: false
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
 
 jobs:
-  review:
-    runs-on: [self-hosted, linux, x64, ollama]
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.11"
+  automatic-cloud-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: {reusable}
+    with:
+      mode: automatic
+      operation: review
+      repository: ${{{{ github.repository }}}}
+      repository_id: ${{{{ github.repository_id }}}}
+      pull_request_number: ${{{{ github.event.pull_request.number }}}}
+      base_ref: ${{{{ github.event.pull_request.base.ref }}}}
+      base_sha: ${{{{ github.event.pull_request.base.sha }}}}
+      head_ref: ${{{{ github.event.pull_request.head.ref }}}}
+      head_repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+      head_sha: ${{{{ github.event.pull_request.head.sha }}}}
+      review_sensei_version: ${{{{ vars.REVIEWSENSEI_VERSION }}}}
+      enable_review: ${{{{ vars.REVIEWSENSEI_AUTO_REVIEW }}}}
+      enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
+      enable_learning_prs: ${{{{ vars.REVIEWSENSEI_LEARNING_PRS }}}}
+      enable_mention_replies: ${{{{ vars.REVIEWSENSEI_MENTION_REPLIES }}}}
+      upload_artifacts: ${{{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}}}
+    secrets:
+      OLLAMA_API_KEY: ${{{{ secrets.OLLAMA_API_KEY }}}}
 
-      - name: Validate refs, version, and provider variables
-        id: version
-        env:
-          BASE_REF: ${{ inputs.base_ref }}
-          HEAD_REF: ${{ inputs.head_ref }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          CONFIG_PROVIDER_MODE: ${{ vars.REVIEWSENSEI_PROVIDER_MODE }}
-          CONFIG_LOCAL_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
-          CONFIG_CLOUD_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          import sys
-          ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
-          repo_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-          for name in ("BASE_REF", "HEAD_REF"):
-              value = os.environ.get(name, "")
-              if not value or value.startswith("-") or not ref_pattern.fullmatch(value):
-                  print(f"::error::{name} is not a supported Git ref", file=sys.stderr)
-                  sys.exit(1)
-          default_branch = os.environ.get("DEFAULT_BRANCH", "")
-          if not default_branch or not ref_pattern.fullmatch(default_branch):
-              print("::error::repository default branch is unavailable", file=sys.stderr)
-              sys.exit(1)
-          if os.environ.get("BASE_REF") != default_branch:
-              print("::error::base_ref must match the repository default branch", file=sys.stderr)
-              sys.exit(1)
-          head_repository = os.environ.get("HEAD_REPOSITORY", "")
-          if head_repository and not repo_pattern.fullmatch(head_repository):
-              print("::error::head_repository must be an owner/repo slug", file=sys.stderr)
-              sys.exit(1)
-          raw = os.environ.get("REVIEW_SENSEI_VERSION", "")
-          if not re.fullmatch(r"v?[0-9]+\\.[0-9]+\\.[0-9]+", raw):
-              print("::error::review_sensei_version must be an exact X.Y.Z version", file=sys.stderr)
-              sys.exit(1)
-          normalized = raw[1:] if raw.startswith("v") else raw
-          provider_mode = os.environ.get("CONFIG_PROVIDER_MODE", "").strip().lower() or "local"
-          if provider_mode not in {"local", "cloud"}:
-              print("::error::REVIEWSENSEI_PROVIDER_MODE must be local or cloud", file=sys.stderr)
-              sys.exit(1)
-          model_pattern = re.compile(r"^[A-Za-z0-9._:/-]+$")
-          local_model = os.environ.get("CONFIG_LOCAL_MODEL", "").strip() or "qwen3.5:4b"
-          cloud_model = os.environ.get("CONFIG_CLOUD_MODEL", "").strip() or "deepseek-v4-flash:cloud"
-          for label, model in (("REVIEWSENSEI_LOCAL_MODEL", local_model), ("REVIEWSENSEI_CLOUD_MODEL", cloud_model)):
-              if not model_pattern.fullmatch(model):
-                  print(f"::error::{label} is not a supported Ollama model name", file=sys.stderr)
-                  sys.exit(1)
-          selected_model = cloud_model if provider_mode == "cloud" else local_model
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"normalized_version={normalized}\\n")
-              handle.write(f"provider_mode={provider_mode}\\n")
-              handle.write(f"ollama_model={selected_model}\\n")
-          PY
-
-      - name: Check out base ref only
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Install exact ReviewSensei package
-        env:
-          REVIEW_SENSEI_VERSION: ${{ steps.version.outputs.normalized_version }}
-        run: |
-          python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install "review-sensei==${REVIEW_SENSEI_VERSION}"
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" --version | tee review-sensei-version.txt
-
-      - name: Prepare bounded diff
-        env:
-          BASE_REF: ${{ inputs.base_ref }}
-          HEAD_REF: ${{ inputs.head_ref }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-        run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then
-            args+=(--head-repository "$HEAD_REPOSITORY")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" \
-            --base-ref "$BASE_REF" \
-            --head-ref "$HEAD_REF" \
-            "${args[@]}" \
-            --output pr.patch \
-            --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 \
-            --max-diff-files 500 \
-            --max-diff-hunks 5000
-
-      - name: Verify local Ollama service
-        if: steps.version.outputs.provider_mode == 'local'
-        env:
-          OLLAMA_MODEL: ${{ steps.version.outputs.ollama_model }}
-        run: |
-          curl --fail --silent --show-error --max-time 10 \
-            "http://127.0.0.1:11434/api/tags" >/dev/null
-          ollama show "$OLLAMA_MODEL" >/dev/null
-
-      - name: Run ReviewSensei review
-        env:
-          PROVIDER_MODE: ${{ steps.version.outputs.provider_mode }}
-          OLLAMA_MODEL: ${{ steps.version.outputs.ollama_model }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-        run: |
-          if [[ "$PROVIDER_MODE" == "cloud" ]]; then
-            export OLLAMA_BASE_URL="https://ollama.com/api"
-            if [[ -z "$OLLAMA_API_KEY" ]]; then
-              echo "::error::OLLAMA_API_KEY is required for cloud mode" >&2
-              exit 1
-            fi
-          else
-            export OLLAMA_BASE_URL="http://127.0.0.1:11434/api"
-            unset OLLAMA_API_KEY
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" \
-            --diff pr.patch \
-            --learning-root . \
-            --learning-directory .github/review-sensei/learnings \
-            --base-url "$OLLAMA_BASE_URL" \
-            --model "$OLLAMA_MODEL" \
-            --output review.json
-
-      - name: Upload review artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: review-sensei-review
-          path: |
-            review.json
-            review-sensei-version.txt
-          if-no-files-found: error
-          retention-days: 7
+  manual-or-trusted-local:
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot')) &&
+      vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'
+    uses: {reusable}
+    with:
+      mode: manual
+      operation: ${{{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}}}
+      repository: ${{{{ github.repository }}}}
+      repository_id: ${{{{ github.repository_id }}}}
+      pull_request_number: ${{{{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}}}
+      base_ref: ${{{{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}}}
+      base_sha: ${{{{ inputs.base_sha || github.event.pull_request.base.sha }}}}
+      head_ref: ${{{{ inputs.head_ref || github.event.pull_request.head.ref || '' }}}}
+      head_repository: ${{{{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}}}
+      head_sha: ${{{{ inputs.head_sha || github.event.pull_request.head.sha }}}}
+      source_kind: ${{{{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}}}
+      source_comment_id: ${{{{ inputs.source_comment_id || github.event.comment.id }}}}
+      source_updated_at: ${{{{ inputs.source_updated_at || github.event.comment.updated_at }}}}
+      root_comment_id: ${{{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}}}
+      review_sensei_version: ${{{{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}}}
+      enable_review: ${{{{ (inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply') == 'review' && vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}}}
+      enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
+      enable_learning_prs: ${{{{ vars.REVIEWSENSEI_LEARNING_PRS }}}}
+      enable_mention_replies: ${{{{ vars.REVIEWSENSEI_MENTION_REPLIES }}}}
+      upload_artifacts: ${{{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}}}
+    secrets:
+      OLLAMA_API_KEY: ${{{{ secrets.OLLAMA_API_KEY }}}}
 """
 
 
 def _config_file() -> str:
     return """\
-# ReviewSensei setup version: 2
-setup_version: 2
+# ReviewSensei setup version: 3
+setup_version: 3
 provider: ollama
 provider_mode: local
 base_url: http://127.0.0.1:11434/api
 cloud_base_url: https://ollama.com/api
 local_model: qwen3.5:4b
 cloud_model: deepseek-v4-flash:cloud
+version: 0.1.0
+auto_review: false
+github_writes: false
+learning_prs: false
+mention_replies: false
+upload_artifacts: false
 """
 
 
 def _uninstall_workflow() -> str:
     return """\
-# ReviewSensei setup version: 2
+# ReviewSensei setup version: 3
 name: Remove ReviewSensei setup
 
 on:
@@ -407,13 +447,15 @@ jobs:
 def _setup_pull_request_body() -> str:
     return (
         "This pull request adds or updates the ReviewSensei review workflow "
-        "(setup version 2), provider defaults, and a manual uninstall-cleanup "
+        "(setup version 3), opt-in provider defaults, and a manual uninstall-cleanup "
         "workflow. The installation bootstrap also "
         "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
         "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
-        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud) without overwriting "
-        "existing values. Change REVIEWSENSEI_PROVIDER_MODE to cloud and add "
-        "OLLAMA_API_KEY as a repository secret to use Ollama Cloud. The uninstall "
+        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
+        "version, and false-by-default opt-ins without overwriting existing "
+        "values. Change the opt-in variables explicitly to enable publication. "
+        "Cloud mode reads the existing customer-owned OLLAMA_API_KEY secret by "
+        "name only; the App never creates or reads its value. The uninstall "
         "workflow creates a reviewable PR to remove these generated scripts; it does "
         "not delete learnings or secrets. No private keys, installation tokens, or "
         "webhook bodies are included in these files."
@@ -428,6 +470,7 @@ class SetupPlanBuilder:
         *,
         branch_name: str = DEFAULT_SETUP_BRANCH,
         title: str = DEFAULT_SETUP_TITLE,
+        public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
     ) -> None:
         if not branch_name.strip():
             raise GitHubSetupError("Setup branch name must be non-empty")
@@ -437,6 +480,7 @@ class SetupPlanBuilder:
             raise GitHubSetupError("Setup branch name is invalid")
         if not title.strip():
             raise GitHubSetupError("Setup pull request title must be non-empty")
+        self.public_workflow_sha = _validate_public_workflow_sha(public_workflow_sha)
         self.branch_name = branch_name
         self.title = title
 
@@ -445,17 +489,25 @@ class SetupPlanBuilder:
         repository: str,
         *,
         base_branch: str | None = None,
+        base_sha: str | None = None,
     ) -> SetupPlan:
         if not isinstance(repository, str) or not _is_repository_slug(repository):
             raise GitHubSetupError("Setup repository must be an owner/repo slug")
         files = (
-            SetupFile(path=WORKFLOW_PATH, content=_immutable_workflow()),
+            SetupFile(
+                path=WORKFLOW_PATH,
+                content=_immutable_workflow(self.public_workflow_sha),
+            ),
             SetupFile(path=UNINSTALL_WORKFLOW_PATH, content=_uninstall_workflow()),
             SetupFile(path=CONFIG_PATH, content=_config_file()),
         )
         return SetupPlan(
             repository=repository,
-            branch_name=self.branch_name,
+            branch_name=(
+                self.branch_name
+                if base_sha is None
+                else _setup_branch(base_sha, self.public_workflow_sha)
+            ),
             base_branch=base_branch,
             title=self.title,
             body=_setup_pull_request_body(),
@@ -487,6 +539,15 @@ class GitHubSetupTransport(Protocol):
     ) -> str:
         """Return the repository default branch name."""
 
+    def get_default_head_sha(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+        base_branch: str,
+    ) -> str:
+        """Return the exact authoritative default-branch commit SHA."""
+
     def branch_exists(
         self,
         *,
@@ -495,6 +556,17 @@ class GitHubSetupTransport(Protocol):
         branch: str,
     ) -> bool:
         """Return whether the setup branch already exists."""
+
+    def is_managed_setup_branch(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+        branch: str,
+        base_sha: str,
+        public_workflow_sha: str,
+    ) -> bool:
+        """Return whether an existing branch has the App-owned setup shape."""
 
     def get_repository_file(
         self,
@@ -512,10 +584,11 @@ class GitHubSetupTransport(Protocol):
         repository: str,
         installation_token: str,
         base_branch: str,
+        base_sha: str,
         branch: str,
         files: Sequence[SetupFile],
-    ) -> None:
-        """Create or update the setup branch with generated files."""
+    ) -> bool:
+        """Create the content-addressed setup branch, or report a collision."""
 
     def ensure_repository_variables(
         self,
@@ -607,6 +680,110 @@ class GitHubSetupClient:
             self._raise_for_status(status)
         return True
 
+    def get_default_head_sha(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+        base_branch: str,
+    ) -> str:
+        data = self._request_json(
+            "GET",
+            f"/repos/{repository}/git/ref/heads/{quote(base_branch, safe='')}",
+            installation_token=installation_token,
+        )
+        if not isinstance(data, dict):
+            raise GitHubSetupError("GitHub setup response did not include a base ref")
+        base_object = data.get("object")
+        if not isinstance(base_object, dict):
+            raise GitHubSetupError("GitHub setup response did not include a base ref")
+        base_sha = base_object.get("sha")
+        if (
+            not isinstance(base_sha, str)
+            or PUBLIC_WORKFLOW_SHA_PATTERN.fullmatch(base_sha) is None
+        ):
+            raise GitHubSetupError(
+                "GitHub setup response did not include a base commit"
+            )
+        return base_sha
+
+    def is_managed_setup_branch(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+        branch: str,
+        base_sha: str,
+        public_workflow_sha: str,
+    ) -> bool:
+        data = self._request_json(
+            "GET",
+            f"/repos/{repository}/branches/{quote(branch, safe='')}",
+            installation_token=installation_token,
+        )
+        if not isinstance(data, dict):
+            raise GitHubSetupError("GitHub setup branch response was invalid")
+        commit = data.get("commit")
+        if not isinstance(commit, dict):
+            raise GitHubSetupError("GitHub setup branch response was invalid")
+        metadata = commit.get("commit")
+        parents = commit.get("parents")
+        sha = commit.get("sha")
+        author = commit.get("author")
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("message") != SETUP_COMMIT_MESSAGE
+            or not isinstance(sha, str)
+            or re.fullmatch(r"[a-f0-9]{40}", sha) is None
+            or not isinstance(parents, list)
+            or len(parents) != 1
+            or not isinstance(parents[0], dict)
+            or not isinstance(author, dict)
+            or author.get("login") != SETUP_APP_LOGIN
+            or author.get("type") != "Bot"
+        ):
+            return False
+        parent_sha = parents[0].get("sha")
+        if not isinstance(parent_sha, str) or parent_sha != base_sha:
+            return False
+        comparison = self._request_json(
+            "GET",
+            f"/repos/{repository}/compare/{parent_sha}...{sha}",
+            installation_token=installation_token,
+        )
+        if not isinstance(comparison, dict):
+            raise GitHubSetupError("GitHub setup branch comparison was invalid")
+        files = comparison.get("files")
+        if not isinstance(files, list) or not files:
+            return False
+        generated_only = all(
+            isinstance(file, dict)
+            and file.get("filename") in SETUP_FILE_PATHS
+            and (
+                "previous_filename" not in file
+                or file.get("previous_filename") in SETUP_FILE_PATHS
+            )
+            for file in files
+        )
+        if not generated_only:
+            return False
+        branch_files = {
+            path: self.get_repository_file(
+                repository=repository,
+                installation_token=installation_token,
+                base_branch=branch,
+                path=path,
+            )
+            for path in SETUP_FILE_PATHS
+        }
+        return (
+            _classify_setup_files(
+                branch_files,
+                public_workflow_sha=public_workflow_sha,
+            )
+            == "current"
+        )
+
     def get_repository_file(
         self,
         *,
@@ -663,24 +840,10 @@ class GitHubSetupClient:
         repository: str,
         installation_token: str,
         base_branch: str,
+        base_sha: str,
         branch: str,
         files: Sequence[SetupFile],
-    ) -> None:
-        base_ref = self._request_json(
-            "GET",
-            f"/repos/{repository}/git/ref/heads/{quote(base_branch, safe='')}",
-            installation_token=installation_token,
-        )
-        if not isinstance(base_ref, dict):
-            raise GitHubSetupError("GitHub setup response did not include a base ref")
-        base_object = base_ref.get("object")
-        if not isinstance(base_object, dict):
-            raise GitHubSetupError("GitHub setup response did not include a base ref")
-        base_sha = base_object.get("sha")
-        if not isinstance(base_sha, str) or not base_sha:
-            raise GitHubSetupError(
-                "GitHub setup response did not include a base commit"
-            )
+    ) -> bool:
         tree_entries = [
             {
                 "path": file.path,
@@ -710,7 +873,7 @@ class GitHubSetupClient:
             f"/repos/{repository}/git/commits",
             installation_token=installation_token,
             body={
-                "message": "Add ReviewSensei review setup files",
+                "message": SETUP_COMMIT_MESSAGE,
                 "tree": tree_sha,
                 "parents": [base_sha],
             },
@@ -728,15 +891,10 @@ class GitHubSetupClient:
             body={"ref": ref, "sha": commit_sha},
         )
         if status == 422:
-            self._request_json(
-                "PATCH",
-                f"/repos/{repository}/git/refs/heads/{quote(branch, safe='')}",
-                installation_token=installation_token,
-                body={"sha": commit_sha},
-            )
-            return
+            return False
         if status < 200 or status >= 300:
             self._raise_for_status(status)
+        return True
 
     def ensure_repository_variables(
         self,
@@ -992,28 +1150,17 @@ class SetupPullRequestService:
                 repository=repository,
                 installation_token=installation_token,
             )
-            plan = self.plan_builder.build(repository, base_branch=base_branch)
+            base_sha = self.transport.get_default_head_sha(
+                repository=repository,
+                installation_token=installation_token,
+                base_branch=base_branch,
+            )
+            plan = self.plan_builder.build(
+                repository,
+                base_branch=base_branch,
+                base_sha=base_sha,
+            )
             with self._repository_lock(repository, plan.branch_name):
-                branch_exists = self.transport.branch_exists(
-                    repository=repository,
-                    installation_token=installation_token,
-                    branch=plan.branch_name,
-                )
-                existing_prs = self.transport.list_pull_requests(
-                    repository=repository,
-                    installation_token=installation_token,
-                    head_branch=plan.branch_name,
-                )
-                existing = self._existing_pr_number(existing_prs)
-                if existing is not None:
-                    results.append(
-                        SetupPullRequestResult(
-                            repository=repository,
-                            status="skipped_pull_request_exists",
-                            pull_request_number=existing,
-                        )
-                    )
-                    continue
                 setup_state = self._inspect_repository_setup(
                     repository=repository,
                     installation_token=installation_token,
@@ -1035,6 +1182,56 @@ class SetupPullRequestService:
                         )
                     )
                     continue
+                branch_exists = self.transport.branch_exists(
+                    repository=repository,
+                    installation_token=installation_token,
+                    branch=plan.branch_name,
+                )
+                if branch_exists:
+                    branch_checker = getattr(
+                        self.transport, "is_managed_setup_branch", None
+                    )
+                    if not callable(branch_checker) or not branch_checker(
+                        repository=repository,
+                        installation_token=installation_token,
+                        branch=plan.branch_name,
+                        base_sha=base_sha,
+                        public_workflow_sha=self.plan_builder.public_workflow_sha,
+                    ):
+                        results.append(
+                            SetupPullRequestResult(
+                                repository=repository,
+                                status="skipped_branch_conflict",
+                            )
+                        )
+                        continue
+                if not branch_exists:
+                    created_branch = self.transport.create_or_update_branch(
+                        repository=repository,
+                        installation_token=installation_token,
+                        base_branch=base_branch,
+                        base_sha=base_sha,
+                        branch=plan.branch_name,
+                        files=plan.files,
+                    )
+                    if not created_branch:
+                        branch_checker = getattr(
+                            self.transport, "is_managed_setup_branch", None
+                        )
+                        if not callable(branch_checker) or not branch_checker(
+                            repository=repository,
+                            installation_token=installation_token,
+                            branch=plan.branch_name,
+                            base_sha=base_sha,
+                            public_workflow_sha=(self.plan_builder.public_workflow_sha),
+                        ):
+                            results.append(
+                                SetupPullRequestResult(
+                                    repository=repository,
+                                    status="skipped_branch_conflict",
+                                )
+                            )
+                            continue
                 ensure_variables = getattr(
                     self.transport, "ensure_repository_variables", None
                 )
@@ -1045,14 +1242,6 @@ class SetupPullRequestService:
                         repository=repository,
                         installation_token=installation_token,
                         variables=SETUP_VARIABLES,
-                    )
-                if not branch_exists or setup_state == "migration":
-                    self.transport.create_or_update_branch(
-                        repository=repository,
-                        installation_token=installation_token,
-                        base_branch=base_branch,
-                        branch=plan.branch_name,
-                        files=plan.files,
                     )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
@@ -1119,7 +1308,10 @@ class SetupPullRequestService:
             if content is not None and not isinstance(content, str):
                 raise GitHubSetupError("GitHub setup file response was invalid")
             files[path] = content
-        return _classify_setup_files(files)
+        return _classify_setup_files(
+            files,
+            public_workflow_sha=self.plan_builder.public_workflow_sha,
+        )
 
     @staticmethod
     def _existing_pr_number(existing_prs: Sequence[dict[str, object]]) -> int | None:

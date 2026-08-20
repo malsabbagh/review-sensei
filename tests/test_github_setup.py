@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import unittest
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 from review_sensei.hosting.github import (
@@ -13,6 +14,8 @@ from review_sensei.hosting.github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
+
+BASE_SHA = "b" * 40
 
 
 class FakeHTTPResponse(io.BytesIO):
@@ -31,23 +34,67 @@ class FakeTransport:
         existing_prs=None,
         created_pr_number=42,
         default_branch="main",
+        branch_managed=True,
+        ref_collision=False,
     ):
         self.requests = []
         self._branch_exists = branch_exists if branch_exists is not None else False
         self.existing_prs = existing_prs or []
         self.created_pr_number = created_pr_number
         self.default_branch = default_branch
+        self.branch_managed = branch_managed
+        self.ref_collision = ref_collision
+        self.collision_observed = False
 
     def get_default_branch(self, *, repository, installation_token):
         self.requests.append(("get_default_branch", repository, installation_token))
         return self.default_branch
 
+    def get_default_head_sha(self, *, repository, installation_token, base_branch):
+        self.requests.append(
+            (
+                "get_default_head_sha",
+                repository,
+                installation_token,
+                base_branch,
+            )
+        )
+        return BASE_SHA
+
     def branch_exists(self, *, repository, installation_token, branch):
         self.requests.append(("branch_exists", repository, installation_token, branch))
-        return self._branch_exists
+        return self._branch_exists or self.collision_observed
+
+    def is_managed_setup_branch(
+        self,
+        *,
+        repository,
+        installation_token,
+        branch,
+        base_sha,
+        public_workflow_sha,
+    ):
+        self.requests.append(
+            (
+                "is_managed_setup_branch",
+                repository,
+                installation_token,
+                branch,
+                base_sha,
+                public_workflow_sha,
+            )
+        )
+        return self.branch_managed
 
     def create_or_update_branch(
-        self, *, repository, installation_token, base_branch, branch, files
+        self,
+        *,
+        repository,
+        installation_token,
+        base_branch,
+        base_sha,
+        branch,
+        files,
     ):
         self.requests.append(
             (
@@ -55,8 +102,23 @@ class FakeTransport:
                 repository,
                 installation_token,
                 base_branch,
+                base_sha,
                 branch,
                 files,
+            )
+        )
+        if self.ref_collision:
+            self.collision_observed = True
+            return False
+        return True
+
+    def ensure_repository_variables(self, *, repository, installation_token, variables):
+        self.requests.append(
+            (
+                "ensure_repository_variables",
+                repository,
+                installation_token,
+                variables,
             )
         )
 
@@ -97,16 +159,25 @@ class RecheckTransport(FakeTransport):
         return []
 
     def create_or_update_branch(
-        self, *, repository, installation_token, base_branch, branch, files
+        self,
+        *,
+        repository,
+        installation_token,
+        base_branch,
+        base_sha,
+        branch,
+        files,
     ):
-        super().create_or_update_branch(
+        created = super().create_or_update_branch(
             repository=repository,
             installation_token=installation_token,
             base_branch=base_branch,
+            base_sha=base_sha,
             branch=branch,
             files=files,
         )
         self.pr_appeared_after_branch = True
+        return created
 
 
 class FileTransport(FakeTransport):
@@ -149,6 +220,7 @@ def delivery(
             "contents": "write",
             "pull_requests": "write",
             "variables": "write",
+            "workflows": "write",
         },
     )
 
@@ -170,19 +242,26 @@ class SetupPlanTests(unittest.TestCase):
         workflow = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-review.yml"
         ]
+        self.assertIn("# ReviewSensei setup version: 3", workflow)
         self.assertIn(
-            "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", workflow
-        )
-        self.assertIn(
-            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1", workflow
-        )
-        self.assertIn(
-            r're.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", raw)',
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
+            + ("f" * 40),
             workflow,
         )
+        self.assertIn(
+            "types: [opened, reopened, synchronize, ready_for_review]", workflow
+        )
+        self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("github.event.comment.author_association == 'OWNER'", workflow)
+        self.assertIn("github.event.comment.user.type != 'Bot'", workflow)
+        self.assertIn("github.event.issue.pull_request", workflow)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", workflow)
-        self.assertIn("qwen3.5:4b", workflow)
-        self.assertIn("deepseek-v4-flash:cloud", workflow)
+        config = dict((f.path, f.content) for f in plan.files)[
+            ".github/review-sensei/config.yml"
+        ]
+        self.assertIn("qwen3.5:4b", config)
+        self.assertIn("deepseek-v4-flash:cloud", config)
         uninstall = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-uninstall.yml"
         ]
@@ -196,6 +275,16 @@ class SetupPlanTests(unittest.TestCase):
             "Authorization:",
         ):
             self.assertNotIn(marker, combined)
+
+        dynamic = SetupPlanBuilder().build(
+            "owner/repo",
+            base_branch="main",
+            base_sha=BASE_SHA,
+        )
+        self.assertEqual(
+            dynamic.branch_name,
+            "review-sensei/setup-v3-bbbbbbbbbbbb-ffffffffffff",
+        )
 
     def test_build_rejects_unsafe_repository(self):
         with self.assertRaises(GitHubSetupError):
@@ -211,6 +300,12 @@ class SetupPlanTests(unittest.TestCase):
 
 
 class SetupPullRequestServiceTests(unittest.TestCase):
+    @staticmethod
+    def historical_fixture(name):
+        return (Path(__file__).parent / "fixtures" / "setup-legacy" / name).read_text(
+            encoding="utf-8"
+        )
+
     def test_installation_created_creates_one_setup_pr(self):
         transport = FakeTransport()
         service = SetupPullRequestService(transport)
@@ -241,6 +336,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
                 "contents": "write",
                 "pull_requests": "write",
                 "variables": "write",
+                "workflows": "write",
             },
         )
 
@@ -267,7 +363,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual([r.status for r in results], ["created", "created", "created"])
 
-    def test_existing_branch_still_creates_missing_setup_pr(self):
+    def test_existing_canonical_content_addressed_branch_is_reused(self):
         transport = FakeTransport(branch_exists=True)
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
             delivery(),
@@ -280,17 +376,47 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             any(r[0] == "create_or_update_branch" for r in transport.requests)
         )
 
-    def test_legacy_setup_refreshes_existing_branch_for_migration_pr(self):
+    def test_customer_owned_setup_branch_is_not_overwritten(self):
+        transport = FakeTransport(branch_exists=True, branch_managed=False)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_branch_conflict")
+        self.assertFalse(
+            any(r[0] == "create_or_update_branch" for r in transport.requests)
+        )
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_create_only_branch_race_does_not_overwrite_customer_ref(self):
+        transport = FakeTransport(ref_collision=True, branch_managed=False)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_branch_conflict")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+        self.assertFalse(
+            any(r[0] == "ensure_repository_variables" for r in transport.requests)
+        )
+
+    def test_legacy_setup_reuses_existing_content_addressed_branch(self):
         transport = FileTransport(
             branch_exists=True,
             files={
-                ".github/workflows/review-sensei-review.yml": (
-                    "name: ReviewSensei review\n"
-                    "review_sensei_version: old\n"
-                    "prepare-diff\n"
-                ),
                 ".github/review-sensei/config.yml": (
-                    "provider: ollama\nbase_url: http://127.0.0.1:11434/api\n"
+                    "# ReviewSensei setup version: 2\n"
+                    "setup_version: 2\n"
+                    "provider: ollama\n"
+                    "provider_mode: local\n"
+                    "base_url: http://127.0.0.1:11434/api\n"
+                    "cloud_base_url: https://ollama.com/api\n"
+                    "local_model: qwen3.5:4b\n"
+                    "cloud_model: deepseek-v4-flash:cloud\n"
                 ),
             },
         )
@@ -301,7 +427,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(results[0].status, "created")
-        self.assertTrue(
+        self.assertFalse(
             any(r[0] == "create_or_update_branch" for r in transport.requests)
         )
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
@@ -324,10 +450,139 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             any(r[0] == "create_or_update_branch" for r in transport.requests)
         )
 
+    def test_current_setup_with_unexpected_public_workflow_sha_is_custom(self):
+        plan = SetupPlanBuilder(public_workflow_sha="e" * 40).build("owner/repo")
+        transport = FileTransport(
+            branch_exists=True,
+            files={file.path: file.content for file in plan.files},
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+        self.assertFalse(
+            any(r[0] == "create_or_update_branch" for r in transport.requests)
+        )
+
     def test_unknown_existing_setup_is_not_overwritten(self):
         transport = FileTransport(
             files={
                 ".github/workflows/review-sensei-review.yml": "name: Custom review\n",
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_marker_only_v3_setup_is_treated_as_custom(self):
+        transport = FileTransport(
+            files={
+                ".github/workflows/review-sensei-review.yml": (
+                    "# ReviewSensei setup version: 3\nname: ReviewSensei review\n"
+                ),
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_marker_only_v2_setup_is_treated_as_custom(self):
+        transport = FileTransport(
+            files={
+                ".github/workflows/review-sensei-review.yml": (
+                    "# ReviewSensei setup version: 2\nname: ReviewSensei review\n"
+                ),
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_released_pre_marker_clients_are_migrated(self):
+        for fixture in (
+            "pre-marker-worker-review.yml",
+            "pre-marker-python-review.yml",
+        ):
+            with self.subTest(fixture=fixture):
+                transport = FileTransport(
+                    files={
+                        ".github/workflows/review-sensei-review.yml": (
+                            self.historical_fixture(fixture)
+                        ),
+                        ".github/workflows/review-sensei-uninstall.yml": None,
+                        ".github/review-sensei/config.yml": self.historical_fixture(
+                            "pre-marker-config.yml"
+                        ),
+                    }
+                )
+
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertEqual(results[0].status, "created")
+                self.assertTrue(
+                    any(r[0] == "create_pull_request" for r in transport.requests)
+                )
+
+    def test_complete_cross_runtime_v2_clients_are_migrated(self):
+        for review, uninstall in (
+            ("v2-worker-review.yml", "v2-worker-uninstall.yml"),
+            ("v2-python-review.yml", "v2-python-uninstall.yml"),
+        ):
+            with self.subTest(review=review):
+                transport = FileTransport(
+                    files={
+                        ".github/workflows/review-sensei-review.yml": (
+                            self.historical_fixture(review)
+                        ),
+                        ".github/workflows/review-sensei-uninstall.yml": (
+                            self.historical_fixture(uninstall)
+                        ),
+                        ".github/review-sensei/config.yml": self.historical_fixture(
+                            "v2-config.yml"
+                        ),
+                    }
+                )
+
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertEqual(results[0].status, "created")
+
+    def test_customized_partial_v3_setup_is_not_overwritten(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        workflow = next(
+            file.content for file in plan.files if file.path.endswith("review.yml")
+        )
+        transport = FileTransport(
+            files={
+                ".github/workflows/review-sensei-review.yml": workflow.replace(
+                    "name: ReviewSensei review",
+                    "name: Customer ReviewSensei review",
+                )
             }
         )
 
@@ -427,6 +682,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             "contents": "write",
             "pull_requests": "write",
             "actions_variables": "write",
+            "workflows": "write",
         }
         results = SetupPullRequestService(FakeTransport()).ensure_setup_pull_requests(
             delivery(),
@@ -667,17 +923,17 @@ class GitHubSetupClientTests(unittest.TestCase):
 
     def test_client_create_or_update_branch_request_sequence(self):
         responses = [
-            (200, b'{"object":{"sha":"base-sha"}}'),
             (200, b'{"sha":"tree-sha"}'),
             (200, b'{"sha":"commit-sha"}'),
             (201, b'{"ref":"refs/heads/review-sensei/setup"}'),
         ]
         client, calls = self.make_client(responses)
 
-        client.create_or_update_branch(
+        created = client.create_or_update_branch(
             repository="owner/repo",
             installation_token="ghs_opaque",
             base_branch="main",
+            base_sha=BASE_SHA,
             branch="review-sensei/setup",
             files=[
                 SetupFile(
@@ -687,25 +943,110 @@ class GitHubSetupClientTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(len(calls), 4)
-        self.assertIn("git/trees", calls[1][1])
-        self.assertIn("git/commits", calls[2][1])
-        self.assertIn("git/refs", calls[3][1])
+        self.assertTrue(created)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("git/trees", calls[0][1])
+        self.assertIn("git/commits", calls[1][1])
+        self.assertIn("git/refs", calls[2][1])
 
-    def test_client_create_or_update_branch_updates_existing_ref_on_422(self):
+    def test_client_verifies_managed_setup_branch_shape(self):
+        plan = SetupPlanBuilder().build("owner/repo")
         responses = [
-            (200, b'{"object":{"sha":"base-sha"}}'),
-            (200, b'{"sha":"tree-sha"}'),
-            (200, b'{"sha":"commit-sha"}'),
-            (422, b""),
-            (200, b"{}"),
+            (
+                200,
+                json.dumps(
+                    {
+                        "commit": {
+                            "sha": "c" * 40,
+                            "commit": {
+                                "message": "Add ReviewSensei review setup files"
+                            },
+                            "parents": [{"sha": "b" * 40}],
+                            "author": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        }
+                    }
+                ).encode("utf-8"),
+            ),
+            (
+                200,
+                b'{"files":[{"filename":".github/review-sensei/config.yml"}]}',
+            ),
+            *[
+                (
+                    200,
+                    json.dumps(
+                        {
+                            "type": "file",
+                            "encoding": "base64",
+                            "truncated": False,
+                            "content": base64.b64encode(
+                                next(
+                                    file.content
+                                    for file in plan.files
+                                    if file.path == path
+                                ).encode("utf-8")
+                            ).decode("ascii"),
+                        }
+                    ).encode("utf-8"),
+                )
+                for path in (
+                    ".github/workflows/review-sensei-review.yml",
+                    ".github/workflows/review-sensei-uninstall.yml",
+                    ".github/review-sensei/config.yml",
+                )
+            ],
         ]
         client, calls = self.make_client(responses)
 
-        client.create_or_update_branch(
+        self.assertTrue(
+            client.is_managed_setup_branch(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+                branch="review-sensei/setup",
+                base_sha=BASE_SHA,
+                public_workflow_sha="f" * 40,
+            )
+        )
+        self.assertIn("/compare/", calls[1][1])
+
+        client, calls = self.make_client(
+            (
+                200,
+                json.dumps(
+                    {
+                        "commit": {
+                            "sha": "c" * 40,
+                            "commit": {"message": "Customer branch"},
+                            "parents": [{"sha": "b" * 40}],
+                        }
+                    }
+                ).encode("utf-8"),
+            )
+        )
+        self.assertFalse(
+            client.is_managed_setup_branch(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+                branch="review-sensei/setup",
+                base_sha=BASE_SHA,
+                public_workflow_sha="f" * 40,
+            )
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_client_create_only_branch_reports_ref_collision_without_patch(self):
+        responses = [
+            (200, b'{"sha":"tree-sha"}'),
+            (200, b'{"sha":"commit-sha"}'),
+            (422, b""),
+        ]
+        client, calls = self.make_client(responses)
+
+        created = client.create_or_update_branch(
             repository="owner/repo",
             installation_token="ghs_opaque",
             base_branch="main",
+            base_sha=BASE_SHA,
             branch="review-sensei/setup",
             files=[
                 SetupFile(
@@ -715,19 +1056,19 @@ class GitHubSetupClientTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(len(calls), 5)
-        self.assertEqual(calls[4][0], "PATCH")
+        self.assertFalse(created)
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("PATCH", [call[0] for call in calls])
 
     def test_client_create_or_update_branch_rejects_malformed_responses(self):
         bad_responses = [
             [(200, b"[]")],
             [(200, b"{}")],
             [
-                (200, b'{"object":{"sha":"base-sha"}}'),
+                (200, b"{}"),
                 (200, b"{}"),
             ],
             [
-                (200, b'{"object":{"sha":"base-sha"}}'),
                 (200, b'{"sha":"tree-sha"}'),
                 (200, b"{}"),
             ],
@@ -740,6 +1081,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                         repository="owner/repo",
                         installation_token="ghs_opaque",
                         base_branch="main",
+                        base_sha=BASE_SHA,
                         branch="review-sensei/setup",
                         files=[
                             SetupFile(

@@ -174,6 +174,19 @@ Negative or tradeoffs:
 - If GitHub App-identity comments/reviews are needed later, keep them on a
   separate, explicitly configured App identity path.
 
+## Amendment - issue #64 setup-v3
+
+The portable workflow decision now has a generated setup-v3 caller that
+invokes the public reusable workflow at an exact configured commit SHA. The
+caller keeps automatic cloud pull-request execution on GitHub-hosted compute,
+limits local Ollama to manual or trusted-event execution on the labeled
+self-hosted runner, and grants only read permissions plus `id-token: write`.
+All publication, learning, reply, and artifact switches default to false.
+The customer-owned `OLLAMA_API_KEY` may be passed to the reusable workflow by
+name only; the setup App never handles its value. This amendment supersedes
+the old example-only boundary for generated setup clients while retaining the
+trusted-base checkout and exact package rules.
+
 ## Links
 
 - Related issue: #15

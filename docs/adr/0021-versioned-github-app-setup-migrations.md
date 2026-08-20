@@ -78,3 +78,22 @@ version is skipped by older Workers rather than overwritten.
   exists.
 - Typecheck the Cloudflare Worker and run the repository's Python quality and
   package tests before deployment.
+
+## Amendment - setup-v3 issue #64
+
+The current marker is `ReviewSensei setup version: 3`. Every present v3 file
+must byte-match the generated artifact for the configured public workflow SHA;
+a version marker or structural substring alone is insufficient evidence of
+generated ownership. Released pre-marker Worker/Python and setup-v2 artifacts
+are recognized only by their catalogued byte-exact SHA-256 digests. The Worker
+and Python setup builders classify absent, legacy/v2, current, custom,
+malformed, and future files consistently. Migration uses a create-only branch
+that binds the exact base and public-workflow SHAs in its name. Reuse requires
+the exact base parent, ReviewSensei App author, canonical generated content,
+and a comparison limited to generated paths. Any pre-existing or concurrent
+collision is a no-write conflict; refs are never force-moved.
+`installation.created` (including
+reinstall), `installation.new_permissions_accepted`, and
+`installation_repositories.added` trigger the same bounded reconciliation,
+with current/custom/malformed/future no-write behavior and at most one
+deterministic setup-v3 PR per exact base/workflow revision.

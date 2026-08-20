@@ -99,6 +99,29 @@ Optional App-identity publication is documented in
 [`docs/github-app-auth.md`](docs/github-app-auth.md). It is a narrow
 authentication adapter for GitHub App JWTs and installation access tokens; it
 is not a hosted review service, webhook receiver, or durable delivery store.
+
+### GitHub App setup-v3 integration
+
+The optional setup-v3 integration adds a reviewable, generated caller at an
+exact public commit SHA:
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<40-hex-sha>`.
+Automatic pull-request cloud reviews run only on GitHub-hosted compute. Local
+Ollama runs remain manual or trusted-event-only on an operator-controlled
+self-hosted runner. Every generated write switch defaults to `false`.
+
+Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
+name (`secrets.OLLAMA_API_KEY`) to the immutable reusable workflow. The App
+does not create, read, persist, log, or reveal that secret value. The Worker
+broker only issues one capability-scoped installation token after verifying
+the signed Actions OIDC identity, exact workflow SHA, repository identity,
+fork status, installation, replay state, and rate limit.
+
+Installation, reinstall, permission-acceptance, and repository-added events
+reconcile absent or older generated clients through at most one setup-v3 PR.
+Current v3, custom, malformed, and future setup files are handled as no-write
+or no-op cases. See [`docs/installation.md`](docs/installation.md),
+[`docs/github-app-registration.md`](docs/github-app-registration.md), and the
+proposed [`docs/adr/0022-actions-publication-learning-and-conversations.md`](docs/adr/0022-actions-publication-learning-and-conversations.md).
 The optional OIDC broker documented there is a hosted issuance-only backend
 that never distributes the App private key.
 
@@ -329,27 +352,26 @@ See [the architecture guide](docs/architecture.md).
 
 ## GitHub integration
 
-The repository includes a workflow example in
-[`examples/github-actions/review-sensei-review.yml`](examples/github-actions/review-sensei-review.yml).
-It checks out only the trusted base ref, installs an exact released ReviewSensei
-package into a separate `RUNNER_TEMP` virtual environment, records the
-installed `review-sensei --version`, computes a bounded diff with the installed
-`review-sensei prepare-diff` command, runs the review, and uploads `review.json`
-and `review-sensei-version.txt`. The example requires a maintainer-controlled
-self-hosted Linux runner labelled `ollama` with the selected local model
-provisioned. It binds checkout to the repository default branch and rejects a
-different `base_ref`. The default provider mode is local Ollama; cloud mode is
-explicit opt-in and uses the fixed Ollama Cloud endpoint. It does not execute
-the head branch or post comments. This keeps provider credentials away from
-untrusted pull-request code.
+The GitHub App opens a setup-v3 PR containing a thin caller that pins the public
+reusable workflow to an operator-configured 40-character commit SHA. All nine
+`REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
+review, GitHub writes, learning PRs, mention replies, and artifact upload are
+off. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
 
-If a GitHub App registration is created for ReviewSensei branding/identity, the
-App can later support optional App-identity comments or reviews through narrow
-JWT and installation-token authentication. That auth work is separate from the
-provider-neutral review core and does not require a hosted review service.
+When explicitly enabled, same-repository pull requests can run automatic cloud
+review on a GitHub-hosted runner. ReviewSensei checks out only trusted base
+content, constructs a bounded diff without executing head code, validates the
+model result, and publishes one exact-head App-authored review containing its
+summary and valid inline changed-line comments. Learning proposals are separate
+draft PRs. Fork pull requests fail closed before provider or broker access.
 
-Do not change that example to run automatically on fork pull requests without
-reviewing the secret and untrusted-code boundary first.
+Local Ollama remains available on the labelled self-hosted runner only for
+manual dispatch and authorized trusted-event `@sensei` replies. Conversation
+context is not sent to the cloud provider. `review.json` is uploaded only when
+`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v3 does not create a separate
+version artifact. See [installation and migration](docs/installation.md) and
+the reviewable
+[`setup-v3 example`](examples/github-actions/review-sensei-review.yml).
 
 ## Concurrency policy
 

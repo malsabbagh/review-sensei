@@ -1,5 +1,7 @@
 import type { WorkerEnv } from "./env";
 import { DeliveryLedger } from "./delivery-ledger";
+import { BrokerLedger } from "./broker-ledger";
+import { TokenBroker } from "./token-broker";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
@@ -10,12 +12,80 @@ import {
 const LEDGER_NAME = "reviewsensei-deliveries";
 
 export { DeliveryLedger };
+export { BrokerLedger };
 
-function response(body: unknown, status = 200): Response {
+function response(body: unknown, status = 200, noStore = false): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(noStore ? { "cache-control": "no-store" } : {}),
+    },
   });
+}
+
+const MAX_BROKER_REQUEST_BYTES = 64 * 1024;
+
+async function readBoundedBody(request: Request, maximum: number): Promise<ArrayBuffer> {
+  if (request.body === null) {
+    return new ArrayBuffer(0);
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) {
+      break;
+    }
+    total += next.value.byteLength;
+    if (total > maximum) {
+      await reader.cancel();
+      throw new Error("request_body_too_large");
+    }
+    chunks.push(next.value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
+async function token(request: Request, env: WorkerEnv): Promise<Response> {
+  if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
+    return response({ error: "cors_not_supported" }, 400, true);
+  }
+  const length = request.headers.get("content-length");
+  if (length === null) {
+    return response({ error: "content_length_required" }, 411, true);
+  }
+  if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
+    return response({ error: "payload_too_large" }, 413, true);
+  }
+  let body: unknown;
+  try {
+    const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
+      return response({ error: "payload_too_large" }, 413, true);
+    }
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return response({ error: "invalid_request" }, 400, true);
+  }
+  try {
+    const result = await new TokenBroker(env).exchange(
+      body as Record<string, unknown>,
+      request.headers.get("cf-connecting-ip") ?? undefined,
+    );
+    return response(result, 200, true);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    const status = message === "broker_rate_limited" ? 429 : message === "broker_ledger_unavailable" ? 503 : 403;
+    return response({ error: "capability_not_issued" }, status, true);
+  }
 }
 
 function appId(value: string | undefined): number | null {
@@ -132,8 +202,10 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
   if (!event || !deliveryId) {
     return response({ error: "github_headers_required" }, 400);
   }
-  const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_WEBHOOK_BODY_BYTES) {
+  let body: ArrayBuffer;
+  try {
+    body = await readBoundedBody(request, MAX_WEBHOOK_BODY_BYTES);
+  } catch {
     return response({ error: "payload_too_large" }, 413);
   }
   if (
@@ -190,6 +262,12 @@ const worker = {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") {
       return response({ ok: true });
+    }
+    if (url.pathname === "/github/token") {
+      if (request.method !== "POST") {
+        return response({ error: "method_not_allowed" }, 405, true);
+      }
+      return token(request, env);
     }
     if (url.pathname !== "/github/webhook") {
       return response({ error: "not_found" }, 404);

@@ -7,6 +7,7 @@ idempotent installation-time setup pull request bootstrap for optional
 App-identity comments, reviews, or setup.
 """
 
+from .application import GitHubApplication, GitHubWriteOptions
 from .auth import (
     AppInstallationToken,
     EnvPrivateKeySource,
@@ -34,6 +35,8 @@ from .broker import (
     RateLimiter,
     TokenBucketRateLimiter,
 )
+from .broker_client import BrokerClient
+from .conversation import ConversationPublisher, PreparedConversation, ReplyResult
 from .errors import (
     BrokerPolicyError,
     BrokerRateLimitError,
@@ -43,6 +46,13 @@ from .errors import (
     GitHubAuthInsufficientPermissionError,
     GitHubAuthTransientError,
     GitHubAuthUnavailableInstallationError,
+    GitHubBrokerClientError,
+    GitHubConversationError,
+    GitHubConversationTransientError,
+    GitHubHTTPError,
+    GitHubHTTPTransientError,
+    GitHubLearningProposalError,
+    GitHubLearningProposalTransientError,
     GitHubOIDCAudienceError,
     GitHubOIDCClaimsError,
     GitHubOIDCError,
@@ -50,12 +60,16 @@ from .errors import (
     GitHubOIDCInvalidTokenError,
     GitHubOIDCIssuerError,
     GitHubOIDCSignatureError,
+    GitHubPublicationError,
+    GitHubPublicationTransientError,
     GitHubSetupError,
     GitHubSetupTransientError,
     GitHubWebhookError,
     GitHubWebhookSignatureError,
 )
+from .http import GitHubHttp
 from .jwt import JWTAlgorithms, decode_jwt_parts, jwt_encode_rs256
+from .learning_pr import LearningPRPublisher, LearningPRResult
 from .oidc import (
     DEFAULT_OIDC_ISSUER,
     HttpJwksFetcher,
@@ -63,6 +77,7 @@ from .oidc import (
     VerifiedOIDCClaims,
     verify_oidc_token,
 )
+from .publication import PublicationResult, ReviewPublisher
 from .setup import (
     GitHubSetupClient,
     GitHubSetupTransport,
@@ -86,23 +101,35 @@ __all__ = [
     "ApprovedWorkflow",
     "AuditRecord",
     "AuditSink",
+    "BrokerClient",
     "BrokerPolicy",
     "BrokerPolicyError",
     "BrokerRateLimitError",
     "BrokerRejectionError",
+    "ConversationPublisher",
+    "PreparedConversation",
     "DEFAULT_BROKER_AUDIENCE",
     "DEFAULT_OIDC_ISSUER",
     "EnvPrivateKeySource",
     "FilePrivateKeySource",
     "ForkChecker",
+    "GitHubApplication",
     "GitHubAppAuth",
+    "GitHubBrokerClientError",
     "GitHubAuthConfigurationError",
     "GitHubAuthError",
     "GitHubAuthInsufficientPermissionError",
     "GitHubAuthTransientError",
     "GitHubAuthUnavailableInstallationError",
+    "GitHubConversationError",
+    "GitHubConversationTransientError",
     "GitHubForkChecker",
+    "GitHubHTTPError",
+    "GitHubHTTPTransientError",
+    "GitHubHttp",
     "GitHubInstallationLookup",
+    "GitHubLearningProposalError",
+    "GitHubLearningProposalTransientError",
     "GitHubOIDCAudienceError",
     "GitHubOIDCClaimsError",
     "GitHubOIDCError",
@@ -110,6 +137,8 @@ __all__ = [
     "GitHubOIDCInvalidTokenError",
     "GitHubOIDCIssuerError",
     "GitHubOIDCSignatureError",
+    "GitHubPublicationError",
+    "GitHubPublicationTransientError",
     "GitHubSetupClient",
     "GitHubSetupError",
     "GitHubSetupTransientError",
@@ -124,8 +153,14 @@ __all__ = [
     "EnvWebhookSecretSource",
     "InMemoryDeliveryLedger",
     "JWTAlgorithms",
+    "LearningPRPublisher",
+    "LearningPRResult",
     "PrivateKeySource",
+    "PublicationResult",
     "RequestedPermissions",
+    "ReplyResult",
+    "ReviewPublisher",
+    "GitHubWriteOptions",
     "HttpJwksFetcher",
     "JwksFetcher",
     "OIDCBroker",

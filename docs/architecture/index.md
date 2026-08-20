@@ -1,7 +1,7 @@
 # Architecture Index
 
 Project: ReviewSensei
-Last updated: 2026-08-12
+Last updated: 2026-08-19
 
 ## System Overview
 
@@ -26,7 +26,7 @@ result before a future publisher can consume it.
 | Release engineering | Reproducible package metadata, artifact validation, and provenance-backed publication | Release maintainers | `pyproject.toml`, `MANIFEST.in`, `.github/workflows/release.yml`, `scripts/validate_release.py` | External PyPI/GitHub release writes stay behind maintainer-owned tag/environment authority |
 | GitHub App auth | JWT and installation-token authentication for App-identity comments/reviews | Maintainers | `src/review_sensei/hosting/github/` | Narrow transport concern outside `src/review_sensei/providers/`; not a hosted service |
 | GitHub App setup bootstrap | Webhook signature verification, delivery deduplication, visible provider-default variables, and idempotent setup pull request creation | Maintainers | `src/review_sensei/hosting/github/` | Fails closed on invalid webhooks; generated files and PR bodies contain no secrets |
-| Cloudflare deployment package | Worker ingress, SQLite delivery claims, Web Crypto GitHub App auth, and setup PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap only; no Container, hosted review execution, or provider data |
+| Cloudflare deployment package | Worker ingress, SQLite delivery/broker claims, Web Crypto GitHub App auth, capability broker, and setup-v3 PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap and issuance-only token boundary; no hosted review execution or provider data |
 
 ## Dependency Direction
 
@@ -75,6 +75,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0014`](../adr/0014-github-app-setup-bootstrap.md) | Proposed | GitHub App setup bootstrap | #37; Signature-verified, idempotent, no-secret setup PR creation |
 | [`0020`](../adr/0020-cloudflare-github-app-package.md) | Proposed | Cloudflare Worker-only + SQLite Durable Object package | #37; Free-tier installation bootstrap deployment, no hosted review engine |
 | [`0021`](../adr/0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37; bounded inspection and fail-closed unknown setup handling |
+| [`0022`](../adr/0022-actions-publication-learning-and-conversations.md) | Proposed | Immutable setup-v3 publication, learning PRs, and authorized conversations | #64; exact-head writes and issuance-only capabilities |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

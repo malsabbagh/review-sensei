@@ -17,6 +17,12 @@ GitHub App webhook
        -> DeliveryLedger (SQLite Durable Object)
        -> Web Crypto RS256 GitHub App JWT
        -> installation token and idempotent setup pull request
+
+GitHub Actions OIDC
+    -> Worker /github/token
+       -> exact reusable-workflow claims and server-side installation lookup
+       -> BrokerLedger (hashed replay/rate identities only)
+       -> one capability-scoped installation token
 ```
 
 The Worker never stores raw webhook bodies, installation tokens, private keys,
@@ -51,16 +57,17 @@ GitHub rate limits and the configured App permissions.
   documented in [`docs/github-app-registration.md`](../../docs/github-app-registration.md).
 - The App's webhook URL set to the deployed Worker URL and JSON content type.
 
-The App needs `Contents: write`, `Pull requests: write`, and `Variables: write`
-repository permissions. `Variables: write` lets the bootstrap create the
+The App needs `Contents: write`, `Pull requests: write`, `Issues: write`,
+`Variables: write`, and `Workflows: write` repository permissions. `Issues: write` is used only by the
+opt-in top-level PR-conversation reply capability; review and inline-reply
+tokens omit it. `Variables: write` lets the bootstrap create the
 visible `REVIEWSENSEI_*` defaults without touching secrets. GitHub's webhook
 and installation-token payloads expose this UI permission as
-`actions_variables`; the Worker accepts both names. GitHub may also require
-`Workflows: write` when the App creates a workflow file; request it only when
-the target repositories need it. Enable the
+`actions_variables`; the Worker accepts both names. `Workflows: write` is
+required because setup always writes generated workflow files. Enable the
 `Installation` and `Installation repositories` events.
 
-If the App was already installed before `Variables: write` was added, accept
+If the App was already installed before `Variables: write` or `Workflows: write` was added, accept
 the updated permissions in the repository installation settings. GitHub then
 sends `installation.new_permissions_accepted`; that delivery is the retryable
 setup trigger and will create the missing variables and setup PR.
@@ -146,14 +153,26 @@ for explicit operator cleanup.
 
 ### Existing installations and setup migrations
 
-Generated files are marked `ReviewSensei setup version: 2`. On a new setup
+Generated files are marked `ReviewSensei setup version: 3`. On a new setup
 delivery, the Worker reads only the three generated paths from the repository's
 default branch, bounded to 128 KiB each. An older ReviewSensei setup (including
 the original unmarked workflow/configuration) causes the existing setup branch
 to be refreshed and a migration PR to be opened. A current setup is a no-op.
+The v3 caller references `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
+at the configured `PUBLIC_WORKFLOW_SHA`; invalid or placeholder values fail
+closed before any setup write.
 If a known path contains custom content, a malformed marker, or a future setup
 version, the Worker skips it without overwriting the file and reports the
 `skipped_unknown_setup` outcome in its internal result.
+
+The legacy catalog contains the union of byte-exact released pre-marker and
+setup-v2 Worker/Python artifacts. Current-v3 recognition is also byte-exact for
+the configured public workflow SHA. Migration uses a create-only branch named
+`review-sensei/setup-v3-<base12>-<workflow12>`. An existing branch is reusable
+only when its parent is the named base SHA, its author is the ReviewSensei App,
+its exact generated content is current, and its comparison changes generated
+paths only. Any pre-existing or concurrent mismatch returns
+`skipped_branch_conflict`; setup never force-moves a ref.
 
 Deploying the Worker does not replay old webhook deliveries. After deployment,
 trigger a fresh `installation.new_permissions_accepted` delivery by accepting
@@ -162,13 +181,34 @@ resulting migration PR is the only repository write; merge it after review.
 No uninstall or manual deletion is required, and repository learnings and
 existing variable/secret values are preserved.
 
+### Setup-v3 execution and broker boundary
+
+Automatic cloud pull-request review uses GitHub-hosted compute. Local Ollama
+uses only manual or trusted-event dispatch on the labeled self-hosted runner.
+Explicit `@sensei` replies use that trusted local path only; cloud mode does not
+send PR conversation or inline-thread context to the cloud provider.
+Generated write and artifact switches default to false. The generated caller
+may pass `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}` by name only; the App
+never creates, retrieves, logs, persists, or reveals that secret value.
+
+The isolated `POST /github/token` route accepts a bounded OIDC exchange for
+`review_publish`, `inline_reply`, `issue_reply`, or `learning_write`. It
+verifies the exact public workflow ref/SHA and repository identity, rejects
+forks and unsupported runners/events, resolves the installation server-side,
+and claims replay/rate state in `BrokerLedger`. A bounded pre-auth admission
+check runs before JWKS work, public JWKS reads are cached for five minutes with
+concurrent refresh coalescing, and a verified assertion is claimed before any
+GitHub repository or installation lookup. The route is no-store and has no
+CORS contract. `PUBLIC_WORKFLOW_SHA` is a non-secret Worker variable and must
+be set to the public workflow commit before deployment.
+
 ## Rollback and operations
 
 Deploy from a known Git commit. To roll back, redeploy the previous Worker
-commit with the same Wrangler configuration, then verify `GET /healthz` and
+commit with the same Wrangler configuration and migration history, then verify `GET /healthz` and
 send a signed test delivery from GitHub. Do not delete the `DeliveryLedger`
-namespace during rollback; its migration and one-hour accepted-delivery state
-are part of the delivery contract. Rotate secrets with `wrangler secret put`
+or `BrokerLedger` namespace during rollback; their migrations and accepted
+identity state are part of the delivery contract. Rotate secrets with `wrangler secret put`
 and redeploy.
 
 This repository does not run `wrangler deploy` or register the GitHub App as

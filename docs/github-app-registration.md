@@ -58,10 +58,11 @@ Request only the permissions needed by the features you deploy:
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open the setup pull request and later App-identity review PRs |
+| `Issues` | Write | Required only for opt-in top-level `@sensei` replies on pull-request conversations; capability tokens omit it for review and inline-reply operations |
 | `Variables` | Write | Required to create visible repository defaults used by the generated workflow; GitHub payloads name this permission `actions_variables`; existing values are never overwritten |
-| `Workflows` | Write | Conditional; GitHub may require this to add workflow files. Request it only if your App is adding workflow files and your target repositories allow workflow writes |
+| `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
 
-Do not request organization administration, secrets, checks, issues, or
+Do not request organization administration, secrets, checks, or
 unrelated repository permissions unless a separate design explicitly requires
 them. GitHub documents the permission model in
 [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app).
@@ -74,7 +75,7 @@ The setup bootstrap handles the following webhook events:
 
 | Event | Actions | Behavior |
 | --- | --- | --- |
-| `installation` | `created`, `new_permissions_accepted` | Create a setup pull request and default repository variables for selected repositories when `contents`, `pull_requests`, and `variables` (payload key `actions_variables`) are write |
+| `installation` | `created`, `new_permissions_accepted` | Create a setup pull request and default repository variables for selected repositories when `contents`, `pull_requests`, `variables` (payload key `actions_variables`), and `workflows` are write |
 | `installation` | `deleted`, `removed`, `suspended`, `unsuspend` | No setup writes |
 | `installation_repositories` | `added` | Create setup pull requests and missing default repository variables for added repositories |
 | `installation_repositories` | `removed` | No setup writes |
@@ -164,3 +165,30 @@ overwriting them. A deployment does not replay historical deliveries, so
 accept the App's permission update (`new_permissions_accepted`) or remove and
 re-add the repository to emit a fresh setup event. Merge the migration PR after
 review; an uninstall/reinstall cycle is not required.
+
+## Issue-64 setup-v3 lifecycle
+
+Setup-v3 adds the public immutable reusable workflow boundary. The generated
+caller references only `malsabbagh/review-sensei` at a configured full commit
+SHA, requests `contents: read`, `pull-requests: read`, `issues: read`, and
+`id-token: write`, and defaults every write/artifact switch to `false`.
+Automatic cloud pull-request review is GitHub-hosted and same-repository only;
+local Ollama is manual or trusted-event-only on the operator's labeled runner.
+
+The App may pass the customer-owned `OLLAMA_API_KEY` secret by name only. It
+does not create, fetch, reveal, log, persist, or place the secret value in a
+setup PR. Add the secret manually when enabling cloud mode.
+
+| Delivery | Reconciliation | Write rule |
+| --- | --- | --- |
+| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2 -> one setup-v3 PR; current v3 -> no-op |
+| `installation.new_permissions_accepted` | Repeat the same selected-repository inspection | Reuse one open setup PR; custom/malformed/future -> zero writes |
+| `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v3 PR per repository |
+| removed/deleted/suspended/unsupported | Do not reconcile setup | No setup write |
+
+The Worker validates the immutable SHA before generation, branches from the
+current default-branch head, writes only the three generated paths, and never
+writes directly to the default branch. A failed or unavailable capability,
+fork, insufficient permission, replay, or rate limit fails closed. Release
+ordering and rollback are documented in [`docs/installation.md`](installation.md)
+and [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md).

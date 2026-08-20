@@ -319,6 +319,7 @@ def _write_policy(path: Path, **overrides) -> None:
             "emails": ["test@example.com"],
             "names": ["malsabbagh", "Test"],
         },
+        "non_identity_handles": ["sensei"],
         "path_classifications": {
             "synthetic": ["evaluation/**", "tests/fixtures/**", "examples/**"],
             "public": ["README.md", "docs/**", "src/**", ".github/**"],
@@ -507,6 +508,27 @@ class PublicationAuditTests(unittest.TestCase):
             self.tmp_path, sha, self.policy_path, self.excl_path
         )
         self.assertEqual(report["counts"]["blocking_findings"], 0)
+
+    def test_declared_product_command_not_treated_as_identity_metadata(self):
+        (self.tmp_path / "docs").mkdir()
+        (self.tmp_path / "docs" / "guide.md").write_text(
+            "Reply with @sensei to request another review.\n", encoding="utf-8"
+        )
+        sha = self._commit()
+        report = AUDIT.audit_publication(
+            self.tmp_path, sha, self.policy_path, self.excl_path
+        )
+        self.assertEqual(report["counts"]["blocking_findings"], 0)
+
+    def test_malformed_non_identity_handle_rejected(self):
+        policy = json.loads(self.policy_path.read_text(encoding="utf-8"))
+        policy["non_identity_handles"] = ["@sensei"]
+        self.policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        sha = self._commit()
+        with self.assertRaises(AUDIT.PublicationAuditError):
+            AUDIT.audit_publication(
+                self.tmp_path, sha, self.policy_path, self.excl_path
+            )
 
     def test_unallowlisted_identity_metadata_rejected(self):
         email = "someone@" + "private.example"

@@ -1,20 +1,29 @@
 import type { WorkerEnv } from "./env";
 import {
-  SETUP_FILES,
+  GitHubApi,
+  type GitHubApiResponse,
+  type InstallationToken,
+  type JsonObject,
+} from "./github-api";
+import {
+  SETUP_FILE_PATHS,
   SETUP_PULL_REQUEST_BODY,
   SETUP_PULL_REQUEST_TITLE,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  buildSetupFiles,
+  validatePublicWorkflowSha,
 } from "./setup-content";
+
+// App JWT signing remains in the shared adapter and uses Web Crypto
+// RSASSA-PKCS1-v1_5; setup only consumes its bounded REST seam.
 
 export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
-const MAX_PRIVATE_KEY_BYTES = 64 * 1024;
-const MAX_GITHUB_RESPONSE_BYTES = 512 * 1024;
 const MAX_SETUP_FILE_BYTES = 128 * 1024;
-const JWT_LIFETIME_SECONDS = 9 * 60;
-const CLOCK_SKEW_SECONDS = 30;
-const SETUP_BRANCH = "review-sensei/setup";
+const SETUP_BRANCH_PREFIX = "review-sensei/setup-v3";
+const SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files";
+const SETUP_APP_LOGIN = "reviewsensei[bot]";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const DELIVERY_ID_PATTERN = /^[\x21-\x7e]{1,200}$/;
 const EVENT_PATTERN = /^[\x21-\x7e]{1,100}$/;
@@ -22,12 +31,20 @@ const REQUIRED_SETUP_PERMISSIONS = [
   "contents",
   "pull_requests",
   "variables",
+  "workflows",
 ] as const;
 const SUPPORTED_EVENTS = new Set(["installation", "installation_repositories"]);
 const SETUP_VERSION_PATTERN = /^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(\d+)[ \t]*$/m;
 const SETUP_VERSION_PREFIX = "ReviewSensei setup version:";
 
 type SetupInspectionState = "absent" | "migration" | "current" | "unknown";
+
+function setupBranch(baseSha: string, publicWorkflowSha: string): string {
+  if (!/^[a-f0-9]{40}$/.test(baseSha) || !/^[a-f0-9]{40}$/.test(publicWorkflowSha)) {
+    throw new GitHubSetupError("Setup branch inputs were invalid");
+  }
+  return `${SETUP_BRANCH_PREFIX}-${baseSha.slice(0, 12)}-${publicWorkflowSha.slice(0, 12)}`;
+}
 
 export class WebhookPayloadError extends Error {
   constructor(message: string) {
@@ -73,21 +90,6 @@ export interface SetupResult {
   repository: string;
   status: string;
   pull_request_number?: number;
-}
-
-interface JsonObject {
-  [key: string]: unknown;
-}
-
-interface ApiResponse {
-  status: number;
-  data: unknown;
-}
-
-interface InstallationToken {
-  token: string;
-  expiresAt: number;
-  permissions: Record<string, string>;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -144,30 +146,54 @@ function setupMarkerVersion(content: string): number | null {
   return Number.isSafeInteger(version) ? version : null;
 }
 
-function looksLikeLegacySetup(path: string, content: string): boolean {
-  if (path === ".github/workflows/review-sensei-review.yml") {
-    return [
-      "name: ReviewSensei review",
-      "review_sensei_version:",
-      "prepare-diff",
-    ].every((marker) => content.includes(marker));
+const LEGACY_SHA256: Readonly<Record<string, readonly string[]>> = {
+  ".github/workflows/review-sensei-review.yml": [
+    // Released setup-v2 Worker output.
+    "f32527ebe4476eeadc7fc607d2529190a42a4c39820c9c35e3ae3497c1dc15b2",
+    // Released setup-v2 Python output.
+    "415ae46804c95dc388c4daa8f31db195a4dfba97ab6de03e1837c7f34d4db3d6",
+    // Pre-marker Worker and Python outputs released in 8afa49f.
+    "f273b9c220a4e1e8336b776f919f7a83b78d9cc6473ad8920f9a7cd1fe250078",
+    "bb43f1cf081a46e03fa83baa4906759e202a9b8915c9f38db2cb0cd7ddd79be8",
+  ],
+  ".github/workflows/review-sensei-uninstall.yml": [
+    "350dcf9960e1c325a2ce1e6189ffeb5d993dfc053511791991c67044a0a3edf3",
+    "6d330e41a8df5fe7e1a54875091ffc353bbacf6fde727dc28d7bbdc76aedeca0",
+  ],
+  ".github/review-sensei/config.yml": [
+    // Released setup-v2 and pre-marker outputs.
+    "a1ebe48445cab35ffde125b7a8a66253d7a007cbed11dc03118c0b9b14d9a58b",
+    "d20c350134df752db4d03a67676c5ee244b1f7421650c620e36fa8ecb22e24af",
+  ],
+};
+
+async function looksLikeLegacySetup(path: string, content: string): Promise<boolean> {
+  const expected = LEGACY_SHA256[path];
+  if (expected === undefined) {
+    return false;
   }
-  if (path === ".github/workflows/review-sensei-uninstall.yml") {
-    return [
-      "name: Remove ReviewSensei setup",
-      "git rm",
-      "Remove ReviewSensei setup",
-    ].every((marker) => content.includes(marker));
-  }
-  if (path === ".github/review-sensei/config.yml") {
-    return content.includes("provider: ollama") && content.includes("base_url:");
-  }
-  return false;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+  const actual = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return expected.includes(actual);
 }
 
-function classifySetupFiles(
+function looksLikeCurrentSetup(
+  path: string,
+  content: string,
+  publicWorkflowSha: string,
+): boolean {
+  const canonical = buildSetupFiles(publicWorkflowSha).find(
+    (file) => file.path === path,
+  );
+  return canonical?.content === content;
+}
+
+async function classifySetupFiles(
   files: Record<string, string | null>,
-): SetupInspectionState {
+  publicWorkflowSha: string,
+): Promise<SetupInspectionState> {
   const present = Object.entries(files).filter(
     (entry): entry is [string, string] => entry[1] !== null,
   );
@@ -187,20 +213,26 @@ function classifySetupFiles(
         return "unknown";
       }
       if (marker === SETUP_VERSION) {
+        if (!looksLikeCurrentSetup(path, content, publicWorkflowSha)) {
+          return "unknown";
+        }
         hasCurrent = true;
       } else {
+        if (!(await looksLikeLegacySetup(path, content))) {
+          return "unknown";
+        }
         hasLegacy = true;
       }
       continue;
     }
-    if (looksLikeLegacySetup(path, content)) {
+    if (await looksLikeLegacySetup(path, content)) {
       hasLegacy = true;
       continue;
     }
     return "unknown";
   }
 
-  if (present.length === SETUP_FILES.length && hasCurrent && !hasLegacy) {
+  if (present.length === SETUP_FILE_PATHS.length && hasCurrent && !hasLegacy) {
     return "current";
   }
   if (hasLegacy || hasCurrent) {
@@ -218,30 +250,28 @@ function decodeJsonBody(body: ArrayBuffer): unknown {
   }
 }
 
-function repositoriesFromPayload(payload: JsonObject): string[] {
-  for (const key of ["repositories", "repositories_added"]) {
-    const value = payload[key];
-    if (!Array.isArray(value)) {
+function repositoriesFromPayload(
+  payload: JsonObject,
+  key: "repositories" | "repositories_added",
+): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const repositories: string[] = [];
+  for (const item of value) {
+    if (!isObject(item)) {
       continue;
     }
-    const repositories: string[] = [];
-    for (const item of value) {
-      if (!isObject(item)) {
-        continue;
+    const fullName = item.full_name;
+    if (typeof fullName === "string") {
+      if (!repositorySlug(fullName)) {
+        throw new WebhookPayloadError("GitHub webhook repository is invalid");
       }
-      const fullName = item.full_name;
-      if (typeof fullName === "string") {
-        if (!repositorySlug(fullName)) {
-          throw new WebhookPayloadError("GitHub webhook repository is invalid");
-        }
-        repositories.push(fullName);
-      }
-    }
-    if (repositories.length > 0) {
-      return repositories;
+      repositories.push(fullName);
     }
   }
-  return [];
+  return repositories;
 }
 
 /**
@@ -290,8 +320,15 @@ export function parseVerifiedDelivery(
     action === "new_permissions_accepted";
 
   if (needsRepository) {
-    repositories = repositoriesFromPayload(payload);
-    if (repositories.length === 0) {
+    const payloadKey =
+      event === "installation_repositories" && action === "added"
+        ? "repositories_added"
+        : "repositories";
+    repositories = repositoriesFromPayload(payload, payloadKey);
+    if (
+      repositories.length === 0 &&
+      !(event === "installation_repositories" && action === "added")
+    ) {
       const singleRepository = payload.repository;
       if (isObject(singleRepository) && typeof singleRepository.full_name === "string") {
         if (!repositorySlug(singleRepository.full_name)) {
@@ -301,10 +338,13 @@ export function parseVerifiedDelivery(
         repositories = [repository];
       }
     }
-    if (repositories.length === 0) {
+    const canListInstallationRepositories =
+      event === "installation" &&
+      (action === "created" || action === "new_permissions_accepted");
+    if (repositories.length === 0 && !canListInstallationRepositories) {
       throw new WebhookPayloadError("GitHub webhook repository is missing");
     }
-    repository ??= repositories[0];
+    repository = repositories.length > 0 ? repositories[0] : null;
   }
 
   return {
@@ -320,165 +360,11 @@ export function parseVerifiedDelivery(
   };
 }
 
-function base64Url(bytes: ArrayBuffer | Uint8Array): string {
-  const values = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let binary = "";
-  for (let offset = 0; offset < values.length; offset += 0x8000) {
-    binary += String.fromCharCode(...values.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
-}
-
-function concatenate(...parts: Uint8Array[]): Uint8Array {
-  const length = parts.reduce((total, part) => total + part.byteLength, 0);
-  const result = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
-}
-
-function derLength(length: number): Uint8Array {
-  if (length < 0x80) {
-    return Uint8Array.of(length);
-  }
-  const bytes: number[] = [];
-  let remaining = length;
-  while (remaining > 0) {
-    bytes.unshift(remaining & 0xff);
-    remaining >>>= 8;
-  }
-  return Uint8Array.of(0x80 | bytes.length, ...bytes);
-}
-
-function wrapRsaPrivateKey(pkcs1: Uint8Array): Uint8Array {
-  // PKCS#8 PrivateKeyInfo wrapper for an RSA PKCS#1 key.
-  const version = Uint8Array.of(0x02, 0x01, 0x00);
-  const algorithm = Uint8Array.of(
-    0x30,
-    0x0d,
-    0x06,
-    0x09,
-    0x2a,
-    0x86,
-    0x48,
-    0x86,
-    0xf7,
-    0x0d,
-    0x01,
-    0x01,
-    0x01,
-    0x05,
-    0x00,
-  );
-  const privateKey = concatenate(
-    Uint8Array.of(0x04),
-    derLength(pkcs1.byteLength),
-    pkcs1,
-  );
-  const sequence = concatenate(version, algorithm, privateKey);
-  return concatenate(Uint8Array.of(0x30), derLength(sequence.byteLength), sequence);
-}
-
-function decodePrivateKeyPem(value: string): Uint8Array {
-  if (!value || new TextEncoder().encode(value).byteLength > MAX_PRIVATE_KEY_BYTES) {
-    throw new GitHubAuthConfigurationError("GitHub App private key is unavailable");
-  }
-  const match = value.match(
-    /-----BEGIN (PRIVATE KEY|RSA PRIVATE KEY)-----([\s\S]*?)-----END \1-----/,
-  );
-  if (!match) {
-    throw new GitHubAuthConfigurationError("GitHub App private key is invalid");
-  }
-  const encoded = match[2].replaceAll(/\s+/g, "");
-  if (!encoded || encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
-    throw new GitHubAuthConfigurationError("GitHub App private key is invalid");
-  }
-  try {
-    const binary = atob(encoded);
-    const der = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    return match[1] === "RSA PRIVATE KEY" ? wrapRsaPrivateKey(der) : der;
-  } catch {
-    throw new GitHubAuthConfigurationError("GitHub App private key is invalid");
-  }
-}
-
-async function importPrivateKey(value: string): Promise<CryptoKey> {
-  const der = decodePrivateKeyPem(value);
-  try {
-    return await crypto.subtle.importKey(
-      "pkcs8",
-      toArrayBuffer(der),
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      false,
-      ["sign"],
-    );
-  } catch {
-    throw new GitHubAuthConfigurationError("GitHub App private key is invalid");
-  }
-}
-
 function jsonObject(value: unknown, message: string): JsonObject {
   if (!isObject(value)) {
     throw new GitHubSetupError(message);
   }
   return value;
-}
-
-async function readBoundedText(response: Response): Promise<string> {
-  const declaredLength = response.headers.get("content-length");
-  if (declaredLength !== null) {
-    const parsedLength = Number(declaredLength);
-    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > MAX_GITHUB_RESPONSE_BYTES) {
-      throw new GitHubSetupError("GitHub response exceeded the configured size limit");
-    }
-  }
-  if (!response.body) {
-    return "";
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) {
-        break;
-      }
-      const chunk = next.value;
-      total += chunk.byteLength;
-      if (total > MAX_GITHUB_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw new GitHubSetupError("GitHub response exceeded the configured size limit");
-      }
-      chunks.push(chunk);
-    }
-  } catch (error) {
-    if (error instanceof GitHubSetupError) {
-      throw error;
-    }
-    throw new GitHubSetupTransientError("GitHub response could not be read");
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new GitHubSetupError("GitHub response was not valid UTF-8");
-  }
 }
 
 function decodeRepositoryFile(data: unknown): string {
@@ -511,7 +397,7 @@ function decodeRepositoryFile(data: unknown): string {
   }
 }
 
-function requireSuccessful(response: ApiResponse): unknown {
+function requireSuccessful(response: GitHubApiResponse): unknown {
   if (response.status >= 200 && response.status < 300) {
     return response.data;
   }
@@ -529,18 +415,25 @@ function pullRequestNumber(value: unknown): number | null {
 }
 
 export class GitHubSetupService {
-  private readonly apiUrl: string;
-  private privateKey: Promise<CryptoKey> | undefined;
+  private readonly github: Pick<
+    GitHubApi,
+    "request" | "installationToken" | "installationRepositories"
+  >;
 
-  constructor(private readonly env: WorkerEnv) {
-    const apiUrl = (env.GITHUB_API_URL ?? "https://api.github.com").trim();
-    if (
-      !/^https:\/\//i.test(apiUrl) &&
-      !/^http:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(apiUrl)
-    ) {
-      throw new GitHubAuthConfigurationError("GitHub API URL is invalid");
+  constructor(
+    private readonly env: WorkerEnv,
+    github?: Pick<
+      GitHubApi,
+      "request" | "installationToken" | "installationRepositories"
+    >,
+  ) {
+    try {
+      this.github = github ?? new GitHubApi(env);
+    } catch (error) {
+      throw new GitHubAuthConfigurationError(
+        error instanceof Error ? error.message : "GitHub API is unavailable",
+      );
     }
-    this.apiUrl = apiUrl.replace(/\/+$/, "");
   }
 
   async process(delivery: VerifiedDelivery): Promise<SetupResult[]> {
@@ -562,6 +455,14 @@ export class GitHubSetupService {
       return [];
     }
 
+    if (
+      selected.length === 0 &&
+      delivery.event === "installation" &&
+      ["created", "new_permissions_accepted"].includes(delivery.action)
+    ) {
+      selected = await this.installationRepositories(delivery.installationId);
+    }
+
     if (!hasSetupPermissions(delivery.permissions)) {
       return selected.map((repository) => ({
         repository,
@@ -569,18 +470,19 @@ export class GitHubSetupService {
       }));
     }
 
+    const publicWorkflowSha = validatePublicWorkflowSha(
+      this.env.PUBLIC_WORKFLOW_SHA ?? "",
+    );
+    const setupFiles = buildSetupFiles(publicWorkflowSha);
     const results: SetupResult[] = [];
     const requestedPermissions: Record<string, string> = {
       contents: "write",
       pull_requests: "write",
       actions_variables: "write",
+      workflows: "write",
     };
-    if (delivery.permissions.workflows === "write") {
-      requestedPermissions.workflows = "write";
-    }
     for (const repository of selected) {
       const token = await this.installationToken(
-        delivery.appId,
         delivery.installationId,
         repository,
         requestedPermissions,
@@ -588,7 +490,14 @@ export class GitHubSetupService {
       if (!hasSetupPermissions(token.permissions)) {
         throw new GitHubSetupError("GitHub App installation lacks setup permissions");
       }
-      results.push(await this.ensureSetupPullRequest(repository, token.token));
+      results.push(
+        await this.ensureSetupPullRequest(
+          repository,
+          token.token,
+          setupFiles,
+          publicWorkflowSha,
+        ),
+      );
     }
     return results;
   }
@@ -606,95 +515,53 @@ export class GitHubSetupService {
     return selected;
   }
 
-  private async appJwt(appId: number): Promise<string> {
-    this.privateKey ??= importPrivateKey(this.env.GITHUB_APP_PRIVATE_KEY ?? "");
-    const key = await this.privateKey;
-    const now = Math.floor(Date.now() / 1000);
-    const header = base64Url(new TextEncoder().encode('{"alg":"RS256","typ":"JWT"}'));
-    const payload = base64Url(
-      new TextEncoder().encode(
-        JSON.stringify({
-          iat: now - CLOCK_SKEW_SECONDS,
-          exp: now + JWT_LIFETIME_SECONDS,
-          iss: String(appId),
-        }),
-      ),
-    );
-    const input = `${header}.${payload}`;
-    let signature: ArrayBuffer;
-    try {
-      signature = await crypto.subtle.sign(
-        "RSASSA-PKCS1-v1_5",
-        key,
-        new TextEncoder().encode(input),
-      );
-    } catch {
-      throw new GitHubAuthConfigurationError("GitHub App JWT could not be created");
-    }
-    return `${input}.${base64Url(signature)}`;
-  }
-
   private async installationToken(
-    appId: number,
     installationId: number,
     repository: string,
     requestedPermissions: Record<string, string>,
   ): Promise<InstallationToken> {
-    const jwt = await this.appJwt(appId);
-    const response = await this.request(
-      "POST",
-      `/app/installations/${installationId}/access_tokens`,
-      jwt,
-      {
-        permissions: requestedPermissions,
-        repositories: [repository.split("/")[1]],
-      },
-    );
-    const data = jsonObject(
-      requireSuccessful(response),
-      "GitHub App token response was invalid",
-    );
-    const token = data.token;
-    const expiresAt = data.expires_at;
-    if (typeof token !== "string" || !token.trim() || typeof expiresAt !== "string") {
-      throw new GitHubSetupError("GitHub App token response was invalid");
+    try {
+      return await this.github.installationToken(
+        installationId,
+        repository,
+        requestedPermissions,
+      );
+    } catch (error) {
+      throw new GitHubSetupError(
+        error instanceof Error ? error.message : "GitHub App token response was invalid",
+      );
     }
-    const expiry = Date.parse(expiresAt);
-    if (!Number.isFinite(expiry) || expiry <= Date.now()) {
-      throw new GitHubSetupError("GitHub App token response was expired");
+  }
+
+  private async installationRepositories(
+    installationId: number,
+  ): Promise<string[]> {
+    try {
+      return await this.github.installationRepositories(installationId);
+    } catch (error) {
+      if (error instanceof GitHubSetupError) {
+        throw error;
+      }
+      throw new GitHubSetupError(
+        error instanceof Error
+          ? error.message
+          : "GitHub installation repositories were unavailable",
+      );
     }
-    return {
-      token,
-      expiresAt: expiry,
-      permissions: normalizePermissions(data.permissions),
-    };
   }
 
   private async ensureSetupPullRequest(
     repository: string,
     installationToken: string,
+    setupFiles: readonly { path: string; content: string }[],
+    publicWorkflowSha: string,
   ): Promise<SetupResult> {
     const baseBranch = await this.defaultBranch(repository, installationToken);
-    const branchExists = await this.branchExists(
-      repository,
-      installationToken,
-      SETUP_BRANCH,
-    );
-    const existingBeforeBranch = await this.existingPullRequest(
-      repository,
-      installationToken,
-    );
-    if (existingBeforeBranch !== null) {
-      return {
-        repository,
-        status: "skipped_pull_request_exists",
-        pull_request_number: existingBeforeBranch,
-      };
-    }
     const setupState = await this.inspectRepositorySetup(
       repository,
       installationToken,
       baseBranch,
+      publicWorkflowSha,
     );
     if (setupState === "current") {
       return { repository, status: "skipped_current" };
@@ -702,13 +569,49 @@ export class GitHubSetupService {
     if (setupState === "unknown") {
       return { repository, status: "skipped_unknown_setup" };
     }
-    await this.ensureRepositoryVariables(repository, installationToken);
-    if (!branchExists || setupState === "migration") {
-      await this.createOrUpdateBranch(repository, installationToken, baseBranch);
+    const baseSha = await this.defaultHeadSha(
+      repository,
+      installationToken,
+      baseBranch,
+    );
+    const branch = setupBranch(baseSha, publicWorkflowSha);
+    const branchAlreadyExists = await this.branchExists(
+      repository,
+      installationToken,
+      branch,
+    );
+    if (branchAlreadyExists && !(await this.isManagedSetupBranch(
+      repository,
+      installationToken,
+      branch,
+      baseSha,
+      publicWorkflowSha,
+    ))) {
+      return { repository, status: "skipped_branch_conflict" };
     }
+    if (!branchAlreadyExists) {
+      const created = await this.createBranch(
+        repository,
+        installationToken,
+        baseSha,
+        branch,
+        setupFiles,
+      );
+      if (!created && !(await this.isManagedSetupBranch(
+        repository,
+        installationToken,
+        branch,
+        baseSha,
+        publicWorkflowSha,
+      ))) {
+        return { repository, status: "skipped_branch_conflict" };
+      }
+    }
+    await this.ensureRepositoryVariables(repository, installationToken);
     const existingAfterBranch = await this.existingPullRequest(
       repository,
       installationToken,
+      branch,
     );
     if (existingAfterBranch !== null) {
       return {
@@ -723,7 +626,7 @@ export class GitHubSetupService {
       installationToken,
       {
         title: SETUP_PULL_REQUEST_TITLE,
-        head: SETUP_BRANCH,
+        head: branch,
         base: baseBranch,
         body: SETUP_PULL_REQUEST_BODY,
       },
@@ -734,6 +637,7 @@ export class GitHubSetupService {
       const existingAfterCreate = await this.existingPullRequest(
         repository,
         installationToken,
+        branch,
       );
       if (existingAfterCreate !== null) {
         return {
@@ -758,10 +662,11 @@ export class GitHubSetupService {
     repository: string,
     token: string,
     baseBranch: string,
+    publicWorkflowSha: string,
   ): Promise<SetupInspectionState> {
     const files: Record<string, string | null> = {};
-    for (const file of SETUP_FILES) {
-      const encodedPath = file.path
+    for (const path of SETUP_FILE_PATHS) {
+      const encodedPath = path
         .split("/")
         .map((segment) => encodeURIComponent(segment))
         .join("/");
@@ -771,12 +676,12 @@ export class GitHubSetupService {
         token,
       );
       if (response.status === 404) {
-        files[file.path] = null;
+        files[path] = null;
         continue;
       }
-      files[file.path] = decodeRepositoryFile(requireSuccessful(response));
+      files[path] = decodeRepositoryFile(requireSuccessful(response));
     }
-    return classifySetupFiles(files);
+    return await classifySetupFiles(files, publicWorkflowSha);
   }
 
   private async ensureRepositoryVariables(
@@ -845,35 +750,115 @@ export class GitHubSetupService {
     return true;
   }
 
-  private async createOrUpdateBranch(
+  private async defaultHeadSha(
     repository: string,
     token: string,
     baseBranch: string,
-  ): Promise<void> {
-    const baseRefResponse = await this.request(
+  ): Promise<string> {
+    const response = await this.request(
       "GET",
       `/repos/${repositoryPath(repository)}/git/ref/heads/${encodeURIComponent(baseBranch)}`,
       token,
     );
-    const baseRef = jsonObject(
-      requireSuccessful(baseRefResponse),
+    const data = jsonObject(
+      requireSuccessful(response),
       "GitHub setup response did not include a base ref",
     );
-    const baseObject = jsonObject(
-      baseRef.object,
+    const object = jsonObject(
+      data.object,
       "GitHub setup response did not include a base ref",
     );
-    if (typeof baseObject.sha !== "string" || !baseObject.sha) {
+    if (typeof object.sha !== "string" || !/^[a-f0-9]{40}$/.test(object.sha)) {
       throw new GitHubSetupError("GitHub setup response did not include a base commit");
     }
+    return object.sha;
+  }
 
+  private async isManagedSetupBranch(
+    repository: string,
+    token: string,
+    branch: string,
+    baseSha: string,
+    publicWorkflowSha: string,
+  ): Promise<boolean> {
+    const response = await this.request(
+      "GET",
+      `/repos/${repositoryPath(repository)}/branches/${encodeURIComponent(branch)}`,
+      token,
+    );
+    const data = jsonObject(
+      requireSuccessful(response),
+      "GitHub setup branch response was invalid",
+    );
+    const commit = jsonObject(data.commit, "GitHub setup branch response was invalid");
+    const metadata = jsonObject(
+      commit.commit,
+      "GitHub setup branch response was invalid",
+    );
+    const sha = commit.sha;
+    const parents = commit.parents;
+    const author = commit.author;
+    if (
+      typeof sha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(sha) ||
+      metadata.message !== SETUP_COMMIT_MESSAGE ||
+      !Array.isArray(parents) ||
+      parents.length !== 1 ||
+      !isObject(parents[0]) ||
+      typeof parents[0].sha !== "string" ||
+      parents[0].sha !== baseSha ||
+      !isObject(author) ||
+      author.login !== SETUP_APP_LOGIN ||
+      author.type !== "Bot"
+    ) {
+      return false;
+    }
+    const comparisonResponse = await this.request(
+      "GET",
+      `/repos/${repositoryPath(repository)}/compare/${parents[0].sha}...${sha}`,
+      token,
+    );
+    const comparison = jsonObject(
+      requireSuccessful(comparisonResponse),
+      "GitHub setup branch comparison was invalid",
+    );
+    if (!Array.isArray(comparison.files) || comparison.files.length === 0) {
+      return false;
+    }
+    const generatedOnly = comparison.files.every(
+      (file) =>
+        isObject(file) &&
+        typeof file.filename === "string" &&
+        SETUP_FILE_PATHS.includes(file.filename as (typeof SETUP_FILE_PATHS)[number]) &&
+        (file.previous_filename === undefined ||
+          (typeof file.previous_filename === "string" &&
+            SETUP_FILE_PATHS.includes(
+              file.previous_filename as (typeof SETUP_FILE_PATHS)[number],
+            ))),
+    );
+    return generatedOnly &&
+      (await this.inspectRepositorySetup(
+        repository,
+        token,
+        branch,
+        publicWorkflowSha,
+      )) === "current";
+  }
+
+  private async createBranch(
+    repository: string,
+    token: string,
+    baseSha: string,
+    branch: string,
+    setupFiles: readonly { path: string; content: string }[],
+  ): Promise<boolean> {
     const treeResponse = await this.request(
       "POST",
       "/repos/" + repositoryPath(repository) + "/git/trees",
       token,
       {
-        base_tree: baseObject.sha,
-        tree: SETUP_FILES.map((file) => ({
+        base_tree: baseSha,
+        tree: setupFiles.map((file) => ({
           path: file.path,
           mode: "100644",
           type: "blob",
@@ -894,9 +879,9 @@ export class GitHubSetupService {
       "/repos/" + repositoryPath(repository) + "/git/commits",
       token,
       {
-        message: "Add ReviewSensei review setup files",
+        message: SETUP_COMMIT_MESSAGE,
         tree: tree.sha,
-        parents: [baseObject.sha],
+        parents: [baseSha],
       },
     );
     const commit = jsonObject(
@@ -911,28 +896,23 @@ export class GitHubSetupService {
       "POST",
       "/repos/" + repositoryPath(repository) + "/git/refs",
       token,
-      { ref: `refs/heads/${SETUP_BRANCH}`, sha: commit.sha },
+      { ref: `refs/heads/${branch}`, sha: commit.sha },
     );
     if (refResponse.status === 422) {
-      const updateResponse = await this.request(
-        "PATCH",
-        `/repos/${repositoryPath(repository)}/git/refs/heads/${encodeURIComponent(SETUP_BRANCH)}`,
-        token,
-        { sha: commit.sha },
-      );
-      requireSuccessful(updateResponse);
-      return;
+      return false;
     }
     requireSuccessful(refResponse);
+    return true;
   }
 
   private async existingPullRequest(
     repository: string,
     token: string,
+    branch: string,
   ): Promise<number | null> {
     const owner = repository.split("/", 1)[0];
     const query = new URLSearchParams({
-      head: `${owner}:${SETUP_BRANCH}`,
+      head: `${owner}:${branch}`,
       state: "open",
     });
     const response = await this.request(
@@ -958,32 +938,9 @@ export class GitHubSetupService {
     path: string,
     token: string,
     body?: JsonObject,
-  ): Promise<ApiResponse> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+  ): Promise<GitHubApiResponse> {
     try {
-      const response = await fetch(`${this.apiUrl}${path}`, {
-        method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
-          "X-GitHub-Api-Version": "2022-11-28",
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const text = await readBoundedText(response);
-      let data: unknown = undefined;
-      if (text) {
-        try {
-          data = JSON.parse(text) as unknown;
-        } catch {
-          throw new GitHubSetupError("GitHub response was invalid JSON");
-        }
-      }
-      return { status: response.status, data };
+      return await this.github.request(method, path, token, body);
     } catch (error) {
       if (
         error instanceof GitHubSetupError ||
@@ -992,8 +949,6 @@ export class GitHubSetupService {
         throw error;
       }
       throw new GitHubSetupTransientError("GitHub request failed");
-    } finally {
-      clearTimeout(timeout);
     }
   }
 }

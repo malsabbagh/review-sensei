@@ -40,39 +40,35 @@ available as explicit overrides.
 
 ## GitHub workflow example
 
-The manual workflow example in
+The setup-v3 caller example in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
-installs an exact released `review-sensei==X.Y.Z` package into a separate
-`RUNNER_TEMP` virtual environment. It records `review-sensei --version` before
-reviewing, uses the installed `review-sensei prepare-diff` command to validate
-refs and compute a bounded diff, and uploads `review.json` plus
-`review-sensei-version.txt`.
+invokes the immutable public reusable workflow at an operator-configured full
+commit SHA. That workflow installs the exact `REVIEWSENSEI_VERSION` into a
+separate `RUNNER_TEMP` environment, checks out only trusted base content,
+validates refs, and computes a bounded diff without installing or executing the
+head branch.
 
-The workflow defaults to the `REVIEWSENSEI_PROVIDER_MODE` repository variable
-(`local`), uses a local Ollama API, and does not require a provider secret.
-Because GitHub-hosted runners do not ship
-with Ollama, this example requires a maintainer-controlled self-hosted Linux
-runner labelled `ollama` with the selected model already available. The
-workflow checks out only the repository default branch and rejects a
-`base_ref` that does not match it; it never installs or executes the head
-branch. If you set `REVIEWSENSEI_PROVIDER_MODE` to `cloud`, the review step
-sends the diff and selected context to Ollama Cloud using
-`deepseek-v4-flash:cloud` by default and requires `OLLAMA_API_KEY`; review provider
-terms and your data-handling requirements before doing so. The workflow does
-not accept an arbitrary provider URL input.
+The App creates nine repository variables: provider mode, local model, cloud
+model, package version, automatic review, GitHub writes, learning PRs, mention
+replies, and artifact upload. The five feature switches default to `false`.
+The App does not create a placeholder secret or overwrite an existing variable.
 
-The workflow is manually dispatched and intentionally not enabled for fork
-pull requests. A fork-triggered automatic run would need a separate security
-review of secrets, untrusted head behavior, and provider data egress.
+To enable automatic same-repository review, add the customer-owned
+`OLLAMA_API_KEY` under Repository Settings → Secrets and variables → Actions,
+set `REVIEWSENSEI_PROVIDER_MODE=cloud`, then set
+`REVIEWSENSEI_AUTO_REVIEW=true` and `REVIEWSENSEI_GITHUB_WRITES=true`.
+Automatic review runs on `ubuntu-latest`, rejects fork heads before provider or
+broker access, and publishes one exact-head App review with a summary and valid
+inline changed-line comments. Enable `REVIEWSENSEI_LEARNING_PRS` separately to
+allow validated learning proposals to open deterministic draft PRs.
 
-The GitHub App bootstrap creates the three `REVIEWSENSEI_*` repository
-variables with the defaults above and does not create a placeholder secret.
-After the setup PR is merged, install Ollama and pull `qwen3.5:4b` on the
-self-hosted runner for local mode. For cloud mode, add `OLLAMA_API_KEY` under
-Repository Settings → Secrets and variables → Actions, then change only
-`REVIEWSENSEI_PROVIDER_MODE` to `cloud`. The generated **Remove ReviewSensei
-setup** workflow can be dispatched to open a cleanup PR; it leaves learnings,
-variables, and secrets for explicit operator review.
+For local Ollama, install and pull `qwen3.5:4b` on the labelled self-hosted
+runner. Local mode is limited to manual dispatch and authorized trusted-event
+`@sensei` replies; conversation context is never sent through cloud mode.
+`review.json` is uploaded only when `REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; there
+is no separate version artifact. The generated **Remove ReviewSensei setup**
+workflow opens a cleanup PR and leaves learnings, variables, and secrets for
+explicit operator review.
 
 If the GitHub App was already installed before a setup version change, do not
 remove the generated files manually. Deploy the updated Worker, then accept a
@@ -81,3 +77,46 @@ fresh setup delivery. The bootstrap identifies the older generated files and
 opens a migration PR that updates only those files. It skips custom or future
 versions for manual review and preserves learnings, existing variables, and
 secrets.
+
+## Setup-v3 and immutable reusable workflow
+
+The current generated setup is version 3. The caller pins the public reusable
+workflow to a full 40-character lowercase SHA and passes only bounded event
+inputs. It requests `contents: read`, `pull-requests: read`, `issues: read`,
+and `id-token: write`; generated write and artifact switches are all `false`.
+Automatic `pull_request` cloud review runs on `ubuntu-latest` and rejects fork
+heads before any secret-bearing step. Local Ollama runs are limited to manual
+or trusted comment dispatch on the labeled self-hosted runner.
+`@sensei` conversation replies therefore require local provider mode and that
+trusted runner; cloud mode does not send comment threads to the cloud provider.
+
+The generated caller may contain the literal name-only mapping
+`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read the value
+during setup and the App never creates, retrieves, logs, persists, or
+interpolates a secret value into generated output. Add the customer-owned
+secret yourself only when explicitly enabling cloud mode.
+
+Setup reconciliation is PR-only and changes only the three generated paths.
+`installation.created` (including reinstall),
+`installation.new_permissions_accepted`, and
+`installation_repositories.added` inspect absent, legacy, and v2 clients.
+They reuse an existing open setup PR and produce at most one deterministic
+`review-sensei/setup-v3-<base12>-<workflow12>` PR for the exact base and public
+workflow revision. Current v3 is a no-op; custom, malformed, and future versions
+are skipped without writes. A deployment alone does not replay old events.
+
+Released pre-marker and setup-v2 clients are recognized from exact historical
+generated bytes. Present setup-v3 files must exactly match the configured
+generated files; retained markers do not make edited content migratable. Setup
+branches are create-only and bind the base and public-workflow SHAs in their
+names. Existing branches are reused only after App-author, exact-parent,
+canonical-content, and generated-path checks. A pre-existing or concurrent
+collision reports `skipped_branch_conflict`; the App never force-moves a ref.
+
+The release order is: merge the implementation; publish the audited public
+snapshot; release the exact package; set the Worker `PUBLIC_WORKFLOW_SHA`;
+deploy the Worker; update and accept App permissions or reinstall/re-add the
+App; verify setup PR reconciliation; merge desired setup PRs; enable repository
+opt-ins; and only then run hosted acceptance. Rollback is a code-only
+revert/redeploy that preserves delivery and broker ledger migrations; close or
+revert unmerged setup PRs rather than writing the default branch directly.

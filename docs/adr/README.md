@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-08-16
+Last updated: 2026-08-19
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -30,6 +30,7 @@ Process: `docs/process/adr-process.md`
 | [0019](0019-reviewsensei-dev-landing-page.md) | Proposed | ReviewSensei.dev canonical landing page | #47 | Static HTML under docs/site deployed via GitHub Pages |
 | [0020](0020-cloudflare-github-app-package.md) | Proposed | Cloudflare Worker-only + SQLite Durable Object package | #37 | Free-tier installation bootstrap ingress; no hosted review engine |
 | [0021](0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37 | Bounded inspection; unknown or future files are left untouched |
+| [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Immutable setup-v3 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
 
 ## Policy
 

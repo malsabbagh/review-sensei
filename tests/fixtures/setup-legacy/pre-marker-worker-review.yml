@@ -1,0 +1,162 @@
+name: ReviewSensei review
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Repository default branch (must match the repository setting)
+        required: true
+      head_ref:
+        description: Head branch or ref to review
+        required: true
+      head_repository:
+        description: Optional owner/repo slug for fork review
+        required: false
+      review_sensei_version:
+        description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
+        required: true
+      provider_mode:
+        description: local or cloud; cloud sends the diff to Ollama Cloud
+        required: false
+        default: local
+      ollama_model:
+        description: Ollama model name
+        required: false
+        default: llama3.2
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: [self-hosted, linux, x64, ollama]
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate refs, repository, version, and provider mode
+        id: version
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
+          repo_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+          for name in ("BASE_REF", "HEAD_REF"):
+              value = os.environ.get(name, "")
+              if not value or value.startswith("-") or not ref_pattern.fullmatch(value):
+                  print(f"::error::{name} is not a supported Git ref", file=sys.stderr)
+                  sys.exit(1)
+          default_branch = os.environ.get("DEFAULT_BRANCH", "")
+          if not default_branch or not ref_pattern.fullmatch(default_branch):
+              print("::error::repository default branch is unavailable", file=sys.stderr)
+              sys.exit(1)
+          if os.environ.get("BASE_REF") != default_branch:
+              print("::error::base_ref must match the repository default branch", file=sys.stderr)
+              sys.exit(1)
+          head_repository = os.environ.get("HEAD_REPOSITORY", "")
+          if head_repository and not repo_pattern.fullmatch(head_repository):
+              print("::error::head_repository must be an owner/repo slug", file=sys.stderr)
+              sys.exit(1)
+          raw = os.environ.get("REVIEW_SENSEI_VERSION", "")
+          if not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", raw):
+              print("::error::review_sensei_version must be an exact X.Y.Z version", file=sys.stderr)
+              sys.exit(1)
+          normalized = raw[1:] if raw.startswith("v") else raw
+          provider_mode = os.environ.get("PROVIDER_MODE", "local")
+          if provider_mode not in {"local", "cloud"}:
+              print("::error::provider_mode must be local or cloud", file=sys.stderr)
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"normalized_version={normalized}\n")
+              handle.write(f"provider_mode={provider_mode}\n")
+          PY
+
+      - name: Check out base ref only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Install exact ReviewSensei package
+        env:
+          REVIEW_SENSEI_VERSION: ${{ steps.version.outputs.normalized_version }}
+        run: |
+          python -m venv "$RUNNER_TEMP/review-sensei-venv"
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install "review-sensei==${REVIEW_SENSEI_VERSION}"
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" --version | tee review-sensei-version.txt
+
+      - name: Prepare bounded diff
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+        run: |
+          args=()
+          if [[ -n "$HEAD_REPOSITORY" ]]; then
+            args+=(--head-repository "$HEAD_REPOSITORY")
+          fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
+            --repository "$PWD" \
+            --base-ref "$BASE_REF" \
+            --head-ref "$HEAD_REF" \
+            "${args[@]}" \
+            --output pr.patch \
+            --max-diff-bytes 1048576 \
+            --max-diff-lines 50000 \
+            --max-diff-files 500 \
+            --max-diff-hunks 5000
+
+      - name: Verify local Ollama service
+        if: steps.version.outputs.provider_mode == 'local'
+        env:
+          OLLAMA_MODEL: ${{ inputs.ollama_model }}
+        run: |
+          curl --fail --silent --show-error --max-time 10 \
+            "http://127.0.0.1:11434/api/tags" >/dev/null
+          ollama show "$OLLAMA_MODEL" >/dev/null
+
+      - name: Run ReviewSensei review
+        env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          OLLAMA_MODEL: ${{ inputs.ollama_model }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+        run: |
+          if [[ "$PROVIDER_MODE" == "cloud" ]]; then
+            export OLLAMA_BASE_URL="https://ollama.com/api"
+            if [[ -z "$OLLAMA_API_KEY" ]]; then
+              echo "::error::OLLAMA_API_KEY is required for cloud mode" >&2
+              exit 1
+            fi
+          else
+            export OLLAMA_BASE_URL="http://127.0.0.1:11434/api"
+            unset OLLAMA_API_KEY
+          fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" \
+            --diff pr.patch \
+            --learning-root . \
+            --learning-directory .github/review-sensei/learnings \
+            --base-url "$OLLAMA_BASE_URL" \
+            --model "$OLLAMA_MODEL" \
+            --output review.json
+
+      - name: Upload review artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-sensei-review
+          path: |
+            review.json
+            review-sensei-version.txt
+          if-no-files-found: error
+          retention-days: 7

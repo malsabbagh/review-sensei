@@ -117,3 +117,57 @@ class BrokerRejectionError(ReviewSenseiError):
     """Raised when the broker rejects an OIDC workflow identity."""
 
     error_category = "broker_rejection"
+
+
+class GitHubHTTPError(ReviewSenseiError):
+    """Raised for bounded GitHub REST transport failures."""
+
+    error_category = "github_http"
+
+
+class GitHubHTTPTransientError(GitHubHTTPError):
+    """Raised for transient GitHub REST failures."""
+
+    error_category = "github_http_transient"
+
+
+class GitHubBrokerClientError(ReviewSenseiError):
+    """Raised when the Actions workflow cannot exchange an OIDC capability."""
+
+    error_category = "github_broker_client"
+
+
+class GitHubPublicationError(ReviewSenseiError):
+    """Raised when a validated review cannot be published."""
+
+    error_category = "github_publication"
+
+
+class GitHubPublicationTransientError(GitHubPublicationError):
+    """Raised for transient review publication failures."""
+
+    error_category = "github_publication_transient"
+
+
+class GitHubLearningProposalError(ReviewSenseiError):
+    """Raised when a learning proposal cannot be published safely."""
+
+    error_category = "github_learning_proposal"
+
+
+class GitHubLearningProposalTransientError(GitHubLearningProposalError):
+    """Raised for transient learning proposal publication failures."""
+
+    error_category = "github_learning_proposal_transient"
+
+
+class GitHubConversationError(ReviewSenseiError):
+    """Raised when a conversation reply cannot be published safely."""
+
+    error_category = "github_conversation"
+
+
+class GitHubConversationTransientError(GitHubConversationError):
+    """Raised for transient conversation reply publication failures."""
+
+    error_category = "github_conversation_transient"

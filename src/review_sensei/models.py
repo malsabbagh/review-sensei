@@ -16,9 +16,16 @@ from .validation import (
 
 _LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_GIT_SHA = re.compile(r"^[a-f0-9]{40}$")
 MAX_REVIEW_CONTEXT_FILES = 64
 MAX_REVIEW_DOCUMENT_BYTES = 128 * 1024
 MAX_REVIEW_CONTEXT_TOTAL_BYTES = 512 * 1024
+MAX_CONVERSATION_MESSAGES = 20
+MAX_CONVERSATION_FINDINGS = 20
+MAX_CONVERSATION_CONTEXT_BYTES = 64 * 1024
+MAX_CONVERSATION_REPLY_BYTES = 16 * 1024
+MAX_CONVERSATION_PR_BODY_BYTES = 8 * 1024
+MAX_CONVERSATION_DIFF_BYTES = 16 * 1024
 
 
 def _validate_learning_scope(scope: tuple[str, ...]) -> None:
@@ -549,6 +556,364 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ReviewResult":
+        """Reconstruct a fully validated review result from canonical JSON."""
+
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("review result must be a JSON object")
+        summary = value.get("summary")
+        comments = value.get("comments")
+        provider = value.get("provider")
+        model = value.get("model")
+        proposals = value.get("learning_proposals", [])
+        if not isinstance(summary, str):
+            raise ReviewInputError("review result summary must be a string")
+        if not isinstance(comments, list):
+            raise ReviewInputError("review result comments must be an array")
+        if not isinstance(provider, str):
+            raise ReviewInputError("review result provider must be a string")
+        if model is not None and not isinstance(model, str):
+            raise ReviewInputError("review result model must be a string or null")
+        if not isinstance(proposals, list):
+            raise ReviewInputError("review result learning_proposals must be an array")
+        comment_values: list[ReviewComment] = []
+        for index, comment in enumerate(comments):
+            if not isinstance(comment, Mapping):
+                raise ReviewInputError(
+                    f"review result comment {index} must be an object"
+                )
+            path = comment.get("path")
+            line = comment.get("line")
+            body = comment.get("body")
+            if (
+                not isinstance(path, str)
+                or not isinstance(line, int)
+                or not isinstance(body, str)
+            ):
+                raise ReviewInputError(
+                    f"review result comment {index} has an invalid shape"
+                )
+            comment_values.append(
+                ReviewComment(
+                    path=path,
+                    line=line,
+                    body=body,
+                    severity=(
+                        comment.get("severity")
+                        if isinstance(comment.get("severity"), str)
+                        else None
+                    ),
+                    category=(
+                        comment.get("category")
+                        if isinstance(comment.get("category"), str)
+                        else None
+                    ),
+                )
+            )
+        parsed_proposals: list[LearningProposal] = []
+        for index, proposal in enumerate(proposals):
+            if not isinstance(proposal, Mapping):
+                raise ReviewInputError(
+                    f"review result learning proposal {index} must be an object"
+                )
+            parsed_proposals.append(LearningProposal.from_dict(proposal))
+        return cls(
+            summary=summary,
+            comments=tuple(comment_values),
+            provider=provider,
+            model=cast(str | None, model),
+            learning_proposals=tuple(parsed_proposals),
+        )
+
+
+@dataclass(frozen=True)
+class ConversationMessage:
+    """One bounded thread message used as untrusted conversation context."""
+
+    author: str
+    body: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.author, str) or not self.author.strip():
+            raise ReviewInputError("conversation author must be a non-empty string")
+        utf8_size(self.author, label="conversation author")
+        if not isinstance(self.body, str) or not self.body.strip():
+            raise ReviewInputError("conversation body must be a non-empty string")
+        validate_bounded_text(
+            self.body,
+            DEFAULT_REVIEW_LIMITS.max_comment_body_bytes,
+            label="conversation body",
+            allow_empty=False,
+        )
+        if not isinstance(self.created_at, str) or not self.created_at.strip():
+            raise ReviewInputError("conversation created_at must be non-empty")
+        utf8_size(self.created_at, label="conversation created_at")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ConversationMessage":
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("conversation message must be a JSON object")
+        author = value.get("author")
+        body = value.get("body")
+        created_at = value.get("created_at")
+        if (
+            not isinstance(author, str)
+            or not isinstance(body, str)
+            or not isinstance(created_at, str)
+        ):
+            raise ReviewInputError("conversation message has an invalid shape")
+        return cls(author=author, body=body, created_at=created_at)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "author": self.author,
+            "body": self.body,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationFinding:
+    """One bounded prior App finding for the same pull-request head."""
+
+    body: str
+    path: str | None = None
+    line: int | None = None
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.body,
+            DEFAULT_REVIEW_LIMITS.max_metadata_value_bytes,
+            label="conversation finding body",
+            allow_empty=False,
+        )
+        if self.path is not None:
+            validate_repository_path(self.path, label="conversation finding path")
+        if self.line is not None and (
+            isinstance(self.line, bool)
+            or not isinstance(self.line, int)
+            or self.line < 1
+            or self.line > DEFAULT_REVIEW_LIMITS.max_line_number
+        ):
+            raise ReviewInputError("conversation finding line is invalid")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ConversationFinding":
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("conversation finding must be a JSON object")
+        body = value.get("body")
+        path = value.get("path")
+        line = value.get("line")
+        if not isinstance(body, str):
+            raise ReviewInputError("conversation finding body must be a string")
+        if path is not None and not isinstance(path, str):
+            raise ReviewInputError("conversation finding path must be a string")
+        return cls(body=body, path=path, line=cast(int | None, line))
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {"body": self.body}
+        if self.path is not None:
+            value["path"] = self.path
+        if self.line is not None:
+            value["line"] = self.line
+        return value
+
+
+@dataclass(frozen=True)
+class ConversationContext:
+    """Bounded provider-neutral input to a mention-reply conversation."""
+
+    messages: tuple[ConversationMessage, ...] = ()
+    pull_request_number: int | None = None
+    head_sha: str | None = None
+    pull_request_title: str | None = None
+    pull_request_body: str | None = None
+    base_ref: str | None = None
+    base_sha: str | None = None
+    head_ref: str | None = None
+    diff_context: str | None = None
+    prior_findings: tuple[ConversationFinding, ...] = ()
+    learnings: tuple[LearningEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.messages, tuple) or any(
+            not isinstance(message, ConversationMessage) for message in self.messages
+        ):
+            raise ReviewInputError(
+                "conversation messages must be a tuple of ConversationMessage values"
+            )
+        if len(self.messages) > MAX_CONVERSATION_MESSAGES:
+            raise ReviewInputError("conversation contains too many messages")
+        if self.pull_request_number is not None and (
+            isinstance(self.pull_request_number, bool)
+            or not isinstance(self.pull_request_number, int)
+            or self.pull_request_number < 1
+        ):
+            raise ReviewInputError("conversation pull_request_number is invalid")
+        if self.head_sha is not None:
+            if not isinstance(self.head_sha, str) or not _GIT_SHA.fullmatch(
+                self.head_sha
+            ):
+                raise ReviewInputError("conversation head_sha must be a Git commit sha")
+        if self.base_sha is not None:
+            if not isinstance(self.base_sha, str) or not _GIT_SHA.fullmatch(
+                self.base_sha
+            ):
+                raise ReviewInputError("conversation base_sha must be a Git commit sha")
+        for label, value, maximum in (
+            (
+                "pull request title",
+                self.pull_request_title,
+                DEFAULT_REVIEW_LIMITS.max_title_bytes,
+            ),
+            (
+                "pull request body",
+                self.pull_request_body,
+                MAX_CONVERSATION_PR_BODY_BYTES,
+            ),
+            ("base ref", self.base_ref, DEFAULT_REVIEW_LIMITS.max_repository_bytes),
+            ("head ref", self.head_ref, DEFAULT_REVIEW_LIMITS.max_repository_bytes),
+            ("diff context", self.diff_context, MAX_CONVERSATION_DIFF_BYTES),
+        ):
+            if value is not None:
+                validate_bounded_text(
+                    value,
+                    maximum,
+                    label=f"conversation {label}",
+                    allow_empty=False,
+                )
+        if not isinstance(self.prior_findings, tuple) or any(
+            not isinstance(finding, ConversationFinding)
+            for finding in self.prior_findings
+        ):
+            raise ReviewInputError(
+                "conversation prior_findings must be ConversationFinding values"
+            )
+        if len(self.prior_findings) > MAX_CONVERSATION_FINDINGS:
+            raise ReviewInputError("conversation contains too many prior findings")
+        if not isinstance(self.learnings, tuple) or any(
+            not isinstance(learning, LearningEntry) for learning in self.learnings
+        ):
+            raise ReviewInputError(
+                "conversation learnings must be a tuple of LearningEntry values"
+            )
+        if any(learning.status != "active" for learning in self.learnings):
+            raise ReviewInputError("conversation learnings must be active")
+        if len(self.learnings) > DEFAULT_REVIEW_LIMITS.max_learning_entries:
+            raise ReviewInputError("conversation contains too many learnings")
+        context_size = sum(
+            utf8_size(message.author, label="conversation author")
+            + utf8_size(message.body, label="conversation body")
+            + utf8_size(message.created_at, label="conversation created_at")
+            for message in self.messages
+        )
+        context_size += sum(
+            utf8_size(value, label="conversation context value")
+            for value in (
+                self.pull_request_title,
+                self.pull_request_body,
+                self.base_ref,
+                self.base_sha,
+                self.head_ref,
+                self.diff_context,
+            )
+            if value is not None
+        )
+        context_size += sum(
+            utf8_size(_json_compact(finding.to_dict()), label="conversation finding")
+            for finding in self.prior_findings
+        )
+        context_size += sum(
+            utf8_size(
+                _json_compact(learning.to_prompt_dict()), label="conversation learning"
+            )
+            for learning in self.learnings
+        )
+        if context_size > MAX_CONVERSATION_CONTEXT_BYTES:
+            raise ReviewInputError("conversation context exceeds the size limit")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ConversationContext":
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("conversation context must be a JSON object")
+        messages = value.get("messages", [])
+        if not isinstance(messages, list):
+            raise ReviewInputError("conversation messages must be an array")
+        parsed_messages = tuple(
+            ConversationMessage.from_dict(message) for message in messages
+        )
+        prior_findings = value.get("prior_findings", [])
+        learnings = value.get("learnings", [])
+        if not isinstance(prior_findings, list):
+            raise ReviewInputError("conversation prior_findings must be an array")
+        if not isinstance(learnings, list):
+            raise ReviewInputError("conversation learnings must be an array")
+        return cls(
+            messages=parsed_messages,
+            pull_request_number=cast(int | None, value.get("pull_request_number")),
+            head_sha=cast(str | None, value.get("head_sha")),
+            pull_request_title=cast(str | None, value.get("pull_request_title")),
+            pull_request_body=cast(str | None, value.get("pull_request_body")),
+            base_ref=cast(str | None, value.get("base_ref")),
+            base_sha=cast(str | None, value.get("base_sha")),
+            head_ref=cast(str | None, value.get("head_ref")),
+            diff_context=cast(str | None, value.get("diff_context")),
+            prior_findings=tuple(
+                ConversationFinding.from_dict(finding) for finding in prior_findings
+            ),
+            learnings=tuple(
+                LearningEntry.from_dict(learning) for learning in learnings
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "messages": [message.to_dict() for message in self.messages],
+            "pull_request_number": self.pull_request_number,
+            "head_sha": self.head_sha,
+            "pull_request_title": self.pull_request_title,
+            "pull_request_body": self.pull_request_body,
+            "base_ref": self.base_ref,
+            "base_sha": self.base_sha,
+            "head_ref": self.head_ref,
+            "diff_context": self.diff_context,
+            "prior_findings": [finding.to_dict() for finding in self.prior_findings],
+            "learnings": [learning.to_dict() for learning in self.learnings],
+        }
+
+
+@dataclass(frozen=True)
+class ConversationReply:
+    """Validated provider-produced reply body safe for GitHub publication."""
+
+    body: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.body,
+            MAX_CONVERSATION_REPLY_BYTES,
+            label="conversation reply",
+            allow_empty=False,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ConversationReply":
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("conversation reply must be a JSON object")
+        if set(value.keys()) != {"body"}:
+            raise ReviewInputError(
+                "conversation reply must contain only a strict body field"
+            )
+        body = value.get("body")
+        if not isinstance(body, str):
+            raise ReviewInputError("conversation reply body must be a string")
+        return cls(body=body)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"body": self.body}
 
 
 @dataclass(frozen=True)

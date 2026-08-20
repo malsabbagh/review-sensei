@@ -97,13 +97,21 @@ class GitHubBrokerTests(unittest.TestCase):
             repository="owner/repo",
             repository_owner="owner",
             repository_id=1234,
-            installation_id=7,
+            actor="octocat",
+            actor_id=1001,
             workflow="Review",
             workflow_ref="owner/repo/.github/workflows/review.yml@refs/heads/main",
             workflow_sha="a" * 40,
-            event="push",
-            ref="refs/heads/main",
             job_workflow_ref="owner/repo/.github/workflows/review.yml@refs/heads/main",
+            job_workflow_sha="a" * 40,
+            event_name="pull_request",
+            ref="refs/heads/main",
+            sha="b" * 40,
+            run_id="1000",
+            run_number="42",
+            run_attempt="1",
+            runner_environment="github-hosted",
+            jti="unique-jti",
             aud="sts.reviewsensei.dev",
             iss="https://token.actions.githubusercontent.com",
             exp=self.now + 300,
@@ -430,21 +438,6 @@ class GitHubBrokerTests(unittest.TestCase):
             opener=opener,
         )
         self.assertTrue(checker.is_fork("owner", "repo"))
-
-    def test_installation_id_mismatch_rejected(self):
-        claims = VerifiedOIDCClaims(**{**self.claims.__dict__, "installation_id": 999})
-        broker = self.make_broker()
-        with (
-            mock.patch(
-                "review_sensei.hosting.github.broker.verify_oidc_token",
-                return_value=claims,
-            ),
-            self.assertRaises(BrokerRejectionError) as context,
-        ):
-            broker.exchange("oidc.token")
-        self.assertIn("installation id", str(context.exception))
-        self.assertEqual(self.sink.records[-1].reason_category, "broker_rejection")
-        self.assertEqual(self.sink.records[-1].installation_id, 7)
 
 
 if __name__ == "__main__":

@@ -400,10 +400,10 @@ class OIDCBroker:
         if not self._is_approved(claims):
             self._audit(
                 request_id,
-                claims.installation_id,
+                None,
                 claims.repository,
                 claims.workflow_ref,
-                claims.event,
+                claims.event_name,
                 "rejected",
                 "broker_rejection",
             )
@@ -417,10 +417,10 @@ class OIDCBroker:
         if is_fork:
             self._audit(
                 request_id,
-                claims.installation_id,
+                None,
                 claims.repository,
                 claims.workflow_ref,
-                claims.event,
+                claims.event_name,
                 "rejected",
                 "broker_rejection",
             )
@@ -436,22 +436,11 @@ class OIDCBroker:
                 None,
                 claims.repository,
                 claims.workflow_ref,
-                claims.event,
+                claims.event_name,
                 "rejected",
                 "broker_rejection",
             )
             raise BrokerRejectionError("OIDC repository has no installation mapping")
-        if installation_id != claims.installation_id:
-            self._audit(
-                request_id,
-                installation_id,
-                claims.repository,
-                claims.workflow_ref,
-                claims.event,
-                "rejected",
-                "broker_rejection",
-            )
-            raise BrokerRejectionError("OIDC installation id did not match the mapping")
 
         if self.rate_limiter is not None:
             key = (installation_id, claims.repository, claims.workflow_ref)
@@ -461,7 +450,7 @@ class OIDCBroker:
                     installation_id,
                     claims.repository,
                     claims.workflow_ref,
-                    claims.event,
+                    claims.event_name,
                     "rejected",
                     "broker_rate_limit",
                 )
@@ -479,7 +468,7 @@ class OIDCBroker:
                 installation_id,
                 claims.repository,
                 claims.workflow_ref,
-                claims.event,
+                claims.event_name,
                 "rejected",
                 exc.error_category,
             )
@@ -490,7 +479,7 @@ class OIDCBroker:
             installation_id,
             claims.repository,
             claims.workflow_ref,
-            claims.event,
+            claims.event_name,
             "issued",
             "ok",
         )

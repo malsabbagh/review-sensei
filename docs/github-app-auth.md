@@ -40,10 +40,12 @@ Recommended setup:
   secret before accepting any installation event.
 - Permissions: request only what the deployed feature needs. GitHub App
   registration requires implicit `Metadata: read`. For the setup bootstrap,
-  request `Contents: write`, `Pull requests: write`, and `Variables: write`; for comments/reviews
-  without setup writes, request only the pull-request access needed by that
-  publisher. Do not request organization, administration, workflows, checks,
-  issues, or unrelated permissions without a separate design.
+  request `Contents: write`, `Pull requests: write`, `Variables: write`, and
+  `Workflows: write`.
+  Opt-in top-level pull-request conversation replies also require
+  `Issues: write`; review and inline-reply capability tokens do not receive it.
+  Do not request organization, administration, checks, or unrelated
+  permissions without a separate design.
 - Repository access: selected repositories, so installation scope stays
   explicit.
 
@@ -164,3 +166,28 @@ Customer-visible broker failures are stable `BrokerRejectionError` and
 `BrokerRateLimitError` categories. A future HTTP frontend can map them to 401
 and 429 respectively. Broker errors and audit records never include tokens,
 keys, JWTs, authorization headers, or assertion content.
+
+### Issue-64 Worker capability broker
+
+The deployed Worker endpoint is `POST /github/token` and accepts a bounded
+JSON body containing an OIDC assertion plus one of the fixed capability names:
+
+| Capability | GitHub installation permission |
+| --- | --- |
+| `review_publish` | `pull_requests: write` |
+| `inline_reply` | `pull_requests: write` |
+| `issue_reply` | `issues: write` |
+| `learning_write` | `contents: write`, `pull_requests: write` |
+
+The signed assertion must use issuer
+`https://token.actions.githubusercontent.com`, audience
+`sts.reviewsensei.dev`, and include `iss`, `aud`, `exp`, `iat`, `sub`, `jti`,
+`repository`, `repository_owner`, `repository_id`, `event_name`,
+`workflow_ref`, `workflow_sha`, `job_workflow_ref`, `job_workflow_sha`,
+`run_id`, `run_attempt`, and `runner_environment` (plus the documented actor
+and ref claims). `installation_id` is not trusted or accepted as a caller
+claim. The broker requires the exact public reusable workflow ref and SHA,
+checks repository and fork state server-side, resolves the installation
+server-side, claims replay/rate state in the SQLite ledger, and then requests a
+repository-scoped token for only the selected capability. The response is
+`Cache-Control: no-store`; there is no browser CORS contract.

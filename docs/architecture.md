@@ -391,3 +391,37 @@ GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
         -> short-lived InstallationToken (no key/JWT in response)
         -> audit (non-secret metadata only)
 ```
+
+## Issue-64 setup-v3 publication architecture
+
+Setup-v3 separates the customer caller, public execution workflow, and
+issuance-only Worker:
+
+```text
+customer setup-v3 caller (exact public workflow SHA; all opt-ins false)
+    -> public reusable workflow
+       -> trusted-base checkout and bounded diff
+       -> GitHub-hosted cloud review or trusted local Ollama review
+       -> typed result/reply validation
+       -> Actions OIDC assertion
+          -> Cloudflare POST /github/token
+             -> exact claims/workflow SHA + repository/fork/install checks
+             -> hashed replay/rate Durable Object claim
+             -> one least-privileged capability token
+       -> App-authored exact-head review, learning PR, or authorized reply
+```
+
+The generated setup PR is limited to the workflow caller, uninstall workflow,
+and config file. The public reusable workflow is immutable by full SHA and may
+receive the existing customer-owned `OLLAMA_API_KEY` only through a literal
+name-only secret mapping. The setup App does not access that value. The Worker
+does not receive source, diffs, prompts, review output, reply content, provider
+credentials, or installation-token values for persistence; its ledger retains
+only hashed identities and bounded counters. Current, custom, malformed, and
+future clients are no-write cases, while absent and legacy/v2 clients are
+reconciled through at most one reviewable setup-v3 PR per selected repository.
+
+This architecture preserves the provider-neutral core: GitHub transport,
+Actions OIDC, broker capabilities, setup lifecycle, publication markers, and
+conversation authorization remain under `src/review_sensei/hosting/github/`
+or `deploy/cloudflare/`.

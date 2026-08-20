@@ -148,3 +148,24 @@ Negative or tradeoffs:
 - Related PR: not configured
 - Supersedes: none
 - Superseded by: none
+
+## Amendment - issue #64 Worker broker
+
+The approved issuance-only frontend is Cloudflare Worker `POST
+/github/token`. In addition to the original issuer, audience, JWKS, signature,
+and time checks, it requires bounded repository/actor/run claims, exact
+`job_workflow_ref` and `job_workflow_sha` for the public reusable workflow,
+allowed event/runner policy, and server-side repository/fork and installation
+resolution. `installation_id` is not accepted from the caller. A SQLite
+Durable Object admits bounded source-address/token-digest identities before
+OIDC verification, then claims the verified assertion before any GitHub API
+lookup. This ordering bounds forged-token JWKS work and prevents a replayed
+valid assertion from consuming GitHub App API capacity. Public JWKS responses
+are cached for five minutes per Worker isolate and concurrent refreshes are
+coalesced; signature, issuer, audience, workflow, and time checks still run for
+every exchange. The ledger stores only hashed replay/rate identities and
+bounded counters.
+The endpoint issues one of four fixed disjoint capabilities (`review_publish`,
+`inline_reply`, `issue_reply`, or `learning_write`) and never stores or logs
+assertions, installation tokens, source, diffs, prompts, results, replies, or
+provider credentials. Responses are no-store and CORS is not supported.

@@ -106,14 +106,22 @@ class GitHubOIDCTests(unittest.TestCase):
             "sub": "repo:owner/repo:ref:refs/heads/main",
             "repository": "owner/repo",
             "repository_owner": "owner",
-            "repository_id": 123,
-            "installation_id": 456,
+            "repository_id": "123",
+            "actor": "octocat",
+            "actor_id": "1001",
             "workflow": "Review",
             "workflow_ref": "owner/repo/.github/workflows/review.yml@refs/heads/main",
             "workflow_sha": "a" * 40,
-            "event": "push",
+            "event_name": "pull_request",
             "ref": "refs/heads/main",
             "job_workflow_ref": "owner/repo/.github/workflows/review.yml@refs/heads/main",
+            "job_workflow_sha": "a" * 40,
+            "sha": "b" * 40,
+            "run_id": "1000",
+            "run_number": "42",
+            "run_attempt": "1",
+            "runner_environment": "github-hosted",
+            "jti": "unique-jti",
             "exp": self.now + 300,
             "iat": self.now - 10,
         }
@@ -139,7 +147,11 @@ class GitHubOIDCTests(unittest.TestCase):
         self.assertIsInstance(claims, VerifiedOIDCClaims)
         self.assertEqual(claims.repository, "owner/repo")
         self.assertEqual(claims.repository_id, 123)
-        self.assertEqual(claims.installation_id, 456)
+        self.assertEqual(claims.actor, "octocat")
+        self.assertEqual(claims.actor_id, 1001)
+        self.assertEqual(claims.event_name, "pull_request")
+        self.assertEqual(claims.runner_environment, "github-hosted")
+        self.assertEqual(claims.jti, "unique-jti")
         self.assertEqual(claims.aud, DEFAULT_BROKER_AUDIENCE)
 
     def test_wrong_issuer_rejected(self):
@@ -207,13 +219,19 @@ class GitHubOIDCTests(unittest.TestCase):
 
     def test_missing_required_claim_rejected(self):
         claims = self.claims()
-        del claims["installation_id"]
+        del claims["event_name"]
         with self.assertRaises(GitHubOIDCClaimsError):
             self.verify(self.token(claims))
 
-    def test_non_numeric_repository_id_rejected(self):
+    def test_numeric_repository_id_rejected_because_github_uses_strings(self):
         claims = self.claims()
-        claims["repository_id"] = "123"
+        claims["repository_id"] = 123
+        with self.assertRaises(GitHubOIDCClaimsError):
+            self.verify(self.token(claims))
+
+    def test_non_decimal_identity_claim_rejected(self):
+        claims = self.claims()
+        claims["actor_id"] = "1e3"
         with self.assertRaises(GitHubOIDCClaimsError):
             self.verify(self.token(claims))
 

@@ -49,13 +49,21 @@ class VerifiedOIDCClaims:
     repository: str
     repository_owner: str
     repository_id: int
-    installation_id: int
+    actor: str
+    actor_id: int
     workflow: str
     workflow_ref: str
     workflow_sha: str
-    event: str
-    ref: str
     job_workflow_ref: str
+    job_workflow_sha: str
+    event_name: str
+    ref: str
+    sha: str
+    run_id: str
+    run_number: str
+    run_attempt: str
+    runner_environment: str
+    jti: str
     aud: str
     iss: str
     exp: int
@@ -173,6 +181,15 @@ def _numeric_claim(payload: dict[str, Any], name: str) -> int | float:
     return value
 
 
+def _decimal_id_claim(payload: dict[str, Any], name: str) -> int:
+    """Parse GitHub's decimal-string identity claims without coercion quirks."""
+
+    value = payload.get(name)
+    if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+        raise GitHubOIDCClaimsError("OIDC token claims were invalid")
+    return int(value)
+
+
 def _non_empty_string(payload: dict[str, Any], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str) or not value:
@@ -218,22 +235,22 @@ def _validate_claims(
     if _REPOSITORY_PATTERN.fullmatch(repository) is None:
         raise GitHubOIDCClaimsError("OIDC token claims were invalid")
     repository_owner = _non_empty_string(payload, "repository_owner")
-    repository_id = payload.get("repository_id")
-    installation_id = payload.get("installation_id")
-    if (
-        isinstance(repository_id, bool)
-        or not isinstance(repository_id, int)
-        or isinstance(installation_id, bool)
-        or not isinstance(installation_id, int)
-        or installation_id <= 0
-    ):
-        raise GitHubOIDCClaimsError("OIDC token claims were invalid")
+    repository_id = _decimal_id_claim(payload, "repository_id")
+    actor = _non_empty_string(payload, "actor")
+    actor_id = _decimal_id_claim(payload, "actor_id")
     workflow = _non_empty_string(payload, "workflow")
     workflow_ref = _non_empty_string(payload, "workflow_ref")
     workflow_sha = _non_empty_string(payload, "workflow_sha")
-    event = _non_empty_string(payload, "event")
+    event_name = _non_empty_string(payload, "event_name")
     ref = _non_empty_string(payload, "ref")
     job_workflow_ref = _non_empty_string(payload, "job_workflow_ref")
+    job_workflow_sha = _non_empty_string(payload, "job_workflow_sha")
+    sha = _non_empty_string(payload, "sha")
+    run_id = _non_empty_string(payload, "run_id")
+    run_number = _non_empty_string(payload, "run_number")
+    run_attempt = _non_empty_string(payload, "run_attempt")
+    runner_environment = _non_empty_string(payload, "runner_environment")
+    jti = _non_empty_string(payload, "jti")
 
     if not isinstance(exp_value, (int, float)) or not isinstance(
         iat_value, (int, float)
@@ -243,14 +260,22 @@ def _validate_claims(
         sub=sub,
         repository=repository,
         repository_owner=repository_owner,
-        repository_id=int(repository_id),
-        installation_id=int(installation_id),
+        repository_id=repository_id,
+        actor=actor,
+        actor_id=actor_id,
         workflow=workflow,
         workflow_ref=workflow_ref,
         workflow_sha=workflow_sha,
-        event=event,
-        ref=ref,
         job_workflow_ref=job_workflow_ref,
+        job_workflow_sha=job_workflow_sha,
+        event_name=event_name,
+        ref=ref,
+        sha=sha,
+        run_id=run_id,
+        run_number=run_number,
+        run_attempt=run_attempt,
+        runner_environment=runner_environment,
+        jti=jti,
         aud=audience if isinstance(audience, str) else expected_audience,
         iss=issuer,
         exp=int(exp_value),

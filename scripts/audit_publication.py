@@ -176,6 +176,14 @@ def _parse_policy(data: object, source: str) -> dict[str, Any]:
             raise PublicationAuditError(
                 f"audit policy public_identity.{key} must be a string list"
             )
+    non_identity_handles = data.get("non_identity_handles")
+    if not isinstance(non_identity_handles, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", item)
+        for item in non_identity_handles
+    ):
+        raise PublicationAuditError(
+            "audit policy non_identity_handles must be a list of bare handle names"
+        )
     classifications = data.get("path_classifications")
     if not isinstance(classifications, dict):
         raise PublicationAuditError(
@@ -417,9 +425,14 @@ def _scan_blob(
                 break
         if Path(path).suffix.lower() in HANDLE_SCAN_EXTENSIONS:
             email_spans = [match.span() for match in EMAIL_PATTERN.finditer(content)]
+            non_identity_handles = {
+                f"@{item.lower()}" for item in policy["non_identity_handles"]
+            }
             for match in HANDLE_PATTERN.finditer(content):
                 handle = match.group(0).decode("ascii", errors="replace").lower()
                 if _is_non_identity_handle(path, content, match, email_spans):
+                    continue
+                if handle in non_identity_handles:
                     continue
                 if re.match(r"@v\d+(?:\.\d+)*$", handle):
                     continue

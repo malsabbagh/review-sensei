@@ -6,8 +6,13 @@ from .context import (
     ReviewContextSelection,
     build_review_context_selection,
 )
+from .conversation import ConversationService
 from .learnings import LearningStore, load_repository_learnings
 from .models import (
+    ConversationContext,
+    ConversationFinding,
+    ConversationMessage,
+    ConversationReply,
     LearningEntry,
     LearningProposal,
     ProviderRequest,
@@ -32,6 +37,11 @@ from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
 __all__ = [
     "ConcurrencyGroup",
     "ContextDocumentSource",
+    "ConversationContext",
+    "ConversationFinding",
+    "ConversationMessage",
+    "ConversationReply",
+    "ConversationService",
     "LearningEntry",
     "LearningProposal",
     "LearningStore",

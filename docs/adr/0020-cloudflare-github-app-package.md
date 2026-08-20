@@ -50,7 +50,7 @@ scale-out without relying on an in-memory delivery ledger.
 After a durable claim, the Worker uses Web Crypto RSASSA-PKCS1-v1_5 signing to
 create a short-lived GitHub App JWT. It exchanges that JWT for a repository-
 scoped installation token, validates the granted `contents`, `pull_requests`,
-and `variables` permissions, creates missing visible repository configuration
+`variables`, and `workflows` permissions, creates missing visible repository configuration
 variables, and calls the GitHub REST API to create the setup branch and PR.
 Tokens and private keys remain in the request/isolate memory only.
 
@@ -61,15 +61,17 @@ variables. Defaults are `local`, `qwen3.5:4b`, and
 overwritten. `OLLAMA_API_KEY` remains an operator-managed repository secret;
 the bootstrap never creates a blank secret or handles its value.
 
-If GitHub requires it for workflow-file writes, operators must additionally
-grant `workflows: write`; the Worker does not broaden the requested token
-permissions automatically.
+Operators must grant `workflows: write` because setup always writes generated
+workflow files. Older installations remain in `skipped_permissions` until the
+owner accepts that added permission or reinstalls the App.
 
-Setup creation is idempotent. The Worker checks the setup branch and open setup
-PR before writing, creates the branch from the repository default branch only
-when needed, rechecks the open PR after branch creation, and creates at most
-one setup PR per selected repository. A later delivery beyond the one-hour
-ledger window is protected by the existing branch/PR check.
+Setup creation is idempotent. The Worker derives a create-only branch from the
+exact default-head and public-workflow SHAs, checks that branch and its open PR,
+rechecks the open PR after branch creation, and creates at most one setup PR per
+exact revision. It never force-moves a ref; pre-existing or concurrent branch
+collisions must pass exact App-author, parent, content, and path checks or fail
+closed. A later delivery beyond the one-hour ledger window is protected by the
+existing branch/PR check.
 
 The package does not declare Cloudflare Containers or the `@cloudflare/containers`
 dependency. It is intended to run on the Workers Free plan, subject to the
@@ -180,3 +182,14 @@ retention decision.
 - Cloudflare Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/
 - Cloudflare Durable Objects pricing: https://developers.cloudflare.com/durable-objects/platform/pricing/
 - Cloudflare Web Crypto: https://developers.cloudflare.com/workers/runtime-apis/web-crypto/
+
+## Amendment - issue #64 capability broker and migration v2
+
+The Worker retains the v1 `DeliveryLedger` migration and adds a v2 SQLite
+`BrokerLedger` binding. The new isolated `POST /github/token` route performs
+OIDC identity and exact public workflow SHA checks, resolves installations
+server-side, claims hashed replay/rate state, and issues only a fixed
+least-privileged capability. It has a bounded request body, no browser CORS,
+and no-store responses. The Worker still does not execute reviews or persist
+source, diff, provider, assertion, token, or review data. `PUBLIC_WORKFLOW_SHA`
+is fail-closed configuration required by setup-v3 generation.

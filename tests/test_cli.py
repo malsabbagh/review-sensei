@@ -5,10 +5,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei import ProviderResponse
-from review_sensei.cli import _parser, main
+from review_sensei.cli import _github_parser, _parser, main
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -44,6 +45,214 @@ class FakeRegistry:
 
 
 class CliTests(unittest.TestCase):
+    def test_github_review_cli_wires_review_and_learning_publication(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.calls = []
+                self.__class__.instances.append(self)
+
+            def publish_review(self, **kwargs):
+                self.calls.append(("review", kwargs))
+                return SimpleNamespace(status="published")
+
+            def publish_learning_proposals(self, **kwargs):
+                self.calls.append(("learning", kwargs))
+                return (SimpleNamespace(status="created"),)
+
+        class FakeRegistry:
+            def create(self, settings):
+                return FakeProvider()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result_path = root / "result.json"
+            diff_path = root / "diff.patch"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "summary": "Summary.",
+                        "comments": [],
+                        "provider": "fixture",
+                        "model": "fixture-model",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            diff_path.write_text(DIFF, encoding="utf-8")
+            with patch.multiple(
+                github_module,
+                BrokerClient=lambda: object(),
+                GitHubHttp=lambda: object(),
+                ReviewPublisher=lambda **kwargs: object(),
+                LearningPRPublisher=lambda **kwargs: object(),
+                ConversationPublisher=lambda **kwargs: object(),
+                GitHubApplication=FakeApplication,
+            ):
+                status = main(
+                    [
+                        "github",
+                        "review",
+                        "--result",
+                        str(result_path),
+                        "--diff",
+                        str(diff_path),
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "1",
+                        "--pull-request",
+                        "2",
+                        "--head-sha",
+                        "a" * 40,
+                        "--base-branch",
+                        "main",
+                        "--base-sha",
+                        "b" * 40,
+                        "--allow-write",
+                        "--enable-review",
+                        "--enable-learning-prs",
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            [kind for kind, _ in FakeApplication.instances[0].calls],
+            ["review", "learning"],
+        )
+        review_call = FakeApplication.instances[0].calls[0][1]
+        self.assertEqual(review_call["base_branch"], "main")
+        self.assertEqual(review_call["base_sha"], "b" * 40)
+
+    def test_github_parser_uses_the_installed_app_bot_slug(self):
+        args = _github_parser().parse_args(
+            [
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "diff.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "a" * 40,
+            ]
+        )
+        self.assertEqual(args.app_slug, "reviewsensei[bot]")
+
+    def test_github_generated_reply_cli_reads_named_token_and_publishes(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                self.calls = []
+                self.__class__.instance = self
+
+            def generate_and_publish_reply(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(status="replied")
+
+        class FakeRegistry:
+            def create(self, settings):
+                self.settings = settings
+                return FakeProvider()
+
+        registry = FakeRegistry()
+        with patch.multiple(
+            github_module,
+            BrokerClient=lambda: object(),
+            GitHubHttp=lambda: object(),
+            ReviewPublisher=lambda **kwargs: object(),
+            LearningPRPublisher=lambda **kwargs: object(),
+            ConversationPublisher=lambda **kwargs: object(),
+            GitHubApplication=FakeApplication,
+        ):
+            with patch.dict(
+                "os.environ",
+                {"REVIEW_SENSEI_READ_TOKEN": "read-token"},
+                clear=True,
+            ):
+                with patch("review_sensei.cli.default_registry", return_value=registry):
+                    status = main(
+                        [
+                            "github",
+                            "reply",
+                            "--generate",
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "2",
+                            "--source-comment-id",
+                            "10",
+                            "--source-updated-at",
+                            "2026-08-19T00:00:00Z",
+                            "--source-kind",
+                            "issue",
+                            "--github-token-env",
+                            "REVIEW_SENSEI_READ_TOKEN",
+                            "--allow-write",
+                            "--enable-reply",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(FakeApplication.instance.calls[0]["read_token"], "read-token")
+        self.assertEqual(registry.settings.api_key, None)
+
+    def test_github_legacy_reply_cli_reads_reply_file(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                self.__class__.instance = self
+
+            def publish_reply(self, **kwargs):
+                self.call = kwargs
+                return SimpleNamespace(status="replied")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reply_path = Path(temp_dir) / "reply.json"
+            reply_path.write_text('{"body":"Thanks."}', encoding="utf-8")
+            with patch.multiple(
+                github_module,
+                BrokerClient=lambda: object(),
+                GitHubHttp=lambda: object(),
+                ReviewPublisher=lambda **kwargs: object(),
+                LearningPRPublisher=lambda **kwargs: object(),
+                ConversationPublisher=lambda **kwargs: object(),
+                GitHubApplication=FakeApplication,
+            ):
+                status = main(
+                    [
+                        "github",
+                        "reply",
+                        "--reply",
+                        str(reply_path),
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "2",
+                        "--source-comment-id",
+                        "10",
+                        "--source-updated-at",
+                        "2026-08-19T00:00:00Z",
+                        "--head-sha",
+                        "a" * 40,
+                        "--allow-write",
+                        "--enable-reply",
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(FakeApplication.instance.call["head_sha"], "a" * 40)
+
     def test_provider_mode_selects_mode_specific_defaults(self):
         with patch.dict(
             "os.environ",
@@ -99,6 +308,78 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.max_diff_lines, 10)
         self.assertEqual(args.max_diff_files, 2)
         self.assertEqual(args.max_diff_hunks, 3)
+
+    def test_github_review_without_write_opt_in_does_not_write(self):
+        from review_sensei.cli import _github_parser
+
+        args = _github_parser().parse_args(
+            [
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "pr.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "b" * 40,
+                "--allow-write",
+            ]
+        )
+        self.assertFalse(args.enable_review)
+
+    def test_github_reply_without_write_opt_in_is_disabled(self):
+        from review_sensei.cli import _github_parser
+
+        args = _github_parser().parse_args(
+            [
+                "reply",
+                "--reply",
+                "reply.json",
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "2",
+                "--source-comment-id",
+                "10",
+                "--source-updated-at",
+                "2026-08-19T00:00:00Z",
+                "--head-sha",
+                "b" * 40,
+                "--allow-write",
+                "--root-comment-id",
+                "10",
+            ]
+        )
+        self.assertFalse(args.enable_reply)
+
+    def test_github_commands_require_allow_write(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "github",
+                    "review",
+                    "--result",
+                    "result.json",
+                    "--diff",
+                    "pr.patch",
+                    "--repository",
+                    "owner/repo",
+                    "--repository-id",
+                    "1",
+                    "--pull-request",
+                    "2",
+                    "--head-sha",
+                    "b" * 40,
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("--allow-write", stderr.getvalue())
 
     def test_cli_version_returns_metadata_version(self):
         expected = importlib.metadata.version("review-sensei")

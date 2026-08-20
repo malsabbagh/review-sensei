@@ -259,6 +259,229 @@ def _run_evaluate(args: argparse.Namespace) -> int:
     return 0 if report["passed"] else 1
 
 
+def _github_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei github",
+        description="Run GitHub publication seams with write opt-ins.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    review = subparsers.add_parser("review", help="Publish a validated review result")
+    review.add_argument("--result", type=Path, required=True)
+    review.add_argument("--diff", type=Path, required=True)
+    review.add_argument("--repository", required=True)
+    review.add_argument("--repository-id", type=int, required=True)
+    review.add_argument("--pull-request", type=int, required=True)
+    review.add_argument("--head-sha", required=True)
+    review.add_argument("--base-branch")
+    review.add_argument("--base-sha")
+    review.add_argument("--app-slug", default="reviewsensei[bot]")
+    review.add_argument("--oidc-token")
+    review.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="Acknowledge that GitHub writes are enabled for this invocation.",
+    )
+    review.add_argument(
+        "--enable-review",
+        action="store_true",
+        help="Opt into review publication for this invocation.",
+    )
+    review.add_argument(
+        "--enable-learning-prs",
+        action="store_true",
+        help="Opt into deterministic draft learning-PR publication.",
+    )
+
+    reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
+    reply.add_argument("--reply", type=Path)
+    reply.add_argument(
+        "--generate",
+        action="store_true",
+        help="Build bounded GitHub context, invoke the provider, and publish the reply.",
+    )
+    reply.add_argument("--repository", required=True)
+    reply.add_argument("--pull-request", type=int, required=True)
+    reply.add_argument("--source-comment-id", type=int, required=True)
+    reply.add_argument("--source-updated-at", required=True)
+    reply.add_argument("--head-sha")
+    reply.add_argument(
+        "--source-kind",
+        choices=("inline", "issue"),
+        default="inline",
+    )
+    reply.add_argument("--app-slug", default="reviewsensei[bot]")
+    reply.add_argument("--root-comment-id", type=int, default=0)
+    reply.add_argument("--oidc-token")
+    reply.add_argument("--github-token-env", default="GITHUB_TOKEN")
+    reply.add_argument(
+        "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
+    )
+    reply.add_argument("--base-url", default=_default_ollama_base_url())
+    reply.add_argument("--model", default=_default_ollama_model())
+    reply.add_argument("--api-key-env", default="OLLAMA_API_KEY")
+    reply.add_argument(
+        "--timeout-seconds",
+        type=_positive_float,
+        default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
+    )
+    reply.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="Acknowledge that GitHub writes may be enabled for this invocation.",
+    )
+    reply.add_argument(
+        "--enable-reply",
+        action="store_true",
+        help="Enable mention reply publication for this invocation.",
+    )
+    return parser
+
+
+def _run_github(args: argparse.Namespace) -> int:
+    from .hosting.github import (
+        BrokerClient,
+        ConversationPublisher,
+        GitHubApplication,
+        GitHubHttp,
+        GitHubWriteOptions,
+        LearningPRPublisher,
+        LearningPRResult,
+        ReviewPublisher,
+    )
+    from .models import ConversationReply, ReviewResult
+
+    if not args.allow_write:
+        raise ReviewInputError("github writes require --allow-write")
+    broker = BrokerClient()
+    http = GitHubHttp()
+    application = GitHubApplication(
+        broker=broker,
+        http=http,
+        reviewer=ReviewPublisher(http=http),
+        learner=LearningPRPublisher(http=http),
+        replier=ConversationPublisher(http=http),
+    )
+    if args.command == "review":
+        result = ReviewResult.from_dict(
+            json.loads(
+                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
+            )
+        )
+        diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
+        if args.enable_review and (not args.base_branch or not args.base_sha):
+            raise ReviewInputError(
+                "review publication requires --base-branch and --base-sha"
+            )
+        review_outcome = application.publish_review(
+            options=GitHubWriteOptions(
+                github_writes=True,
+                auto_review=args.enable_review,
+            ),
+            oidc_token=args.oidc_token,
+            repository=args.repository,
+            repository_id=args.repository_id,
+            pull_request=args.pull_request,
+            head_sha=args.head_sha,
+            base_branch=args.base_branch,
+            base_sha=args.base_sha,
+            result=result,
+            diff=diff,
+            app_slug=args.app_slug,
+        )
+        learning_outcomes: tuple[LearningPRResult, ...] = ()
+        review_allows_learning = not args.enable_review or review_outcome.status in {
+            "published",
+            "already_published",
+        }
+        if args.enable_learning_prs and review_allows_learning:
+            if not args.base_branch or not args.base_sha:
+                raise ReviewInputError(
+                    "learning PR publication requires --base-branch and --base-sha"
+                )
+            learning_outcomes = application.publish_learning_proposals(
+                options=GitHubWriteOptions(
+                    github_writes=True,
+                    learning_prs=True,
+                ),
+                oidc_token=args.oidc_token,
+                repository=args.repository,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                base_branch=args.base_branch,
+                base_sha=args.base_sha,
+                result=result,
+            )
+        statuses = [review_outcome.status]
+        statuses.extend(outcome.status for outcome in learning_outcomes)
+        print(" ".join(statuses))
+        return 0
+    if args.generate:
+        if not args.enable_reply:
+            print("disabled")
+            return 0
+        read_token = os.getenv(args.github_token_env)
+        if not read_token:
+            raise ReviewInputError(
+                f"GitHub read token environment variable {args.github_token_env} is unavailable"
+            )
+        provider = default_registry().create(
+            ProviderSettings(
+                name=args.provider,
+                model=args.model,
+                base_url=args.base_url,
+                api_key=os.getenv(args.api_key_env),
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+        reply_outcome = application.generate_and_publish_reply(
+            options=GitHubWriteOptions(
+                github_writes=True,
+                mention_replies=True,
+            ),
+            oidc_token=args.oidc_token,
+            read_token=read_token,
+            repository=args.repository,
+            pull_request=args.pull_request,
+            source_comment_id=args.source_comment_id,
+            source_updated_at=args.source_updated_at,
+            expected_head_sha=args.head_sha or None,
+            reply_provider=provider,
+            model=args.model,
+            app_slug=args.app_slug,
+            root_comment_id=args.root_comment_id or None,
+            source_kind=args.source_kind,
+        )
+        print(reply_outcome.status)
+        return 0
+    if args.reply is None or not args.head_sha:
+        raise ReviewInputError(
+            "publishing a reply requires --reply and --head-sha unless --generate is used"
+        )
+    reply = ConversationReply.from_dict(
+        json.loads(read_bounded_utf8(args.reply, maximum=16 * 1024, label="reply"))
+    )
+    reply_outcome = application.publish_reply(
+        options=GitHubWriteOptions(
+            github_writes=True,
+            mention_replies=args.enable_reply,
+        ),
+        oidc_token=args.oidc_token,
+        repository=args.repository,
+        pull_request=args.pull_request,
+        source_comment_id=args.source_comment_id,
+        source_updated_at=args.source_updated_at,
+        head_sha=args.head_sha,
+        reply=reply,
+        app_slug=args.app_slug,
+        root_comment_id=args.root_comment_id,
+        source_kind=args.source_kind,
+    )
+    print(reply_outcome.status)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     if args_list and args_list[0] == "prepare-diff":
@@ -288,6 +511,13 @@ def main(argv: list[str] | None = None) -> int:
         args = _evaluate_parser().parse_args(args_list[1:])
         try:
             return _run_evaluate(args)
+        except (OSError, ValueError, ReviewSenseiError) as exc:
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            return 1
+    if args_list and args_list[0] == "github":
+        args = _github_parser().parse_args(args_list[1:])
+        try:
+            return _run_github(args)
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1

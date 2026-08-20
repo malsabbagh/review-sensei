@@ -1,12 +1,18 @@
 /**
- * Files written by the installation bootstrap. These strings intentionally
- * contain no credentials or repository-specific values.
+ * Generated customer setup-v3 files.
+ *
+ * The Worker receives only the public reusable-workflow commit SHA as
+ * configuration. The customer-owned OLLAMA_API_KEY is referenced by name in
+ * the caller and passed to the immutable workflow; this module never handles
+ * its value.
  */
 
 const GITHUB_EXPRESSION = "@@";
+const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
 
-export const SETUP_VERSION = 2;
+export const SETUP_VERSION = 3;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
+export const DEFAULT_PUBLIC_WORKFLOW_SHA = "f".repeat(40);
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud";
@@ -21,23 +27,49 @@ export interface SetupVariable {
   readonly value: string;
 }
 
-/**
- * These are repository configuration variables, not secrets. Existing values
- * are never overwritten, so an operator can change them from Settings after
- * installation without a later webhook resetting the choice.
- */
+export const SETUP_FILE_PATHS: readonly string[] = [
+  ".github/workflows/review-sensei-review.yml",
+  ".github/workflows/review-sensei-uninstall.yml",
+  ".github/review-sensei/config.yml",
+];
+
 export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_PROVIDER_MODE", value: DEFAULT_PROVIDER_MODE },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
+  { name: "REVIEWSENSEI_VERSION", value: "0.1.0" },
+  { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
+  { name: "REVIEWSENSEI_GITHUB_WRITES", value: "false" },
+  { name: "REVIEWSENSEI_LEARNING_PRS", value: "false" },
+  { name: "REVIEWSENSEI_MENTION_REPLIES", value: "false" },
+  { name: "REVIEWSENSEI_UPLOAD_ARTIFACTS", value: "false" },
 ];
 
-const workflowTemplate = String.raw`# ReviewSensei setup version: 2
+export function validatePublicWorkflowSha(value: string): string {
+  if (typeof value !== "string" || !PUBLIC_SHA_PATTERN.test(value)) {
+    throw new Error(
+      "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters",
+    );
+  }
+  return value;
+}
+
+function workflowTemplate(publicWorkflowSha: string): string {
+  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+  return String.raw`# ReviewSensei setup version: 3
 name: ReviewSensei review
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
+      operation:
+        description: Review the selected pull request
+        required: true
+        default: review
+        type: choice
+        options: [review]
       base_ref:
         description: Repository default branch (must match the repository setting)
         required: true
@@ -47,162 +79,106 @@ on:
       head_repository:
         description: Optional owner/repo slug for fork review
         required: false
+      pull_request_number:
+        description: Pull request number to review for manual dispatch
+        required: true
+      head_sha:
+        description: Exact pull request head commit SHA
+        required: true
+      base_sha:
+        description: Exact reviewed base commit SHA
+        required: false
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
 
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
 
 jobs:
-  review:
-    runs-on: [self-hosted, linux, x64, ollama]
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.11"
+  automatic-cloud-review:
+    if: >-
+      github.event_name == 'pull_request' &&
+      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_SHA__
+    with:
+      mode: automatic
+      operation: review
+      repository: @@{{ github.repository }}
+      repository_id: @@{{ github.repository_id }}
+      pull_request_number: @@{{ github.event.pull_request.number }}
+      base_ref: @@{{ github.event.pull_request.base.ref }}
+      base_sha: @@{{ github.event.pull_request.base.sha }}
+      head_ref: @@{{ github.event.pull_request.head.ref }}
+      head_repository: @@{{ github.event.pull_request.head.repo.full_name }}
+      head_sha: @@{{ github.event.pull_request.head.sha }}
+      review_sensei_version: @@{{ vars.REVIEWSENSEI_VERSION }}
+      enable_review: @@{{ vars.REVIEWSENSEI_AUTO_REVIEW }}
+      enable_github_writes: @@{{ vars.REVIEWSENSEI_GITHUB_WRITES }}
+      enable_learning_prs: @@{{ vars.REVIEWSENSEI_LEARNING_PRS }}
+      enable_mention_replies: @@{{ vars.REVIEWSENSEI_MENTION_REPLIES }}
+      upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
+    secrets:
+      OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
 
-      - name: Validate refs, version, and provider variables
-        id: version
-        env:
-          BASE_REF: @@{{ inputs.base_ref }}
-          HEAD_REF: @@{{ inputs.head_ref }}
-          HEAD_REPOSITORY: @@{{ inputs.head_repository }}
-          REVIEW_SENSEI_VERSION: @@{{ inputs.review_sensei_version }}
-          DEFAULT_BRANCH: @@{{ github.event.repository.default_branch }}
-          CONFIG_PROVIDER_MODE: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE }}
-          CONFIG_LOCAL_MODEL: @@{{ vars.REVIEWSENSEI_LOCAL_MODEL }}
-          CONFIG_CLOUD_MODEL: @@{{ vars.REVIEWSENSEI_CLOUD_MODEL }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          import sys
+  trusted-local-manual:
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot')) &&
+      vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_SHA__
+    with:
+      mode: manual
+      operation: @@{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
+      repository: @@{{ github.repository }}
+      repository_id: @@{{ github.repository_id }}
+      pull_request_number: @@{{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
+      base_ref: @@{{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
+      base_sha: @@{{ inputs.base_sha || github.event.pull_request.base.sha }}
+      head_ref: @@{{ inputs.head_ref || '' }}
+      head_repository: @@{{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}
+      head_sha: @@{{ inputs.head_sha || github.event.pull_request.head.sha }}
+      source_kind: @@{{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}
+      source_comment_id: @@{{ inputs.source_comment_id || github.event.comment.id }}
+      source_updated_at: @@{{ inputs.source_updated_at || github.event.comment.updated_at }}
+      root_comment_id: @@{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
+      review_sensei_version: @@{{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
+      enable_review: @@{{ (inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply') == 'review' && vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_github_writes: @@{{ vars.REVIEWSENSEI_GITHUB_WRITES }}
+      enable_learning_prs: @@{{ vars.REVIEWSENSEI_LEARNING_PRS }}
+      enable_mention_replies: @@{{ vars.REVIEWSENSEI_MENTION_REPLIES }}
+      upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
+    secrets:
+      OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
+`.replaceAll("__PUBLIC_WORKFLOW_SHA__", sha).replaceAll(GITHUB_EXPRESSION, "$");
+}
 
-          ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
-          repo_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-          model_pattern = re.compile(r"^[A-Za-z0-9._:/-]+$")
-          for name in ("BASE_REF", "HEAD_REF"):
-              value = os.environ.get(name, "")
-              if not value or value.startswith("-") or not ref_pattern.fullmatch(value):
-                  print(f"::error::{name} is not a supported Git ref", file=sys.stderr)
-                  sys.exit(1)
-          default_branch = os.environ.get("DEFAULT_BRANCH", "")
-          if not default_branch or not ref_pattern.fullmatch(default_branch):
-              print("::error::repository default branch is unavailable", file=sys.stderr)
-              sys.exit(1)
-          if os.environ.get("BASE_REF") != default_branch:
-              print("::error::base_ref must match the repository default branch", file=sys.stderr)
-              sys.exit(1)
-          head_repository = os.environ.get("HEAD_REPOSITORY", "")
-          if head_repository and not repo_pattern.fullmatch(head_repository):
-              print("::error::head_repository must be an owner/repo slug", file=sys.stderr)
-              sys.exit(1)
-          raw = os.environ.get("REVIEW_SENSEI_VERSION", "")
-          if not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", raw):
-              print("::error::review_sensei_version must be an exact X.Y.Z version", file=sys.stderr)
-              sys.exit(1)
-          normalized = raw[1:] if raw.startswith("v") else raw
-
-          provider_mode = os.environ.get("CONFIG_PROVIDER_MODE", "").strip().lower() or "local"
-          if provider_mode not in {"local", "cloud"}:
-              print("::error::REVIEWSENSEI_PROVIDER_MODE must be local or cloud", file=sys.stderr)
-              sys.exit(1)
-          local_model = os.environ.get("CONFIG_LOCAL_MODEL", "").strip() or "qwen3.5:4b"
-          cloud_model = os.environ.get("CONFIG_CLOUD_MODEL", "").strip() or "deepseek-v4-flash:cloud"
-          for label, model in (("REVIEWSENSEI_LOCAL_MODEL", local_model), ("REVIEWSENSEI_CLOUD_MODEL", cloud_model)):
-              if not model_pattern.fullmatch(model):
-                  print(f"::error::{label} is not a supported Ollama model name", file=sys.stderr)
-                  sys.exit(1)
-          selected_model = cloud_model if provider_mode == "cloud" else local_model
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"normalized_version={normalized}\n")
-              handle.write(f"provider_mode={provider_mode}\n")
-              handle.write(f"ollama_model={selected_model}\n")
-          PY
-
-      - name: Check out base ref only
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: @@{{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - name: Install exact ReviewSensei package
-        env:
-          REVIEW_SENSEI_VERSION: @@{{ steps.version.outputs.normalized_version }}
-        run: |
-          python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install "review-sensei==@@{REVIEW_SENSEI_VERSION}"
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" --version | tee review-sensei-version.txt
-
-      - name: Prepare bounded diff
-        env:
-          BASE_REF: @@{{ inputs.base_ref }}
-          HEAD_REF: @@{{ inputs.head_ref }}
-          HEAD_REPOSITORY: @@{{ inputs.head_repository }}
-        run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then
-            args+=(--head-repository "$HEAD_REPOSITORY")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" \
-            --base-ref "$BASE_REF" \
-            --head-ref "$HEAD_REF" \
-            "@@{args[@]}" \
-            --output pr.patch \
-            --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 \
-            --max-diff-files 500 \
-            --max-diff-hunks 5000
-
-      - name: Verify local Ollama service
-        if: steps.version.outputs.provider_mode == 'local'
-        env:
-          OLLAMA_MODEL: @@{{ steps.version.outputs.ollama_model }}
-        run: |
-          curl --fail --silent --show-error --max-time 10 \
-            "http://127.0.0.1:11434/api/tags" >/dev/null
-          ollama show "$OLLAMA_MODEL" >/dev/null
-
-      - name: Run ReviewSensei review
-        env:
-          PROVIDER_MODE: @@{{ steps.version.outputs.provider_mode }}
-          OLLAMA_MODEL: @@{{ steps.version.outputs.ollama_model }}
-          OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-        run: |
-          if [[ "$PROVIDER_MODE" == "cloud" ]]; then
-            export OLLAMA_BASE_URL="https://ollama.com/api"
-            if [[ -z "$OLLAMA_API_KEY" ]]; then
-              echo "::error::OLLAMA_API_KEY is required for cloud mode" >&2
-              exit 1
-            fi
-          else
-            export OLLAMA_BASE_URL="http://127.0.0.1:11434/api"
-            unset OLLAMA_API_KEY
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" \
-            --diff pr.patch \
-            --learning-root . \
-            --learning-directory .github/review-sensei/learnings \
-            --base-url "$OLLAMA_BASE_URL" \
-            --model "$OLLAMA_MODEL" \
-            --output review.json
-
-      - name: Upload review artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: review-sensei-review
-          path: |
-            review.json
-            review-sensei-version.txt
-          if-no-files-found: error
-          retention-days: 7
-`;
-
-const uninstallWorkflowTemplate = String.raw`# ReviewSensei setup version: 2
+function uninstallWorkflowTemplate(): string {
+  return String.raw`# ReviewSensei setup version: 3
 name: Remove ReviewSensei setup
 
 on:
@@ -258,59 +234,55 @@ jobs:
           subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
           subprocess.run(["git", "commit", "-m", "Remove ReviewSensei setup"], check=True)
           subprocess.run(["git", "push", "--set-upstream", "origin", branch], check=True)
-          subprocess.run(
-              [
-                  "gh",
-                  "pr",
-                  "create",
-                  "--base",
-                  default_branch,
-                  "--head",
-                  branch,
-                  "--title",
-                  "Remove ReviewSensei setup",
-                  "--body",
-                  "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. ReviewSensei learnings and repository secrets are left untouched.",
-              ],
-              check=True,
-          )
+          subprocess.run([
+              "gh", "pr", "create", "--base", default_branch, "--head", branch,
+              "--title", "Remove ReviewSensei setup",
+              "--body", "Remove generated ReviewSensei setup files; learnings and secrets remain untouched.",
+          ], check=True)
           PY
-`;
+`.replaceAll(GITHUB_EXPRESSION, "$");
+}
 
-export const SETUP_FILES: readonly SetupFile[] = [
-  {
-    path: ".github/workflows/review-sensei-review.yml",
-    content: workflowTemplate.replaceAll(GITHUB_EXPRESSION, "$"),
-  },
-  {
-    path: ".github/workflows/review-sensei-uninstall.yml",
-    content: uninstallWorkflowTemplate.replaceAll(GITHUB_EXPRESSION, "$"),
-  },
-  {
-    path: ".github/review-sensei/config.yml",
-    content:
-      `# ${SETUP_VERSION_MARKER}\n` +
-      `setup_version: ${SETUP_VERSION}\n` +
-      "provider: ollama\n" +
-      "provider_mode: local\n" +
-      "base_url: http://127.0.0.1:11434/api\n" +
-      "cloud_base_url: https://ollama.com/api\n" +
-      `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
-      `cloud_model: ${DEFAULT_CLOUD_MODEL}\n`,
-  },
-];
+function configFile(): string {
+  return (
+    `# ${SETUP_VERSION_MARKER}\n` +
+    `setup_version: ${SETUP_VERSION}\n` +
+    "provider: ollama\n" +
+    "provider_mode: local\n" +
+    "base_url: http://127.0.0.1:11434/api\n" +
+    "cloud_base_url: https://ollama.com/api\n" +
+    `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
+    `cloud_model: ${DEFAULT_CLOUD_MODEL}\n` +
+    "version: 0.1.0\n" +
+    "auto_review: false\n" +
+    "github_writes: false\n" +
+    "learning_prs: false\n" +
+    "mention_replies: false\n" +
+    "upload_artifacts: false\n"
+  );
+}
+
+export function buildSetupFiles(publicWorkflowSha: string): readonly SetupFile[] {
+  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+  return [
+    { path: SETUP_FILE_PATHS[0], content: workflowTemplate(sha) },
+    { path: SETUP_FILE_PATHS[1], content: uninstallWorkflowTemplate() },
+    { path: SETUP_FILE_PATHS[2], content: configFile() },
+  ];
+}
+
+export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles(
+  DEFAULT_PUBLIC_WORKFLOW_SHA,
+);
 
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
-  "This pull request adds or updates the ReviewSensei review workflow (setup " +
-  "version 2), provider defaults, and a manual uninstall-cleanup workflow. " +
-  "The installation bootstrap also " +
-  "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), " +
-  "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and " +
-  "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud) without overwriting " +
-  "existing values. Change REVIEWSENSEI_PROVIDER_MODE to cloud and add " +
-  "OLLAMA_API_KEY as a repository secret to use Ollama Cloud. The uninstall " +
-  "workflow creates a reviewable PR to remove these generated scripts; it does " +
-  "not delete learnings or secrets. No private keys, installation tokens, or " +
-  "webhook bodies are included in these files.";
+  "This pull request adds or updates the ReviewSensei setup-v3 caller, which " +
+  "invokes the immutable public reusable workflow at an exact configured SHA. " +
+  "Automatic pull-request review is cloud-provider-only on GitHub-hosted compute; " +
+  "local Ollama remains manual or trusted-event-only. All write and artifact " +
+  "switches default to false. Cloud mode passes the existing customer-owned " +
+  "OLLAMA_API_KEY secret by name only; the App never creates or reads its value. " +
+  "Migration changes only these generated paths through a reviewable PR and " +
+  "never overwrites custom or future setup files.";

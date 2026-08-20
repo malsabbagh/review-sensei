@@ -18,6 +18,8 @@ class CloudflarePackageTests(unittest.TestCase):
             CLOUDFLARE / "src" / "delivery-ledger.ts",
             CLOUDFLARE / "src" / "github-app.ts",
             CLOUDFLARE / "src" / "setup-content.ts",
+            CLOUDFLARE / "src" / "broker-ledger.ts",
+            CLOUDFLARE / "src" / "token-broker.ts",
         )
         for path in required:
             with self.subTest(path=path):
@@ -33,16 +35,22 @@ class CloudflarePackageTests(unittest.TestCase):
         lock = json.loads((CLOUDFLARE / "package-lock.json").read_text())
         self.assertNotIn("node_modules/@cloudflare/containers", lock["packages"])
 
-    def test_wrangler_declares_only_sqlite_ledger(self):
+    def test_wrangler_declares_sqlite_ledgers(self):
         config = json.loads((CLOUDFLARE / "wrangler.jsonc").read_text())
         self.assertEqual(config["main"], "src/worker.ts")
         self.assertNotIn("containers", config)
         self.assertEqual(
             config["durable_objects"]["bindings"],
-            [{"name": "DELIVERY_LEDGER", "class_name": "DeliveryLedger"}],
+            [
+                {"name": "DELIVERY_LEDGER", "class_name": "DeliveryLedger"},
+                {"name": "BROKER_LEDGER", "class_name": "BrokerLedger"},
+            ],
         )
         self.assertEqual(
             config["migrations"][0]["new_sqlite_classes"], ["DeliveryLedger"]
+        )
+        self.assertEqual(
+            config["migrations"][1]["new_sqlite_classes"], ["BrokerLedger"]
         )
 
     def test_package_does_not_embed_secrets_or_payload_storage(self):
@@ -81,14 +89,19 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_setup_content_is_pinned_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
+        self.assertIn("SETUP_VERSION = 3", source)
+        self.assertIn("ReviewSensei setup version: 3", source)
+        self.assertIn("PUBLIC_WORKFLOW_SHA", source)
+        self.assertIn("secrets.OLLAMA_API_KEY", source)
+        self.assertIn("github.event.comment.author_association == 'OWNER'", source)
+        self.assertIn("github.event.comment.user.type != 'Bot'", source)
         self.assertIn(
-            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1", source
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@", source
         )
+        self.assertIn("id-token: write", source)
+        self.assertNotIn("OLLAMA_API_KEY_VALUE", source)
         self.assertIn(
             "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", source
-        )
-        self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", source
         )
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", source)
         self.assertIn("REVIEWSENSEI_LOCAL_MODEL", source)
@@ -96,10 +109,20 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("qwen3.5:4b", source)
         self.assertIn("deepseek-v4-flash:cloud", source)
         self.assertIn("review-sensei-uninstall.yml", source)
-        self.assertIn("SETUP_VERSION = 2", source)
-        self.assertIn("ReviewSensei setup version: 2", source)
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)
+
+    def test_user_guidance_describes_setup_v3_publication_contract(self):
+        readme = (ROOT / "README.md").read_text()
+        installation = (ROOT / "docs" / "installation.md").read_text()
+        for content in (readme, installation):
+            self.assertIn("setup-v3", content)
+            self.assertIn("nine", content)
+            self.assertIn("automatic", content)
+            self.assertIn("summary", content)
+            self.assertIn("inline", content)
+            self.assertIn("REVIEWSENSEI_UPLOAD_ARTIFACTS", content)
+            self.assertNotIn("review-sensei-version.txt", content)
 
 
 if __name__ == "__main__":

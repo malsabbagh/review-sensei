@@ -312,3 +312,35 @@ host configuration before rollback.
 Rollback is code-only for review limits, schemas, and error metadata: revert
 the package change and restore the prior imports/configuration. No stored
 review data migration is required.
+
+## Issue-64 publication contracts
+
+`ReviewPublisher` reconstructs a typed `ReviewResult`, revalidates all
+locations against the exact diff, rereads the open non-draft same-repository PR
+head, and submits one App-authored review whose summary and inline comments
+carry the marker
+`<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
+The marker, App slug, exact head commit, and repository identity form the
+idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
+fail closed.
+
+Learning proposal identity is a canonical SHA-256 digest. Only the deterministic
+`.github/review-sensei/learnings/sensei-<16-hex>.json` path may be materialized
+on a `review-sensei/learnings/pr-<number>-<16-hex>` branch, and the PR is always
+draft. Existing identical base content skips; different content conflicts.
+
+Conversation replies require a standalone case-insensitive `@sensei` mention
+from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
+validated before marker append; source update time, exact head, root-thread
+identity, PR state, and fork state are reread before publication. The inline
+reply marker binds source comment, updated-time digest, PR, and head.
+Generated comment-event execution is local-provider-only on the trusted
+self-hosted runner. Cloud mode does not send conversation or inline-thread
+context to the external provider.
+
+All setup-v3 switches (`REVIEWSENSEI_AUTO_REVIEW`,
+`REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
+`REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`) default
+to `false`. The generated caller may contain only the name-only secret mapping
+`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated
+or handled by the App setup boundary.

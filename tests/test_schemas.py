@@ -17,6 +17,7 @@ from review_sensei.schemas import SCHEMA_DIR, validate_public_document
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
+    "conversation-reply",
     "review-result",
     "review-comment",
     "learning-entry",
