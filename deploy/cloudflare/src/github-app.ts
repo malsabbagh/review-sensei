@@ -155,15 +155,19 @@ const LEGACY_SHA256: Readonly<Record<string, readonly string[]>> = {
     // Pre-marker Worker and Python outputs released in 8afa49f.
     "f273b9c220a4e1e8336b776f919f7a83b78d9cc6473ad8920f9a7cd1fe250078",
     "bb43f1cf081a46e03fa83baa4906759e202a9b8915c9f38db2cb0cd7ddd79be8",
+    // Released intermediate pre-marker Worker output.
+    "4888b04a0e577cb95ceaaabb0b612b55c8cd0aa30aba86fdbfac716d772d57ea",
   ],
   ".github/workflows/review-sensei-uninstall.yml": [
     "350dcf9960e1c325a2ce1e6189ffeb5d993dfc053511791991c67044a0a3edf3",
     "6d330e41a8df5fe7e1a54875091ffc353bbacf6fde727dc28d7bbdc76aedeca0",
+    "e4f56f488214db287b05ee45adb3c84db98060d9b73412a459b7f78f087321a5",
   ],
   ".github/review-sensei/config.yml": [
     // Released setup-v2 and pre-marker outputs.
     "a1ebe48445cab35ffde125b7a8a66253d7a007cbed11dc03118c0b9b14d9a58b",
     "d20c350134df752db4d03a67676c5ee244b1f7421650c620e36fa8ecb22e24af",
+    "904d1ef6d8afbdb7a5dc1e9d04f6a0bff87d8a04eb8c1a561a17ed2d877e4987",
   ],
 };
 

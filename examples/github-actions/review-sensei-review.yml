@@ -3,6 +3,9 @@ name: ReviewSensei review
 
 # Replace the all-f placeholder below with the public reusable-workflow commit
 # SHA published by the operator before copying this example to a customer repo.
+# The reusable workflow installs the requested package from PyPI first and uses
+# its full-SHA-pinned public GitHub source fallback only when that version is
+# not available on PyPI.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]

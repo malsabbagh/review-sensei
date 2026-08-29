@@ -28,6 +28,9 @@ external provider by default.
 - Exact released package versions must be installable into a separate runtime
   environment so the reviewed repository's own code is never installed or
   executed as the review engine.
+- When an exact package version is not yet present on PyPI, the workflow must
+  have a reproducible source-install path without weakening the trusted-base
+  or provider boundaries.
 - Untrusted refs and repository slugs must be validated before any git command
   and must never be interpolated into shell commands.
 - Diff preparation must fetch explicit refs, resolve them to commit OIDs,
@@ -96,8 +99,9 @@ Positive:
 
 Negative or tradeoffs:
 
-- The workflow requires a released Code Sensei package version, so pre-release
-  source changes cannot be run through the example until released.
+- PyPI remains the preferred distribution and the fallback is only a temporary
+  release-gap path; the pinned public source commit must be maintained whenever
+  the default package version changes.
 - Fork reviews are supported manually by `head_repository` only after an
   operator supplies the fork slug; there is no automatic fork PR trigger.
 - The bootstrap version validation is a short Python heredoc inside the
@@ -142,6 +146,11 @@ Negative or tradeoffs:
 - The workflow's version bootstrap step reads `CODE_SENSEI_VERSION`, requires
   `X.Y.Z` or `vX.Y.Z`, normalizes it, and writes a step output. It does not
   execute a repository-local script.
+- The setup-v3 reusable workflow tries `review-sensei==X.Y.Z` from PyPI first.
+  It falls back only when pip reports that the ReviewSensei package/version is
+  unavailable, then installs a public GitHub source commit pinned to a full
+  40-character SHA and verifies the installed version and dependencies. Network,
+  dependency, and other PyPI failures remain fatal.
 - The review step sets `OLLAMA_API_KEY` from the operator's secret only in
   cloud mode. Cloud egress remains opt-in through
   `REVIEWSENSEI_PROVIDER_MODE=cloud`.
@@ -185,7 +194,8 @@ All publication, learning, reply, and artifact switches default to false.
 The customer-owned `OLLAMA_API_KEY` may be passed to the reusable workflow by
 name only; the setup App never handles its value. This amendment supersedes
 the old example-only boundary for generated setup clients while retaining the
-trusted-base checkout and exact package rules.
+trusted-base checkout and exact version validation. The reusable workflow's
+PyPI-first, full-SHA-pinned GitHub source fallback is defined in ADR 0023.
 
 ## Links
 

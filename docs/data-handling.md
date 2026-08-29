@@ -62,10 +62,12 @@ The example workflow in
 is the primary open-source path. It runs on a maintainer-controlled self-hosted
 runner labelled `ollama`, checks out only the repository default branch,
 requires `base_ref` to match that default branch,
-installs an exact released `review-sensei==X.Y.Z` package into a separate
-`RUNNER_TEMP` virtual environment, records the installed version, and computes
-a bounded diff with `review-sensei prepare-diff` without checking out or
-executing the head branch. The runner must provide Ollama on
+installs the exact requested `review-sensei==X.Y.Z` package from PyPI first and
+falls back to a full-SHA-pinned public GitHub source commit only when that
+distribution is unavailable. It verifies the installed version and dependencies
+before computing a bounded diff with `review-sensei prepare-diff`, without
+checking out or executing the head branch. Other PyPI failures remain fatal.
+The runner must provide Ollama on
 `http://127.0.0.1:11434` for the default local mode.
 
 Provider data egress is explicit. The workflow defaults to the

@@ -69,13 +69,14 @@ transport calls; future GitHub publishers consume only validated
 | [`0008`](../adr/0008-versioned-public-schemas-and-compatibility.md) | Proposed | Versioned public schemas and compatibility guarantees | #10; Public JSON, CLI, provider, and error contracts |
 | [`0009`](../adr/0009-ci-quality-supply-chain-gates.md) | Accepted | CI quality and supply-chain gates | #3; Pinned Actions, package/schema checks, CodeQL, and required checks |
 | [`0010`](../adr/0010-secure-package-release-engineering-and-provenance.md) | Proposed | Secure package release engineering and provenance | #4; package metadata, trusted publishing, and rollback |
-| [`0011`](../adr/0011-portable-immutable-github-actions-workflow.md) | Proposed | Portable immutable manual GitHub Actions workflow | #15; exact released package, local-first provider defaults, bounded prepare-diff |
+| [`0011`](../adr/0011-portable-immutable-github-actions-workflow.md) | Proposed | Portable immutable manual GitHub Actions workflow | #15; PyPI-first package install with pinned source fallback, local-first provider defaults, bounded prepare-diff |
 | [`0012`](../adr/0012-privacy-safe-review-quality-evaluation.md) | Accepted | Keep synthetic evaluation offline by default with explicit live egress | #9; Versioned corpus/report schemas and deterministic fixture CI |
 | [`0013`](../adr/0013-github-app-jwt-installation-auth.md) | Proposed | GitHub App JWT and installation-scoped authentication | #12; Narrow App-identity auth outside the review core |
 | [`0014`](../adr/0014-github-app-setup-bootstrap.md) | Proposed | GitHub App setup bootstrap | #37; Signature-verified, idempotent, no-secret setup PR creation |
 | [`0020`](../adr/0020-cloudflare-github-app-package.md) | Proposed | Cloudflare Worker-only + SQLite Durable Object package | #37; Free-tier installation bootstrap deployment, no hosted review engine |
 | [`0021`](../adr/0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37; bounded inspection and fail-closed unknown setup handling |
 | [`0022`](../adr/0022-actions-publication-learning-and-conversations.md) | Proposed | Immutable setup-v3 publication, learning PRs, and authorized conversations | #64; exact-head writes and issuance-only capabilities |
+| [`0023`](../adr/0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to a pinned public GitHub package source | #37; missing-release compatibility without mutable refs or masked install failures |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

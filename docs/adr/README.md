@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-08-19
+Last updated: 2026-08-29
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -21,7 +21,7 @@ Process: `docs/process/adr-process.md`
 | [0008](0008-versioned-public-schemas-and-compatibility.md) | Proposed | Version public JSON schemas and compatibility guarantees | #10 | Schema `$id`, deprecation, migration, and rollback policy |
 | [0009](0009-ci-quality-supply-chain-gates.md) | Accepted | Establish CI quality and supply-chain gates | #3 | Pinned Actions, package/schema checks, CodeQL, and required checks |
 | [0010](0010-secure-package-release-engineering-and-provenance.md) | Proposed | Secure package release engineering and provenance | #4 | Release workflow, package validation, trusted publishing, and rollback policy |
-| [0011](0011-portable-immutable-github-actions-workflow.md) | Proposed | Portable immutable manual GitHub Actions workflow | #15 | Exact released package, local-first provider defaults, bounded prepare-diff |
+| [0011](0011-portable-immutable-github-actions-workflow.md) | Proposed | Portable immutable manual GitHub Actions workflow | #15 | PyPI-first package install with pinned source fallback, local-first provider defaults, bounded prepare-diff |
 | [0012](0012-privacy-safe-review-quality-evaluation.md) | Accepted | Keep synthetic evaluation offline by default with explicit live egress | #9 | Versioned corpus/report schemas and deterministic fixture CI |
 | [0013](0013-github-app-jwt-installation-auth.md) | Proposed | GitHub App JWT and installation-scoped authentication | #12 | Narrow App-identity auth outside the review core; no hosted service |
 | [0014](0014-github-app-setup-bootstrap.md) | Proposed | GitHub App setup bootstrap | #37 | Signature-verified, idempotent, no-secret setup PR creation |
@@ -31,6 +31,7 @@ Process: `docs/process/adr-process.md`
 | [0020](0020-cloudflare-github-app-package.md) | Proposed | Cloudflare Worker-only + SQLite Durable Object package | #37 | Free-tier installation bootstrap ingress; no hosted review engine |
 | [0021](0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37 | Bounded inspection; unknown or future files are left untouched |
 | [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Immutable setup-v3 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
+| [0023](0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to a pinned public GitHub package source | #37 | Missing-release compatibility without mutable refs or masked install failures |
 
 ## Policy
 

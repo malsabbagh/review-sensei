@@ -120,6 +120,55 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
 
+    def test_reusable_workflow_prefers_pypi_with_pinned_github_fallback(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        fallback_ref = "ff53bbadf6bce78fe0421ec2f07844feec976095"
+        self.assertEqual(
+            text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
+            2,
+        )
+        self.assertEqual(
+            text.count(f"REVIEW_SENSEI_GITHUB_REF: {fallback_ref}"),
+            2,
+        )
+        self.assertEqual(
+            text.count(
+                '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"'
+            ),
+            2,
+        )
+        self.assertIn(
+            '"review-sensei==$expected_version"',
+            text,
+        )
+        self.assertIn("No matching distribution found for review-sensei==", text)
+        self.assertIn(
+            "Could not find a version that satisfies the requirement review-sensei==",
+            text,
+        )
+        self.assertIn("refusing the GitHub fallback", text)
+        self.assertIn('importlib.metadata.version("review-sensei")', text)
+        self.assertIn('"$python_bin" -m pip check', text)
+        self.assertNotIn("review-sensei.git@main", text)
+        install_blocks = [
+            block for block in _run_blocks(text) if "REVIEW_SENSEI_GITHUB_REF" in block
+        ]
+        self.assertEqual(len(install_blocks), 2)
+        for block in install_blocks:
+            with self.subTest(block=block[:40]):
+                self.assertLess(
+                    block.index('"review-sensei==$expected_version"'),
+                    block.index(
+                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"'
+                    ),
+                )
+
     def test_generated_dispatch_is_review_only(self):
         text = (
             Path(__file__).resolve().parents[1]

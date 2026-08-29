@@ -2,6 +2,9 @@ name: ReviewSensei immutable runner
 
 # This is the public, immutable reusable workflow. Customer repositories call
 # it by a full public commit SHA from their generated setup-v3 file.
+# PyPI remains the primary release channel. Keep this source fallback pinned to
+# a public ReviewSensei commit with the same package version until the release
+# is available there; update it whenever the default package version changes.
 on:
   workflow_call:
     inputs:
@@ -145,13 +148,40 @@ jobs:
               raise SystemExit("ReviewSensei version must be exact")
           PY
 
-      - name: Install exact ReviewSensei package
+      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          REVIEW_SENSEI_GITHUB_REF: ff53bbadf6bce78fe0421ec2f07844feec976095
         run: |
+          set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install "review-sensei==${REVIEW_SENSEI_VERSION#v}"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          expected_version="${REVIEW_SENSEI_VERSION#v}"
+          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
+          if [[ ! "$REVIEW_SENSEI_GITHUB_REF" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei GitHub fallback ref must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
+            "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee -a "$pypi_log"; then
+            install_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing pinned GitHub commit $REVIEW_SENSEI_GITHUB_REF."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"
+            install_source="GitHub@$REVIEW_SENSEI_GITHUB_REF"
+          else
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
+          "$python_bin" -m pip check
+          echo "Installed ReviewSensei $installed_version from $install_source."
 
       - name: Prepare bounded trusted-base diff
         env:
@@ -236,12 +266,39 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install exact ReviewSensei package
+      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          REVIEW_SENSEI_GITHUB_REF: ff53bbadf6bce78fe0421ec2f07844feec976095
         run: |
+          set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" -m pip install "review-sensei==${REVIEW_SENSEI_VERSION#v}"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          expected_version="${REVIEW_SENSEI_VERSION#v}"
+          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
+          if [[ ! "$REVIEW_SENSEI_GITHUB_REF" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei GitHub fallback ref must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
+            install_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing pinned GitHub commit $REVIEW_SENSEI_GITHUB_REF."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"
+            install_source="GitHub@$REVIEW_SENSEI_GITHUB_REF"
+          else
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
+          "$python_bin" -m pip check
+          echo "Installed ReviewSensei $installed_version from $install_source."
 
       - name: Prepare and run trusted local review
         if: inputs.operation == 'review'

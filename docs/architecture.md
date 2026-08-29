@@ -107,9 +107,11 @@ variable `REVIEWSENSEI_PROVIDER_MODE=cloud`, which uses the fixed Ollama Cloud
 endpoint and the `deepseek-v4-flash:cloud` model by default, and requires
 `OLLAMA_API_KEY`. The workflow does not accept an arbitrary provider URL input,
 so a dispatch-supplied URL cannot redirect the provider credential. The example
-workflow installs an exact released `review-sensei==X.Y.Z` package into a
-separate `RUNNER_TEMP` virtual environment and records the installed version
-artifact before the provider review step.
+workflow first installs the exact requested `review-sensei==X.Y.Z` package from
+PyPI into a separate `RUNNER_TEMP` virtual environment. When that exact
+distribution is unavailable, it installs the same version from a public GitHub
+source commit pinned in the workflow; other PyPI failures remain fatal. The
+install step verifies the package metadata and dependency set before review.
 
 ## GitHub App setup migration boundary
 
@@ -279,8 +281,11 @@ aggregate size violations. Selection and serialization are deterministic.
 The primary distribution is the open-source package and CLI. Repositories run
 ReviewSensei themselves in GitHub Actions: checkout the trusted base, fetch the
 head ref only to compute a bounded diff through `review-sensei prepare-diff`,
-install an exact released package, run the provider, and upload the validated
-result plus the installed version. This path does not require a hosted backend,
+install the exact requested package from PyPI or, when that distribution is
+unavailable, from a full-SHA-pinned public GitHub source commit, run the
+provider, and upload the validated result plus the installed version. A source
+fallback is used only for the package-not-found condition; other PyPI failures
+remain fatal. This path does not require a hosted backend,
 GitHub App installation tokens, a durable job queue, a database, or deployment
 infrastructure. The default provider configuration is local Ollama, so private
 source data is not exported by default.
@@ -401,6 +406,7 @@ issuance-only Worker:
 customer setup-v3 caller (exact public workflow SHA; all opt-ins false)
     -> public reusable workflow
        -> trusted-base checkout and bounded diff
+       -> PyPI package or pinned public GitHub source fallback
        -> GitHub-hosted cloud review or trusted local Ollama review
        -> typed result/reply validation
        -> Actions OIDC assertion

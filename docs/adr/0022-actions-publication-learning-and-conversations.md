@@ -24,8 +24,10 @@ workflow
 `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<40-hex-sha>`.
 The SHA is validated Worker configuration and is required before setup writes.
 The reusable workflow checks out only trusted base content, computes bounded
-diffs, runs the exact released package, and validates typed results before any
-write. Automatic cloud pull-request review uses GitHub-hosted compute and
+diffs, installs the exact requested package from PyPI or its full-SHA-pinned
+public GitHub source fallback when that distribution is unavailable, and
+validates the installed version and typed results before any write. Automatic
+cloud pull-request review uses GitHub-hosted compute and
 same-repository heads only. Local Ollama is restricted to manual or trusted
 event execution on the labeled self-hosted runner.
 
@@ -89,8 +91,9 @@ Positive:
 
 Tradeoffs:
 
-- Hosted acceptance requires a later public snapshot, package release, Worker
-  deployment, App permission acceptance, and customer setup-PR review.
+- Hosted acceptance requires a later public snapshot, an installable package
+  release or the pinned source fallback, Worker deployment, App permission
+  acceptance, and customer setup-PR review.
 - The Python and Worker setup builders must remain structurally equivalent.
 - The broker holds short-lived opaque installation tokens in request memory in
   order to call GitHub, but never persists or returns them outside issuance.
@@ -112,7 +115,8 @@ or workflow SHA, replay/rate limits, forks, missing installations, permission
 scope, redaction, disabled writes, stale/duplicate/ambiguous publication,
 learning conflicts, unauthorized mentions, and setup lifecycle no-write cases.
 Release order is implementation merge, audited public snapshot, exact package
-release, Worker `PUBLIC_WORKFLOW_SHA` configuration, Worker deployment, App
+release when available (the pinned source fallback covers the interim gap),
+Worker `PUBLIC_WORKFLOW_SHA` configuration, Worker deployment, App
 permission update/acceptance or reinstall/re-add, setup reconciliation, setup
 PR review/merge, repository opt-in, and hosted fixture acceptance.
 

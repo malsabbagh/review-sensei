@@ -420,6 +420,25 @@ describe("setup-v3 repository reconciliation", () => {
     ]);
   });
 
+  it("migrates the released intermediate pre-marker setup", async () => {
+    const fake = new FakeGitHub();
+    fake.files = {
+      ".github/workflows/review-sensei-review.yml": historicalFixture(
+        "intermediate-pre-marker-worker-review.yml",
+      ),
+      ".github/workflows/review-sensei-uninstall.yml": historicalFixture(
+        "intermediate-pre-marker-worker-uninstall.yml",
+      ),
+      ".github/review-sensei/config.yml": historicalFixture(
+        "intermediate-pre-marker-config.yml",
+      ),
+    };
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+  });
+
   it("does not replace customized partial setup-v3 content", async () => {
     const fake = new FakeGitHub();
     const current = buildSetupFiles(SHA)[0].content;

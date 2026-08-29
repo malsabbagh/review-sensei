@@ -7,8 +7,10 @@ providers later.
 
 > Alpha: this repository provides an open-source review engine and CLI. The
 > primary usage path is running ReviewSensei in your own GitHub Actions
-> workflow. The example workflow installs an exact released package and
-> defaults to a local Ollama endpoint. It does not require a hosted backend.
+> workflow. The example workflow installs the requested exact package from
+> PyPI first and falls back to a pinned public GitHub source commit only when
+> that distribution is unavailable. It defaults to a local Ollama endpoint and
+> does not require a hosted backend.
 
 ## What it does
 
@@ -353,7 +355,10 @@ See [the architecture guide](docs/architecture.md).
 ## GitHub integration
 
 The GitHub App opens a setup-v3 PR containing a thin caller that pins the public
-reusable workflow to an operator-configured 40-character commit SHA. All nine
+reusable workflow to an operator-configured 40-character commit SHA. The
+reusable workflow prefers the requested exact package from PyPI and falls back
+to its pinned public GitHub source commit only when that package/version is not
+available; unrelated PyPI installation failures remain fatal. All nine
 `REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
 review, GitHub writes, learning PRs, mention replies, and artifact upload are
 off. The App never creates the customer-owned `OLLAMA_API_KEY` secret.

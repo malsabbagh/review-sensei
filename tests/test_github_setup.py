@@ -572,6 +572,31 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
                 self.assertEqual(results[0].status, "created")
 
+    def test_released_intermediate_pre_marker_setup_is_migrated(self):
+        transport = FileTransport(
+            files={
+                ".github/workflows/review-sensei-review.yml": (
+                    self.historical_fixture("intermediate-pre-marker-worker-review.yml")
+                ),
+                ".github/workflows/review-sensei-uninstall.yml": (
+                    self.historical_fixture(
+                        "intermediate-pre-marker-worker-uninstall.yml"
+                    )
+                ),
+                ".github/review-sensei/config.yml": self.historical_fixture(
+                    "intermediate-pre-marker-config.yml"
+                ),
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
     def test_customized_partial_v3_setup_is_not_overwritten(self):
         plan = SetupPlanBuilder().build("owner/repo")
         workflow = next(

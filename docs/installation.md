@@ -43,8 +43,11 @@ available as explicit overrides.
 The setup-v3 caller example in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
 invokes the immutable public reusable workflow at an operator-configured full
-commit SHA. That workflow installs the exact `REVIEWSENSEI_VERSION` into a
-separate `RUNNER_TEMP` environment, checks out only trusted base content,
+commit SHA. That workflow tries to install the exact `REVIEWSENSEI_VERSION`
+from PyPI in a separate `RUNNER_TEMP` environment. When that exact
+distribution/version is unavailable, it falls back to the public ReviewSensei
+repository at a full commit SHA and verifies the installed package metadata;
+other PyPI failures remain fatal. It then checks out only trusted base content,
 validates refs, and computes a bounded diff without installing or executing the
 head branch.
 
@@ -114,7 +117,8 @@ canonical-content, and generated-path checks. A pre-existing or concurrent
 collision reports `skipped_branch_conflict`; the App never force-moves a ref.
 
 The release order is: merge the implementation; publish the audited public
-snapshot; release the exact package; set the Worker `PUBLIC_WORKFLOW_SHA`;
+snapshot; release the exact package when available (the workflow's pinned GitHub
+fallback covers the interim gap); set the Worker `PUBLIC_WORKFLOW_SHA`;
 deploy the Worker; update and accept App permissions or reinstall/re-add the
 App; verify setup PR reconciliation; merge desired setup PRs; enable repository
 opt-ins; and only then run hosted acceptance. Rollback is a code-only
