@@ -9,6 +9,23 @@
 
 const GITHUB_EXPRESSION = "@@";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
+const LEGACY_V3_SOURCE_INPUTS = [
+  "      source_kind:",
+  "        description: Source kind for manual dispatch (issue or inline)",
+  "        required: false",
+  "      source_comment_id:",
+  "        description: Source comment ID for manual reply",
+  "        required: false",
+  "      source_updated_at:",
+  "        description: Timestamp of source comment",
+  "        required: false",
+  "      root_comment_id:",
+  "        description: Root comment ID for manual reply thread",
+  "        required: false",
+].join("\n") + "\n";
+const LEGACY_V3_UNINSTALL_BODY =
+  "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. " +
+  "ReviewSensei learnings and repository secrets are left untouched.";
 
 export const SETUP_VERSION = 3;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
@@ -91,6 +108,18 @@ on:
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+      source_kind:
+        description: Source kind for manual dispatch (issue or inline)
+        required: false
+      source_comment_id:
+        description: Source comment ID for manual reply
+        required: false
+      source_updated_at:
+        description: Timestamp of source comment
+        required: false
+      root_comment_id:
+        description: Root comment ID for manual reply thread
+        required: false
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -177,6 +206,16 @@ jobs:
 `.replaceAll("__PUBLIC_WORKFLOW_SHA__", sha).replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+function historicalV3WorkflowTemplate(publicWorkflowSha: string): string {
+  return workflowTemplate(publicWorkflowSha)
+    .replace(LEGACY_V3_SOURCE_INPUTS, "")
+    .replace("  trusted-local-manual:\n", "  manual-or-trusted-local:\n")
+    .replace(
+      "      head_ref: ${{ inputs.head_ref || '' }}\n",
+      "      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}\n",
+    );
+}
+
 function uninstallWorkflowTemplate(): string {
   return String.raw`# ReviewSensei setup version: 3
 name: Remove ReviewSensei setup
@@ -243,6 +282,14 @@ jobs:
 `.replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+function historicalV3UninstallWorkflowTemplate(): string {
+  return uninstallWorkflowTemplate().replace(
+    '              "--body", "Remove generated ReviewSensei setup files; ' +
+      'learnings and secrets remain untouched.",\n',
+    `              "--body", "${LEGACY_V3_UNINSTALL_BODY}",\n`,
+  );
+}
+
 function configFile(): string {
   return (
     `# ${SETUP_VERSION_MARKER}\n` +
@@ -267,6 +314,20 @@ export function buildSetupFiles(publicWorkflowSha: string): readonly SetupFile[]
   return [
     { path: SETUP_FILE_PATHS[0], content: workflowTemplate(sha) },
     { path: SETUP_FILE_PATHS[1], content: uninstallWorkflowTemplate() },
+    { path: SETUP_FILE_PATHS[2], content: configFile() },
+  ];
+}
+
+export function buildHistoricalV3SetupFiles(
+  publicWorkflowSha: string,
+): readonly SetupFile[] {
+  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+  return [
+    { path: SETUP_FILE_PATHS[0], content: historicalV3WorkflowTemplate(sha) },
+    {
+      path: SETUP_FILE_PATHS[1],
+      content: historicalV3UninstallWorkflowTemplate(),
+    },
     { path: SETUP_FILE_PATHS[2], content: configFile() },
   ];
 }

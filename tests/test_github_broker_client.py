@@ -56,7 +56,7 @@ class BrokerClientTests(unittest.TestCase):
             "os.environ",
             {
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_OIDC_TOKEN_REQUEST_URL": "https://token.actions.test",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test",
             },
             clear=True,
         ):
@@ -72,7 +72,7 @@ class BrokerClientTests(unittest.TestCase):
             "os.environ",
             {
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_OIDC_TOKEN_REQUEST_URL": "https://token.actions.test",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test",
             },
             clear=True,
         ):
@@ -107,7 +107,7 @@ class BrokerClientTests(unittest.TestCase):
             "os.environ",
             {
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_OIDC_TOKEN_REQUEST_URL": (
+                "ACTIONS_ID_TOKEN_REQUEST_URL": (
                     "https://token.actions.test?audience=x"
                 ),
             },

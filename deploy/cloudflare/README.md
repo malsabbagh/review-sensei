@@ -166,8 +166,12 @@ version, the Worker skips it without overwriting the file and reports the
 `skipped_unknown_setup` outcome in its internal result.
 
 The legacy catalog contains the union of byte-exact released pre-marker and
-setup-v2 Worker/Python artifacts. Current-v3 recognition is also byte-exact for
-the configured public workflow SHA. Migration uses a create-only branch named
+setup-v2 Worker/Python artifacts. Current-v3 recognition is byte-exact for the
+configured public workflow SHA. A review workflow that byte-matches the current
+or previously released v3 template for another valid public workflow SHA is
+recognized as managed stale content and migrated; edited or inconsistent
+content remains unknown. Migration
+uses a create-only branch named
 `review-sensei/setup-v3-<base12>-<workflow12>`. An existing branch is reusable
 only when its parent is the named base SHA, its author is the ReviewSensei App,
 its exact generated content is current, and its comparison changes generated

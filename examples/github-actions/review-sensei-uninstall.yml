@@ -60,6 +60,6 @@ jobs:
           subprocess.run([
               "gh", "pr", "create", "--base", default_branch, "--head", branch,
               "--title", "Remove ReviewSensei setup",
-              "--body", "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. ReviewSensei learnings and repository secrets are left untouched.",
+              "--body", "Remove generated ReviewSensei setup files; learnings and secrets remain untouched.",
           ], check=True)
           PY

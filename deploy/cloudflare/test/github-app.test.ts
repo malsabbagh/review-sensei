@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { WorkerEnv } from "../src/env";
 import {
@@ -195,6 +196,43 @@ function historicalFixture(name: string): string {
     new URL(`../../../tests/fixtures/setup-legacy/${name}`, import.meta.url),
     "utf8",
   );
+}
+
+function historicalV3Files(publicWorkflowSha: string): SetupFiles {
+  const files = Object.fromEntries(
+    buildSetupFiles(publicWorkflowSha).map(({ path, content }) => [path, content]),
+  ) as SetupFiles;
+  files[SETUP_FILE_PATHS[0]] = files[SETUP_FILE_PATHS[0]]!
+    .replace(
+      [
+        "      source_kind:",
+        "        description: Source kind for manual dispatch (issue or inline)",
+        "        required: false",
+        "      source_comment_id:",
+        "        description: Source comment ID for manual reply",
+        "        required: false",
+        "      source_updated_at:",
+        "        description: Timestamp of source comment",
+        "        required: false",
+        "      root_comment_id:",
+        "        description: Root comment ID for manual reply thread",
+        "        required: false",
+      ].join("\n") + "\n",
+      "",
+    )
+    .replace("  trusted-local-manual:\n", "  manual-or-trusted-local:\n")
+    .replace(
+      "      head_ref: ${{ inputs.head_ref || '' }}\n",
+      "      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}\n",
+    );
+  files[SETUP_FILE_PATHS[1]] = files[SETUP_FILE_PATHS[1]]!.replace(
+    '              "--body", "Remove generated ReviewSensei setup files; ' +
+      'learnings and secrets remain untouched.",\n',
+    '              "--body", "Remove the ReviewSensei workflow, cleanup workflow, ' +
+      'and generated configuration. ReviewSensei learnings and repository secrets ' +
+      'are left untouched.",\n',
+  );
+  return files;
 }
 
 describe("installation and migration events", () => {
@@ -437,6 +475,51 @@ describe("setup-v3 repository reconciliation", () => {
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
+  });
+
+  it("migrates a managed v3 setup with a stale public workflow SHA", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildSetupFiles("c".repeat(40)).map(({ path, content }) => [path, content]),
+    );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      mutationRequests(fake).some(({ method, path }) =>
+        method === "POST" && path.endsWith("/pulls"),
+      ),
+    ).toBe(true);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates a released v3 setup with a stale public workflow SHA", async () => {
+    const fake = new FakeGitHub();
+    fake.files = historicalV3Files("c".repeat(40));
+    expect(
+      createHash("sha256")
+        .update(fake.files[SETUP_FILE_PATHS[0]]!, "utf8")
+        .digest("hex"),
+    ).toBe("a693256f243dbeafc2910297375064b6133b7ace8f71b75712c72db43a6fafee");
+    expect(
+      createHash("sha256")
+        .update(fake.files[SETUP_FILE_PATHS[1]]!, "utf8")
+        .digest("hex"),
+    ).toBe("fdf0b34c76cd8e0ec7330d307315f7579a4b1fac5a8c5c0cc5f627788c398df8");
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      mutationRequests(fake).some(({ method, path }) =>
+        method === "POST" && path.endsWith("/pulls"),
+      ),
+    ).toBe(true);
   });
 
   it("does not replace customized partial setup-v3 content", async () => {

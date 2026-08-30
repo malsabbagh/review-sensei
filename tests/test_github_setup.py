@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import unittest
@@ -251,6 +252,14 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn(
             "types: [opened, reopened, synchronize, ready_for_review]", workflow
         )
+        self.assertIn(
+            "source_kind:\n        description: Source kind for manual dispatch",
+            workflow,
+        )
+        self.assertIn(
+            "root_comment_id:\n        description: Root comment ID for manual reply thread",
+            workflow,
+        )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("github.event.comment.author_association == 'OWNER'", workflow)
@@ -305,6 +314,49 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         return (Path(__file__).parent / "fixtures" / "setup-legacy" / name).read_text(
             encoding="utf-8"
         )
+
+    @staticmethod
+    def historical_v3_files(public_workflow_sha="c" * 40):
+        plan = SetupPlanBuilder(public_workflow_sha=public_workflow_sha).build(
+            "owner/repo"
+        )
+        files = {file.path: file.content for file in plan.files}
+        files[".github/workflows/review-sensei-review.yml"] = (
+            files[".github/workflows/review-sensei-review.yml"]
+            .replace(
+                "      source_kind:\n"
+                "        description: Source kind for manual dispatch (issue or inline)\n"
+                "        required: false\n"
+                "      source_comment_id:\n"
+                "        description: Source comment ID for manual reply\n"
+                "        required: false\n"
+                "      source_updated_at:\n"
+                "        description: Timestamp of source comment\n"
+                "        required: false\n"
+                "      root_comment_id:\n"
+                "        description: Root comment ID for manual reply thread\n"
+                "        required: false\n",
+                "",
+            )
+            .replace(
+                "  trusted-local-manual:\n",
+                "  manual-or-trusted-local:\n",
+            )
+            .replace(
+                "      head_ref: ${{ inputs.head_ref || '' }}\n",
+                "      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}\n",
+            )
+        )
+        files[".github/workflows/review-sensei-uninstall.yml"] = files[
+            ".github/workflows/review-sensei-uninstall.yml"
+        ].replace(
+            '              "--body", "Remove generated ReviewSensei setup files; '
+            'learnings and secrets remain untouched.",\n',
+            '              "--body", "Remove the ReviewSensei workflow, cleanup '
+            "workflow, and generated configuration. ReviewSensei learnings and "
+            'repository secrets are left untouched.",\n',
+        )
+        return files
 
     def test_installation_created_creates_one_setup_pr(self):
         transport = FakeTransport()
@@ -450,10 +502,9 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             any(r[0] == "create_or_update_branch" for r in transport.requests)
         )
 
-    def test_current_setup_with_unexpected_public_workflow_sha_is_custom(self):
+    def test_stale_v3_setup_with_unexpected_public_workflow_sha_is_migrated(self):
         plan = SetupPlanBuilder(public_workflow_sha="e" * 40).build("owner/repo")
         transport = FileTransport(
-            branch_exists=True,
             files={file.path: file.content for file in plan.files},
         )
 
@@ -462,11 +513,38 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             installation_token="ghs_opaque",
         )
 
-        self.assertEqual(results[0].status, "skipped_unknown_setup")
-        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
-        self.assertFalse(
-            any(r[0] == "create_or_update_branch" for r in transport.requests)
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
         )
+        self.assertEqual(
+            branch_request[5], "review-sensei/setup-v3-bbbbbbbbbbbb-ffffffffffff"
+        )
+
+    def test_released_v3_setup_with_stale_public_workflow_sha_is_migrated(self):
+        files = self.historical_v3_files()
+        self.assertEqual(
+            hashlib.sha256(
+                files[".github/workflows/review-sensei-review.yml"].encode()
+            ).hexdigest(),
+            "a693256f243dbeafc2910297375064b6133b7ace8f71b75712c72db43a6fafee",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                files[".github/workflows/review-sensei-uninstall.yml"].encode()
+            ).hexdigest(),
+            "fdf0b34c76cd8e0ec7330d307315f7579a4b1fac5a8c5c0cc5f627788c398df8",
+        )
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
 
     def test_unknown_existing_setup_is_not_overwritten(self):
         transport = FileTransport(

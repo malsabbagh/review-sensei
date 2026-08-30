@@ -68,6 +68,29 @@ SETUP_VERSION_PATTERN = re.compile(
     r"(?m)^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(?P<version>[0-9]+)[ \t]*$"
 )
 SETUP_VERSION_PREFIX = "ReviewSensei setup version:"
+PUBLIC_WORKFLOW_REFERENCE_PATTERN = re.compile(
+    r"malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@"
+    r"(?P<sha>[a-f0-9]{40})"
+)
+LEGACY_V3_SOURCE_INPUTS = (
+    "      source_kind:\n"
+    "        description: Source kind for manual dispatch (issue or inline)\n"
+    "        required: false\n"
+    "      source_comment_id:\n"
+    "        description: Source comment ID for manual reply\n"
+    "        required: false\n"
+    "      source_updated_at:\n"
+    "        description: Timestamp of source comment\n"
+    "        required: false\n"
+    "      root_comment_id:\n"
+    "        description: Root comment ID for manual reply thread\n"
+    "        required: false\n"
+)
+LEGACY_V3_UNINSTALL_BODY = (
+    "Remove the ReviewSensei workflow, cleanup workflow, and generated "
+    "configuration. ReviewSensei learnings and repository secrets are left "
+    "untouched."
+)
 
 
 def _setup_marker_version(content: str) -> int | None:
@@ -136,6 +159,58 @@ def _looks_like_current_setup(
     return expected.get(path) == content
 
 
+def _historical_v3_workflow(
+    public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
+) -> str:
+    """Return the previously released setup-v3 workflow template.
+
+    The first setup-v3 release already carried the source metadata expressions,
+    but did not declare their manual-dispatch inputs. It also used the original
+    trusted-local job name and head-ref fallback. Keep this exact compatibility
+    shape so real installations can be recognized as managed stale content.
+    """
+
+    return (
+        _immutable_workflow(public_workflow_sha)
+        .replace(LEGACY_V3_SOURCE_INPUTS, "")
+        .replace("  trusted-local-manual:\n", "  manual-or-trusted-local:\n")
+        .replace(
+            "      head_ref: ${{ inputs.head_ref || '' }}\n",
+            "      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}\n",
+        )
+    )
+
+
+def _historical_v3_uninstall_workflow() -> str:
+    """Return the previously released setup-v3 uninstall workflow template."""
+
+    return _uninstall_workflow().replace(
+        '              "--body", "Remove generated ReviewSensei setup files; '
+        'learnings and secrets remain untouched.",\n',
+        f'              "--body", "{LEGACY_V3_UNINSTALL_BODY}",\n',
+    )
+
+
+def _looks_like_managed_v3_setup(path: str, content: str) -> bool:
+    """Recognize a released v3 artifact generated for any valid public SHA."""
+
+    if path == WORKFLOW_PATH:
+        matches = [
+            match.group("sha")
+            for match in PUBLIC_WORKFLOW_REFERENCE_PATTERN.finditer(content)
+        ]
+        if len(matches) != 2 or len(set(matches)) != 1:
+            return False
+        public_workflow_sha = matches[0]
+        return content in {
+            _immutable_workflow(public_workflow_sha),
+            _historical_v3_workflow(public_workflow_sha),
+        }
+    if path == UNINSTALL_WORKFLOW_PATH:
+        return content == _historical_v3_uninstall_workflow()
+    return False
+
+
 def _classify_setup_files(
     files: dict[str, str | None],
     *,
@@ -143,16 +218,17 @@ def _classify_setup_files(
 ) -> str:
     """Return absent, migration, current, or unknown for known setup paths.
 
-    A setup is migrated only when every present file is either a current file,
-    an older ReviewSensei-generated file, or a missing companion file. Any
-    foreign content or future version causes a no-write result instead.
+    A setup is migrated only when every present file is either current, a
+    managed stale-v3 workflow, an older ReviewSensei-generated file, or a
+    missing companion file. Any foreign content or future version causes a
+    no-write result instead.
     """
 
     present = {path: content for path, content in files.items() if content is not None}
     if not present:
         return "absent"
 
-    has_legacy = False
+    has_managed = False
     has_current = False
     for path, content in present.items():
         if content is None:
@@ -164,26 +240,29 @@ def _classify_setup_files(
             if marker > SETUP_VERSION:
                 return "unknown"
             if marker == SETUP_VERSION:
-                if not _looks_like_current_setup(
+                if _looks_like_current_setup(
                     path,
                     content,
                     public_workflow_sha=public_workflow_sha,
                 ):
+                    has_current = True
+                elif _looks_like_managed_v3_setup(path, content):
+                    has_managed = True
+                else:
                     return "unknown"
-                has_current = True
                 continue
             if not _looks_like_legacy_setup(path, content):
                 return "unknown"
-            has_legacy = True
+            has_managed = True
             continue
         if _looks_like_legacy_setup(path, content):
-            has_legacy = True
+            has_managed = True
             continue
         return "unknown"
 
-    if len(present) == len(SETUP_FILE_PATHS) and has_current and not has_legacy:
+    if len(present) == len(SETUP_FILE_PATHS) and has_current and not has_managed:
         return "current"
-    if has_legacy or has_current:
+    if has_managed or has_current:
         return "migration"
     return "unknown"
 
@@ -276,6 +355,18 @@ on:
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+      source_kind:
+        description: Source kind for manual dispatch (issue or inline)
+        required: false
+      source_comment_id:
+        description: Source comment ID for manual reply
+        required: false
+      source_updated_at:
+        description: Timestamp of source comment
+        required: false
+      root_comment_id:
+        description: Root comment ID for manual reply thread
+        required: false
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -316,7 +407,7 @@ jobs:
     secrets:
       OLLAMA_API_KEY: ${{{{ secrets.OLLAMA_API_KEY }}}}
 
-  manual-or-trusted-local:
+  trusted-local-manual:
     if: >-
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issue_comment' &&
@@ -344,7 +435,7 @@ jobs:
       pull_request_number: ${{{{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}}}
       base_ref: ${{{{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}}}
       base_sha: ${{{{ inputs.base_sha || github.event.pull_request.base.sha }}}}
-      head_ref: ${{{{ inputs.head_ref || github.event.pull_request.head.ref || '' }}}}
+      head_ref: ${{{{ inputs.head_ref || '' }}}}
       head_repository: ${{{{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}}}
       head_sha: ${{{{ inputs.head_sha || github.event.pull_request.head.sha }}}}
       source_kind: ${{{{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}}}
@@ -442,7 +533,7 @@ jobs:
           subprocess.run([
               "gh", "pr", "create", "--base", default_branch, "--head", branch,
               "--title", "Remove ReviewSensei setup",
-              "--body", "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. ReviewSensei learnings and repository secrets are left untouched.",
+              "--body", "Remove generated ReviewSensei setup files; learnings and secrets remain untouched.",
           ], check=True)
           PY
 """

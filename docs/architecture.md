@@ -120,12 +120,14 @@ configuration owner. Generated setup files carry a `ReviewSensei setup version`
 marker. Before creating a setup pull request, the Cloudflare Worker or Python
 adapter reads only the three known generated paths from the trusted default
 branch, with a 128 KiB per-file limit and strict UTF-8 decoding. Older
-generated files and partial current setups produce a reviewable migration PR;
-all-current files are a no-op. A custom, malformed, or future-version file
-produces a no-write result so repository-owned workflow content is not
-overwritten. The migration branch is rebuilt from the current default branch
-and changes only generated paths, preserving learnings, variables, secrets,
-and unrelated repository files. See ADR 0021.
+generated files, partial current setups, and byte-exact current or previously
+released v3 workflows pinned to another valid public workflow SHA produce a
+reviewable migration PR; all current files are a no-op. A custom, malformed,
+or future-version file produces a no-write result so repository-owned workflow
+content is not overwritten. The migration branch is rebuilt from the current
+default branch and changes only
+generated paths, preserving learnings, variables, secrets, and unrelated
+repository files. See ADR 0021.
 
 Public JSON documents are versioned under `src/review_sensei/schemas/` with v1
 `$id` values. The `review_sensei.schemas` module and
@@ -424,8 +426,10 @@ name-only secret mapping. The setup App does not access that value. The Worker
 does not receive source, diffs, prompts, review output, reply content, provider
 credentials, or installation-token values for persistence; its ledger retains
 only hashed identities and bounded counters. Current, custom, malformed, and
-future clients are no-write cases, while absent and legacy/v2 clients are
-reconciled through at most one reviewable setup-v3 PR per selected repository.
+future clients are no-write cases. A byte-exact managed v3 workflow pinned to
+another valid public workflow SHA is a stale client and is migrated; absent and
+legacy/v2 clients are also reconciled through at most one reviewable setup-v3 PR
+per selected repository.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

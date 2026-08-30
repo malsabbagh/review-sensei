@@ -23,6 +23,8 @@ describe("setup-v3 public boundary", () => {
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
     expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
+    expect(workflow).toContain("source_kind:\n        description: Source kind for manual dispatch");
+    expect(workflow).toContain("root_comment_id:\n        description: Root comment ID for manual reply thread");
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
   });
 });

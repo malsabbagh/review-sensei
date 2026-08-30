@@ -63,12 +63,16 @@ rechecked before writing.
 Setup reconciliation handles `installation.created` (including reinstall),
 `installation.new_permissions_accepted`, and
 `installation_repositories.added`. Absent, legacy, and v2 clients receive at
-most one deterministic setup-v3 PR. Current v3 is a no-op, while custom,
+most one deterministic setup-v3 PR. Current v3 is a no-op, while a byte-exact
+current or previously released v3 workflow generated for another valid public
+workflow SHA is treated as managed stale content and migrated. A previously
+released v3 uninstall template is also recognized as managed. Custom,
 malformed, and future files are no-write cases. Released pre-marker Worker and
-Python clients and setup-v2 clients are recognized only by byte-exact
-historical digests. Present setup-v3 files must exactly match the configured
-generated artifacts. Migration uses a create-only branch whose name binds the
-base and public-workflow SHAs. Reuse requires the exact base parent,
+Python clients and setup-v2
+clients are recognized only by byte-exact historical digests. Present v3 files
+must exactly match a generated artifact; the workflow's two public references
+must agree on the embedded SHA. Migration uses a create-only branch whose name
+binds the base and public-workflow SHAs. Reuse requires the exact base parent,
 ReviewSensei App author, canonical generated content, and a comparison limited
 to generated paths. A pre-existing or concurrent collision is a no-write
 conflict; the App never force-moves a ref. Only the three generated paths are

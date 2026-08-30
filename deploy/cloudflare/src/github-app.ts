@@ -11,6 +11,7 @@ import {
   SETUP_PULL_REQUEST_TITLE,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  buildHistoricalV3SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
 } from "./setup-content";
@@ -36,6 +37,8 @@ const REQUIRED_SETUP_PERMISSIONS = [
 const SUPPORTED_EVENTS = new Set(["installation", "installation_repositories"]);
 const SETUP_VERSION_PATTERN = /^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(\d+)[ \t]*$/m;
 const SETUP_VERSION_PREFIX = "ReviewSensei setup version:";
+const PUBLIC_WORKFLOW_REFERENCE =
+  /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([a-f0-9]{40})/g;
 
 type SetupInspectionState = "absent" | "migration" | "current" | "unknown";
 
@@ -194,6 +197,30 @@ function looksLikeCurrentSetup(
   return canonical?.content === content;
 }
 
+function looksLikeManagedV3Setup(path: string, content: string): boolean {
+  if (path === SETUP_FILE_PATHS[0]) {
+    const matches = [...content.matchAll(PUBLIC_WORKFLOW_REFERENCE)];
+    if (matches.length !== 2) {
+      return false;
+    }
+    const publicWorkflowSha = matches[0]?.[1];
+    if (
+      !publicWorkflowSha ||
+      matches.some((match) => match[1] !== publicWorkflowSha)
+    ) {
+      return false;
+    }
+    return (
+      content === buildSetupFiles(publicWorkflowSha)[0].content ||
+      content === buildHistoricalV3SetupFiles(publicWorkflowSha)[0].content
+    );
+  }
+  if (path === SETUP_FILE_PATHS[1]) {
+    return content === buildHistoricalV3SetupFiles("f".repeat(40))[1].content;
+  }
+  return false;
+}
+
 async function classifySetupFiles(
   files: Record<string, string | null>,
   publicWorkflowSha: string,
@@ -205,7 +232,7 @@ async function classifySetupFiles(
     return "absent";
   }
 
-  let hasLegacy = false;
+  let hasManaged = false;
   let hasCurrent = false;
   for (const [path, content] of present) {
     const marker = setupMarkerVersion(content);
@@ -217,29 +244,32 @@ async function classifySetupFiles(
         return "unknown";
       }
       if (marker === SETUP_VERSION) {
-        if (!looksLikeCurrentSetup(path, content, publicWorkflowSha)) {
+        if (looksLikeCurrentSetup(path, content, publicWorkflowSha)) {
+          hasCurrent = true;
+        } else if (looksLikeManagedV3Setup(path, content)) {
+          hasManaged = true;
+        } else {
           return "unknown";
         }
-        hasCurrent = true;
       } else {
         if (!(await looksLikeLegacySetup(path, content))) {
           return "unknown";
         }
-        hasLegacy = true;
+        hasManaged = true;
       }
       continue;
     }
     if (await looksLikeLegacySetup(path, content)) {
-      hasLegacy = true;
+      hasManaged = true;
       continue;
     }
     return "unknown";
   }
 
-  if (present.length === SETUP_FILE_PATHS.length && hasCurrent && !hasLegacy) {
+  if (present.length === SETUP_FILE_PATHS.length && hasCurrent && !hasManaged) {
     return "current";
   }
-  if (hasLegacy || hasCurrent) {
+  if (hasManaged || hasCurrent) {
     return "migration";
   }
   return "unknown";

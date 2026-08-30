@@ -42,7 +42,7 @@ class BrokerClient:
         """Request the standard GitHub Actions OIDC token from env claims."""
 
         token = os.getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-        url = os.getenv("ACTIONS_OIDC_TOKEN_REQUEST_URL")
+        url = os.getenv("ACTIONS_ID_TOKEN_REQUEST_URL")
         if not token or not url:
             raise GitHubBrokerClientError("GitHub Actions OIDC token is not available")
         request = Request(

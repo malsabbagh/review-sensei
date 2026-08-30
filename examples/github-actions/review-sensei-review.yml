@@ -39,6 +39,18 @@ on:
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+      source_kind:
+        description: Source kind for manual dispatch (issue or inline)
+        required: false
+      source_comment_id:
+        description: Source comment ID for manual reply
+        required: false
+      source_updated_at:
+        description: Timestamp of source comment
+        required: false
+      root_comment_id:
+        description: Root comment ID for manual reply thread
+        required: false
   issue_comment:
     types: [created]
   pull_request_review_comment:
