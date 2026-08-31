@@ -7,10 +7,11 @@ providers later.
 
 > Alpha: this repository provides an open-source review engine and CLI. The
 > primary usage path is running ReviewSensei in your own GitHub Actions
-> workflow. The example workflow installs the requested exact package from
-> PyPI first and falls back to a pinned public GitHub source commit only when
-> that distribution is unavailable. It defaults to a local Ollama endpoint and
-> does not require a hosted backend.
+> workflow. The installer resolves the operator-managed public workflow tag at
+> setup time and writes a full commit SHA into generated callers. The example
+> workflow installs the requested exact package from PyPI first and falls back
+> to that executing commit only when the distribution is unavailable. It
+> defaults to a local Ollama endpoint and does not require a hosted backend.
 
 ## What it does
 
@@ -102,26 +103,30 @@ Optional App-identity publication is documented in
 authentication adapter for GitHub App JWTs and installation access tokens; it
 is not a hosted review service, webhook receiver, or durable delivery store.
 
-### GitHub App setup-v3 integration
+### GitHub App setup-v4 integration
 
-The optional setup-v3 integration adds a reviewable, generated caller at an
-exact public commit SHA:
-`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<40-hex-sha>`.
+The optional setup-v4 integration adds a reviewable, generated caller by using
+the operator-managed `v4` git tag as an install-time update channel. The Worker
+resolves that tag and writes the resulting full commit SHA into the caller:
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<sha>`.
+The Cloudflare broker admits only the configured SHA (plus explicit legacy SHA
+pins during migration); a mutable tag is never executed by new callers.
 Automatic pull-request cloud reviews run only on GitHub-hosted compute. Local
 Ollama runs remain manual or trusted-event-only on an operator-controlled
 self-hosted runner. Every generated write switch defaults to `false`.
 
 Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
-name (`secrets.OLLAMA_API_KEY`) to the immutable reusable workflow. The App
+name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
 does not create, read, persist, log, or reveal that secret value. The Worker
 broker only issues one capability-scoped installation token after verifying
-the signed Actions OIDC identity, exact workflow SHA, repository identity,
-fork status, installation, replay state, and rate limit.
+the signed Actions OIDC identity, exact workflow SHA, repository identity, fork
+status, installation, replay state, and rate limit.
 
 Installation, reinstall, permission-acceptance, and repository-added events
-reconcile absent or older generated clients through at most one setup-v3 PR.
-Current v3, custom, malformed, and future setup files are handled as no-write
-or no-op cases. See [`docs/installation.md`](docs/installation.md),
+reconcile absent or older generated clients through at most one setup-v4 PR.
+Current v4 is a no-op; managed v3 and older generated clients are migrated
+through a setup PR, while custom, malformed, and future setup files are no-write
+cases. See [`docs/installation.md`](docs/installation.md),
 [`docs/github-app-registration.md`](docs/github-app-registration.md), and the
 proposed [`docs/adr/0022-actions-publication-learning-and-conversations.md`](docs/adr/0022-actions-publication-learning-and-conversations.md).
 The optional OIDC broker documented there is a hosted issuance-only backend
@@ -354,11 +359,12 @@ See [the architecture guide](docs/architecture.md).
 
 ## GitHub integration
 
-The GitHub App opens a setup-v3 PR containing a thin caller that pins the public
-reusable workflow to an operator-configured 40-character commit SHA. The
-reusable workflow prefers the requested exact package from PyPI and falls back
-to its pinned public GitHub source commit only when that package/version is not
-available; unrelated PyPI installation failures remain fatal. All nine
+The GitHub App opens a setup-v4 PR containing a thin caller pinned to the full
+SHA resolved from the operator-managed `v4` public git tag at installation
+time. The reusable workflow prefers the requested exact package from PyPI and,
+only when that package/version is unavailable, installs the executing workflow
+commit directly from the public GitHub source. Unrelated PyPI installation
+failures remain fatal. All nine
 `REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
 review, GitHub writes, learning PRs, mention replies, and artifact upload are
 off. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
@@ -373,10 +379,10 @@ draft PRs. Fork pull requests fail closed before provider or broker access.
 Local Ollama remains available on the labelled self-hosted runner only for
 manual dispatch and authorized trusted-event `@sensei` replies. Conversation
 context is not sent to the cloud provider. `review.json` is uploaded only when
-`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v3 does not create a separate
+`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v4 does not create a separate
 version artifact. See [installation and migration](docs/installation.md) and
 the reviewable
-[`setup-v3 example`](examples/github-actions/review-sensei-review.yml).
+[`setup-v4 example`](examples/github-actions/review-sensei-review.yml).
 
 ## Concurrency policy
 

@@ -33,12 +33,12 @@ MAX_SETUP_FILE_BYTES = 128 * 1024
 DEFAULT_SETUP_BRANCH = "review-sensei/setup"
 DEFAULT_SETUP_TITLE = "ReviewSensei review setup"
 SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files"
-SETUP_BRANCH_PREFIX = "review-sensei/setup-v3"
+SETUP_BRANCH_PREFIX = "review-sensei/setup-v4"
 SETUP_APP_LOGIN = "reviewsensei[bot]"
 REQUIRED_SETUP_PERMISSIONS = frozenset(
     {"contents", "pull_requests", "variables", "workflows"}
 )
-SETUP_VERSION = 3
+SETUP_VERSION = 4
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
@@ -59,10 +59,14 @@ SETUP_VARIABLES = (
 )
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
-# The Python builder is also used by local contract tests and by older setup
-# transports that do not have Worker configuration. The Worker always passes
-# its explicitly configured value through ``public_workflow_sha`` and rejects
-# the fallback before any GitHub write.
+PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# The tag is the install-time update channel. The setup caller receives the
+# resolved SHA so every customer workflow remains immutable after its PR is
+# merged.
+DEFAULT_PUBLIC_WORKFLOW_TAG = "v4"
+# The package-level builder has no GitHub API credentials to resolve a tag;
+# deployments must supply the real resolved SHA, while this sentinel preserves
+# deterministic offline generation/tests.
 DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
 SETUP_VERSION_PATTERN = re.compile(
     r"(?m)^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(?P<version>[0-9]+)[ \t]*$"
@@ -71,6 +75,10 @@ SETUP_VERSION_PREFIX = "ReviewSensei setup version:"
 PUBLIC_WORKFLOW_REFERENCE_PATTERN = re.compile(
     r"malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@"
     r"(?P<sha>[a-f0-9]{40})"
+)
+PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN = re.compile(
+    r"malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@"
+    r"(?P<tag>[A-Za-z0-9][A-Za-z0-9._-]{0,127})"
 )
 LEGACY_V3_SOURCE_INPUTS = (
     "      source_kind:\n"
@@ -149,12 +157,12 @@ def _looks_like_current_setup(
     *,
     public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
 ) -> bool:
-    """Recognize only the exact configured setup-v3 generated artifact."""
+    """Recognize only the exact configured setup-v4 generated artifact."""
 
     expected = {
-        WORKFLOW_PATH: _immutable_workflow(public_workflow_sha),
-        UNINSTALL_WORKFLOW_PATH: _uninstall_workflow(),
-        CONFIG_PATH: _config_file(),
+        WORKFLOW_PATH: _pinned_v4_workflow(public_workflow_sha),
+        UNINSTALL_WORKFLOW_PATH: _v4_uninstall_workflow(),
+        CONFIG_PATH: _v4_config_file(),
     }
     return expected.get(path) == content
 
@@ -207,7 +215,40 @@ def _looks_like_managed_v3_setup(path: str, content: str) -> bool:
             _historical_v3_workflow(public_workflow_sha),
         }
     if path == UNINSTALL_WORKFLOW_PATH:
-        return content == _historical_v3_uninstall_workflow()
+        return content in {_uninstall_workflow(), _historical_v3_uninstall_workflow()}
+    if path == CONFIG_PATH:
+        return content == _config_file()
+    return False
+
+
+def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
+    """Recognize setup-v4 artifacts from either pinning contract."""
+
+    if path == WORKFLOW_PATH:
+        sha_matches = [
+            match.group("sha")
+            for match in PUBLIC_WORKFLOW_REFERENCE_PATTERN.finditer(content)
+        ]
+        if len(sha_matches) == 2 and len(set(sha_matches)) == 1:
+            try:
+                if content == _pinned_v4_workflow(sha_matches[0]):
+                    return True
+            except GitHubSetupError:
+                return False
+        tag_matches = [
+            match.group("tag")
+            for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
+        ]
+        if len(tag_matches) != 2 or len(set(tag_matches)) != 1:
+            return False
+        try:
+            return content == _tagged_workflow(tag_matches[0])
+        except GitHubSetupError:
+            return False
+    if path == UNINSTALL_WORKFLOW_PATH:
+        return content == _v4_uninstall_workflow()
+    if path == CONFIG_PATH:
+        return content == _v4_config_file()
     return False
 
 
@@ -219,7 +260,7 @@ def _classify_setup_files(
     """Return absent, migration, current, or unknown for known setup paths.
 
     A setup is migrated only when every present file is either current, a
-    managed stale-v3 workflow, an older ReviewSensei-generated file, or a
+    managed stale-v4/v3 workflow, an older ReviewSensei-generated file, or a
     missing companion file. Any foreign content or future version causes a
     no-write result instead.
     """
@@ -246,10 +287,15 @@ def _classify_setup_files(
                     public_workflow_sha=public_workflow_sha,
                 ):
                     has_current = True
-                elif _looks_like_managed_v3_setup(path, content):
+                elif _looks_like_managed_v4_setup(path, content):
                     has_managed = True
                 else:
                     return "unknown"
+                continue
+            if marker == 3:
+                if not _looks_like_managed_v3_setup(path, content):
+                    return "unknown"
+                has_managed = True
                 continue
             if not _looks_like_legacy_setup(path, content):
                 return "unknown"
@@ -304,14 +350,43 @@ def _validate_public_workflow_sha(value: str) -> str:
     return value
 
 
-def _setup_branch(base_sha: str, public_workflow_sha: str) -> str:
+def _validate_public_workflow_tag(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or PUBLIC_WORKFLOW_TAG_PATTERN.fullmatch(value) is None
+        or ".." in value
+        or value.endswith(".")
+        or value.endswith(".lock")
+    ):
+        raise GitHubSetupError(
+            "PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag"
+        )
+    return value
+
+
+def _legacy_setup_branch(base_sha: str, public_workflow_sha: str) -> str:
     if (
         not isinstance(base_sha, str)
         or PUBLIC_WORKFLOW_SHA_PATTERN.fullmatch(base_sha) is None
     ):
         raise GitHubSetupError("Setup branch inputs were invalid")
     public_sha = _validate_public_workflow_sha(public_workflow_sha)
-    return f"{SETUP_BRANCH_PREFIX}-{base_sha[:12]}-{public_sha[:12]}"
+    return f"review-sensei/setup-v3-{base_sha[:12]}-{public_sha[:12]}"
+
+
+def _setup_branch(
+    base_sha: str,
+    public_workflow_tag: str,
+    public_workflow_sha: str,
+) -> str:
+    if (
+        not isinstance(base_sha, str)
+        or PUBLIC_WORKFLOW_SHA_PATTERN.fullmatch(base_sha) is None
+    ):
+        raise GitHubSetupError("Setup branch inputs were invalid")
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    sha = _validate_public_workflow_sha(public_workflow_sha)
+    return f"{SETUP_BRANCH_PREFIX}-{base_sha[:12]}-{tag}-{sha[:12]}"
 
 
 def _immutable_workflow(public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA) -> str:
@@ -453,6 +528,33 @@ jobs:
 """
 
 
+def _pinned_v4_workflow(
+    public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
+) -> str:
+    """Return setup-v4 with the install-time resolved SHA pin."""
+
+    return _immutable_workflow(public_workflow_sha).replace(
+        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
+    )
+
+
+def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
+    """Return the prior tag-following setup-v4 caller for migration only."""
+
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    return (
+        _immutable_workflow()
+        .replace(
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
+            + DEFAULT_PUBLIC_WORKFLOW_SHA,
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
+        )
+        .replace(
+            "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
+        )
+    )
+
+
 def _config_file() -> str:
     return """\
 # ReviewSensei setup version: 3
@@ -470,6 +572,14 @@ learning_prs: false
 mention_replies: false
 upload_artifacts: false
 """
+
+
+def _v4_config_file() -> str:
+    return _config_file().replace(
+        "# ReviewSensei setup version: 3\nsetup_version: 3",
+        "# ReviewSensei setup version: 4\nsetup_version: 4",
+        1,
+    )
 
 
 def _uninstall_workflow() -> str:
@@ -539,11 +649,18 @@ jobs:
 """
 
 
+def _v4_uninstall_workflow() -> str:
+    return _uninstall_workflow().replace(
+        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
+    )
+
+
 def _setup_pull_request_body() -> str:
     return (
         "This pull request adds or updates the ReviewSensei review workflow "
-        "(setup version 3), opt-in provider defaults, and a manual uninstall-cleanup "
-        "workflow. The installation bootstrap also "
+        "(setup version 4), which pins the commit resolved from the public v4 "
+        "git tag at installation time, with opt-in provider defaults and a "
+        "manual uninstall-cleanup workflow. The installation bootstrap also "
         "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
         "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
         "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
@@ -565,7 +682,9 @@ class SetupPlanBuilder:
         *,
         branch_name: str = DEFAULT_SETUP_BRANCH,
         title: str = DEFAULT_SETUP_TITLE,
-        public_workflow_sha: str = DEFAULT_PUBLIC_WORKFLOW_SHA,
+        public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+        public_workflow_sha: str | None = None,
+        legacy_v3: bool = False,
     ) -> None:
         if not branch_name.strip():
             raise GitHubSetupError("Setup branch name must be non-empty")
@@ -575,7 +694,13 @@ class SetupPlanBuilder:
             raise GitHubSetupError("Setup branch name is invalid")
         if not title.strip():
             raise GitHubSetupError("Setup pull request title must be non-empty")
-        self.public_workflow_sha = _validate_public_workflow_sha(public_workflow_sha)
+        self.public_workflow_tag = _validate_public_workflow_tag(public_workflow_tag)
+        self.public_workflow_sha = _validate_public_workflow_sha(
+            public_workflow_sha
+            if public_workflow_sha is not None
+            else DEFAULT_PUBLIC_WORKFLOW_SHA
+        )
+        self._legacy_v3 = legacy_v3
         self.branch_name = branch_name
         self.title = title
 
@@ -588,21 +713,32 @@ class SetupPlanBuilder:
     ) -> SetupPlan:
         if not isinstance(repository, str) or not _is_repository_slug(repository):
             raise GitHubSetupError("Setup repository must be an owner/repo slug")
+        if self._legacy_v3:
+            workflow = _immutable_workflow(self.public_workflow_sha)
+            uninstall = _uninstall_workflow()
+            config = _config_file()
+        else:
+            workflow = _pinned_v4_workflow(self.public_workflow_sha)
+            uninstall = _v4_uninstall_workflow()
+            config = _v4_config_file()
         files = (
-            SetupFile(
-                path=WORKFLOW_PATH,
-                content=_immutable_workflow(self.public_workflow_sha),
-            ),
-            SetupFile(path=UNINSTALL_WORKFLOW_PATH, content=_uninstall_workflow()),
-            SetupFile(path=CONFIG_PATH, content=_config_file()),
+            SetupFile(path=WORKFLOW_PATH, content=workflow),
+            SetupFile(path=UNINSTALL_WORKFLOW_PATH, content=uninstall),
+            SetupFile(path=CONFIG_PATH, content=config),
         )
+        branch_name = self.branch_name
+        if base_sha is not None:
+            if self._legacy_v3:
+                branch_name = _legacy_setup_branch(base_sha, self.public_workflow_sha)
+            else:
+                branch_name = _setup_branch(
+                    base_sha,
+                    self.public_workflow_tag,
+                    self.public_workflow_sha,
+                )
         return SetupPlan(
             repository=repository,
-            branch_name=(
-                self.branch_name
-                if base_sha is None
-                else _setup_branch(base_sha, self.public_workflow_sha)
-            ),
+            branch_name=branch_name,
             base_branch=base_branch,
             title=self.title,
             body=_setup_pull_request_body(),
@@ -659,6 +795,7 @@ class GitHubSetupTransport(Protocol):
         installation_token: str,
         branch: str,
         base_sha: str,
+        public_workflow_tag: str,
         public_workflow_sha: str,
     ) -> bool:
         """Return whether an existing branch has the App-owned setup shape."""
@@ -809,6 +946,7 @@ class GitHubSetupClient:
         installation_token: str,
         branch: str,
         base_sha: str,
+        public_workflow_tag: str,
         public_workflow_sha: str,
     ) -> bool:
         data = self._request_json(
@@ -1260,6 +1398,7 @@ class SetupPullRequestService:
                     repository=repository,
                     installation_token=installation_token,
                     base_branch=base_branch,
+                    public_workflow_sha=self.plan_builder.public_workflow_sha,
                 )
                 if setup_state == "current":
                     results.append(
@@ -1291,6 +1430,7 @@ class SetupPullRequestService:
                         installation_token=installation_token,
                         branch=plan.branch_name,
                         base_sha=base_sha,
+                        public_workflow_tag=self.plan_builder.public_workflow_tag,
                         public_workflow_sha=self.plan_builder.public_workflow_sha,
                     ):
                         results.append(
@@ -1318,7 +1458,8 @@ class SetupPullRequestService:
                             installation_token=installation_token,
                             branch=plan.branch_name,
                             base_sha=base_sha,
-                            public_workflow_sha=(self.plan_builder.public_workflow_sha),
+                            public_workflow_tag=self.plan_builder.public_workflow_tag,
+                            public_workflow_sha=self.plan_builder.public_workflow_sha,
                         ):
                             results.append(
                                 SetupPullRequestResult(
@@ -1382,6 +1523,7 @@ class SetupPullRequestService:
         repository: str,
         installation_token: str,
         base_branch: str,
+        public_workflow_sha: str,
     ) -> str:
         """Classify known generated files on the default branch.
 
@@ -1405,7 +1547,7 @@ class SetupPullRequestService:
             files[path] = content
         return _classify_setup_files(
             files,
-            public_workflow_sha=self.plan_builder.public_workflow_sha,
+            public_workflow_sha=public_workflow_sha,
         )
 
     @staticmethod

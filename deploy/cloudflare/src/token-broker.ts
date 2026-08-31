@@ -1,7 +1,9 @@
 import type { WorkerEnv } from "./env";
 import { GitHubApi } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
-import { validatePublicWorkflowSha } from "./setup-content";
+import {
+  validatePublicWorkflowSha,
+} from "./setup-content";
 
 const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -35,6 +37,14 @@ function capability(value: unknown): Capability {
 
 function workflowRef(repository: string, sha: string): string {
   return `${repository}/${WORKFLOW_PATH}@${sha}`;
+}
+
+function legacyWorkflowShas(env: WorkerEnv): string[] {
+  const configured = env.PUBLIC_WORKFLOW_LEGACY_SHAS ?? "";
+  if (!configured.trim()) {
+    return [];
+  }
+  return configured.split(",").map((value) => validatePublicWorkflowSha(value.trim()));
 }
 
 async function claimLedger(
@@ -96,12 +106,15 @@ export class TokenBroker {
     if (admissionState === "rate_limited") {
       throw new Error("broker_rate_limited");
     }
-    const publicWorkflowSha = validatePublicWorkflowSha(this.env.PUBLIC_WORKFLOW_SHA ?? "");
+    const publicWorkflowSha = validatePublicWorkflowSha(
+      this.env.PUBLIC_WORKFLOW_SHA ?? "",
+    );
+    const legacyShas = legacyWorkflowShas(this.env);
     const claims = await verifyOidcAssertion(body.oidc_token, {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
     });
-    this.authorizeClaims(claims, publicWorkflowSha);
+    this.authorizeClaims(claims, publicWorkflowSha, legacyShas);
     // Reject replay/rate abuse immediately after cryptographic and local
     // policy validation, before consuming shared GitHub App API capacity.
     const ledgerState = await claimLedger(
@@ -132,11 +145,24 @@ export class TokenBroker {
     return { token, capability: requested };
   }
 
-  private authorizeClaims(claims: OidcClaims, sha: string): void {
+  private authorizeClaims(
+    claims: OidcClaims,
+    publicWorkflowSha: string,
+    legacyShas: readonly string[],
+  ): void {
     if (!REPOSITORY_PATTERN.test(claims.repository)) {
       throw new Error("broker_repository_rejected");
     }
-    if (claims.job_workflow_ref !== workflowRef("malsabbagh/review-sensei", sha) || claims.job_workflow_sha !== sha) {
+    // New callers use the full commit SHA. Legacy SHA entries provide bounded
+    // overlap for already-merged immutable callers; mutable tag refs are never
+    // admitted because they could execute a different workflow before checks.
+    const authorizedWorkflowShas = [publicWorkflowSha, ...legacyShas];
+    const workflowAuthorized = authorizedWorkflowShas.some(
+      (sha) =>
+        claims.job_workflow_ref === workflowRef("malsabbagh/review-sensei", sha) &&
+        claims.job_workflow_sha === sha,
+    );
+    if (!workflowAuthorized) {
       throw new Error("broker_workflow_rejected");
     }
     if (claims.event_name === "pull_request") {

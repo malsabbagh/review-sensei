@@ -338,7 +338,7 @@ Generated comment-event execution is local-provider-only on the trusted
 self-hosted runner. Cloud mode does not send conversation or inline-thread
 context to the external provider.
 
-All setup-v3 switches (`REVIEWSENSEI_AUTO_REVIEW`,
+All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
 `REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
 `REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`) default
 to `false`. The generated caller may contain only the name-only secret mapping

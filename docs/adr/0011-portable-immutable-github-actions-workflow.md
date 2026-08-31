@@ -197,6 +197,18 @@ the old example-only boundary for generated setup clients while retaining the
 trusted-base checkout and exact version validation. The reusable workflow's
 PyPI-first, full-SHA-pinned GitHub source fallback is defined in ADR 0023.
 
+## Amendment - issue #64 setup-v4 tag channel
+
+Setup-v4 uses the operator-managed public `v4` git tag only as an install-time
+update channel. The Worker resolves that tag, verifies it matches its configured
+SHA, and writes the full commit SHA into both reusable-workflow references in
+the generated caller. The reusable workflow and Cloudflare broker require that
+immutable SHA; the broker may temporarily admit explicitly retained older SHA
+pairs during migration. Setup-v3 callers remain supported only through the
+explicit migration allowlist described in ADR 0021. Package release tags remain
+immutable `vX.Y.Z` tags; the separate `v4` workflow tag is moved only as an
+approved public cutoff.
+
 ## Links
 
 - Related issue: #15

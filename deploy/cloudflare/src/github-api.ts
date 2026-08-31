@@ -3,6 +3,10 @@ import type { WorkerEnv } from "./env";
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_PRIVATE_KEY_BYTES = 64 * 1024;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const PUBLIC_WORKFLOW_REPOSITORY = "malsabbagh/review-sensei";
+const PUBLIC_WORKFLOW_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PUBLIC_WORKFLOW_SHA_PATTERN = /^[a-f0-9]{40}$/;
+const MAX_TAG_DEREFERENCE_DEPTH = 3;
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -17,6 +21,19 @@ export interface InstallationToken {
   token: string;
   expiresAt: number;
   permissions: Record<string, string>;
+}
+
+function publicWorkflowTag(value: string): string {
+  if (
+    typeof value !== "string" ||
+    !PUBLIC_WORKFLOW_TAG_PATTERN.test(value) ||
+    value.includes("..") ||
+    value.endsWith(".") ||
+    value.endsWith(".lock")
+  ) {
+    throw new Error("github_workflow_tag_invalid");
+  }
+  return value;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -248,6 +265,38 @@ export class GitHubApi {
       throw new Error("github_repository_response_invalid");
     }
     return { id, fork };
+  }
+
+  /** Resolve the operator-managed public workflow tag to its immutable commit. */
+  async publicWorkflowSha(tag: string): Promise<string> {
+    const validatedTag = publicWorkflowTag(tag);
+    const token = await this.appJwt();
+    let response = await this.request(
+      "GET",
+      `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(validatedTag)}`,
+      token,
+    );
+    for (let depth = 0; depth <= MAX_TAG_DEREFERENCE_DEPTH; depth += 1) {
+      if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+        throw new Error("github_workflow_tag_unavailable");
+      }
+      const object = response.data.object;
+      if (!isObject(object) || typeof object.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(object.sha)) {
+        throw new Error("github_workflow_tag_invalid");
+      }
+      if (object.type === "commit") {
+        return object.sha;
+      }
+      if (object.type !== "tag" || depth === MAX_TAG_DEREFERENCE_DEPTH) {
+        throw new Error("github_workflow_tag_invalid");
+      }
+      response = await this.request(
+        "GET",
+        `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/tags/${encodeURIComponent(object.sha)}`,
+        token,
+      );
+    }
+    throw new Error("github_workflow_tag_invalid");
   }
 
   /**

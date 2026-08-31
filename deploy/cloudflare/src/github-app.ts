@@ -6,14 +6,19 @@ import {
   type JsonObject,
 } from "./github-api";
 import {
+  DEFAULT_PUBLIC_WORKFLOW_SHA,
+  DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_FILE_PATHS,
   SETUP_PULL_REQUEST_BODY,
   SETUP_PULL_REQUEST_TITLE,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  buildCurrentV3SetupFiles,
   buildHistoricalV3SetupFiles,
+  buildTaggedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
+  validatePublicWorkflowTag,
 } from "./setup-content";
 
 // App JWT signing remains in the shared adapter and uses Web Crypto
@@ -22,7 +27,7 @@ import {
 export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const MAX_SETUP_FILE_BYTES = 128 * 1024;
-const SETUP_BRANCH_PREFIX = "review-sensei/setup-v3";
+const SETUP_BRANCH_PREFIX = "review-sensei/setup-v4";
 const SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files";
 const SETUP_APP_LOGIN = "reviewsensei[bot]";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -37,16 +42,22 @@ const REQUIRED_SETUP_PERMISSIONS = [
 const SUPPORTED_EVENTS = new Set(["installation", "installation_repositories"]);
 const SETUP_VERSION_PATTERN = /^[ \t]*#[ \t]*ReviewSensei setup version:[ \t]*(\d+)[ \t]*$/m;
 const SETUP_VERSION_PREFIX = "ReviewSensei setup version:";
-const PUBLIC_WORKFLOW_REFERENCE =
+const PUBLIC_WORKFLOW_SHA_REFERENCE =
   /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([a-f0-9]{40})/g;
+const PUBLIC_WORKFLOW_TAG_REFERENCE =
+  /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([A-Za-z0-9][A-Za-z0-9._-]{0,127})/g;
 
 type SetupInspectionState = "absent" | "migration" | "current" | "unknown";
 
-function setupBranch(baseSha: string, publicWorkflowSha: string): string {
-  if (!/^[a-f0-9]{40}$/.test(baseSha) || !/^[a-f0-9]{40}$/.test(publicWorkflowSha)) {
+function setupBranch(
+  baseSha: string,
+  publicWorkflowTag: string,
+  publicWorkflowSha: string,
+): string {
+  if (!/^[a-f0-9]{40}$/.test(baseSha)) {
     throw new GitHubSetupError("Setup branch inputs were invalid");
   }
-  return `${SETUP_BRANCH_PREFIX}-${baseSha.slice(0, 12)}-${publicWorkflowSha.slice(0, 12)}`;
+  return `${SETUP_BRANCH_PREFIX}-${baseSha.slice(0, 12)}-${validatePublicWorkflowTag(publicWorkflowTag)}-${validatePublicWorkflowSha(publicWorkflowSha).slice(0, 12)}`;
 }
 
 export class WebhookPayloadError extends Error {
@@ -199,7 +210,7 @@ function looksLikeCurrentSetup(
 
 function looksLikeManagedV3Setup(path: string, content: string): boolean {
   if (path === SETUP_FILE_PATHS[0]) {
-    const matches = [...content.matchAll(PUBLIC_WORKFLOW_REFERENCE)];
+    const matches = [...content.matchAll(PUBLIC_WORKFLOW_SHA_REFERENCE)];
     if (matches.length !== 2) {
       return false;
     }
@@ -211,12 +222,62 @@ function looksLikeManagedV3Setup(path: string, content: string): boolean {
       return false;
     }
     return (
-      content === buildSetupFiles(publicWorkflowSha)[0].content ||
+      content === buildCurrentV3SetupFiles(publicWorkflowSha)[0].content ||
       content === buildHistoricalV3SetupFiles(publicWorkflowSha)[0].content
     );
   }
   if (path === SETUP_FILE_PATHS[1]) {
-    return content === buildHistoricalV3SetupFiles("f".repeat(40))[1].content;
+    return (
+      content === buildCurrentV3SetupFiles("f".repeat(40))[1].content ||
+      content === buildHistoricalV3SetupFiles("f".repeat(40))[1].content
+    );
+  }
+  if (path === SETUP_FILE_PATHS[2]) {
+    return content === buildCurrentV3SetupFiles("f".repeat(40))[2].content;
+  }
+  return false;
+}
+
+function looksLikeManagedV4Setup(path: string, content: string): boolean {
+  if (path === SETUP_FILE_PATHS[0]) {
+    const shaMatches = [...content.matchAll(PUBLIC_WORKFLOW_SHA_REFERENCE)];
+    if (shaMatches.length === 2) {
+      const publicWorkflowSha = shaMatches[0]?.[1];
+      if (
+        publicWorkflowSha &&
+        shaMatches.every((match) => match[1] === publicWorkflowSha)
+      ) {
+        try {
+          if (content === buildSetupFiles(publicWorkflowSha)[0].content) {
+            return true;
+          }
+        } catch {
+          return false;
+        }
+      }
+    }
+    const tagMatches = [...content.matchAll(PUBLIC_WORKFLOW_TAG_REFERENCE)];
+    if (tagMatches.length !== 2) {
+      return false;
+    }
+    const publicWorkflowTag = tagMatches[0]?.[1];
+    if (
+      !publicWorkflowTag ||
+      tagMatches.some((match) => match[1] !== publicWorkflowTag)
+    ) {
+      return false;
+    }
+    try {
+      return content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content;
+    } catch {
+      return false;
+    }
+  }
+  if (path === SETUP_FILE_PATHS[1]) {
+    return content === buildSetupFiles(DEFAULT_PUBLIC_WORKFLOW_SHA)[1].content;
+  }
+  if (path === SETUP_FILE_PATHS[2]) {
+    return content === buildSetupFiles(DEFAULT_PUBLIC_WORKFLOW_SHA)[2].content;
   }
   return false;
 }
@@ -246,11 +307,16 @@ async function classifySetupFiles(
       if (marker === SETUP_VERSION) {
         if (looksLikeCurrentSetup(path, content, publicWorkflowSha)) {
           hasCurrent = true;
-        } else if (looksLikeManagedV3Setup(path, content)) {
+        } else if (looksLikeManagedV4Setup(path, content)) {
           hasManaged = true;
         } else {
           return "unknown";
         }
+      } else if (marker === 3) {
+        if (!looksLikeManagedV3Setup(path, content)) {
+          return "unknown";
+        }
+        hasManaged = true;
       } else {
         if (!(await looksLikeLegacySetup(path, content))) {
           return "unknown";
@@ -451,14 +517,14 @@ function pullRequestNumber(value: unknown): number | null {
 export class GitHubSetupService {
   private readonly github: Pick<
     GitHubApi,
-    "request" | "installationToken" | "installationRepositories"
+    "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha"
   >;
 
   constructor(
     private readonly env: WorkerEnv,
     github?: Pick<
       GitHubApi,
-      "request" | "installationToken" | "installationRepositories"
+      "request" | "installationToken" | "installationRepositories" | "publicWorkflowSha"
     >,
   ) {
     try {
@@ -504,10 +570,19 @@ export class GitHubSetupService {
       }));
     }
 
-    const publicWorkflowSha = validatePublicWorkflowSha(
+    const publicWorkflowTag = validatePublicWorkflowTag(
+      this.env.PUBLIC_WORKFLOW_TAG ?? "",
+    );
+    const configuredWorkflowSha = validatePublicWorkflowSha(
       this.env.PUBLIC_WORKFLOW_SHA ?? "",
     );
-    const setupFiles = buildSetupFiles(publicWorkflowSha);
+    const resolvedWorkflowSha = await this.resolvePublicWorkflowSha(publicWorkflowTag);
+    if (resolvedWorkflowSha !== configuredWorkflowSha) {
+      throw new GitHubSetupError(
+        "PUBLIC_WORKFLOW_TAG does not resolve to PUBLIC_WORKFLOW_SHA",
+      );
+    }
+    const setupFiles = buildSetupFiles(resolvedWorkflowSha);
     const results: SetupResult[] = [];
     const requestedPermissions: Record<string, string> = {
       contents: "write",
@@ -529,7 +604,8 @@ export class GitHubSetupService {
           repository,
           token.token,
           setupFiles,
-          publicWorkflowSha,
+          publicWorkflowTag,
+          resolvedWorkflowSha,
         ),
       );
     }
@@ -584,10 +660,25 @@ export class GitHubSetupService {
     }
   }
 
+  private async resolvePublicWorkflowSha(publicWorkflowTag: string): Promise<string> {
+    try {
+      return validatePublicWorkflowSha(
+        await this.github.publicWorkflowSha(publicWorkflowTag),
+      );
+    } catch (error) {
+      throw new GitHubSetupError(
+        error instanceof Error
+          ? error.message
+          : "Public ReviewSensei workflow tag could not be resolved",
+      );
+    }
+  }
+
   private async ensureSetupPullRequest(
     repository: string,
     installationToken: string,
     setupFiles: readonly { path: string; content: string }[],
+    publicWorkflowTag: string,
     publicWorkflowSha: string,
   ): Promise<SetupResult> {
     const baseBranch = await this.defaultBranch(repository, installationToken);
@@ -608,7 +699,7 @@ export class GitHubSetupService {
       installationToken,
       baseBranch,
     );
-    const branch = setupBranch(baseSha, publicWorkflowSha);
+    const branch = setupBranch(baseSha, publicWorkflowTag, publicWorkflowSha);
     const branchAlreadyExists = await this.branchExists(
       repository,
       installationToken,
@@ -619,6 +710,7 @@ export class GitHubSetupService {
       installationToken,
       branch,
       baseSha,
+      publicWorkflowTag,
       publicWorkflowSha,
     ))) {
       return { repository, status: "skipped_branch_conflict" };
@@ -636,6 +728,7 @@ export class GitHubSetupService {
         installationToken,
         branch,
         baseSha,
+        publicWorkflowTag,
         publicWorkflowSha,
       ))) {
         return { repository, status: "skipped_branch_conflict" };
@@ -813,6 +906,7 @@ export class GitHubSetupService {
     token: string,
     branch: string,
     baseSha: string,
+    publicWorkflowTag: string,
     publicWorkflowSha: string,
   ): Promise<boolean> {
     const response = await this.request(

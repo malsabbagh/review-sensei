@@ -92,6 +92,24 @@ must exactly match the secret in the GitHub App webhook settings.
 non-secret Worker variable only for a GitHub-compatible API endpoint you
 operate.
 
+Before the first production deploy, replace the three workflow placeholders in
+`wrangler.jsonc` (or set equivalent dashboard variables):
+
+```text
+PUBLIC_WORKFLOW_TAG=v4
+PUBLIC_WORKFLOW_SHA=<commit resolved from the v4 tag>
+PUBLIC_WORKFLOW_LEGACY_SHAS=<comma-separated older pinned SHAs, or empty>
+```
+
+`PUBLIC_WORKFLOW_TAG` is the install-time update channel. During setup the
+Worker resolves that tag through the GitHub API, verifies it equals
+`PUBLIC_WORKFLOW_SHA`, and writes the full SHA into generated customer callers.
+The OIDC broker authorizes that immutable SHA and any explicitly configured
+older pins; it refuses a tag/SHA mismatch and never authorizes a mutable tag as
+the current caller contract. Keep older pins for the bounded migration window
+and remove them after managed clients have merged their setup PRs. A Worker
+deploy does not create or move the public tag.
+
 After deployment, set the GitHub App webhook URL to:
 
 ```text
@@ -153,30 +171,34 @@ for explicit operator cleanup.
 
 ### Existing installations and setup migrations
 
-Generated files are marked `ReviewSensei setup version: 3`. On a new setup
+Generated files are marked `ReviewSensei setup version: 4`. On a new setup
 delivery, the Worker reads only the three generated paths from the repository's
 default branch, bounded to 128 KiB each. An older ReviewSensei setup (including
 the original unmarked workflow/configuration) causes the existing setup branch
 to be refreshed and a migration PR to be opened. A current setup is a no-op.
-The v3 caller references `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
-at the configured `PUBLIC_WORKFLOW_SHA`; invalid or placeholder values fail
-closed before any setup write.
+The v4 caller pins `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
+to the commit resolved from the configured `PUBLIC_WORKFLOW_TAG` (default
+`v4`); invalid values or a tag/SHA mismatch fail closed before any setup write.
+`PUBLIC_WORKFLOW_LEGACY_SHAS` can retain older pinned workflow commits during
+migration or rollback.
 If a known path contains custom content, a malformed marker, or a future setup
 version, the Worker skips it without overwriting the file and reports the
 `skipped_unknown_setup` outcome in its internal result.
 
 The legacy catalog contains the union of byte-exact released pre-marker and
-setup-v2 Worker/Python artifacts. Current-v3 recognition is byte-exact for the
-configured public workflow SHA. A review workflow that byte-matches the current
-or previously released v3 template for another valid public workflow SHA is
-recognized as managed stale content and migrated; edited or inconsistent
-content remains unknown. Migration
-uses a create-only branch named
-`review-sensei/setup-v3-<base12>-<workflow12>`. An existing branch is reusable
+setup-v2 Worker/Python artifacts. Current-v3 recognition is byte-exact for any
+valid public workflow SHA so v3 clients can migrate. Current-v4 recognition is
+byte-exact for the configured SHA; a review workflow that follows a valid tag
+from the previous contract is managed stale content and is migrated. Edited or
+inconsistent content remains unknown. Migration uses a create-only branch named
+`review-sensei/setup-v4-<base12>-<tag>-<sha12>`. An existing branch is reusable
 only when its parent is the named base SHA, its author is the ReviewSensei App,
 its exact generated content is current, and its comparison changes generated
 paths only. Any pre-existing or concurrent mismatch returns
 `skipped_branch_conflict`; setup never force-moves a ref.
+Because the broker no longer admits mutable tag references, a stale tag-following
+caller must merge its SHA-pinned migration PR before it can obtain a new cloud
+capability; older SHA-pinned callers remain covered by the explicit legacy list.
 
 Deploying the Worker does not replay old webhook deliveries. After deployment,
 trigger a fresh `installation.new_permissions_accepted` delivery by accepting
@@ -185,7 +207,7 @@ resulting migration PR is the only repository write; merge it after review.
 No uninstall or manual deletion is required, and repository learnings and
 existing variable/secret values are preserved.
 
-### Setup-v3 execution and broker boundary
+### Setup-v4 execution and broker boundary
 
 Automatic cloud pull-request review uses GitHub-hosted compute. Local Ollama
 uses only manual or trusted-event dispatch on the labeled self-hosted runner.
@@ -197,14 +219,17 @@ never creates, retrieves, logs, persists, or reveals that secret value.
 
 The isolated `POST /github/token` route accepts a bounded OIDC exchange for
 `review_publish`, `inline_reply`, `issue_reply`, or `learning_write`. It
-verifies the exact public workflow ref/SHA and repository identity, rejects
+verifies the configured workflow SHA (and temporarily configured older pinned
+SHA pairs) and repository identity, rejects
 forks and unsupported runners/events, resolves the installation server-side,
 and claims replay/rate state in `BrokerLedger`. A bounded pre-auth admission
 check runs before JWKS work, public JWKS reads are cached for five minutes with
 concurrent refresh coalescing, and a verified assertion is claimed before any
 GitHub repository or installation lookup. The route is no-store and has no
-CORS contract. `PUBLIC_WORKFLOW_SHA` is a non-secret Worker variable and must
-be set to the public workflow commit before deployment.
+CORS contract. `PUBLIC_WORKFLOW_TAG` and its resolved `PUBLIC_WORKFLOW_SHA` are
+non-secret Worker variables and must be set before deployment. Keep old v3
+SHAs in `PUBLIC_WORKFLOW_LEGACY_SHAS` until all managed clients have merged
+their migration PRs.
 
 ## Rollback and operations
 

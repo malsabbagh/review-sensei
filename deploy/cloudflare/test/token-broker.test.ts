@@ -8,6 +8,7 @@ import type { WorkerEnv } from "../src/env";
 import { TokenBroker } from "../src/token-broker";
 
 const SHA = "a".repeat(40);
+const TAG = "v4";
 
 function claims(overrides: Record<string, unknown> = {}) {
   return {
@@ -47,6 +48,7 @@ function harness(ledgerState: "accepted" | "replay" | "rate_limited" = "accepted
     });
   });
   const env = {
+    PUBLIC_WORKFLOW_TAG: TAG,
     PUBLIC_WORKFLOW_SHA: SHA,
     BROKER_LEDGER: {
       idFromName: vi.fn(() => ({ name: "broker" })),
@@ -83,7 +85,8 @@ describe("token broker authorization", () => {
   });
 
   it.each([
-    ["different reusable workflow", { job_workflow_ref: `attacker/repo/.github/workflows/review-sensei-run.yml@${SHA}` }, "broker_workflow_rejected"],
+    ["different reusable workflow", { job_workflow_ref: `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}` }, "broker_workflow_rejected"],
+    ["mutable public workflow tag", { job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}` }, "broker_workflow_rejected"],
     ["different reusable workflow SHA", { job_workflow_sha: "b".repeat(40) }, "broker_workflow_rejected"],
     ["self-hosted automatic PR", { runner_environment: "self-hosted" }, "broker_runner_rejected"],
     ["unsupported event", { event_name: "push" }, "broker_event_rejected"],
@@ -93,6 +96,33 @@ describe("token broker authorization", () => {
     const { broker, github } = harness();
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(message);
     expect(github.capabilityToken).not.toHaveBeenCalled();
+  });
+
+  it("accepts a configured v3 SHA during the migration window", async () => {
+    const legacySha = "c".repeat(40);
+    const legacyEnv = {
+      PUBLIC_WORKFLOW_TAG: TAG,
+      PUBLIC_WORKFLOW_SHA: SHA,
+      PUBLIC_WORKFLOW_LEGACY_SHAS: legacySha,
+      BROKER_LEDGER: {
+        idFromName: vi.fn(() => ({ name: "broker" })),
+        get: vi.fn(() => ({ fetch: async () => new Response(JSON.stringify({ state: "accepted" })) })),
+      },
+    } as unknown as WorkerEnv;
+    const legacyBroker = new TokenBroker(legacyEnv, {
+      repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
+      installationFor: vi.fn(async () => 2468),
+      capabilityToken: vi.fn(async () => "ghs_scoped_token"),
+    } as never);
+    oidc.verify.mockResolvedValue(
+      claims({
+        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${legacySha}`,
+        job_workflow_sha: legacySha,
+      }),
+    );
+    await expect(legacyBroker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
+      capability: "review_publish",
+    });
   });
 
   it.each(["workflow_dispatch", "issue_comment", "pull_request_review_comment"])(

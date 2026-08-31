@@ -191,5 +191,7 @@ OIDC identity and exact public workflow SHA checks, resolves installations
 server-side, claims hashed replay/rate state, and issues only a fixed
 least-privileged capability. It has a bounded request body, no browser CORS,
 and no-store responses. The Worker still does not execute reviews or persist
-source, diff, provider, assertion, token, or review data. `PUBLIC_WORKFLOW_SHA`
-is fail-closed configuration required by setup-v3 generation.
+source, diff, provider, assertion, token, or review data. `PUBLIC_WORKFLOW_TAG`
+is the fail-closed install-time update channel used to resolve setup-v4;
+generated callers and the broker require its configured
+`PUBLIC_WORKFLOW_SHA`. Older pinned SHA pairs may be retained during migration.

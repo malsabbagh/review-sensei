@@ -63,9 +63,11 @@ is the primary open-source path. It runs on a maintainer-controlled self-hosted
 runner labelled `ollama`, checks out only the repository default branch,
 requires `base_ref` to match that default branch,
 installs the exact requested `review-sensei==X.Y.Z` package from PyPI first and
-falls back to a full-SHA-pinned public GitHub source commit only when that
-distribution is unavailable. It verifies the installed version and dependencies
-before computing a bounded diff with `review-sensei prepare-diff`, without
+falls back to a public GitHub source tag only when that distribution is
+unavailable. It resolves the tag, compares it with the executing workflow
+SHA, and installs from that verified commit before checking the installed
+version and dependencies before computing a bounded diff with
+`review-sensei prepare-diff`, without
 checking out or executing the head branch. Other PyPI failures remain fatal.
 The runner must provide Ollama on
 `http://127.0.0.1:11434` for the default local mode.
@@ -142,9 +144,9 @@ forwards to a model provider. Any future learning PR path must keep proposals
 unmerged until maintainer review and load future learnings from the target
 branch rather than the PR head.
 
-## Setup-v3 and broker boundary
+## Setup-v4 and broker boundary
 
-The issue-64 setup-v3 path keeps review execution in the customer repository.
+The issue-64 setup-v4 path keeps review execution in the customer repository.
 The Worker receives only bounded webhook metadata and a short-lived Actions
 OIDC assertion for capability issuance. Its Durable Object stores hashed `jti`
 and scope identities plus bounded replay/rate counters. Pre-auth admission uses
@@ -156,7 +158,7 @@ installation-token values. Worker responses are `no-store`, the token route
 does not support CORS, and errors are sanitized.
 
 The generated workflow may reference the existing customer-owned secret by
-name only (`secrets.OLLAMA_API_KEY`) when invoking the immutable public
+name only (`secrets.OLLAMA_API_KEY`) when invoking the tagged public reusable
 workflow. The App and setup bootstrap never create, retrieve, reveal, log,
 persist, or interpolate its value into generated files. Cloud provider egress
 is explicit and limited to the configured provider step; local mode uses the

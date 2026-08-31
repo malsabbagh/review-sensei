@@ -30,8 +30,8 @@ Process: `docs/process/adr-process.md`
 | [0019](0019-reviewsensei-dev-landing-page.md) | Proposed | ReviewSensei.dev canonical landing page | #47 | Static HTML under docs/site deployed via GitHub Pages |
 | [0020](0020-cloudflare-github-app-package.md) | Proposed | Cloudflare Worker-only + SQLite Durable Object package | #37 | Free-tier installation bootstrap ingress; no hosted review engine |
 | [0021](0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37 | Bounded inspection; unknown or future files are left untouched |
-| [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Immutable setup-v3 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
-| [0023](0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to a pinned public GitHub package source | #37 | Missing-release compatibility without mutable refs or masked install failures |
+| [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Tagged setup-v4 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
+| [0023](0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to the executing-SHA public GitHub package source | #37 | Missing-release compatibility without unverified refs or masked install failures |
 
 ## Policy
 

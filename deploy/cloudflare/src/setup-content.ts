@@ -1,14 +1,16 @@
 /**
- * Generated customer setup-v3 files.
+ * Generated customer setup-v4 files.
  *
- * The Worker receives only the public reusable-workflow commit SHA as
- * configuration. The customer-owned OLLAMA_API_KEY is referenced by name in
- * the caller and passed to the immutable workflow; this module never handles
- * its value.
+ * The Worker receives the public reusable-workflow git tag as the install-time
+ * update channel and resolves it to the configured immutable commit before
+ * generating these files. The customer-owned OLLAMA_API_KEY is referenced by
+ * name in the caller and passed to the workflow; this module never handles its
+ * value.
  */
 
 const GITHUB_EXPRESSION = "@@";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
+const PUBLIC_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LEGACY_V3_SOURCE_INPUTS = [
   "      source_kind:",
   "        description: Source kind for manual dispatch (issue or inline)",
@@ -27,8 +29,9 @@ const LEGACY_V3_UNINSTALL_BODY =
   "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. " +
   "ReviewSensei learnings and repository secrets are left untouched.";
 
-export const SETUP_VERSION = 3;
+export const SETUP_VERSION = 4;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
+export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v4";
 export const DEFAULT_PUBLIC_WORKFLOW_SHA = "f".repeat(40);
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
@@ -63,10 +66,28 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
 ];
 
 export function validatePublicWorkflowSha(value: string): string {
-  if (typeof value !== "string" || !PUBLIC_SHA_PATTERN.test(value)) {
+  if (
+    typeof value !== "string" ||
+    /[\r\n]/.test(value) ||
+    !PUBLIC_SHA_PATTERN.test(value)
+  ) {
     throw new Error(
       "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters",
     );
+  }
+  return value;
+}
+
+export function validatePublicWorkflowTag(value: string): string {
+  if (
+    typeof value !== "string" ||
+    /[\r\n]/.test(value) ||
+    !PUBLIC_TAG_PATTERN.test(value) ||
+    value.includes("..") ||
+    value.endsWith(".") ||
+    value.endsWith(".lock")
+  ) {
+    throw new Error("PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag");
   }
   return value;
 }
@@ -206,6 +227,23 @@ jobs:
 `.replaceAll("__PUBLIC_WORKFLOW_SHA__", sha).replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+function taggedWorkflowTemplate(publicWorkflowTag: string): string {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  return workflowTemplate(DEFAULT_PUBLIC_WORKFLOW_SHA)
+    .replaceAll(
+      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${DEFAULT_PUBLIC_WORKFLOW_SHA}`,
+      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
+    )
+    .replace("# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4");
+}
+
+function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
+  return workflowTemplate(publicWorkflowSha).replace(
+    "# ReviewSensei setup version: 3",
+    "# ReviewSensei setup version: 4",
+  );
+}
+
 function historicalV3WorkflowTemplate(publicWorkflowSha: string): string {
   return workflowTemplate(publicWorkflowSha)
     .replace(LEGACY_V3_SOURCE_INPUTS, "")
@@ -290,10 +328,10 @@ function historicalV3UninstallWorkflowTemplate(): string {
   );
 }
 
-function configFile(): string {
+function configFile(version: number): string {
   return (
-    `# ${SETUP_VERSION_MARKER}\n` +
-    `setup_version: ${SETUP_VERSION}\n` +
+    `# ReviewSensei setup version: ${version}\n` +
+    `setup_version: ${version}\n` +
     "provider: ollama\n" +
     "provider_mode: local\n" +
     "base_url: http://127.0.0.1:11434/api\n" +
@@ -312,9 +350,33 @@ function configFile(): string {
 export function buildSetupFiles(publicWorkflowSha: string): readonly SetupFile[] {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return [
-    { path: SETUP_FILE_PATHS[0], content: workflowTemplate(sha) },
-    { path: SETUP_FILE_PATHS[1], content: uninstallWorkflowTemplate() },
-    { path: SETUP_FILE_PATHS[2], content: configFile() },
+    { path: SETUP_FILE_PATHS[0], content: pinnedV4WorkflowTemplate(sha) },
+    {
+      path: SETUP_FILE_PATHS[1],
+      content: uninstallWorkflowTemplate().replace(
+        "# ReviewSensei setup version: 3",
+        "# ReviewSensei setup version: 4",
+      ),
+    },
+    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
+  ];
+}
+
+/** Setup-v4 output from the previous tag-following contract, for migration only. */
+export function buildTaggedV4SetupFiles(
+  publicWorkflowTag: string,
+): readonly SetupFile[] {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  return [
+    { path: SETUP_FILE_PATHS[0], content: taggedWorkflowTemplate(tag) },
+    {
+      path: SETUP_FILE_PATHS[1],
+      content: uninstallWorkflowTemplate().replace(
+        "# ReviewSensei setup version: 3",
+        "# ReviewSensei setup version: 4",
+      ),
+    },
+    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
   ];
 }
 
@@ -328,7 +390,19 @@ export function buildHistoricalV3SetupFiles(
       path: SETUP_FILE_PATHS[1],
       content: historicalV3UninstallWorkflowTemplate(),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile() },
+    { path: SETUP_FILE_PATHS[2], content: configFile(3) },
+  ];
+}
+
+/** Exact current setup-v3 output retained only for migration recognition. */
+export function buildCurrentV3SetupFiles(
+  publicWorkflowSha: string,
+): readonly SetupFile[] {
+  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+  return [
+    { path: SETUP_FILE_PATHS[0], content: workflowTemplate(sha) },
+    { path: SETUP_FILE_PATHS[1], content: uninstallWorkflowTemplate() },
+    { path: SETUP_FILE_PATHS[2], content: configFile(3) },
   ];
 }
 
@@ -339,8 +413,9 @@ export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles(
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
-  "This pull request adds or updates the ReviewSensei setup-v3 caller, which " +
-  "invokes the immutable public reusable workflow at an exact configured SHA. " +
+  "This pull request adds or updates the ReviewSensei setup-v4 caller, which " +
+  "pins the public reusable workflow to the SHA resolved from the configured " +
+  "v4 git tag at installation time. " +
   "Automatic pull-request review is cloud-provider-only on GitHub-hosted compute; " +
   "local Ollama remains manual or trusted-event-only. All write and artifact " +
   "switches default to false. Cloud mode passes the existing customer-owned " +

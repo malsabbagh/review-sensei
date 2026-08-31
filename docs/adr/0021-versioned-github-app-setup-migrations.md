@@ -105,3 +105,23 @@ reinstall), `installation.new_permissions_accepted`, and
 `installation_repositories.added` trigger the same bounded reconciliation,
 with current/custom/malformed/future no-write behavior and at most one
 deterministic setup-v3 PR per exact base/workflow revision.
+
+## Amendment - setup-v4 tagged issue #64
+
+Setup version 4 uses the operator-managed `v4` git tag only as an install-time
+update channel. The Worker resolves it, verifies the configured SHA, and writes
+that full commit SHA into both reusable-workflow references. During migration,
+`PUBLIC_WORKFLOW_LEGACY_SHAS` may authorize exact older pinned
+`(job_workflow_ref, job_workflow_sha)` pairs, but no arbitrary branch, tag, or
+caller-supplied SHA is accepted.
+
+The classifier treats a byte-exact setup-v4 caller following another valid tag
+as managed stale content and migrates it to the configured resolved SHA. A byte-exact
+setup-v3 caller (including any valid public SHA), released pre-marker/setup-v2
+artifact, missing companion file, or partial managed set remains migratable;
+custom, malformed, and future files remain no-write cases. Migration branches
+bind the exact base SHA, update channel, and resolved SHA in
+`review-sensei/setup-v4-<base12>-<tag>-<sha12>`, and the create-only branch/recheck
+rules from the v3 amendment still apply. Reinstall and permission-acceptance
+events remain the supported trigger; deploying the Worker does not replay old
+deliveries.

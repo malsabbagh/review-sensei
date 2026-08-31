@@ -46,6 +46,23 @@ class ActionPinPolicyTests(unittest.TestCase):
         """
         self.assertEqual(check_workflow_text(text), [])
 
+    def test_public_reusable_workflow_requires_a_full_sha(self):
+        self.assertEqual(
+            check_workflow_text(
+                "jobs:\n  call:\n    uses: "
+                "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
+                + "a" * 40
+                + " # v4\n"
+            ),
+            [],
+        )
+        violations = check_workflow_text(
+            "jobs:\n  call:\n    uses: "
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4\n"
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("40-character commit SHA", violations[0])
+
     def test_mutable_or_undocumented_actions_are_rejected(self):
         text = """
         steps:
@@ -78,10 +95,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         run_blocks = _run_blocks(text)
         self.assertFalse(run_blocks)
-        self.assertIn("# ReviewSensei setup version: 3", text)
+        self.assertIn("# ReviewSensei setup version: 4", text)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
-            + ("f" * 40),
+            + "f" * 40,
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
@@ -120,7 +137,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
 
-    def test_reusable_workflow_prefers_pypi_with_pinned_github_fallback(self):
+    def test_reusable_workflow_prefers_pypi_with_sha_verified_github_fallback(self):
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
@@ -128,18 +145,17 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-run.yml"
         )
         text = workflow.read_text(encoding="utf-8")
-        fallback_ref = "ff53bbadf6bce78fe0421ec2f07844feec976095"
         self.assertEqual(
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
             2,
         )
         self.assertEqual(
-            text.count(f"REVIEW_SENSEI_GITHUB_REF: {fallback_ref}"),
+            text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
             2,
         )
         self.assertEqual(
             text.count(
-                '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"'
+                '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
             ),
             2,
         )
@@ -153,11 +169,18 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("refusing the GitHub fallback", text)
+        self.assertIn("must run from a full commit SHA", text)
+        self.assertIn("installing the verified ReviewSensei workflow commit", text)
+        self.assertNotIn(
+            "git ls-remote https://github.com/malsabbagh/review-sensei.git", text
+        )
         self.assertIn('importlib.metadata.version("review-sensei")', text)
         self.assertIn('"$python_bin" -m pip check', text)
         self.assertNotIn("review-sensei.git@main", text)
         install_blocks = [
-            block for block in _run_blocks(text) if "REVIEW_SENSEI_GITHUB_REF" in block
+            block
+            for block in _run_blocks(text)
+            if "REVIEW_SENSEI_WORKFLOW_REF" in block
         ]
         self.assertEqual(len(install_blocks), 2)
         for block in install_blocks:
@@ -165,7 +188,7 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertLess(
                     block.index('"review-sensei==$expected_version"'),
                     block.index(
-                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"'
+                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
                     ),
                 )
 
@@ -233,7 +256,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         for workflow in workflow_paths:
             with self.subTest(workflow=workflow.name):
                 if workflow.name == "review-sensei-run.yml":
-                    # This immutable public reusable workflow intentionally runs
+                    # This public reusable workflow intentionally runs
                     # on GitHub-hosted compute (automatic cloud) or the explicit
                     # trusted Ollama self-hosted label; the repository's private
                     # CI runner policy does not apply to this public contract.

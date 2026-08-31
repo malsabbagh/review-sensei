@@ -52,6 +52,14 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             config["migrations"][1]["new_sqlite_classes"], ["BrokerLedger"]
         )
+        self.assertEqual(
+            config["vars"],
+            {
+                "PUBLIC_WORKFLOW_TAG": "REPLACE_WITH_PUBLIC_WORKFLOW_TAG",
+                "PUBLIC_WORKFLOW_SHA": "REPLACE_WITH_PUBLIC_WORKFLOW_SHA",
+                "PUBLIC_WORKFLOW_LEGACY_SHAS": "",
+            },
+        )
 
     def test_package_does_not_embed_secrets_or_payload_storage(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text()
@@ -87,10 +95,11 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("30 days", readme)
         self.assertNotIn("30 days", adr)
 
-    def test_setup_content_is_pinned_and_secret_free(self):
+    def test_setup_content_is_tagged_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
-        self.assertIn("SETUP_VERSION = 3", source)
-        self.assertIn("ReviewSensei setup version: 3", source)
+        self.assertIn("SETUP_VERSION = 4", source)
+        self.assertIn("ReviewSensei setup version: 4", source)
+        self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertIn("PUBLIC_WORKFLOW_SHA", source)
         self.assertIn("secrets.OLLAMA_API_KEY", source)
         self.assertIn("github.event.comment.author_association == 'OWNER'", source)
@@ -112,11 +121,11 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)
 
-    def test_user_guidance_describes_setup_v3_publication_contract(self):
+    def test_user_guidance_describes_setup_v4_publication_contract(self):
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
         for content in (readme, installation):
-            self.assertIn("setup-v3", content)
+            self.assertIn("setup-v4", content)
             self.assertIn("nine", content)
             self.assertIn("automatic", content)
             self.assertIn("summary", content)

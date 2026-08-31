@@ -1,10 +1,11 @@
-name: ReviewSensei immutable runner
+name: ReviewSensei reusable runner
 
-# This is the public, immutable reusable workflow. Customer repositories call
-# it by a full public commit SHA from their generated setup-v3 file.
-# PyPI remains the primary release channel. Keep this source fallback pinned to
-# a public ReviewSensei commit with the same package version until the release
-# is available there; update it whenever the default package version changes.
+# This is the public reusable workflow. The installer uses the operator-managed
+# v4 git tag as an update channel, resolves it at setup time, and writes the
+# resulting commit SHA into customer setup-v4 files. The OIDC broker admits
+# only that immutable SHA (plus an explicit legacy-SHA migration window).
+# PyPI remains the primary package channel; the source fallback installs the
+# executing workflow commit SHA directly.
 on:
   workflow_call:
     inputs:
@@ -151,15 +152,25 @@ jobs:
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_GITHUB_REF: ff53bbadf6bce78fe0421ec2f07844feec976095
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_GITHUB_REF" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei GitHub fallback ref must be a full lowercase commit SHA." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@([a-f0-9]{40})$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a full commit SHA." >&2
+            exit 1
+          fi
+          workflow_ref_sha="${BASH_REMATCH[1]}"
+          if [[ "$workflow_ref_sha" != "$REVIEW_SENSEI_WORKFLOW_SHA" ]]; then
+            echo "::error::The reusable workflow ref does not match the executing workflow SHA." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
@@ -167,10 +178,10 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing pinned GitHub commit $REVIEW_SENSEI_GITHUB_REF."
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"
-            install_source="GitHub@$REVIEW_SENSEI_GITHUB_REF"
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
           else
             echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1
@@ -269,25 +280,35 @@ jobs:
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_GITHUB_REF: ff53bbadf6bce78fe0421ec2f07844feec976095
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_GITHUB_REF" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei GitHub fallback ref must be a full lowercase commit SHA." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@([a-f0-9]{40})$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a full commit SHA." >&2
+            exit 1
+          fi
+          workflow_ref_sha="${BASH_REMATCH[1]}"
+          if [[ "$workflow_ref_sha" != "$REVIEW_SENSEI_WORKFLOW_SHA" ]]; then
+            echo "::error::The reusable workflow ref does not match the executing workflow SHA." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing pinned GitHub commit $REVIEW_SENSEI_GITHUB_REF."
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_GITHUB_REF"
-            install_source="GitHub@$REVIEW_SENSEI_GITHUB_REF"
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
           else
             echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1

@@ -8,11 +8,17 @@ import {
   type VerifiedDelivery,
   parseVerifiedDelivery,
 } from "../src/github-app";
-import { SETUP_FILE_PATHS, buildSetupFiles } from "../src/setup-content";
+import {
+  SETUP_FILE_PATHS,
+  buildCurrentV3SetupFiles,
+  buildTaggedV4SetupFiles,
+  buildSetupFiles,
+} from "../src/setup-content";
 
 const SHA = "a".repeat(40);
+const TAG = "v4";
 const BASE_SHA = "b".repeat(40);
-const SETUP_BRANCH = `review-sensei/setup-v3-${BASE_SHA.slice(0, 12)}-${SHA.slice(0, 12)}`;
+const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}-${SHA.slice(0, 12)}`;
 const ALL_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
@@ -25,6 +31,7 @@ function env(): WorkerEnv {
     GITHUB_APP_ID: "12345",
     GITHUB_APP_PRIVATE_KEY: "unused-by-test-adapter",
     GITHUB_APP_WEBHOOK_SECRET: "unused",
+    PUBLIC_WORKFLOW_TAG: TAG,
     PUBLIC_WORKFLOW_SHA: SHA,
   } as WorkerEnv;
 }
@@ -75,6 +82,7 @@ class FakeGitHub {
     permissions: ALL_PERMISSIONS,
   }));
   readonly installationRepositories = vi.fn(async () => ["acme/one", "acme/two"]);
+  readonly publicWorkflowSha = vi.fn(async () => SHA);
   files: SetupFiles = Object.fromEntries(SETUP_FILE_PATHS.map((path) => [path, null]));
   branchFiles: SetupFiles = Object.fromEntries(
     buildSetupFiles(SHA).map(({ path, content }) => [path, content]),
@@ -91,7 +99,7 @@ class FakeGitHub {
     if (method === "GET" && /^\/repos\/acme\/(widgets|one|two)$/.test(path)) {
       return { status: 200, data: { default_branch: "main" } };
     }
-    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v3-")) {
+    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v4-")) {
       const exists = this.branchExists || this.collisionObserved;
       return {
         status: exists ? 200 : 404,
@@ -137,7 +145,7 @@ class FakeGitHub {
     if (method === "GET" && path.includes("/contents/")) {
       const encoded = path.split("/contents/")[1].split("?", 1)[0];
       const filePath = encoded.split("/").map(decodeURIComponent).join("/");
-      const content = path.includes("?ref=review-sensei%2Fsetup-v3-")
+      const content = path.includes("?ref=review-sensei%2Fsetup-v4-")
         ? this.branchFiles[filePath]
         : this.files[filePath];
       return content === null || content === undefined
@@ -200,7 +208,7 @@ function historicalFixture(name: string): string {
 
 function historicalV3Files(publicWorkflowSha: string): SetupFiles {
   const files = Object.fromEntries(
-    buildSetupFiles(publicWorkflowSha).map(({ path, content }) => [path, content]),
+    buildCurrentV3SetupFiles(publicWorkflowSha).map(({ path, content }) => [path, content]),
   ) as SetupFiles;
   files[SETUP_FILE_PATHS[0]] = files[SETUP_FILE_PATHS[0]]!
     .replace(
@@ -301,6 +309,30 @@ describe("installation and migration events", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  it("rejects an invalid configured tag before any setup write", async () => {
+    const fake = new FakeGitHub();
+    const invalidEnvironment = {
+      ...env(),
+      PUBLIC_WORKFLOW_TAG: "v4.lock",
+    } as WorkerEnv;
+
+    await expect(
+      new GitHubSetupService(invalidEnvironment, fake).process(delivery()),
+    ).rejects.toThrow("PUBLIC_WORKFLOW_TAG");
+    expect(mutationRequests(fake)).toEqual([]);
+  });
+
+  it("fails closed when the configured tag resolves to a different SHA", async () => {
+    const fake = new FakeGitHub();
+    fake.publicWorkflowSha.mockResolvedValue("c".repeat(40));
+
+    await expect(serviceWith(fake).process(delivery())).rejects.toThrow(
+      "PUBLIC_WORKFLOW_TAG does not resolve to PUBLIC_WORKFLOW_SHA",
+    );
+    expect(fake.installationToken).not.toHaveBeenCalled();
+    expect(mutationRequests(fake)).toEqual([]);
+  });
+
   it.each([
     ["installation", "created"],
     ["installation", "new_permissions_accepted"],
@@ -336,12 +368,13 @@ describe("installation and migration events", () => {
   });
 });
 
-describe("setup-v3 repository reconciliation", () => {
+describe("setup repository reconciliation", () => {
   it("creates a setup PR for an older client with no generated files", async () => {
     const fake = new FakeGitHub();
     const results = await serviceWith(fake).process(delivery());
 
     expect(results).toEqual([{ repository: "acme/widgets", status: "created", pull_request_number: 42 }]);
+    expect(fake.publicWorkflowSha).toHaveBeenCalledWith(TAG);
     expect(fake.installationToken).toHaveBeenCalledWith(2468, "acme/widgets", {
       contents: "write",
       pull_requests: "write",
@@ -480,7 +513,7 @@ describe("setup-v3 repository reconciliation", () => {
   it("migrates a managed v3 setup with a stale public workflow SHA", async () => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(
-      buildSetupFiles("c".repeat(40)).map(({ path, content }) => [path, content]),
+      buildCurrentV3SetupFiles("c".repeat(40)).map(({ path, content }) => [path, content]),
     );
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
@@ -491,6 +524,22 @@ describe("setup-v3 repository reconciliation", () => {
         method === "POST" && path.endsWith("/pulls"),
       ),
     ).toBe(true);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates a managed v4 setup following an older public tag", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
+    );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
     expect(
       fake.requests.find(
         ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
@@ -522,7 +571,7 @@ describe("setup-v3 repository reconciliation", () => {
     ).toBe(true);
   });
 
-  it("does not replace customized partial setup-v3 content", async () => {
+  it("does not replace customized partial setup-v4 content", async () => {
     const fake = new FakeGitHub();
     const current = buildSetupFiles(SHA)[0].content;
     fake.files[".github/workflows/review-sensei-review.yml"] = current.replace(
@@ -536,7 +585,7 @@ describe("setup-v3 repository reconciliation", () => {
     expect(mutationRequests(fake)).toEqual([]);
   });
 
-  it("does not write when setup-v3 is already current", async () => {
+  it("does not write when setup-v4 is already current", async () => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(buildSetupFiles(SHA).map(({ path, content }) => [path, content]));
     expect(await serviceWith(fake).process(delivery())).toEqual([
@@ -550,6 +599,7 @@ describe("setup-v3 repository reconciliation", () => {
       "name: Customer-owned workflow\n",
       "# ReviewSensei setup version: not-a-number\nname: ReviewSensei review\n",
       "# ReviewSensei setup version: 99\nname: ReviewSensei review\n",
+      buildSetupFiles(SHA)[0].content.replaceAll(`@${SHA}`, "@v4.lock"),
     ]) {
       const fake = new FakeGitHub();
       fake.files[".github/workflows/review-sensei-review.yml"] = content;

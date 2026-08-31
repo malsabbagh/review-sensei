@@ -109,8 +109,8 @@ endpoint and the `deepseek-v4-flash:cloud` model by default, and requires
 so a dispatch-supplied URL cannot redirect the provider credential. The example
 workflow first installs the exact requested `review-sensei==X.Y.Z` package from
 PyPI into a separate `RUNNER_TEMP` virtual environment. When that exact
-distribution is unavailable, it installs the same version from a public GitHub
-source commit pinned in the workflow; other PyPI failures remain fatal. The
+distribution is unavailable, it installs the same version from the executing
+workflow commit SHA in the public GitHub repository; other PyPI failures remain fatal. The
 install step verifies the package metadata and dependency set before review.
 
 ## GitHub App setup migration boundary
@@ -120,9 +120,9 @@ configuration owner. Generated setup files carry a `ReviewSensei setup version`
 marker. Before creating a setup pull request, the Cloudflare Worker or Python
 adapter reads only the three known generated paths from the trusted default
 branch, with a 128 KiB per-file limit and strict UTF-8 decoding. Older
-generated files, partial current setups, and byte-exact current or previously
-released v3 workflows pinned to another valid public workflow SHA produce a
-reviewable migration PR; all current files are a no-op. A custom, malformed,
+generated files, partial current setups, byte-exact managed v3 workflows, and
+managed v4 workflows following another valid public tag produce a reviewable
+migration PR; all current files are a no-op. A custom, malformed,
 or future-version file produces a no-write result so repository-owned workflow
 content is not overwritten. The migration branch is rebuilt from the current
 default branch and changes only
@@ -284,7 +284,7 @@ The primary distribution is the open-source package and CLI. Repositories run
 ReviewSensei themselves in GitHub Actions: checkout the trusted base, fetch the
 head ref only to compute a bounded diff through `review-sensei prepare-diff`,
 install the exact requested package from PyPI or, when that distribution is
-unavailable, from a full-SHA-pinned public GitHub source commit, run the
+unavailable, from the public repository at the executing workflow SHA, run the
 provider, and upload the validated result plus the installed version. A source
 fallback is used only for the package-not-found condition; other PyPI failures
 remain fatal. This path does not require a hosted backend,
@@ -399,37 +399,40 @@ GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
         -> audit (non-secret metadata only)
 ```
 
-## Issue-64 setup-v3 publication architecture
+## Issue-64 setup-v4 tagged publication architecture
 
-Setup-v3 separates the customer caller, public execution workflow, and
+Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:
 
 ```text
-customer setup-v3 caller (exact public workflow SHA; all opt-ins false)
+customer setup-v4 caller (install-resolved full workflow SHA; all opt-ins false)
     -> public reusable workflow
        -> trusted-base checkout and bounded diff
-       -> PyPI package or pinned public GitHub source fallback
+       -> PyPI package or executing-SHA public GitHub source fallback
        -> GitHub-hosted cloud review or trusted local Ollama review
        -> typed result/reply validation
        -> Actions OIDC assertion
           -> Cloudflare POST /github/token
-             -> exact claims/workflow SHA + repository/fork/install checks
+             -> exact current/legacy-SHA claims + repository/fork/install checks
              -> hashed replay/rate Durable Object claim
              -> one least-privileged capability token
        -> App-authored exact-head review, learning PR, or authorized reply
 ```
 
 The generated setup PR is limited to the workflow caller, uninstall workflow,
-and config file. The public reusable workflow is immutable by full SHA and may
+and config file. The operator-managed v4 tag is resolved only during
+installation/reconciliation; the generated caller pins that commit and the
+broker admits the current SHA plus explicitly configured older SHA pairs during
+migration. The workflow may
 receive the existing customer-owned `OLLAMA_API_KEY` only through a literal
 name-only secret mapping. The setup App does not access that value. The Worker
 does not receive source, diffs, prompts, review output, reply content, provider
 credentials, or installation-token values for persistence; its ledger retains
 only hashed identities and bounded counters. Current, custom, malformed, and
-future clients are no-write cases. A byte-exact managed v3 workflow pinned to
-another valid public workflow SHA is a stale client and is migrated; absent and
-legacy/v2 clients are also reconciled through at most one reviewable setup-v3 PR
-per selected repository.
+future clients are no-write cases. A byte-exact managed v3 workflow or managed
+v4 workflow following another valid public tag is stale and is migrated; absent
+and legacy/v2 clients are also reconciled through at most one reviewable
+setup-v4 PR per selected repository.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

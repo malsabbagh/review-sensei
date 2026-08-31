@@ -153,10 +153,11 @@ Negative or tradeoffs:
 
 The approved issuance-only frontend is Cloudflare Worker `POST
 /github/token`. In addition to the original issuer, audience, JWKS, signature,
-and time checks, it requires bounded repository/actor/run claims, exact
-`job_workflow_ref` and `job_workflow_sha` for the public reusable workflow,
-allowed event/runner policy, and server-side repository/fork and installation
-resolution. `installation_id` is not accepted from the caller. A SQLite
+and time checks, it requires bounded repository/actor/run claims, the
+configured full workflow SHA in `job_workflow_ref` and matching
+`job_workflow_sha` (plus only explicitly retained older pinned SHA pairs during
+migration), allowed event/runner policy, and server-side repository/fork and
+installation resolution. `installation_id` is not accepted from the caller. A SQLite
 Durable Object admits bounded source-address/token-digest identities before
 OIDC verification, then claims the verified assertion before any GitHub API
 lookup. This ordering bounds forged-token JWKS work and prevents a replayed

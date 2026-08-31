@@ -186,7 +186,8 @@ The signed assertion must use issuer
 `workflow_ref`, `workflow_sha`, `job_workflow_ref`, `job_workflow_sha`,
 `run_id`, `run_attempt`, and `runner_environment` (plus the documented actor
 and ref claims). `installation_id` is not trusted or accepted as a caller
-claim. The broker requires the exact public reusable workflow ref and SHA,
+claim. The broker requires the configured immutable workflow SHA (and only
+explicitly retained older pinned SHA pairs during migration),
 checks repository and fork state server-side, resolves the installation
 server-side, claims replay/rate state in the SQLite ledger, and then requests a
 repository-scoped token for only the selected capability. The response is

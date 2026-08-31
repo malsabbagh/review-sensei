@@ -159,20 +159,22 @@ PR bodies, logs, or errors.
 Generated setup files carry a `ReviewSensei setup version` marker. After a
 Worker deployment, the next setup-triggering installation delivery inspects the
 three generated paths on the repository default branch. Older generated files,
-including a byte-exact v3 workflow pinned to an older valid public workflow SHA,
-are refreshed through a migration pull request; current files are left alone.
+including byte-exact v3 workflows with older SHA pins and managed v4 workflows
+following an older tag, are refreshed through a migration pull request; current
+files are left alone.
 The bootstrap skips custom, malformed, or future-version files instead of
 overwriting them. A deployment does not replay historical deliveries, so
 accept the App's permission update (`new_permissions_accepted`) or remove and
 re-add the repository to emit a fresh setup event. Merge the migration PR after
 review; an uninstall/reinstall cycle is not required.
 
-## Issue-64 setup-v3 lifecycle
+## Issue-64 setup-v4 lifecycle
 
-Setup-v3 adds the public immutable reusable workflow boundary. The generated
-caller references only `malsabbagh/review-sensei` at a configured full commit
-SHA, requests `contents: read`, `pull-requests: read`, `issues: read`, and
-`id-token: write`, and defaults every write/artifact switch to `false`.
+Setup-v4 adds the public reusable workflow boundary. The operator-managed `v4`
+git tag is an install-time update channel: the Worker resolves it and the
+generated caller references the resulting full commit SHA. The caller requests
+`contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
+and defaults every write/artifact switch to `false`.
 Automatic cloud pull-request review is GitHub-hosted and same-repository only;
 local Ollama is manual or trusted-event-only on the operator's labeled runner.
 
@@ -182,14 +184,17 @@ setup PR. Add the secret manually when enabling cloud mode.
 
 | Delivery | Reconciliation | Write rule |
 | --- | --- | --- |
-| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3 -> one setup-v3 PR; current v3 -> no-op |
+| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3/v4 -> one setup-v4 PR; current v4 -> no-op |
 | `installation.new_permissions_accepted` | Repeat the same selected-repository inspection | Reuse one open setup PR; custom/malformed/future -> zero writes |
-| `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v3 PR per repository |
+| `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v4 PR per repository |
 | removed/deleted/suspended/unsupported | Do not reconcile setup | No setup write |
 
-The Worker validates the immutable SHA before generation, branches from the
-current default-branch head, writes only the three generated paths, and never
-writes directly to the default branch. A failed or unavailable capability,
-fork, insufficient permission, replay, or rate limit fails closed. Release
-ordering and rollback are documented in [`docs/installation.md`](installation.md)
+The Worker validates the configured tag, resolves it through GitHub, and
+requires the result to equal `PUBLIC_WORKFLOW_SHA` before generation. It then
+branches from the current default-branch head, writes only the three generated
+paths, and never writes directly to the default branch. A failed or unavailable
+capability, fork, insufficient permission, replay, or rate limit fails closed.
+The OIDC broker requires that immutable SHA and can temporarily allow older
+pinned SHA pairs through `PUBLIC_WORKFLOW_LEGACY_SHAS`.
+Release ordering and rollback are documented in [`docs/installation.md`](installation.md)
 and [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md).

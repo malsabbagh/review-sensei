@@ -1,4 +1,4 @@
-# ADR 0022 - Immutable setup-v3 publication and authorized conversations
+# ADR 0022 - Tagged setup-v4 publication and authorized conversations
 
 Status: Proposed
 Date: 2026-08-19
@@ -11,7 +11,8 @@ Approved by: not configured
 
 ReviewSensei needs an opt-in GitHub integration without moving model
 execution, provider credentials, or review content into a hosted service.
-Generated customer workflows must remain reviewable and immutable, while
+Generated customer workflows must remain reviewable, with immutable third-party
+Action pins, while
 App-authored review comments, deterministic learning draft PRs, and explicit
 mention replies need exact-head, idempotent, fork-safe publication. Existing
 installations also need a safe migration path that never overwrites custom or
@@ -19,14 +20,17 @@ future setup files.
 
 ## Decision
 
-Setup version 3 is a thin customer caller that invokes the public reusable
-workflow
-`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<40-hex-sha>`.
-The SHA is validated Worker configuration and is required before setup writes.
-The reusable workflow checks out only trusted base content, computes bounded
-diffs, installs the exact requested package from PyPI or its full-SHA-pinned
-public GitHub source fallback when that distribution is unavailable, and
-validates the installed version and typed results before any write. Automatic
+Setup version 4 is a thin customer caller that pins the public reusable
+workflow to the full commit SHA resolved from the operator-managed `v4` git tag
+during installation:
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<sha>`.
+The Worker validates the tag, verifies the configured SHA, and the broker
+requires that immutable SHA (plus explicitly retained older pins during
+migration). A mutable tag is never the new caller contract.
+The reusable workflow checks out only trusted base content and computes bounded
+diffs. When the exact package distribution is unavailable, it installs from
+the executing workflow commit SHA directly. It validates the installed version and typed results before
+any write. Automatic
 cloud pull-request review uses GitHub-hosted compute and
 same-repository heads only. Local Ollama is restricted to manual or trusted
 event execution on the labeled self-hosted runner.
@@ -39,7 +43,8 @@ reveal its value.
 
 The Worker exposes an issuance-only `POST /github/token` route. It verifies
 the GitHub Actions OIDC issuer, audience, time, repository identity, actor and
-run claims, exact reusable workflow ref and SHA, allowed event/runner policy,
+run claims, the exact current workflow SHA (plus explicitly retained older
+pinned SHA pairs during migration), allowed event/runner policy,
 server-side repository/fork state, and server-side installation mapping. It
 performs bounded pre-auth admission before cached JWKS verification, claims
 the verified assertion before GitHub API lookups, and stores hashed replay and
@@ -63,16 +68,16 @@ rechecked before writing.
 Setup reconciliation handles `installation.created` (including reinstall),
 `installation.new_permissions_accepted`, and
 `installation_repositories.added`. Absent, legacy, and v2 clients receive at
-most one deterministic setup-v3 PR. Current v3 is a no-op, while a byte-exact
-current or previously released v3 workflow generated for another valid public
-workflow SHA is treated as managed stale content and migrated. A previously
-released v3 uninstall template is also recognized as managed. Custom,
+most one deterministic setup-v4 PR. Current v4 is a no-op, while a byte-exact
+current or previously released v3 workflow, or a managed v4 workflow generated
+for another valid public tag, is treated as managed stale content and migrated.
+A previously released v3 uninstall template is also recognized as managed. Custom,
 malformed, and future files are no-write cases. Released pre-marker Worker and
 Python clients and setup-v2
 clients are recognized only by byte-exact historical digests. Present v3 files
-must exactly match a generated artifact; the workflow's two public references
-must agree on the embedded SHA. Migration uses a create-only branch whose name
-binds the base and public-workflow SHAs. Reuse requires the exact base parent,
+must exactly match a generated artifact; a v4 workflow's two public references
+must agree on the embedded full SHA. Migration uses a create-only branch whose name
+binds the base, update channel, and public-workflow SHA. Reuse requires the exact base parent,
 ReviewSensei App author, canonical generated content, and a comparison limited
 to generated paths. A pre-existing or concurrent collision is a no-write
 conflict; the App never force-moves a ref. Only the three generated paths are
@@ -87,7 +92,8 @@ schedule comment content for cloud-provider processing.
 Positive:
 
 - Customer workflows own provider execution and secret values.
-- Public workflow changes are pinned to an auditable commit SHA.
+- Public workflow changes are auditable through a tag plus broker-verified
+  resolved commit SHA.
 - Exact-head markers and reconciliation close duplicate and stale-write races.
 - Capability scopes keep review, reply, and learning writes separate.
 - Installation lifecycle events can repair absent or legacy clients without
@@ -96,8 +102,11 @@ Positive:
 Tradeoffs:
 
 - Hosted acceptance requires a later public snapshot, an installable package
-  release or the pinned source fallback, Worker deployment, App permission
-  acceptance, and customer setup-PR review.
+  release or the executing-SHA source fallback, Worker deployment, App
+  permission acceptance, and customer setup-PR review.
+- Existing tag-following v4 callers are deliberately fail-closed at the broker
+  until their SHA-pinned migration PR is merged; older SHA-pinned callers can
+  overlap through `PUBLIC_WORKFLOW_LEGACY_SHAS`.
 - The Python and Worker setup builders must remain structurally equivalent.
 - The broker holds short-lived opaque installation tokens in request memory in
   order to call GitHub, but never persists or returns them outside issuance.
@@ -108,21 +117,23 @@ Tradeoffs:
 
 Do not mutate customer default branches. Stop or redeploy the previous Worker
 version with its existing Durable Object migration history, and leave current
-ledger state intact. Close or revert unmerged setup-v3 PRs if the generated
+ledger state intact. Close or revert unmerged setup-v4 PRs if the generated
 contract is not desired. Revert the package/workflow/docs code through the
 normal review process; no review-content data migration is required.
 
 ## Validation and release order
 
 Deterministic checks cover invalid OIDC claims, wrong audience/event/repository
-or workflow SHA, replay/rate limits, forks, missing installations, permission
+or workflow-SHA pairing, replay/rate limits, forks, missing installations, permission
 scope, redaction, disabled writes, stale/duplicate/ambiguous publication,
 learning conflicts, unauthorized mentions, and setup lifecycle no-write cases.
-Release order is implementation merge, audited public snapshot, exact package
-release when available (the pinned source fallback covers the interim gap),
-Worker `PUBLIC_WORKFLOW_SHA` configuration, Worker deployment, App
-permission update/acceptance or reinstall/re-add, setup reconciliation, setup
-PR review/merge, repository opt-in, and hosted fixture acceptance.
+Release order is implementation merge, audited public snapshot, Worker
+`PUBLIC_WORKFLOW_TAG` plus its matching `PUBLIC_WORKFLOW_SHA` and temporary
+`PUBLIC_WORKFLOW_LEGACY_SHAS`, Worker deployment, public `v4` tag creation or
+move to that same snapshot, App permission update/acceptance or reinstall/re-add,
+setup reconciliation, setup PR review/merge, repository opt-in, and hosted
+fixture acceptance. The source fallback installs from the executing SHA when a
+PyPI package is not yet available.
 
 ## Links
 
