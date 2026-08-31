@@ -5,9 +5,9 @@
 - Added issue #64's opt-in setup-v4 GitHub integration: public git-tagged
   reusable workflow callers, exact-head App-authored inline review publication,
   deterministic learning draft PRs, authorized bounded mention replies, and an
-  issuance-only Cloudflare OIDC capability broker. The broker binds the
-  configured tag to its resolved workflow SHA while retaining an explicit v3
-  SHA allowlist during migration. Customer-owned `OLLAMA_API_KEY` is referenced
+  issuance-only Cloudflare OIDC capability broker. Setup-v4 uses the protected
+  public `v4` tag as its sole workflow channel; the broker resolves that tag and
+  checks the runtime workflow SHA. Customer-owned `OLLAMA_API_KEY` is referenced
   by name only and all write/artifact switches default to false.
 - Renamed the product identity from Code Sensei to ReviewSensei before public
   publication. The Python distribution is now `review-sensei`, the CLI is now

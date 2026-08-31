@@ -1,11 +1,10 @@
 /**
  * Generated customer setup-v4 files.
  *
- * The Worker receives the public reusable-workflow git tag as the install-time
- * update channel and resolves it to the configured immutable commit before
- * generating these files. The customer-owned OLLAMA_API_KEY is referenced by
- * name in the caller and passed to the workflow; this module never handles its
- * value.
+ * The Worker receives the public reusable-workflow git tag as the update
+ * channel and validates that it resolves before generating these files. The
+ * customer-owned OLLAMA_API_KEY is referenced by name in the caller and passed
+ * to the workflow; this module never handles its value.
  */
 
 const GITHUB_EXPRESSION = "@@";
@@ -32,7 +31,6 @@ const LEGACY_V3_UNINSTALL_BODY =
 export const SETUP_VERSION = 4;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v4";
-export const DEFAULT_PUBLIC_WORKFLOW_SHA = "f".repeat(40);
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud";
@@ -92,8 +90,14 @@ export function validatePublicWorkflowTag(value: string): string {
   return value;
 }
 
-function workflowTemplate(publicWorkflowSha: string): string {
-  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+function workflowTemplate(publicWorkflowRef: string): string {
+  if (
+    typeof publicWorkflowRef !== "string" ||
+    /[\r\n]/.test(publicWorkflowRef) ||
+    publicWorkflowRef.length === 0
+  ) {
+    throw new Error("PUBLIC_WORKFLOW_REF must be a non-empty single-line value");
+  }
   return String.raw`# ReviewSensei setup version: 3
 name: ReviewSensei review
 
@@ -160,7 +164,7 @@ jobs:
       vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
       vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_SHA__
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_REF__
     with:
       mode: automatic
       operation: review
@@ -200,7 +204,7 @@ jobs:
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')) &&
       vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_SHA__
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_REF__
     with:
       mode: manual
       operation: @@{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
@@ -224,21 +228,18 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-`.replaceAll("__PUBLIC_WORKFLOW_SHA__", sha).replaceAll(GITHUB_EXPRESSION, "$");
+`.replaceAll("__PUBLIC_WORKFLOW_REF__", publicWorkflowRef).replaceAll(GITHUB_EXPRESSION, "$");
 }
 
 function taggedWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  return workflowTemplate(DEFAULT_PUBLIC_WORKFLOW_SHA)
-    .replaceAll(
-      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${DEFAULT_PUBLIC_WORKFLOW_SHA}`,
-      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
-    )
+  return workflowTemplate(tag)
     .replace("# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4");
 }
 
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
-  return workflowTemplate(publicWorkflowSha).replace(
+  const sha = validatePublicWorkflowSha(publicWorkflowSha);
+  return workflowTemplate(sha).replace(
     "# ReviewSensei setup version: 3",
     "# ReviewSensei setup version: 4",
   );
@@ -347,7 +348,10 @@ function configFile(version: number): string {
   );
 }
 
-export function buildSetupFiles(publicWorkflowSha: string): readonly SetupFile[] {
+/** Exact setup-v4 output from the historical SHA-pinning contract. */
+export function buildPinnedV4SetupFiles(
+  publicWorkflowSha: string,
+): readonly SetupFile[] {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return [
     { path: SETUP_FILE_PATHS[0], content: pinnedV4WorkflowTemplate(sha) },
@@ -362,7 +366,7 @@ export function buildSetupFiles(publicWorkflowSha: string): readonly SetupFile[]
   ];
 }
 
-/** Setup-v4 output from the previous tag-following contract, for migration only. */
+/** Current setup-v4 output: the public git tag is the only workflow ref. */
 export function buildTaggedV4SetupFiles(
   publicWorkflowTag: string,
 ): readonly SetupFile[] {
@@ -378,6 +382,12 @@ export function buildTaggedV4SetupFiles(
     },
     { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
   ];
+}
+
+export function buildSetupFiles(
+  publicWorkflowTag: string = DEFAULT_PUBLIC_WORKFLOW_TAG,
+): readonly SetupFile[] {
+  return buildTaggedV4SetupFiles(publicWorkflowTag);
 }
 
 export function buildHistoricalV3SetupFiles(
@@ -406,16 +416,13 @@ export function buildCurrentV3SetupFiles(
   ];
 }
 
-export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles(
-  DEFAULT_PUBLIC_WORKFLOW_SHA,
-);
+export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles();
 
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
   "This pull request adds or updates the ReviewSensei setup-v4 caller, which " +
-  "pins the public reusable workflow to the SHA resolved from the configured " +
-  "v4 git tag at installation time. " +
+  "follows the operator-managed public v4 git tag. " +
   "Automatic pull-request review is cloud-provider-only on GitHub-hosted compute; " +
   "local Ollama remains manual or trusted-event-only. All write and artifact " +
   "switches default to false. Cloud mode passes the existing customer-owned " +

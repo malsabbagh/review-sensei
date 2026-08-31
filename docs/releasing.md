@@ -64,14 +64,12 @@ it identifies the reviewed reusable workflow snapshot and may be moved only by
 the release owner as part of an approved public cutoff. Do not move it from an
 unreviewed or unpublished snapshot.
 
-After the audited public snapshot is published, record the commit that the
-public `v4` tag will resolve to. Set the Cloudflare Worker variables
-`PUBLIC_WORKFLOW_TAG=v4` and `PUBLIC_WORKFLOW_SHA=<resolved commit>` together;
-retain older pinned workflow SHAs in `PUBLIC_WORKFLOW_LEGACY_SHAS` until
-managed client migration PRs have been merged. Deploy the Worker, move `v4` to
-that same commit, and then trigger a fresh App installation/permission event to
-reconcile existing repositories. The reusable workflow installs its source
-fallback from the executing workflow SHA directly.
+After the audited public snapshot is published, configure the Cloudflare
+Worker with `PUBLIC_WORKFLOW_TAG=v4` and deploy it. Move `v4` to the reviewed
+public snapshot, then trigger a fresh App installation/permission event to
+reconcile repositories. The broker resolves the tag at capability exchange
+time and checks the runtime workflow SHA against that resolution. The reusable
+workflow installs its source fallback from the executing workflow SHA directly.
 
 A package release still uses an immutable `vX.Y.Z` tag and the `Release`
 workflow above. Publishing a package or deploying the Worker does not move the

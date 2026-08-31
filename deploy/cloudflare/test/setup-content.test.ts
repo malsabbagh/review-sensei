@@ -9,7 +9,7 @@ import {
 } from "../src/setup-content";
 
 describe("setup-v4 public boundary", () => {
-  it("requires a full lowercase public workflow SHA", () => {
+  it("retains strict SHA validation for historical setup recognition", () => {
     expect(() => validatePublicWorkflowSha("")).toThrow();
     expect(() => validatePublicWorkflowSha("A".repeat(40))).toThrow();
     expect(() => validatePublicWorkflowSha(`${"a".repeat(40)}\n`)).toThrow();
@@ -26,13 +26,13 @@ describe("setup-v4 public boundary", () => {
     expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v4");
   });
 
-  it("generates opt-in, fork-safe callers at the supplied public workflow SHA", () => {
-    const sha = "a".repeat(40);
-    const workflow = buildSetupFiles(sha)[0].content;
+  it("generates opt-in, fork-safe callers at the supplied public workflow tag", () => {
+    const tag = "stable";
+    const workflow = buildSetupFiles(tag)[0].content;
     expect(SETUP_VERSION).toBe(4);
     expect(workflow).toContain("opened, reopened, synchronize, ready_for_review");
     expect(workflow).toContain(
-      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${sha}`,
+      `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
     );
     expect(workflow).toContain("head.repo.full_name == github.repository");
     expect(workflow).toContain("github.event.issue.pull_request");
@@ -43,7 +43,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
   });
 
-  it("keeps the prior tag-following output available for migration recognition", () => {
+  it("generates both reusable jobs with the supplied tag", () => {
     const workflow = buildTaggedV4SetupFiles("stable")[0].content;
     expect(workflow.match(/review-sensei-run\.yml@stable/g)).toHaveLength(2);
     expect(workflow).toContain("# ReviewSensei setup version: 4");

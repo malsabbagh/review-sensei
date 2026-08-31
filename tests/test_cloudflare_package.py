@@ -56,8 +56,6 @@ class CloudflarePackageTests(unittest.TestCase):
             config["vars"],
             {
                 "PUBLIC_WORKFLOW_TAG": "REPLACE_WITH_PUBLIC_WORKFLOW_TAG",
-                "PUBLIC_WORKFLOW_SHA": "REPLACE_WITH_PUBLIC_WORKFLOW_SHA",
-                "PUBLIC_WORKFLOW_LEGACY_SHAS": "",
             },
         )
 
@@ -100,7 +98,8 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("SETUP_VERSION = 4", source)
         self.assertIn("ReviewSensei setup version: 4", source)
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
-        self.assertIn("PUBLIC_WORKFLOW_SHA", source)
+        self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
+        self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
         self.assertIn("secrets.OLLAMA_API_KEY", source)
         self.assertIn("github.event.comment.author_association == 'OWNER'", source)
         self.assertIn("github.event.comment.user.type != 'Bot'", source)

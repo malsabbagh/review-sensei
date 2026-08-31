@@ -6,7 +6,6 @@ import {
   type JsonObject,
 } from "./github-api";
 import {
-  DEFAULT_PUBLIC_WORKFLOW_SHA,
   DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_FILE_PATHS,
   SETUP_PULL_REQUEST_BODY,
@@ -16,6 +15,7 @@ import {
   buildCurrentV3SetupFiles,
   buildHistoricalV3SetupFiles,
   buildTaggedV4SetupFiles,
+  buildPinnedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
   validatePublicWorkflowTag,
@@ -52,12 +52,11 @@ type SetupInspectionState = "absent" | "migration" | "current" | "unknown";
 function setupBranch(
   baseSha: string,
   publicWorkflowTag: string,
-  publicWorkflowSha: string,
 ): string {
   if (!/^[a-f0-9]{40}$/.test(baseSha)) {
     throw new GitHubSetupError("Setup branch inputs were invalid");
   }
-  return `${SETUP_BRANCH_PREFIX}-${baseSha.slice(0, 12)}-${validatePublicWorkflowTag(publicWorkflowTag)}-${validatePublicWorkflowSha(publicWorkflowSha).slice(0, 12)}`;
+  return `${SETUP_BRANCH_PREFIX}-${baseSha.slice(0, 12)}-${validatePublicWorkflowTag(publicWorkflowTag)}`;
 }
 
 export class WebhookPayloadError extends Error {
@@ -200,9 +199,9 @@ async function looksLikeLegacySetup(path: string, content: string): Promise<bool
 function looksLikeCurrentSetup(
   path: string,
   content: string,
-  publicWorkflowSha: string,
+  publicWorkflowTag: string,
 ): boolean {
-  const canonical = buildSetupFiles(publicWorkflowSha).find(
+  const canonical = buildSetupFiles(publicWorkflowTag).find(
     (file) => file.path === path,
   );
   return canonical?.content === content;
@@ -248,7 +247,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
         shaMatches.every((match) => match[1] === publicWorkflowSha)
       ) {
         try {
-          if (content === buildSetupFiles(publicWorkflowSha)[0].content) {
+          if (content === buildPinnedV4SetupFiles(publicWorkflowSha)[0].content) {
             return true;
           }
         } catch {
@@ -274,17 +273,17 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
   }
   if (path === SETUP_FILE_PATHS[1]) {
-    return content === buildSetupFiles(DEFAULT_PUBLIC_WORKFLOW_SHA)[1].content;
+    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[1].content;
   }
   if (path === SETUP_FILE_PATHS[2]) {
-    return content === buildSetupFiles(DEFAULT_PUBLIC_WORKFLOW_SHA)[2].content;
+    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content;
   }
   return false;
 }
 
 async function classifySetupFiles(
   files: Record<string, string | null>,
-  publicWorkflowSha: string,
+  publicWorkflowTag: string,
 ): Promise<SetupInspectionState> {
   const present = Object.entries(files).filter(
     (entry): entry is [string, string] => entry[1] !== null,
@@ -305,7 +304,7 @@ async function classifySetupFiles(
         return "unknown";
       }
       if (marker === SETUP_VERSION) {
-        if (looksLikeCurrentSetup(path, content, publicWorkflowSha)) {
+        if (looksLikeCurrentSetup(path, content, publicWorkflowTag)) {
           hasCurrent = true;
         } else if (looksLikeManagedV4Setup(path, content)) {
           hasManaged = true;
@@ -573,16 +572,11 @@ export class GitHubSetupService {
     const publicWorkflowTag = validatePublicWorkflowTag(
       this.env.PUBLIC_WORKFLOW_TAG ?? "",
     );
-    const configuredWorkflowSha = validatePublicWorkflowSha(
-      this.env.PUBLIC_WORKFLOW_SHA ?? "",
-    );
-    const resolvedWorkflowSha = await this.resolvePublicWorkflowSha(publicWorkflowTag);
-    if (resolvedWorkflowSha !== configuredWorkflowSha) {
-      throw new GitHubSetupError(
-        "PUBLIC_WORKFLOW_TAG does not resolve to PUBLIC_WORKFLOW_SHA",
-      );
-    }
-    const setupFiles = buildSetupFiles(resolvedWorkflowSha);
+    // Validate that the tag exists before creating a caller that follows it.
+    // The tag itself is the release channel; the broker resolves it again when
+    // a workflow requests a capability.
+    await this.resolvePublicWorkflowSha(publicWorkflowTag);
+    const setupFiles = buildSetupFiles(publicWorkflowTag);
     const results: SetupResult[] = [];
     const requestedPermissions: Record<string, string> = {
       contents: "write",
@@ -605,7 +599,6 @@ export class GitHubSetupService {
           token.token,
           setupFiles,
           publicWorkflowTag,
-          resolvedWorkflowSha,
         ),
       );
     }
@@ -679,14 +672,13 @@ export class GitHubSetupService {
     installationToken: string,
     setupFiles: readonly { path: string; content: string }[],
     publicWorkflowTag: string,
-    publicWorkflowSha: string,
   ): Promise<SetupResult> {
     const baseBranch = await this.defaultBranch(repository, installationToken);
     const setupState = await this.inspectRepositorySetup(
       repository,
       installationToken,
       baseBranch,
-      publicWorkflowSha,
+      publicWorkflowTag,
     );
     if (setupState === "current") {
       return { repository, status: "skipped_current" };
@@ -699,7 +691,7 @@ export class GitHubSetupService {
       installationToken,
       baseBranch,
     );
-    const branch = setupBranch(baseSha, publicWorkflowTag, publicWorkflowSha);
+    const branch = setupBranch(baseSha, publicWorkflowTag);
     const branchAlreadyExists = await this.branchExists(
       repository,
       installationToken,
@@ -711,7 +703,6 @@ export class GitHubSetupService {
       branch,
       baseSha,
       publicWorkflowTag,
-      publicWorkflowSha,
     ))) {
       return { repository, status: "skipped_branch_conflict" };
     }
@@ -729,7 +720,6 @@ export class GitHubSetupService {
         branch,
         baseSha,
         publicWorkflowTag,
-        publicWorkflowSha,
       ))) {
         return { repository, status: "skipped_branch_conflict" };
       }
@@ -789,7 +779,7 @@ export class GitHubSetupService {
     repository: string,
     token: string,
     baseBranch: string,
-    publicWorkflowSha: string,
+    publicWorkflowTag: string,
   ): Promise<SetupInspectionState> {
     const files: Record<string, string | null> = {};
     for (const path of SETUP_FILE_PATHS) {
@@ -808,7 +798,7 @@ export class GitHubSetupService {
       }
       files[path] = decodeRepositoryFile(requireSuccessful(response));
     }
-    return await classifySetupFiles(files, publicWorkflowSha);
+    return await classifySetupFiles(files, publicWorkflowTag);
   }
 
   private async ensureRepositoryVariables(
@@ -907,7 +897,6 @@ export class GitHubSetupService {
     branch: string,
     baseSha: string,
     publicWorkflowTag: string,
-    publicWorkflowSha: string,
   ): Promise<boolean> {
     const response = await this.request(
       "GET",
@@ -969,7 +958,7 @@ export class GitHubSetupService {
         repository,
         token,
         branch,
-        publicWorkflowSha,
+        publicWorkflowTag,
       )) === "current";
   }
 

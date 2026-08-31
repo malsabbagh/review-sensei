@@ -46,19 +46,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         """
         self.assertEqual(check_workflow_text(text), [])
 
-    def test_public_reusable_workflow_requires_a_full_sha(self):
+    def test_public_reusable_workflow_uses_the_managed_v4_tag(self):
         self.assertEqual(
             check_workflow_text(
                 "jobs:\n  call:\n    uses: "
                 "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
-                + "a" * 40
-                + " # v4\n"
+                + "v4\n"
             ),
             [],
         )
         violations = check_workflow_text(
             "jobs:\n  call:\n    uses: "
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4\n"
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5\n"
         )
         self.assertEqual(len(violations), 1)
         self.assertIn("40-character commit SHA", violations[0])
@@ -97,8 +96,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertFalse(run_blocks)
         self.assertIn("# ReviewSensei setup version: 4", text)
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
-            + "f" * 40,
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
@@ -169,7 +167,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("refusing the GitHub fallback", text)
-        self.assertIn("must run from a full commit SHA", text)
+        self.assertIn("must run from a public git tag", text)
+        self.assertIn("@refs/tags/[A-Za-z0-9]", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
         self.assertNotIn(
             "git ls-remote https://github.com/malsabbagh/review-sensei.git", text

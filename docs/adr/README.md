@@ -32,6 +32,7 @@ Process: `docs/process/adr-process.md`
 | [0021](0021-versioned-github-app-setup-migrations.md) | Proposed | Version generated setup files and migrate older installations through PRs | #37 | Bounded inspection; unknown or future files are left untouched |
 | [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Tagged setup-v4 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
 | [0023](0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to the executing-SHA public GitHub package source | #37 | Missing-release compatibility without unverified refs or masked install failures |
+| [0024](0024-tag-only-setup-v4-channel.md) | Proposed | Use the protected public `v4` tag as the sole setup-v4 workflow channel | #64 | Worker validates the tag; broker resolves it and checks the runtime SHA |
 
 ## Policy
 

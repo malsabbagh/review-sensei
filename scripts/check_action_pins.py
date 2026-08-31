@@ -1,9 +1,10 @@
 """Check that repository GitHub Actions use immutable commit pins.
 
 The checker intentionally reads workflow text without executing or resolving
-any workflow expressions.  Local actions and Docker actions are valid without a
-commit SHA; every third-party action must carry a full 40-character SHA and an
-inline release-tag comment for maintainability.
+any workflow expressions. Local actions and Docker actions are valid without a
+commit SHA; third-party actions must carry a full 40-character SHA and an
+inline release-tag comment, except for the public ReviewSensei reusable
+workflow whose protected `@v4` tag is the setup-v4 update channel.
 """
 
 from __future__ import annotations
@@ -17,6 +18,9 @@ _USES = re.compile(
 )
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _WORKFLOW_SUFFIXES = {".yaml", ".yml"}
+_PUBLIC_REUSABLE_V4 = (
+    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
+)
 
 
 def iter_workflow_files(root: Path) -> tuple[Path, ...]:
@@ -47,6 +51,11 @@ def check_workflow_text(text: str, *, source: str = "workflow") -> list[str]:
             continue
         reference = match.group("reference")
         if reference.startswith("./") or reference.startswith("docker://"):
+            continue
+        # The ReviewSensei reusable workflow is intentionally the sole
+        # tag-following dependency: v4 is the operator-managed release channel.
+        # The broker resolves the tag and verifies the executing SHA at runtime.
+        if reference == _PUBLIC_REUSABLE_V4:
             continue
         if "@" not in reference:
             violations.append(

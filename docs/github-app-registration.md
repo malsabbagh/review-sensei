@@ -171,8 +171,8 @@ review; an uninstall/reinstall cycle is not required.
 ## Issue-64 setup-v4 lifecycle
 
 Setup-v4 adds the public reusable workflow boundary. The operator-managed `v4`
-git tag is an install-time update channel: the Worker resolves it and the
-generated caller references the resulting full commit SHA. The caller requests
+git tag is the update channel: the Worker validates it before setup and the
+generated caller follows the tag. The caller requests
 `contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
 and defaults every write/artifact switch to `false`.
 Automatic cloud pull-request review is GitHub-hosted and same-repository only;
@@ -189,12 +189,11 @@ setup PR. Add the secret manually when enabling cloud mode.
 | `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v4 PR per repository |
 | removed/deleted/suspended/unsupported | Do not reconcile setup | No setup write |
 
-The Worker validates the configured tag, resolves it through GitHub, and
-requires the result to equal `PUBLIC_WORKFLOW_SHA` before generation. It then
-branches from the current default-branch head, writes only the three generated
-paths, and never writes directly to the default branch. A failed or unavailable
-capability, fork, insufficient permission, replay, or rate limit fails closed.
-The OIDC broker requires that immutable SHA and can temporarily allow older
-pinned SHA pairs through `PUBLIC_WORKFLOW_LEGACY_SHAS`.
+The Worker validates the configured tag and resolves it through GitHub before
+generation. It then branches from the current default-branch head, writes only
+the three generated paths, and never writes directly to the default branch. A
+failed or unavailable capability, fork, insufficient permission, replay, or
+rate limit fails closed. The OIDC broker resolves the same tag at exchange time
+and requires both the tag workflow ref and its runtime-resolved SHA.
 Release ordering and rollback are documented in [`docs/installation.md`](installation.md)
 and [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md).

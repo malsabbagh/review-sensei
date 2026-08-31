@@ -1,11 +1,10 @@
 name: ReviewSensei reusable runner
 
-# This is the public reusable workflow. The installer uses the operator-managed
-# v4 git tag as an update channel, resolves it at setup time, and writes the
-# resulting commit SHA into customer setup-v4 files. The OIDC broker admits
-# only that immutable SHA (plus an explicit legacy-SHA migration window).
-# PyPI remains the primary package channel; the source fallback installs the
-# executing workflow commit SHA directly.
+# This is the public reusable workflow. Setup-v4 callers use the
+# operator-managed v4 git tag as their update channel. The OIDC broker resolves
+# that tag at capability-exchange time and requires the executing workflow SHA
+# to match it. PyPI remains the primary package channel; the source fallback
+# installs the executing workflow commit SHA directly.
 on:
   workflow_call:
     inputs:
@@ -160,13 +159,8 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@([a-f0-9]{40})$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a full commit SHA." >&2
-            exit 1
-          fi
-          workflow_ref_sha="${BASH_REMATCH[1]}"
-          if [[ "$workflow_ref_sha" != "$REVIEW_SENSEI_WORKFLOW_SHA" ]]; then
-            echo "::error::The reusable workflow ref does not match the executing workflow SHA." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -288,13 +282,8 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@([a-f0-9]{40})$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a full commit SHA." >&2
-            exit 1
-          fi
-          workflow_ref_sha="${BASH_REMATCH[1]}"
-          if [[ "$workflow_ref_sha" != "$REVIEW_SENSEI_WORKFLOW_SHA" ]]; then
-            echo "::error::The reusable workflow ref does not match the executing workflow SHA." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then

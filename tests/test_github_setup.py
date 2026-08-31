@@ -75,7 +75,6 @@ class FakeTransport:
         branch,
         base_sha,
         public_workflow_tag,
-        public_workflow_sha,
     ):
         self.requests.append(
             (
@@ -85,7 +84,6 @@ class FakeTransport:
                 branch,
                 base_sha,
                 public_workflow_tag,
-                public_workflow_sha,
             )
         )
         return self.branch_managed
@@ -248,8 +246,7 @@ class SetupPlanTests(unittest.TestCase):
         ]
         self.assertIn("# ReviewSensei setup version: 4", workflow)
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
-            + "f" * 40,
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
             workflow,
         )
         self.assertIn(
@@ -295,13 +292,12 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             dynamic.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4-ffffffffffff",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
         )
 
-    def test_build_plan_uses_the_supplied_tag_and_sha(self):
+    def test_build_plan_uses_the_supplied_tag(self):
         plan = SetupPlanBuilder(
             public_workflow_tag="stable",
-            public_workflow_sha=PUBLIC_WORKFLOW_SHA,
         ).build(
             "owner/repo",
             base_branch="main",
@@ -309,14 +305,12 @@ class SetupPlanTests(unittest.TestCase):
         )
         files = {file.path: file.content for file in plan.files}
         workflow = files[".github/workflows/review-sensei-review.yml"]
-        self.assertEqual(
-            workflow.count(f"review-sensei-run.yml@{PUBLIC_WORKFLOW_SHA}"), 2
-        )
+        self.assertEqual(workflow.count("review-sensei-run.yml@stable"), 2)
         self.assertIn("# ReviewSensei setup version: 4", workflow)
         self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
         self.assertEqual(
             plan.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-stable-aaaaaaaaaaaa",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-stable",
         )
 
     def test_builder_rejects_unsafe_public_workflow_tags(self):
@@ -324,9 +318,9 @@ class SetupPlanTests(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaises(GitHubSetupError):
                 SetupPlanBuilder(public_workflow_tag=tag)
 
-    def test_builder_rejects_invalid_public_workflow_sha(self):
+    def test_builder_rejects_sha_configuration_for_current_v4(self):
         with self.assertRaises(GitHubSetupError):
-            SetupPlanBuilder(public_workflow_sha="not-a-commit-sha")
+            SetupPlanBuilder(public_workflow_sha=PUBLIC_WORKFLOW_SHA)
 
     def test_build_rejects_unsafe_repository(self):
         with self.assertRaises(GitHubSetupError):
@@ -338,7 +332,24 @@ class SetupPlanTests(unittest.TestCase):
         with self.assertRaises(GitHubSetupError):
             SetupPlanBuilder(branch_name="../bad")
         with self.assertRaises(GitHubSetupError):
+            SetupPlanBuilder(branch_name="bad?branch")
+        with self.assertRaises(GitHubSetupError):
             SetupPlanBuilder(title="")
+
+    def test_build_rejects_invalid_base_sha_for_tagged_setup(self):
+        with self.assertRaises(GitHubSetupError):
+            SetupPlanBuilder().build("owner/repo", base_sha="not-a-sha")
+
+    def test_legacy_v3_build_with_base_sha_keeps_migration_branch(self):
+        plan = SetupPlanBuilder(
+            public_workflow_sha=PUBLIC_WORKFLOW_SHA,
+            legacy_v3=True,
+        ).build("owner/repo", base_sha=BASE_SHA)
+
+        self.assertEqual(
+            plan.branch_name,
+            "review-sensei/setup-v3-bbbbbbbbbbbb-aaaaaaaaaaaa",
+        )
 
 
 class SetupPullRequestServiceTests(unittest.TestCase):
@@ -557,17 +568,12 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4-ffffffffffff",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
         )
 
     def test_stale_v4_setup_following_another_tag_is_migrated(self):
-        plan = SetupPlanBuilder(public_workflow_sha=PUBLIC_WORKFLOW_SHA).build(
-            "owner/repo"
-        )
+        plan = SetupPlanBuilder(public_workflow_tag="old-v4").build("owner/repo")
         files = {file.path: file.content for file in plan.files}
-        files[".github/workflows/review-sensei-review.yml"] = files[
-            ".github/workflows/review-sensei-review.yml"
-        ].replace(f"@{PUBLIC_WORKFLOW_SHA}", "@old-v4")
         transport = FileTransport(
             files=files,
         )
@@ -583,7 +589,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4-ffffffffffff",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
         )
 
     def test_released_v3_setup_with_stale_public_workflow_sha_is_migrated(self):
@@ -630,7 +636,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         transport = FileTransport(
             files={
                 ".github/workflows/review-sensei-review.yml": workflow.replace(
-                    "@" + "f" * 40, "@v4.lock"
+                    "@v4", "@v4.lock"
                 )
             }
         )
@@ -1190,7 +1196,6 @@ class GitHubSetupClientTests(unittest.TestCase):
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
                 public_workflow_tag="v4",
-                public_workflow_sha="f" * 40,
             )
         )
         self.assertIn("/compare/", calls[1][1])
@@ -1216,7 +1221,6 @@ class GitHubSetupClientTests(unittest.TestCase):
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
                 public_workflow_tag="v4",
-                public_workflow_sha="f" * 40,
             )
         )
         self.assertEqual(len(calls), 1)

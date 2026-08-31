@@ -405,7 +405,7 @@ Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:
 
 ```text
-customer setup-v4 caller (install-resolved full workflow SHA; all opt-ins false)
+customer setup-v4 caller (operator-managed @v4 tag; all opt-ins false)
     -> public reusable workflow
        -> trusted-base checkout and bounded diff
        -> PyPI package or executing-SHA public GitHub source fallback
@@ -413,17 +413,16 @@ customer setup-v4 caller (install-resolved full workflow SHA; all opt-ins false)
        -> typed result/reply validation
        -> Actions OIDC assertion
           -> Cloudflare POST /github/token
-             -> exact current/legacy-SHA claims + repository/fork/install checks
+             -> exact @v4 ref + tag-resolved runtime SHA + repository/fork/install checks
              -> hashed replay/rate Durable Object claim
              -> one least-privileged capability token
        -> App-authored exact-head review, learning PR, or authorized reply
 ```
 
 The generated setup PR is limited to the workflow caller, uninstall workflow,
-and config file. The operator-managed v4 tag is resolved only during
-installation/reconciliation; the generated caller pins that commit and the
-broker admits the current SHA plus explicitly configured older SHA pairs during
-migration. The workflow may
+and config file. The operator-managed v4 tag is validated during
+installation/reconciliation and remains in the generated caller; the broker
+resolves the tag at capability exchange time and checks the runtime SHA. The workflow may
 receive the existing customer-owned `OLLAMA_API_KEY` only through a literal
 name-only secret mapping. The setup App does not access that value. The Worker
 does not receive source, diffs, prompts, review output, reply content, provider

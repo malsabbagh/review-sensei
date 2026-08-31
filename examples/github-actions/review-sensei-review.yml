@@ -1,11 +1,10 @@
 # ReviewSensei setup version: 4
 name: ReviewSensei review
 
-# The installer resolves the operator-managed v4 git tag and writes its full
-# commit SHA into generated customer workflows. Replace this placeholder with
-# that resolved SHA when using this standalone example. The reusable workflow
-# installs the requested package from PyPI first and falls back to that same
-# verified commit when the package version is not yet published.
+# The installer and this example follow the operator-managed v4 git tag. Moving
+# that tag is the public setup-v4 release action. The reusable workflow installs
+# the requested package from PyPI first and falls back to its executing commit
+# only when the package version is not yet published.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -70,7 +69,7 @@ jobs:
       vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
       vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@ffffffffffffffffffffffffffffffffffffffff # replace with the install-resolved v4 commit SHA
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
     with:
       mode: automatic
       operation: review
@@ -110,7 +109,7 @@ jobs:
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')) &&
       vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@ffffffffffffffffffffffffffffffffffffffff # replace with the install-resolved v4 commit SHA
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
     with:
       mode: manual
       operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}

@@ -98,8 +98,10 @@ comments. Reviewers may request an ADR, tests, or narrower scope before
 approval.
 
 Third-party Actions in `.github/workflows` and `examples/github-actions` are
-pinned to full commit SHAs with same-line release comments. Dependabot updates
-the pins weekly; review the resulting diff and rerun
+pinned to full commit SHAs with same-line release comments. The sole exception
+is the public ReviewSensei reusable workflow, which intentionally follows the
+protected `@v4` setup channel and is checked by the OIDC broker at runtime.
+Dependabot updates the pins weekly; review the resulting diff and rerun
 `python scripts/check_action_pins.py`. CI and tests must remain credential-free.
 
 ## Architecture and ADR policy

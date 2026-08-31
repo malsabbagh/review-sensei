@@ -7,10 +7,11 @@ providers later.
 
 > Alpha: this repository provides an open-source review engine and CLI. The
 > primary usage path is running ReviewSensei in your own GitHub Actions
-> workflow. The installer resolves the operator-managed public workflow tag at
-> setup time and writes a full commit SHA into generated callers. The example
-> workflow installs the requested exact package from PyPI first and falls back
-> to that executing commit only when the distribution is unavailable. It
+> workflow. Setup-v4 callers follow the operator-managed public `v4` tag; the
+> Worker validates that tag before creating the setup PR and the broker resolves
+> it again when issuing a capability. The example workflow installs the
+> requested exact package from PyPI first and falls back to its executing commit
+> only when the distribution is unavailable. It
 > defaults to a local Ollama endpoint and does not require a hosted backend.
 
 ## What it does
@@ -106,11 +107,11 @@ is not a hosted review service, webhook receiver, or durable delivery store.
 ### GitHub App setup-v4 integration
 
 The optional setup-v4 integration adds a reviewable, generated caller by using
-the operator-managed `v4` git tag as an install-time update channel. The Worker
-resolves that tag and writes the resulting full commit SHA into the caller:
-`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@<sha>`.
-The Cloudflare broker admits only the configured SHA (plus explicit legacy SHA
-pins during migration); a mutable tag is never executed by new callers.
+the operator-managed `v4` git tag as the only update channel:
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4`.
+The Worker validates the tag before writing the caller, and the Cloudflare
+broker resolves the same tag at capability exchange time and checks the
+executing workflow SHA. Moving `v4` is therefore the public cutoff action.
 Automatic pull-request cloud reviews run only on GitHub-hosted compute. Local
 Ollama runs remain manual or trusted-event-only on an operator-controlled
 self-hosted runner. Every generated write switch defaults to `false`.
@@ -119,8 +120,8 @@ Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
 name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
 does not create, read, persist, log, or reveal that secret value. The Worker
 broker only issues one capability-scoped installation token after verifying
-the signed Actions OIDC identity, exact workflow SHA, repository identity, fork
-status, installation, replay state, and rate limit.
+the signed Actions OIDC identity, exact v4 workflow ref and runtime SHA,
+repository identity, fork status, installation, replay state, and rate limit.
 
 Installation, reinstall, permission-acceptance, and repository-added events
 reconcile absent or older generated clients through at most one setup-v4 PR.

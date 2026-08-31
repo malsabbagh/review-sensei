@@ -18,7 +18,7 @@ import {
 const SHA = "a".repeat(40);
 const TAG = "v4";
 const BASE_SHA = "b".repeat(40);
-const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}-${SHA.slice(0, 12)}`;
+const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}`;
 const ALL_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
@@ -32,7 +32,6 @@ function env(): WorkerEnv {
     GITHUB_APP_PRIVATE_KEY: "unused-by-test-adapter",
     GITHUB_APP_WEBHOOK_SECRET: "unused",
     PUBLIC_WORKFLOW_TAG: TAG,
-    PUBLIC_WORKFLOW_SHA: SHA,
   } as WorkerEnv;
 }
 
@@ -85,7 +84,7 @@ class FakeGitHub {
   readonly publicWorkflowSha = vi.fn(async () => SHA);
   files: SetupFiles = Object.fromEntries(SETUP_FILE_PATHS.map((path) => [path, null]));
   branchFiles: SetupFiles = Object.fromEntries(
-    buildSetupFiles(SHA).map(({ path, content }) => [path, content]),
+    buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
   );
   branchExists = false;
   branchManaged = true;
@@ -322,13 +321,11 @@ describe("installation and migration events", () => {
     expect(mutationRequests(fake)).toEqual([]);
   });
 
-  it("fails closed when the configured tag resolves to a different SHA", async () => {
+  it("fails closed when the configured tag cannot be resolved", async () => {
     const fake = new FakeGitHub();
-    fake.publicWorkflowSha.mockResolvedValue("c".repeat(40));
+    fake.publicWorkflowSha.mockRejectedValue(new Error("public workflow tag unavailable"));
 
-    await expect(serviceWith(fake).process(delivery())).rejects.toThrow(
-      "PUBLIC_WORKFLOW_TAG does not resolve to PUBLIC_WORKFLOW_SHA",
-    );
+    await expect(serviceWith(fake).process(delivery())).rejects.toThrow("public workflow tag unavailable");
     expect(fake.installationToken).not.toHaveBeenCalled();
     expect(mutationRequests(fake)).toEqual([]);
   });
@@ -573,7 +570,7 @@ describe("setup repository reconciliation", () => {
 
   it("does not replace customized partial setup-v4 content", async () => {
     const fake = new FakeGitHub();
-    const current = buildSetupFiles(SHA)[0].content;
+    const current = buildSetupFiles(TAG)[0].content;
     fake.files[".github/workflows/review-sensei-review.yml"] = current.replace(
       "name: ReviewSensei review",
       "name: Customer ReviewSensei review",
@@ -587,7 +584,7 @@ describe("setup repository reconciliation", () => {
 
   it("does not write when setup-v4 is already current", async () => {
     const fake = new FakeGitHub();
-    fake.files = Object.fromEntries(buildSetupFiles(SHA).map(({ path, content }) => [path, content]));
+    fake.files = Object.fromEntries(buildSetupFiles(TAG).map(({ path, content }) => [path, content]));
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "skipped_current" },
     ]);
@@ -599,7 +596,7 @@ describe("setup repository reconciliation", () => {
       "name: Customer-owned workflow\n",
       "# ReviewSensei setup version: not-a-number\nname: ReviewSensei review\n",
       "# ReviewSensei setup version: 99\nname: ReviewSensei review\n",
-      buildSetupFiles(SHA)[0].content.replaceAll(`@${SHA}`, "@v4.lock"),
+      buildSetupFiles(TAG)[0].content.replaceAll(`@${TAG}`, "@v4.lock"),
     ]) {
       const fake = new FakeGitHub();
       fake.files[".github/workflows/review-sensei-review.yml"] = content;

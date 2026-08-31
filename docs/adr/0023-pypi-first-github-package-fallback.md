@@ -33,21 +33,21 @@ virtual environment and attempts:
    when pip reports that the ReviewSensei package/version has no matching
    distribution.
 
-The setup installer has already resolved the operator-managed `v4` workflow tag
-to the immutable commit used in the caller. The reusable workflow validates that
-its `job.workflow_ref` is the full commit reference and that `job.workflow_sha`
-matches it. If PyPI is unavailable, it installs directly from that executing
-commit SHA. It checks
+The setup installer validates the operator-managed `v4` workflow tag and writes
+that tag into the caller. The reusable workflow validates that its
+`job.workflow_ref` is the exact public v4 tag reference and that `job.workflow_sha`
+is a valid executing commit. If PyPI is unavailable, it installs directly from
+that executing commit SHA. It checks
 the installed metadata against the requested version, runs `pip check`, and
 logs whether PyPI or GitHub supplied the package. A branch or arbitrary source
 URL is never accepted.
 
 Generated setup-v4 callers continue to pass `REVIEWSENSEI_VERSION` and add no
-package-source input. Existing tag-following v4 callers are recognized as stale
-managed files and receive a migration PR with the resolved SHA. Existing v3
-callers retain their own immutable workflow behavior while the Worker can allow
-their exact legacy SHA pairs during the migration window. Publishing the package
-to PyPI remains the preferred long-term path.
+package-source input. Existing callers following another tag are recognized as
+stale managed files and receive a migration PR to the configured v4 tag.
+Existing v3 callers retain their historical immutable workflow behavior during
+the migration. Publishing the package to PyPI remains the preferred long-term
+path.
 
 ## Scope
 
@@ -81,8 +81,8 @@ Positive:
 
 Tradeoffs:
 
-- The installation Worker must resolve the public `v4` tag and verify its
-  configured SHA before creating setup files.
+- The installation Worker must validate that the public `v4` tag exists before
+  creating setup files, and the broker resolves it again for each exchange.
 - Source installation depends on Git being available on the runner and still
   resolves package build dependencies from the configured package index.
 - Until the package is published, hosted acceptance must record that the run
@@ -92,8 +92,9 @@ Tradeoffs:
 
 ### Install from `main` or an unverified tag
 
-Rejected because a branch or a moving tag would allow the review engine to
-change after a customer caller is merged.
+Rejected because an arbitrary branch or untrusted tag would allow the review
+engine to change outside the operator-managed v4 cutoff. The managed `v4` tag
+is the intentional release channel and is checked by the broker at runtime.
 
 ### Fall back on every PyPI installation error
 
@@ -109,7 +110,8 @@ limits the source choice to the reviewed public workflow.
 ## Validation
 
 - Static workflow tests assert PyPI installation precedes the GitHub URL, the
-  reusable workflow ref and executing SHA are full-SHA matched, the
+  reusable workflow ref is exactly the managed v4 tag, the executing SHA is
+  valid, the
   missing-distribution patterns are specific to `review-sensei`, version
   metadata is checked, and other failures refuse fallback.
 - Run the shell syntax check for both install blocks.
@@ -121,17 +123,16 @@ limits the source choice to the reviewed public workflow.
 ## Rollout and rollback
 
 Publish the reviewed source snapshot, configure and deploy the Worker with
-`PUBLIC_WORKFLOW_TAG=v4`, its matching `PUBLIC_WORKFLOW_SHA`, and any older
-pinned SHAs in `PUBLIC_WORKFLOW_LEGACY_SHAS`, then move `v4` to that snapshot.
-Trigger a fresh installation/permission event so existing tag-following and v3
-clients receive SHA-pinned migration PRs. After the PyPI release is available,
+`PUBLIC_WORKFLOW_TAG=v4`, then move `v4` to that snapshot. Trigger a fresh
+installation/permission event so the setup-v4 caller follows the current tag.
+After the PyPI release is available,
 the same workflow automatically uses it and the fallback remains dormant. Roll
-back by redeploying the prior Worker/workflow pair and retaining its legacy SHA
-allowlist; no review-content data migration is required.
+back by moving `v4` to the last approved public commit or redeploying the prior
+Worker/workflow pair; no review-content data migration is required.
 
 ## Follow-up
 
 - Publish and verify `review-sensei==0.1.0` through the existing Trusted
   Publishing release workflow.
-- Move the public `v4` tag and update the Worker's resolved SHA whenever a future
-  source snapshot is introduced before its PyPI publication.
+- Move the public `v4` tag whenever a future source snapshot is introduced
+  before its PyPI publication; no separate SHA variable is updated.
