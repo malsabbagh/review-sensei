@@ -101,7 +101,7 @@ function positiveId(value: unknown): number {
 }
 
 async function fetchJwks(issuer: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${issuer}/.well-known/jwks.json`, {
+  const response = await fetch(`${issuer}/.well-known/jwks`, {
     headers: { accept: "application/json" },
   });
   if (!response.ok) {

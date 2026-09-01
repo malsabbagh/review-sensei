@@ -9,7 +9,7 @@ vi.mock("../src/token-broker", () => ({
 }));
 
 import type { WorkerEnv } from "../src/env";
-import worker from "../src/worker";
+import worker, { brokerErrorCode, setupErrorCode } from "../src/worker";
 
 const env = {} as WorkerEnv;
 
@@ -56,13 +56,44 @@ describe("token route response security", () => {
     broker.exchange.mockRejectedValue(
       new Error("github rejected ghs_sensitive and signed-jwt with repository metadata"),
     );
-    const result = await worker.fetch(request(), env);
-    const body = await result.text();
-    expect(result.status).toBe(403);
-    expect(result.headers.get("cache-control")).toBe("no-store");
-    expect(body).toBe('{"error":"capability_not_issued"}');
-    expect(body).not.toContain("ghs_sensitive");
-    expect(body).not.toContain("signed-jwt");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const result = await worker.fetch(request(), env);
+      const body = await result.text();
+      expect(result.status).toBe(403);
+      expect(result.headers.get("cache-control")).toBe("no-store");
+      expect(body).toBe('{"error":"capability_not_issued"}');
+      expect(body).not.toContain("ghs_sensitive");
+      expect(body).not.toContain("signed-jwt");
+      expect(log).toHaveBeenCalledWith("github_broker_failed", {
+        error_code: "broker_failed",
+        capability: "review_publish",
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("logs a stable broker code and bounded request metadata", async () => {
+    broker.exchange.mockRejectedValue(new Error("github_capability_issue_failed_422"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const result = await worker.fetch(
+        request({ oidc_token: "signed-jwt", capability: "learning_write" }, {
+          "cf-ray": "0123456789abcdef-YYZ",
+        }),
+        env,
+      );
+      expect(result.status).toBe(403);
+      expect(await result.json()).toEqual({ error: "capability_not_issued" });
+      expect(log).toHaveBeenCalledWith("github_broker_failed", {
+        error_code: "github_capability_issue_failed_422",
+        capability: "learning_write",
+        cf_ray: "0123456789abcdef-YYZ",
+      });
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it.each([
@@ -103,5 +134,29 @@ describe("token route response security", () => {
     );
     expect(missingLength.status).toBe(411);
     expect(missingLength.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("failure diagnostics", () => {
+  it.each([
+    [new Error("github_capability_issue_failed_422"), "github_capability_issue_failed_422"],
+    [new Error("oidc_audience_invalid"), "oidc_audience_invalid"],
+    [new Error("unexpected provider response"), "broker_failed"],
+  ])("normalizes broker diagnostics for %s", (error, expected) => {
+    expect(brokerErrorCode(error)).toBe(expected);
+  });
+
+  it.each([
+    [new Error("github_installation_token_failed_401"), "github_installation_token_failed_401"],
+    [new Error("GitHub App installation lacks setup permissions"), "github_installation_permissions_missing"],
+    [new Error("GitHub request was rejected"), "github_request_rejected"],
+  ])("keeps the diagnostic code stable for %s", (error, expected) => {
+    expect(setupErrorCode(error)).toBe(expected);
+  });
+
+  it("does not expose arbitrary error text", () => {
+    expect(setupErrorCode(new Error("github rejected ghs_sensitive-token"))).toBe(
+      "setup_failed",
+    );
   });
 });

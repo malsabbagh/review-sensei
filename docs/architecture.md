@@ -413,7 +413,7 @@ customer setup-v4 caller (operator-managed @v4 tag; all opt-ins false)
        -> typed result/reply validation
        -> Actions OIDC assertion
           -> Cloudflare POST /github/token
-             -> exact @v4 ref + tag-resolved runtime SHA + repository/fork/install checks
+             -> exact @v4 ref + tag-resolved runtime SHA + installation resolution + metadata-scoped repository/fork checks
              -> hashed replay/rate Durable Object claim
              -> one least-privileged capability token
        -> App-authored exact-head review, learning PR, or authorized reply

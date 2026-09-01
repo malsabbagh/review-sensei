@@ -55,7 +55,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             config["vars"],
             {
-                "PUBLIC_WORKFLOW_TAG": "REPLACE_WITH_PUBLIC_WORKFLOW_TAG",
+                "PUBLIC_WORKFLOW_TAG": "v4",
             },
         )
 

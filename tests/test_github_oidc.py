@@ -263,6 +263,21 @@ class HttpJwksFetcherTTLTests(unittest.TestCase):
 
         return opener
 
+    def test_uses_github_oidc_jwks_endpoint(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append((request.full_url, request.get_header("Accept")))
+            return io.BytesIO(b'{"keys":[]}')
+
+        fetcher = HttpJwksFetcher(opener=opener)
+        fetcher.fetch_jwks(DEFAULT_OIDC_ISSUER)
+
+        self.assertEqual(
+            calls,
+            [(f"{DEFAULT_OIDC_ISSUER}/.well-known/jwks", "application/json")],
+        )
+
     def test_cache_serves_within_ttl_then_refreshes(self):
         calls = []
 

@@ -4,9 +4,11 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_PRIVATE_KEY_BYTES = 64 * 1024;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const PUBLIC_WORKFLOW_REPOSITORY = "malsabbagh/review-sensei";
+const PUBLIC_WORKFLOW_GIT_URL = "https://github.com/malsabbagh/review-sensei.git";
 const PUBLIC_WORKFLOW_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PUBLIC_WORKFLOW_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_TAG_DEREFERENCE_DEPTH = 3;
+const MAX_PUBLIC_REF_BYTES = 64 * 1024;
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -169,6 +171,87 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
+async function boundedBytes(response: Response, maximum: number): Promise<Uint8Array> {
+  const length = response.headers.get("content-length");
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > maximum)) {
+    throw new Error("github_response_too_large");
+  }
+  if (response.body === null) {
+    return new Uint8Array();
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) {
+      break;
+    }
+    total += next.value.byteLength;
+    if (total > maximum) {
+      await reader.cancel();
+      throw new Error("github_response_too_large");
+    }
+    chunks.push(next.value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+function advertisedTagSha(bytes: Uint8Array, tag: string): string {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const directRef = `refs/tags/${tag}`;
+  const peeledRef = `${directRef}^{}`;
+  let direct: string | undefined;
+  let peeled: string | undefined;
+  let offset = 0;
+  while (offset + 4 <= bytes.byteLength) {
+    const header = decoder.decode(bytes.subarray(offset, offset + 4));
+    if (!/^[0-9a-f]{4}$/.test(header)) {
+      throw new Error("github_workflow_tag_invalid");
+    }
+    const length = Number.parseInt(header, 16);
+    if (length === 0) {
+      offset += 4;
+      continue;
+    }
+    if (length === 1) {
+      break;
+    }
+    if (length < 4 || offset + length > bytes.byteLength) {
+      throw new Error("github_workflow_tag_invalid");
+    }
+    const packet = decoder
+      .decode(bytes.subarray(offset + 4, offset + length))
+      .replace(/\n$/, "");
+    offset += length;
+    const separator = packet.indexOf(" ");
+    if (separator < 40) {
+      continue;
+    }
+    const sha = packet.slice(0, separator);
+    const ref = packet.slice(separator + 1).split("\0", 1)[0];
+    if (!PUBLIC_WORKFLOW_SHA_PATTERN.test(sha)) {
+      continue;
+    }
+    if (ref === directRef) {
+      direct = sha;
+    } else if (ref === peeledRef) {
+      peeled = sha;
+    }
+  }
+  const resolved = peeled ?? direct;
+  if (!resolved) {
+    throw new Error("github_workflow_tag_unavailable");
+  }
+  return resolved;
+}
+
 /** Shared bounded App-authenticated GitHub adapter used only by the broker. */
 export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
@@ -219,7 +302,7 @@ export class GitHubApi {
   async request(
     method: string,
     path: string,
-    token: string,
+    token: string | undefined,
     body?: JsonObject,
   ): Promise<GitHubApiResponse> {
     if (!path.startsWith("/") || /[\r\n]/.test(path)) {
@@ -229,7 +312,7 @@ export class GitHubApi {
       method,
       headers: {
         accept: "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
         "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
         "x-github-api-version": "2022-11-28",
         ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -251,8 +334,11 @@ export class GitHubApi {
     return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
   }
 
-  async repositoryInfo(repository: string): Promise<{ id: number; fork: boolean } | null> {
-    const response = await this.request("GET", repositoryPath(repository), await this.appJwt());
+  async repositoryInfo(
+    repository: string,
+    token: string,
+  ): Promise<{ id: number; fork: boolean } | null> {
+    const response = await this.request("GET", repositoryPath(repository), token);
     if (response.status === 404 || response.status === 403) {
       return null;
     }
@@ -267,18 +353,36 @@ export class GitHubApi {
     return { id, fork };
   }
 
-  /** Resolve the operator-managed public workflow tag to its immutable commit. */
+  /**
+   * Resolve the operator-managed public workflow tag to its immutable commit.
+   *
+   * Prefer GitHub's public Git ref advertisement so this hot path is not
+   * constrained by the 60-request/hour anonymous REST bucket. The REST refs
+   * endpoint remains a fallback for GitHub-compatible environments where the
+   * Git advertisement cannot be read or parsed.
+   */
   async publicWorkflowSha(tag: string): Promise<string> {
     const validatedTag = publicWorkflowTag(tag);
-    const token = await this.appJwt();
+    if (this.apiUrl === "https://api.github.com") {
+      try {
+        return await this.publicWorkflowShaFromGit(validatedTag);
+      } catch {
+        // Fall back to the bounded REST resolver below when the public Git
+        // endpoint is unavailable or returns an unsupported advertisement.
+      }
+    }
+    return await this.publicWorkflowShaFromApi(validatedTag);
+  }
+
+  private async publicWorkflowShaFromApi(tag: string): Promise<string> {
     let response = await this.request(
       "GET",
-      `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(validatedTag)}`,
-      token,
+      `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(tag)}`,
+      undefined,
     );
     for (let depth = 0; depth <= MAX_TAG_DEREFERENCE_DEPTH; depth += 1) {
       if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
-        throw new Error("github_workflow_tag_unavailable");
+        throw new Error(`github_workflow_tag_unavailable_${response.status}`);
       }
       const object = response.data.object;
       if (!isObject(object) || typeof object.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(object.sha)) {
@@ -293,10 +397,39 @@ export class GitHubApi {
       response = await this.request(
         "GET",
         `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/tags/${encodeURIComponent(object.sha)}`,
-        token,
+        undefined,
       );
     }
     throw new Error("github_workflow_tag_invalid");
+  }
+
+  /** Resolve a public tag without consuming GitHub's anonymous REST quota. */
+  private async publicWorkflowShaFromGit(tag: string): Promise<string> {
+    let response: Response;
+    try {
+      response = await fetch(
+        `${PUBLIC_WORKFLOW_GIT_URL}/info/refs?service=git-upload-pack`,
+        {
+          headers: {
+            accept: "application/x-git-upload-pack-advertisement",
+            "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
+          },
+        },
+      );
+    } catch {
+      throw new Error("github_workflow_tag_unavailable");
+    }
+    if (!response.ok) {
+      throw new Error(`github_workflow_tag_unavailable_${response.status}`);
+    }
+    try {
+      return advertisedTagSha(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
+    } catch (error) {
+      if (error instanceof Error && /^github_workflow_tag_/.test(error.message)) {
+        throw error;
+      }
+      throw new Error("github_workflow_tag_invalid");
+    }
   }
 
   /**
@@ -319,7 +452,7 @@ export class GitHubApi {
       tokenResponse.status >= 300 ||
       !isObject(tokenResponse.data)
     ) {
-      throw new Error("github_installation_token_failed");
+      throw new Error(`github_installation_token_failed_${tokenResponse.status}`);
     }
     const token = tokenResponse.data.token;
     const expiresAt = tokenResponse.data.expires_at;
@@ -381,8 +514,11 @@ export class GitHubApi {
       await this.appJwt(),
       { repositories: [name], permissions },
     );
-    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
-      throw new Error("github_capability_issue_failed");
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`github_capability_issue_failed_${response.status}`);
+    }
+    if (!isObject(response.data)) {
+      throw new Error("github_capability_response_invalid");
     }
     const token = response.data.token;
     const expiresAt = response.data.expires_at;
@@ -421,7 +557,7 @@ export class GitHubApi {
       { repositories: [name], permissions },
     );
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
-      throw new Error("github_installation_token_failed");
+      throw new Error(`github_installation_token_failed_${response.status}`);
     }
     const token = response.data.token;
     const expiresAt = response.data.expires_at;

@@ -194,6 +194,7 @@ generation. It then branches from the current default-branch head, writes only
 the three generated paths, and never writes directly to the default branch. A
 failed or unavailable capability, fork, insufficient permission, replay, or
 rate limit fails closed. The OIDC broker resolves the same tag at exchange time
+using GitHub's public Git ref advertisement first (with a bounded REST fallback)
 and requires both the tag workflow ref and its runtime-resolved SHA.
 Release ordering and rollback are documented in [`docs/installation.md`](installation.md)
 and [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md).

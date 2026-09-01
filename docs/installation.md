@@ -44,7 +44,8 @@ The setup-v4 caller example in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
 uses the operator-managed `v4` git tag directly. The Worker validates that tag
 during installation/reconciliation, and the broker resolves the same tag when
-authorizing a run. That workflow
+authorizing a run (using the public Git ref advertisement before a bounded REST
+fallback on GitHub.com). That workflow
 tries to install the exact `REVIEWSENSEI_VERSION` from PyPI in a separate
 `RUNNER_TEMP` environment. When that exact distribution/version is unavailable,
 it installs from the public ReviewSensei repository at the executing workflow

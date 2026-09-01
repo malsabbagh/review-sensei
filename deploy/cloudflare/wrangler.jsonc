@@ -6,7 +6,7 @@
 	"workers_dev": true,
 	"preview_urls": true,
 	"vars": {
-		"PUBLIC_WORKFLOW_TAG": "REPLACE_WITH_PUBLIC_WORKFLOW_TAG"
+		"PUBLIC_WORKFLOW_TAG": "v4"
 	},
 	"routes": [
 		{
@@ -42,5 +42,14 @@
 				"BrokerLedger"
 			]
 		}
-	]
+	],
+	"observability": {
+		"redact_query_string": false,
+		"logs": {
+			"enabled": true
+		},
+		"traces": {
+			"enabled": true
+		}
+	}
 }

@@ -58,6 +58,11 @@ function harness(ledgerState: "accepted" | "replay" | "rate_limited" = "accepted
     publicWorkflowSha: vi.fn(async () => SHA),
     repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
     installationFor: vi.fn(async () => 2468),
+    installationToken: vi.fn(async () => ({
+      token: "ghs_metadata_token",
+      expiresAt: Date.now() + 60_000,
+      permissions: { metadata: "read" },
+    })),
     capabilityToken: vi.fn(async () => "ghs_scoped_token"),
   };
   const broker = new TokenBroker(env, github as never);
@@ -81,6 +86,13 @@ describe("token broker authorization", () => {
     const result = await broker.exchange({ oidc_token: "signed-jwt", capability: requested });
 
     expect(result).toEqual({ token: "ghs_scoped_token", capability: returned });
+    expect(github.installationToken).toHaveBeenCalledWith(2468, "acme/widgets", {
+      metadata: "read",
+    });
+    expect(github.repositoryInfo).toHaveBeenCalledWith(
+      "acme/widgets",
+      "ghs_metadata_token",
+    );
     expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", permissions);
   });
 
@@ -146,7 +158,7 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
       "broker_repository_rejected",
     );
-    expect(github.installationFor).not.toHaveBeenCalled();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
   it("rejects a repository without an App installation", async () => {
@@ -155,6 +167,8 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
       "broker_installation_unavailable",
     );
+    expect(github.installationToken).not.toHaveBeenCalled();
+    expect(github.repositoryInfo).not.toHaveBeenCalled();
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
@@ -166,6 +180,7 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(message);
     expect(github.repositoryInfo).not.toHaveBeenCalled();
     expect(github.installationFor).not.toHaveBeenCalled();
+    expect(github.installationToken).not.toHaveBeenCalled();
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 

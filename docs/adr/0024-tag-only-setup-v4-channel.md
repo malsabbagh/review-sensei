@@ -19,7 +19,9 @@ contract is one operator-managed channel: the protected public `v4` git tag.
 
 - `PUBLIC_WORKFLOW_TAG` is the only Worker setup-v4 workflow configuration.
 - The setup Worker validates that the configured tag resolves before creating a
-  setup PR. Generated callers reference
+  setup PR. On GitHub.com it reads the public Git ref advertisement first and
+  falls back to the REST ref endpoint when necessary, avoiding the anonymous
+  REST rate bucket. Generated callers reference
   `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4` directly.
 - The reusable workflow accepts only the canonical public repository tag-ref
   form. The broker binds the configured tag to its runtime `job_workflow_sha`;
@@ -48,7 +50,9 @@ Tradeoffs:
 - Moving `v4` changes trusted workflow code immediately for existing callers;
   the tag must be protected and moved only after the audited public snapshot is
   published.
-- The broker performs a GitHub tag-resolution call for each token exchange.
+- The broker performs a GitHub tag-resolution call for each token exchange; on
+  GitHub.com the normal path uses the public Git ref advertisement, with a
+  bounded REST fallback.
 - Existing SHA-pinned callers no longer obtain a v4 capability until the App
   generates and the repository merges a tag-following migration PR.
 

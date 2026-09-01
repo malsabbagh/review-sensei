@@ -201,7 +201,7 @@ class ReviewPublisher:
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily"
             ) from exc
-        if status == 201 and isinstance(payload, dict):
+        if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
                 return PublicationResult(status="published", review_id=review_id)

@@ -11,6 +11,7 @@ const CAPABILITIES = {
   issue_reply: { issues: "write" },
   learning_write: { contents: "write", "pull_requests": "write" },
 } as const;
+const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
 
 type Capability = keyof typeof CAPABILITIES;
 
@@ -119,13 +120,24 @@ export class TokenBroker {
     if (ledgerState === "rate_limited") {
       throw new Error("broker_rate_limited");
     }
-    const info = await this.github.repositoryInfo(claims.repository);
-    if (info === null || info.fork || info.id !== claims.repository_id) {
-      throw new Error("broker_repository_rejected");
-    }
     const installationId = await this.github.installationFor(claims.repository);
     if (installationId === null) {
       throw new Error("broker_installation_unavailable");
+    }
+    // The repository endpoint requires an installation (or user) access
+    // token for private repositories. App JWTs are accepted for the
+    // installation lookup above, but not for repository metadata.
+    const metadataToken = await this.github.installationToken(
+      installationId,
+      claims.repository,
+      REPOSITORY_METADATA_PERMISSIONS,
+    );
+    const info = await this.github.repositoryInfo(
+      claims.repository,
+      metadataToken.token,
+    );
+    if (info === null || info.fork || info.id !== claims.repository_id) {
+      throw new Error("broker_repository_rejected");
     }
     const token = await this.github.capabilityToken(
       installationId,

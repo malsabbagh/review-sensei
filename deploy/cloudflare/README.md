@@ -100,12 +100,14 @@ PUBLIC_WORKFLOW_TAG=v4
 ```
 
 `PUBLIC_WORKFLOW_TAG` is the v4 update channel. During setup the Worker
-validates that the tag resolves through the GitHub API before writing generated
-callers. The OIDC broker resolves the same tag at capability exchange time and
-requires the runtime workflow SHA to match that resolution. Moving the tag is
-therefore an operator-controlled release action; protect the tag and publish
-the reviewed snapshot before moving it. A Worker deploy does not create or
-move the public tag.
+resolves the tag through GitHub's public Git ref advertisement before writing
+generated callers; it retains the REST ref lookup as a fallback. This avoids
+GitHub's low anonymous REST quota while preserving the tag-to-commit check.
+The OIDC broker resolves the same tag at capability exchange time and requires
+the runtime workflow SHA to match that resolution. Moving the tag is therefore
+an operator-controlled release action; protect the tag and publish the
+reviewed snapshot before moving it. A Worker deploy does not create or move
+the public tag.
 
 After deployment, set the GitHub App webhook URL to:
 
@@ -223,6 +225,20 @@ concurrent refresh coalescing, and a verified assertion is claimed before any
 GitHub repository or installation lookup. The route is no-store and has no
 CORS contract. `PUBLIC_WORKFLOW_TAG` is the only workflow-channel Worker
 variable and must be set before deployment.
+
+For a failed exchange, stream the Worker logs while reproducing the workflow:
+
+```bash
+npx wrangler tail reviewsensei-github-app --format json
+```
+
+`github_broker_failed` entries contain only a normalized `error_code`, the
+bounded capability name, and (when Cloudflare supplies one) the `cf_ray` request
+identifier. `oidc_*` codes identify assertion validation, `broker_*` codes
+identify policy, replay, or installation decisions, and `github_*` codes
+identify GitHub API or App failures. A code such as
+`github_capability_issue_failed_422` preserves only GitHub's HTTP status; raw
+tokens, claims, response bodies, and exception text are never logged or returned.
 
 ## Rollback and operations
 

@@ -102,7 +102,7 @@ class ReviewPublisherTests(unittest.TestCase):
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
-            json_response({"id": 5}, 201),
+            json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
         outcome = ReviewPublisher(http=http).publish(

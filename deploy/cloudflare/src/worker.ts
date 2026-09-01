@@ -24,6 +24,103 @@ function response(body: unknown, status = 200, noStore = false): Response {
   });
 }
 
+/**
+ * Convert setup failures into stable, non-sensitive diagnostics.
+ *
+ * GitHub/API errors in this Worker use fixed machine-readable codes, while
+ * setup validation errors use human-readable messages. Never return an
+ * arbitrary error message: it could contain a repository name, response
+ * body, or another value that should remain private.
+ */
+export function setupErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  if (/^github_[a-z0-9_]{1,80}$/.test(message)) {
+    return message;
+  }
+  if (message === "GitHub App installation lacks setup permissions") {
+    return "github_installation_permissions_missing";
+  }
+  if (message === "GitHub request failed temporarily") {
+    return "github_request_transient";
+  }
+  if (message === "GitHub request was rejected") {
+    return "github_request_rejected";
+  }
+  if (message === "GitHub request failed") {
+    return "github_request_failed";
+  }
+  if (message === "Setup repository must be an owner/repo slug") {
+    return "setup_repository_invalid";
+  }
+  if (message === "Setup branch inputs were invalid") {
+    return "setup_branch_invalid";
+  }
+  if (message.startsWith("GitHub setup file")) {
+    return "github_setup_file_invalid";
+  }
+  if (message.startsWith("GitHub setup response")) {
+    return "github_setup_response_invalid";
+  }
+  if (message.startsWith("GitHub setup branch")) {
+    return "github_setup_branch_invalid";
+  }
+  if (message.startsWith("GitHub installation repositories")) {
+    return "github_installation_repositories_failed";
+  }
+  if (message.startsWith("PUBLIC_WORKFLOW_TAG")) {
+    return "public_workflow_tag_invalid";
+  }
+  if (message.startsWith("PUBLIC_WORKFLOW_REF")) {
+    return "public_workflow_ref_invalid";
+  }
+  if (message.startsWith("PUBLIC_WORKFLOW_SHA")) {
+    return "public_workflow_sha_invalid";
+  }
+  if (message === "public workflow tag unavailable") {
+    return "public_workflow_tag_unavailable";
+  }
+  return "setup_failed";
+}
+
+const BROKER_CAPABILITIES = new Set([
+  "review_publish",
+  "inline_reply",
+  "issue_reply",
+  "learning_write",
+]);
+
+/**
+ * Keep broker diagnostics useful without copying arbitrary exception text into
+ * Worker logs. GitHub and OIDC failures use stable machine-readable codes;
+ * every other exception is intentionally collapsed to one generic code.
+ */
+export function brokerErrorCode(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "";
+  return /^(?:broker|oidc|github)_[a-z0-9_]{1,120}$/.test(message)
+    ? message
+    : "broker_failed";
+}
+
+function brokerCapability(body: unknown): string {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return "invalid";
+  }
+  const value = (body as Record<string, unknown>).capability;
+  if (value === undefined) {
+    return "review_publish";
+  }
+  return typeof value === "string" && BROKER_CAPABILITIES.has(value)
+    ? value
+    : "invalid";
+}
+
+function brokerRayId(request: Request): string | undefined {
+  const value = request.headers.get("cf-ray");
+  return value !== null && /^[a-f0-9]{16,64}-[a-z]{3}$/i.test(value)
+    ? value
+    : undefined;
+}
+
 const MAX_BROKER_REQUEST_BYTES = 64 * 1024;
 
 async function readBoundedBody(request: Request, maximum: number): Promise<ArrayBuffer> {
@@ -83,7 +180,18 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     return response(result, 200, true);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    const status = message === "broker_rate_limited" ? 429 : message === "broker_ledger_unavailable" ? 503 : 403;
+    const status =
+      message === "broker_rate_limited"
+        ? 429
+        : message === "broker_ledger_unavailable"
+          ? 503
+          : 403;
+    const rayId = brokerRayId(request);
+    console.error("github_broker_failed", {
+      error_code: brokerErrorCode(error),
+      capability: brokerCapability(body),
+      ...(rayId === undefined ? {} : { cf_ray: rayId }),
+    });
     return response({ error: "capability_not_issued" }, status, true);
   }
 }
@@ -253,7 +361,13 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
     } catch {
       // The lease expiry remains the recovery path if release also fails.
     }
-    return response({ error: "setup_unavailable" }, 503);
+    const errorCode = setupErrorCode(error);
+    console.error("github_setup_failed", {
+      delivery_id: deliveryId,
+      event,
+      error_code: errorCode,
+    });
+    return response({ error: "setup_unavailable", error_code: errorCode }, 503, true);
   }
 }
 

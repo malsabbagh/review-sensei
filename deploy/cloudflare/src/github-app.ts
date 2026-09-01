@@ -501,9 +501,9 @@ function requireSuccessful(response: GitHubApiResponse): unknown {
     return response.data;
   }
   if (response.status === 429 || response.status >= 500) {
-    throw new GitHubSetupTransientError("GitHub request failed temporarily");
+    throw new GitHubSetupTransientError(`github_request_transient_${response.status}`);
   }
-  throw new GitHubSetupError("GitHub request was rejected");
+  throw new GitHubSetupError(`github_request_rejected_${response.status}`);
 }
 
 function pullRequestNumber(value: unknown): number | null {

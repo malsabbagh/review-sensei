@@ -99,7 +99,7 @@ describe("GitHub Actions OIDC validation", () => {
     expect(result.repository_id).toBe(987654321);
     expect(result.actor_id).toBe(12345678);
     expect(result.repository).toBe("acme/widgets");
-    expect(fetchMock).toHaveBeenCalledWith(`${ISSUER}/.well-known/jwks.json`, {
+    expect(fetchMock).toHaveBeenCalledWith(`${ISSUER}/.well-known/jwks`, {
       headers: { accept: "application/json" },
     });
   });

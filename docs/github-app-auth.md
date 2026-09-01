@@ -188,7 +188,9 @@ The signed assertion must use issuer
 and ref claims). `installation_id` is not trusted or accepted as a caller
 claim. The broker requires the configured public v4 tag ref and resolves that
 tag to compare the runtime workflow SHA,
-checks repository and fork state server-side, resolves the installation
-server-side, claims replay/rate state in the SQLite ledger, and then requests a
-repository-scoped token for only the selected capability. The response is
+claims replay/rate state in the SQLite ledger before any GitHub API capacity is
+consumed, resolves the installation server-side, obtains an installation-scoped
+metadata token for the private-repository check, validates repository and fork
+state server-side, and then requests a repository-scoped token for only the
+selected capability. The response is
 `Cache-Control: no-store`; there is no browser CORS contract.

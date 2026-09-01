@@ -115,7 +115,7 @@ class HttpJwksFetcher:
             if cached is not None and cached[1] > now:
                 return cached[0]
 
-        url = issuer.rstrip("/") + "/.well-known/jwks.json"
+        url = issuer.rstrip("/") + "/.well-known/jwks"
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
