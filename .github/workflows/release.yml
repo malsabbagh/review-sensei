@@ -65,7 +65,7 @@ jobs:
           (cd dist && sha256sum *.tar.gz *.whl) > release/SHA256SUMS
 
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@da167eac915b4e86f08b264dbdbc867b61be6f0c # v0.20.5
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
           format: spdx-json
