@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Quality Assurance",
 ]
-dependencies = ["cryptography>=44,<46", "jsonschema>=4.18,<5"]
+dependencies = ["cryptography>=44,<51", "jsonschema>=4.18,<5"]
 
 [project.urls]
 Homepage = "https://github.com/malsabbagh/review-sensei"
