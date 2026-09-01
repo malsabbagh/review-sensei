@@ -1,6 +1,13 @@
 <!doctype html>
 <html lang="en">
 <head>
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','GTM-5W7TJV38');</script>
+<!-- End Google Tag Manager -->
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta name="theme-color" content="#070913" />
@@ -123,6 +130,7 @@ button,input{font:inherit}
 
 .hero{padding:88px 0 66px;position:relative}
 .hero-grid{display:grid;grid-template-columns:.92fr 1.08fr;gap:58px;align-items:center}
+.hero-grid > *{min-width:0}
 
 .eyebrow{
   display:inline-flex;align-items:center;gap:9px;padding:7px 11px;border-radius:999px;
@@ -388,6 +396,7 @@ h2{font-size:clamp(34px,4vw,50px);line-height:1.06;letter-spacing:-.045em;margin
   display:inline-flex;
   align-items:center;
   justify-content:center;
+  text-align:center;
   margin-top:22px;
   width:90px;
   height:90px;
@@ -450,6 +459,10 @@ h2{font-size:clamp(34px,4vw,50px);line-height:1.06;letter-spacing:-.045em;margin
 
 </head>
 <body>
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-5W7TJV38"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="nav">
   <div class="container nav-inner">
@@ -586,7 +599,7 @@ h2{font-size:clamp(34px,4vw,50px);line-height:1.06;letter-spacing:-.045em;margin
       <article class="feature reveal"><span class="tag">Context</span><div class="ficon">◎</div><h3>Repository memory</h3><p>Carry forward conventions, architectural decisions, prior findings, and accepted review guidance without locking that knowledge inside a vendor.</p></article>
       <article class="feature reveal"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Evidence-backed findings</h3><p>Every important comment should explain why it matters and connect to the changed code, repository rule, or prior learning that supports it.</p></article>
       <article class="feature reveal"><span class="tag">Choice</span><div class="ficon">↔</div><h3>Bring your own model</h3><p>Keep the review engine provider-neutral. Switch models as they improve without replacing your workflow, repository memory, or review policy.</p></article>
-      <article class="feature reveal"><span class="tag">GitHub</span><div class="ficon">⌁</div><h3>Native pull-request workflow</h3><p>ReviewSensei is built around PRs, comments, checks, and actionable findings—not a separate dashboard developers have to remember to visit.</p></article>
+      <article class="feature reveal"><span class="tag">Conversation</span><div class="ficon">👀</div><h3>Discuss every finding</h3><p>Mention <code>@sensei</code> on a review comment or PR conversation to ask a follow-up. The processing reaction clears when the bounded, thread-aware reply arrives.</p></article>
       <article class="feature reveal"><span class="tag">Open</span><div class="ficon">{"</>"}</div><h3>Open-source by design</h3><p>Inspect how the reviewer works, self-host it, extend stages, add providers, and keep sensitive code review execution under your control.</p></article>
     </div>
   </div>
@@ -622,7 +635,7 @@ h2{font-size:clamp(34px,4vw,50px);line-height:1.06;letter-spacing:-.045em;margin
     <div class="section-head reveal">
       <div class="kicker">Start small</div>
       <h2>Install it where your code already lives.</h2>
-      <p>ReviewSensei supports a GitHub App path and customer-owned execution. Install from source or use the GitHub Action with your own Ollama instance.</p>
+      <p>ReviewSensei supports customer-owned cloud and local execution with the same reviews, learning proposals, artifacts, and multi-turn PR conversations.</p>
     </div>
 
     <div class="install reveal">

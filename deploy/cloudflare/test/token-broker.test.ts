@@ -100,7 +100,7 @@ describe("token broker authorization", () => {
     ["different reusable workflow", { job_workflow_ref: `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}` }, "broker_workflow_rejected"],
     ["non-canonical public workflow tag ref", { job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${TAG}` }, "broker_workflow_rejected"],
     ["different reusable workflow SHA", { job_workflow_sha: "b".repeat(40) }, "broker_workflow_rejected"],
-    ["self-hosted automatic PR", { runner_environment: "self-hosted" }, "broker_runner_rejected"],
+    ["unsupported runner environment", { runner_environment: "private-cloud" }, "broker_runner_rejected"],
     ["unsupported event", { event_name: "push" }, "broker_event_rejected"],
     ["repository owner mismatch", { repository_owner: "someone-else" }, "broker_repository_rejected"],
   ])("rejects %s", async (_name, override, message) => {
@@ -141,6 +141,19 @@ describe("token broker authorization", () => {
     "allows the trusted manual %s event on a self-hosted runner",
     async (eventName) => {
       oidc.verify.mockResolvedValue(claims({ event_name: eventName, runner_environment: "self-hosted" }));
+      const { broker } = harness();
+      await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
+        capability: "review_publish",
+      });
+    },
+  );
+
+  it.each(["github-hosted", "self-hosted"])(
+    "allows pull_request capabilities on a %s runner",
+    async (runnerEnvironment) => {
+      oidc.verify.mockResolvedValue(
+        claims({ event_name: "pull_request", runner_environment: runnerEnvironment }),
+      );
       const { broker } = harness();
       await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
         capability: "review_publish",

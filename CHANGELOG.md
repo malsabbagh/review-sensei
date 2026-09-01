@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Aligned setup-v4 cloud and local execution so both provider modes support
+  automatic/manual reviews, learning proposals, optional artifacts, and bounded
+  multi-turn `@sensei` conversations. Published review summaries and inline
+  findings instruct readers to reply with `@sensei`; authorized mentions now
+  receive a temporary 👀 processing reaction that is removed after reply
+  publication or another terminal outcome.
 - Added issue #64's opt-in setup-v4 GitHub integration: public git-tagged
   reusable workflow callers, exact-head App-authored inline review publication,
   deterministic learning draft PRs, authorized bounded mention replies, and an

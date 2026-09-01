@@ -14,6 +14,7 @@ import {
   SETUP_VERSION,
   buildCurrentV3SetupFiles,
   buildHistoricalV3SetupFiles,
+  buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
@@ -256,7 +257,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
       }
     }
     const tagMatches = [...content.matchAll(PUBLIC_WORKFLOW_TAG_REFERENCE)];
-    if (tagMatches.length !== 2) {
+    if (tagMatches.length !== 1 && tagMatches.length !== 2) {
       return false;
     }
     const publicWorkflowTag = tagMatches[0]?.[1];
@@ -267,7 +268,10 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
       return false;
     }
     try {
-      return content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content;
+      return (
+        content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
+        content === buildHistoricalTaggedV4SetupFiles(publicWorkflowTag)[0].content
+      );
     } catch {
       return false;
     }

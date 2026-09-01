@@ -237,10 +237,13 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
             match.group("tag")
             for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
         ]
-        if len(tag_matches) != 2 or len(set(tag_matches)) != 1:
+        if len(tag_matches) not in {1, 2} or len(set(tag_matches)) != 1:
             return False
         try:
-            return content == _tagged_workflow(tag_matches[0])
+            return content in {
+                _tagged_workflow(tag_matches[0]),
+                _historical_tagged_v4_workflow(tag_matches[0]),
+            }
         except GitHubSetupError:
             return False
     if path == UNINSTALL_WORKFLOW_PATH:
@@ -534,8 +537,10 @@ def _pinned_v4_workflow(
     )
 
 
-def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
-    """Return the current setup-v4 caller following the public git tag."""
+def _historical_tagged_v4_workflow(
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+) -> str:
+    """Return the released local/manual and cloud/automatic setup-v4 caller."""
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
     return (
@@ -549,6 +554,130 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
             "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
         )
     )
+
+
+def _provider_parity_workflow(public_workflow_tag: str) -> str:
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    return """\
+# ReviewSensei setup version: 4
+name: ReviewSensei review
+
+# The installer and this example follow the operator-managed v4 git tag. Moving
+# that tag is the public setup-v4 release action. The reusable workflow installs
+# the requested package from PyPI first and falls back to its executing commit
+# only when the package version is not yet published.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Review the selected pull request
+        required: true
+        default: review
+        type: choice
+        options: [review]
+      base_ref:
+        description: Repository default branch (must match the repository setting)
+        required: true
+      head_ref:
+        description: Head branch or ref to review
+        required: true
+      head_repository:
+        description: Optional owner/repo slug for fork review
+        required: false
+      pull_request_number:
+        description: Pull request number to review
+        required: true
+      head_sha:
+        description: Exact pull request head commit SHA
+        required: true
+      base_sha:
+        description: Exact reviewed base commit SHA
+        required: false
+      review_sensei_version:
+        description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
+        required: true
+      source_kind:
+        description: Source kind for manual dispatch (issue or inline)
+        required: false
+      source_comment_id:
+        description: Source comment ID for manual reply
+        required: false
+      source_updated_at:
+        description: Timestamp of source comment
+        required: false
+      root_comment_id:
+        description: Root comment ID for manual reply thread
+        required: false
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
+
+jobs:
+  review-or-reply:
+    if: >-
+      (github.event_name == 'pull_request' &&
+      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot')) &&
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
+      repository: ${{ github.repository }}
+      repository_id: ${{ github.repository_id }}
+      pull_request_number: ${{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
+      base_ref: ${{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
+      base_sha: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
+      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}
+      head_repository: ${{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}
+      head_sha: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
+      source_kind: ${{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}
+      source_comment_id: ${{ inputs.source_comment_id || github.event.comment.id }}
+      source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
+      root_comment_id: ${{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
+      review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
+      enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
+      enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
+      enable_mention_replies: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}
+      upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+""".replace("__PUBLIC_WORKFLOW_TAG__", tag)
+
+
+def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
+    """Return the current setup-v4 caller following the public git tag."""
+
+    return _provider_parity_workflow(public_workflow_tag)
 
 
 def _config_file() -> str:
@@ -662,6 +791,9 @@ def _setup_pull_request_body() -> str:
         "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
         "values. Change the opt-in variables explicitly to enable publication. "
+        "The selected provider mode applies to automatic/manual reviews and "
+        "authorized mention conversations; cloud uses GitHub-hosted compute and "
+        "local uses the labelled self-hosted runner. "
         "Cloud mode reads the existing customer-owned OLLAMA_API_KEY secret by "
         "name only; the App never creates or reads its value. The uninstall "
         "workflow creates a reviewable PR to remove these generated scripts; it does "

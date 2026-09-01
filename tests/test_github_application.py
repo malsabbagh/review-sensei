@@ -57,6 +57,14 @@ class RecordingLearner:
 class RecordingReplier:
     def __init__(self):
         self.calls = []
+        self.reaction_calls = []
+
+    def add_processing_reaction(self, **kwargs):
+        self.reaction_calls.append(("add", kwargs))
+        return type("Reaction", (), {"reaction_id": 99})()
+
+    def remove_processing_reaction(self, **kwargs):
+        self.reaction_calls.append(("remove", kwargs))
 
     def publish(self, **kwargs):
         self.calls.append(kwargs)
@@ -328,6 +336,45 @@ class GitHubApplicationTests(unittest.TestCase):
             ["issue_reply"],
         )
         self.assertEqual(self.replier.prepare_calls[0]["token"], "read-token")
+        self.assertEqual(
+            [operation for operation, _ in self.replier.reaction_calls],
+            ["add", "remove"],
+        )
+        self.assertEqual(
+            self.replier.reaction_calls[0][1]["token"], "capability-issue_reply"
+        )
+        self.assertEqual(self.replier.reaction_calls[1][1]["reaction_id"], 99)
+
+    def test_generated_reply_removes_processing_reaction_when_provider_fails(self):
+        class FailingProvider(RecordingProvider):
+            def complete(self, request):
+                raise RuntimeError("provider unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            self.application.generate_and_publish_reply(
+                options=GitHubWriteOptions(
+                    github_writes=True,
+                    mention_replies=True,
+                ),
+                oidc_token="provided-oidc",
+                read_token="read-token",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=10,
+                source_updated_at="updated",
+                expected_head_sha=None,
+                reply_provider=FailingProvider(),
+                model="fixture-model",
+                app_slug="review-sensei[bot]",
+                root_comment_id=10,
+                source_kind="issue",
+            )
+
+        self.assertEqual(
+            [operation for operation, _ in self.replier.reaction_calls],
+            ["add", "remove"],
+        )
+        self.assertEqual(self.replier.calls, [])
 
 
 if __name__ == "__main__":

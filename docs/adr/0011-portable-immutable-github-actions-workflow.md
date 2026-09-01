@@ -7,6 +7,10 @@ Pull Request: not configured
 Owners/Reviewers: Maintainers
 Approved by: not configured
 
+Revised by: ADR 0025 makes the setup-v4 GitHub App workflow feature-complete in
+both cloud and local provider modes. This ADR remains the historical baseline
+for the standalone portable workflow.
+
 ## Context
 
 The primary open-source path for Code Sensei is running the package in a

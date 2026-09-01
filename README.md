@@ -112,9 +112,11 @@ the operator-managed `v4` git tag as the only update channel:
 The Worker validates the tag before writing the caller, and the Cloudflare
 broker resolves the same tag at capability exchange time and checks the
 executing workflow SHA. Moving `v4` is therefore the public cutoff action.
-Automatic pull-request cloud reviews run only on GitHub-hosted compute. Local
-Ollama runs remain manual or trusted-event-only on an operator-controlled
-self-hosted runner. Every generated write switch defaults to `false`.
+The selected provider mode applies consistently to automatic pull-request
+reviews, manual reviews, learning proposals, artifacts, and authorized
+`@sensei` conversations. Cloud runs use GitHub-hosted compute; local runs use
+the operator-controlled labeled self-hosted runner. Every generated write
+switch defaults to `false`.
 
 Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
 name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
@@ -129,7 +131,7 @@ Current v4 is a no-op; managed v3 and older generated clients are migrated
 through a setup PR, while custom, malformed, and future setup files are no-write
 cases. See [`docs/installation.md`](docs/installation.md),
 [`docs/github-app-registration.md`](docs/github-app-registration.md), and the
-proposed [`docs/adr/0022-actions-publication-learning-and-conversations.md`](docs/adr/0022-actions-publication-learning-and-conversations.md).
+proposed [`docs/adr/0025-cloud-local-feature-parity-and-conversation-reactions.md`](docs/adr/0025-cloud-local-feature-parity-and-conversation-reactions.md).
 The optional OIDC broker documented there is a hosted issuance-only backend
 that never distributes the App private key.
 
@@ -370,16 +372,23 @@ failures remain fatal. All nine
 review, GitHub writes, learning PRs, mention replies, and artifact upload are
 off. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
 
-When explicitly enabled, same-repository pull requests can run automatic cloud
-review on a GitHub-hosted runner. ReviewSensei checks out only trusted base
+When explicitly enabled, same-repository pull requests can run automatic review
+with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
+the labelled self-hosted runner. ReviewSensei checks out only trusted base
 content, constructs a bounded diff without executing head code, validates the
 model result, and publishes one exact-head App-authored review containing its
 summary and valid inline changed-line comments. Learning proposals are separate
 draft PRs. Fork pull requests fail closed before provider or broker access.
 
-Local Ollama remains available on the labelled self-hosted runner only for
-manual dispatch and authorized trusted-event `@sensei` replies. Conversation
-context is not sent to the cloud provider. `review.json` is uploaded only when
+Manual review and authorized `@sensei` replies use the same selected provider
+mode. Each authorized mention receives a temporary 👀 reaction while the reply
+is generated; ReviewSensei removes it after the reply or another terminal
+outcome. Follow-up mentions in the same inline or PR conversation include the
+bounded prior thread, diff context, findings, and trusted-base learnings. Cloud
+mode sends that bounded conversation context to Ollama Cloud; local mode keeps
+it on the configured local service. Published review summaries and inline
+findings also tell readers to reply with @sensei followed by their question.
+`review.json` is uploaded only when
 `REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v4 does not create a separate
 version artifact. See [installation and migration](docs/installation.md) and
 the reviewable

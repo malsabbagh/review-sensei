@@ -318,7 +318,8 @@ review data migration is required.
 `ReviewPublisher` reconstructs a typed `ReviewResult`, revalidates all
 locations against the exact diff, rereads the open non-draft same-repository PR
 head, and submits one App-authored review whose summary and inline comments
-carry the marker
+append the fixed follow-up instruction `To discuss this finding, reply with
+@sensei followed by your question.` and carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
 The marker, App slug, exact head commit, and repository identity form the
 idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
@@ -334,9 +335,14 @@ from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
 validated before marker append; source update time, exact head, root-thread
 identity, PR state, and fork state are reread before publication. The inline
 reply marker binds source comment, updated-time digest, PR, and head.
-Generated comment-event execution is local-provider-only on the trusted
-self-hosted runner. Cloud mode does not send conversation or inline-thread
-context to the external provider.
+Generated review and comment-event execution supports both provider modes.
+Cloud operations use GitHub-hosted compute and send bounded review or
+conversation context to Ollama Cloud; local operations use the labelled
+self-hosted runner and configured local Ollama service. After authorization and
+before provider execution, ReviewSensei adds an App-authored `eyes` reaction to
+the source comment. It removes that reaction after reply publication or another
+terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
+idempotent conversation turn over the current thread and exact PR head.
 
 All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
 `REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,

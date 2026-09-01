@@ -305,8 +305,24 @@ class SetupPlanTests(unittest.TestCase):
         )
         files = {file.path: file.content for file in plan.files}
         workflow = files[".github/workflows/review-sensei-review.yml"]
-        self.assertEqual(workflow.count("review-sensei-run.yml@stable"), 2)
+        self.assertEqual(workflow.count("review-sensei-run.yml@stable"), 1)
+        self.assertIn(
+            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
+            workflow,
+        )
+        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", workflow)
+        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", workflow)
+        self.assertNotIn("default: main", workflow)
         self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertEqual(
+            workflow,
+            (
+                Path(__file__).parent.parent
+                / "examples/github-actions/review-sensei-review.yml"
+            )
+            .read_text(encoding="utf-8")
+            .replace("@v4", "@stable"),
+        )
         self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
         self.assertEqual(
             plan.branch_name,

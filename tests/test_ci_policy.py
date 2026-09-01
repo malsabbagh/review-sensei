@@ -114,6 +114,31 @@ class ActionPinPolicyTests(unittest.TestCase):
             with self.subTest(input_name=input_name):
                 self.assertIn(f"inputs.{input_name}", text)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
+        self.assertEqual(text.count("review-sensei-run.yml@" + "v4"), 1)
+        self.assertIn(
+            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
+        )
+        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
+        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
+
+    def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("provider_mode:", text)
+        self.assertIn("inputs.provider_mode == 'cloud'", text)
+        self.assertIn("inputs.provider_mode == 'local'", text)
+        self.assertIn("validate-provider-mode:", text)
+        self.assertEqual(text.count("needs: validate-provider-mode"), 2)
+        self.assertIn('case "$PROVIDER_MODE" in', text)
+        self.assertEqual(text.count("github reply \\\n"), 2)
+        self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertIn("runs-on: ubuntu-latest", text)
+        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
         workflow = (

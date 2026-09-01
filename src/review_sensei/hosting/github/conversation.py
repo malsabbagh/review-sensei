@@ -117,11 +117,117 @@ class PreparedConversation:
     root_comment_id: int
 
 
+@dataclass(frozen=True)
+class ProcessingReaction:
+    """One App-authored processing reaction that must be removed."""
+
+    reaction_id: int
+
+
 class ConversationPublisher:
     """Publish an App reply to an authorized explicit @sensei mention."""
 
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http
+
+    @staticmethod
+    def _reaction_path(*, source_kind: str, source_comment_id: int) -> str:
+        if source_kind not in {"inline", "issue"}:
+            raise GitHubConversationError("reply source kind is invalid")
+        if (
+            isinstance(source_comment_id, bool)
+            or not isinstance(source_comment_id, int)
+            or source_comment_id < 1
+        ):
+            raise GitHubConversationError("reply source comment id is invalid")
+        resource = "pulls" if source_kind == "inline" else "issues"
+        return f"/{resource}/comments/{source_comment_id}/reactions"
+
+    def add_processing_reaction(
+        self,
+        *,
+        token: str,
+        repository: str,
+        source_comment_id: int,
+        source_kind: str,
+    ) -> ProcessingReaction:
+        """Add the ephemeral eyes reaction after mention authorization."""
+
+        path = self._reaction_path(
+            source_kind=source_kind,
+            source_comment_id=source_comment_id,
+        )
+        try:
+            status, payload = self.http.request(
+                "POST",
+                self.http.repository_path(repository, path),
+                token=token,
+                body={"content": "eyes"},
+            )
+        except GitHubHTTPTransientError as exc:
+            raise GitHubConversationTransientError(
+                "processing reaction failed temporarily"
+            ) from exc
+        if status in {200, 201} and isinstance(payload, dict):
+            reaction_id = payload.get("id")
+            if (
+                isinstance(reaction_id, int)
+                and not isinstance(reaction_id, bool)
+                and reaction_id > 0
+            ):
+                return ProcessingReaction(reaction_id=reaction_id)
+        if status == 404:
+            raise GitHubConversationError("processing reaction target was not found")
+        if status == 403:
+            raise GitHubConversationError("processing reaction lacks permission")
+        if status == 429 or status >= 500:
+            raise GitHubConversationTransientError(
+                "processing reaction failed temporarily"
+            )
+        raise GitHubConversationError("processing reaction was rejected")
+
+    def remove_processing_reaction(
+        self,
+        *,
+        token: str,
+        repository: str,
+        source_comment_id: int,
+        source_kind: str,
+        reaction_id: int,
+    ) -> None:
+        """Remove an App-authored processing reaction after a terminal outcome."""
+
+        path = self._reaction_path(
+            source_kind=source_kind,
+            source_comment_id=source_comment_id,
+        )
+        if (
+            isinstance(reaction_id, bool)
+            or not isinstance(reaction_id, int)
+            or reaction_id < 1
+        ):
+            raise GitHubConversationError("processing reaction id is invalid")
+        try:
+            status, _ = self.http.request(
+                "DELETE",
+                self.http.repository_path(repository, f"{path}/{reaction_id}"),
+                token=token,
+            )
+        except GitHubHTTPTransientError as exc:
+            raise GitHubConversationTransientError(
+                "processing reaction cleanup failed temporarily"
+            ) from exc
+        if status in {204, 404}:
+            return
+        if status == 403:
+            raise GitHubConversationError(
+                "processing reaction cleanup lacks permission"
+            )
+        if status == 429 or status >= 500:
+            raise GitHubConversationTransientError(
+                "processing reaction cleanup failed temporarily"
+            )
+        raise GitHubConversationError("processing reaction cleanup was rejected")
 
     def _require_comment_association(
         self,

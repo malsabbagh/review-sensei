@@ -75,7 +75,8 @@ The runner must provide Ollama on
 Provider data egress is explicit. The workflow defaults to the
 `REVIEWSENSEI_PROVIDER_MODE=local` repository variable, which uses
 `http://127.0.0.1:11434/api` with no API key. If an operator sets that variable
-to `cloud`, the review step sends the diff and selected context to Ollama Cloud
+to `cloud`, review and conversation steps send their bounded diff, selected
+context, and authorized thread context to Ollama Cloud
 using `deepseek-v4-flash:cloud` by default and requires `OLLAMA_API_KEY` from
 secrets. The workflow does not accept an arbitrary provider URL input, so a
 dispatch-supplied URL cannot redirect the provider credential.
@@ -161,6 +162,9 @@ The generated workflow may reference the existing customer-owned secret by
 name only (`secrets.OLLAMA_API_KEY`) when invoking the tagged public reusable
 workflow. The App and setup bootstrap never create, retrieve, reveal, log,
 persist, or interpolate its value into generated files. Cloud provider egress
-is explicit and limited to the configured provider step; local mode uses the
-operator's Ollama runner. Review results are reconstructed and validated,
+is explicit and limited to the configured provider steps; local mode uses the
+operator's Ollama runner. The App-authored 👀 reaction is transient GitHub
+metadata: it is added only after mention authorization and removed after the
+reply or another terminal outcome. Review results and replies are reconstructed
+and validated,
 including exact diff locations and reply bounds, before any App-authored write.

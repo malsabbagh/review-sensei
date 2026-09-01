@@ -7,6 +7,7 @@ from review_sensei.conversation import ConversationService
 from review_sensei.hosting.github import (
     ConversationPublisher,
     GitHubConversationError,
+    GitHubConversationTransientError,
 )
 from review_sensei.hosting.github.conversation import (
     PreparedConversation,
@@ -17,9 +18,9 @@ from review_sensei.hosting.github.conversation import (
 from review_sensei.models import ConversationReply
 
 try:
-    from fake_github_http import json_response, make_http
+    from fake_github_http import FakeHTTPResponse, json_response, make_http
 except ModuleNotFoundError:
-    from tests.fake_github_http import json_response, make_http
+    from tests.fake_github_http import FakeHTTPResponse, json_response, make_http
 
 INLINE_URL = "https://api.github.test/repos/owner/repo/pulls/1"
 ISSUE_URL = "https://api.github.test/repos/owner/repo/issues/1"
@@ -45,6 +46,123 @@ def pr_payload(head_sha, *, fork=False, state="open", draft=False):
 
 
 class ConversationPublisherTests(unittest.TestCase):
+    def test_processing_reaction_uses_source_comment_endpoint_and_is_removed(self):
+        for source_kind, endpoint in (
+            ("inline", "/pulls/comments/10/reactions"),
+            ("issue", "/issues/comments/10/reactions"),
+        ):
+            with self.subTest(source_kind=source_kind):
+                http, calls = make_http(
+                    [json_response({"id": 99}, 201), FakeHTTPResponse(b"", 204)]
+                )
+                publisher = ConversationPublisher(http=http)
+                reaction = publisher.add_processing_reaction(
+                    token="token",
+                    repository="owner/repo",
+                    source_comment_id=10,
+                    source_kind=source_kind,
+                )
+                publisher.remove_processing_reaction(
+                    token="token",
+                    repository="owner/repo",
+                    source_comment_id=10,
+                    source_kind=source_kind,
+                    reaction_id=reaction.reaction_id,
+                )
+
+                self.assertEqual([call[0] for call in calls], ["POST", "DELETE"])
+                self.assertTrue(calls[0][1].endswith(endpoint))
+                self.assertEqual(
+                    __import__("json").loads(calls[0][2].decode("utf-8")),
+                    {"content": "eyes"},
+                )
+                self.assertTrue(calls[1][1].endswith(f"{endpoint}/99"))
+
+    def test_processing_reaction_reuses_existing_and_tolerates_missing_cleanup(self):
+        http, calls = make_http(
+            [json_response({"id": 99}, 200), json_response({}, 404)]
+        )
+        publisher = ConversationPublisher(http=http)
+        reaction = publisher.add_processing_reaction(
+            token="token",
+            repository="owner/repo",
+            source_comment_id=10,
+            source_kind="issue",
+        )
+        publisher.remove_processing_reaction(
+            token="token",
+            repository="owner/repo",
+            source_comment_id=10,
+            source_kind="issue",
+            reaction_id=reaction.reaction_id,
+        )
+        self.assertEqual(len(calls), 2)
+
+    def test_processing_reaction_rejects_invalid_inputs_before_request(self):
+        http, calls = make_http([])
+        publisher = ConversationPublisher(http=http)
+        for source_kind, source_comment_id in (("unknown", 1), ("issue", 0)):
+            with (
+                self.subTest(
+                    source_kind=source_kind,
+                    source_comment_id=source_comment_id,
+                ),
+                self.assertRaises(GitHubConversationError),
+            ):
+                publisher.add_processing_reaction(
+                    token="token",
+                    repository="owner/repo",
+                    source_comment_id=source_comment_id,
+                    source_kind=source_kind,
+                )
+        with self.assertRaises(GitHubConversationError):
+            publisher.remove_processing_reaction(
+                token="token",
+                repository="owner/repo",
+                source_comment_id=1,
+                source_kind="inline",
+                reaction_id=0,
+            )
+        self.assertEqual(calls, [])
+
+    def test_processing_reaction_maps_github_failures(self):
+        add_cases = (
+            (json_response({}, 404), GitHubConversationError),
+            (json_response({}, 403), GitHubConversationError),
+            (json_response({}, 429), GitHubConversationTransientError),
+            (json_response({}, 422), GitHubConversationError),
+            (URLError("timed out"), GitHubConversationTransientError),
+            (json_response({"id": True}, 201), GitHubConversationError),
+        )
+        for response, error in add_cases:
+            with self.subTest(operation="add", error=error.__name__):
+                http, _ = make_http(response)
+                with self.assertRaises(error):
+                    ConversationPublisher(http=http).add_processing_reaction(
+                        token="token",
+                        repository="owner/repo",
+                        source_comment_id=10,
+                        source_kind="inline",
+                    )
+
+        remove_cases = (
+            (json_response({}, 403), GitHubConversationError),
+            (json_response({}, 500), GitHubConversationTransientError),
+            (json_response({}, 422), GitHubConversationError),
+            (URLError("timed out"), GitHubConversationTransientError),
+        )
+        for response, error in remove_cases:
+            with self.subTest(operation="remove", error=error.__name__):
+                http, _ = make_http(response)
+                with self.assertRaises(error):
+                    ConversationPublisher(http=http).remove_processing_reaction(
+                        token="token",
+                        repository="owner/repo",
+                        source_comment_id=10,
+                        source_kind="inline",
+                        reaction_id=99,
+                    )
+
     def test_prepare_issue_context_uses_bounded_issue_thread(self):
         updated = "2026-08-19T00:00:00Z"
         head = "b" * 40

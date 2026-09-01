@@ -11,6 +11,10 @@ on:
       mode:
         required: true
         type: string
+      provider_mode:
+        required: false
+        default: ''
+        type: string
       operation:
         required: false
         default: review
@@ -84,8 +88,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  automatic-cloud:
-    if: inputs.mode == 'automatic' && inputs.operation == 'review'
+  validate-provider-mode:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject unsupported provider mode
+        env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
+        run: |
+          set -euo pipefail
+          case "$PROVIDER_MODE" in
+            ""|cloud|local) ;;
+            *)
+              echo '::error::ReviewSensei provider mode is unsupported; use cloud or local.' >&2
+              exit 1
+              ;;
+          esac
+
+  cloud:
+    needs: validate-provider-mode
+    if: inputs.provider_mode == 'cloud' || (inputs.provider_mode == '' && inputs.mode == 'automatic')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,6 +133,8 @@ jobs:
       - name: Validate trusted workflow inputs
         env:
           MODE: ${{ inputs.mode }}
+          OPERATION: ${{ inputs.operation }}
+          PROVIDER_MODE: ${{ inputs.provider_mode || 'cloud' }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -127,19 +151,28 @@ jobs:
           ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
           repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
           version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
-          if os.environ.get("MODE") != "automatic":
-              raise SystemExit("automatic job received an invalid mode")
+          if os.environ.get("MODE") not in {"automatic", "manual"}:
+              raise SystemExit("workflow mode is invalid")
+          if os.environ.get("OPERATION") not in {"review", "reply"}:
+              raise SystemExit("workflow operation is invalid")
+          if os.environ.get("PROVIDER_MODE") != "cloud":
+              raise SystemExit("cloud job received an invalid provider mode")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
               raise SystemExit("repository input is invalid")
-          for name in ("BASE_REF", "HEAD_REF"):
+          for name in ("BASE_REF",):
               value = os.environ.get(name, "")
               if not value or value.startswith("-") or not ref_pattern.fullmatch(value):
                   raise SystemExit(f"{name} input is invalid")
+          head_ref = os.environ.get("HEAD_REF", "")
+          if os.environ.get("OPERATION") == "review" and (
+              not head_ref or head_ref.startswith("-") or not ref_pattern.fullmatch(head_ref)
+          ):
+              raise SystemExit("HEAD_REF input is invalid")
           base_sha = os.environ.get("BASE_SHA", "")
           if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
               raise SystemExit("BASE_SHA input is invalid")
           head_sha = os.environ.get("HEAD_SHA", "")
-          if not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+          if os.environ.get("OPERATION") == "review" and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
               raise SystemExit("HEAD_SHA input is invalid")
           head_repository = os.environ.get("HEAD_REPOSITORY", "")
           if head_repository and not repository_pattern.fullmatch(head_repository):
@@ -189,6 +222,7 @@ jobs:
           echo "Installed ReviewSensei $installed_version from $install_source."
 
       - name: Prepare bounded trusted-base diff
+        if: inputs.operation == 'review'
         env:
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
@@ -204,6 +238,7 @@ jobs:
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
       - name: Run cloud-provider review
+        if: inputs.operation == 'review'
         env:
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
@@ -218,7 +253,7 @@ jobs:
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
 
       - name: Publish validated review through the broker
-        if: inputs.enable_github_writes == 'true' && inputs.enable_review == 'true'
+        if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -226,20 +261,51 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
+          ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
         run: |
-          learning_args=()
+          review_args=()
+          if [[ "$ENABLE_REVIEW" == "true" ]]; then
+            review_args+=(--enable-review)
+          fi
           if [[ "$LEARNING_PRS" == "true" ]]; then
-            learning_args+=(--enable-learning-prs)
+            review_args+=(--enable-learning-prs)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --allow-write --enable-review "${learning_args[@]}"
+            --allow-write "${review_args[@]}"
+
+      - name: Generate and publish cloud mention reply
+        if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
+          SOURCE_KIND: ${{ inputs.source_kind }}
+          OLLAMA_BASE_URL: https://ollama.com/api
+          OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+        run: |
+          if [[ -z "$OLLAMA_API_KEY" ]]; then
+            echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
+            exit 1
+          fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
+            --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
+            --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
+            --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
+            --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
+            --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
+            --allow-write --enable-reply
 
       - name: Upload opt-in review artifact
-        if: inputs.upload_artifacts == 'true'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
@@ -247,8 +313,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  trusted-local:
-    if: inputs.mode == 'manual'
+  local:
+    needs: validate-provider-mode
+    if: inputs.provider_mode == 'local' || (inputs.provider_mode == '' && inputs.mode == 'manual')
     runs-on: [self-hosted, linux, x64, ollama]
     permissions:
       contents: read
@@ -270,6 +337,55 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.11'
+
+      - name: Validate trusted workflow inputs
+        env:
+          MODE: ${{ inputs.mode }}
+          OPERATION: ${{ inputs.operation }}
+          PROVIDER_MODE: ${{ inputs.provider_mode || 'local' }}
+          REPOSITORY: ${{ inputs.repository }}
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
+          repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+          version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+          if os.environ.get("MODE") not in {"automatic", "manual"}:
+              raise SystemExit("workflow mode is invalid")
+          if os.environ.get("OPERATION") not in {"review", "reply"}:
+              raise SystemExit("workflow operation is invalid")
+          if os.environ.get("PROVIDER_MODE") != "local":
+              raise SystemExit("local job received an invalid provider mode")
+          if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
+              raise SystemExit("repository input is invalid")
+          base_ref = os.environ.get("BASE_REF", "")
+          if not base_ref or base_ref.startswith("-") or not ref_pattern.fullmatch(base_ref):
+              raise SystemExit("BASE_REF input is invalid")
+          head_ref = os.environ.get("HEAD_REF", "")
+          if os.environ.get("OPERATION") == "review" and (
+              not head_ref or head_ref.startswith("-") or not ref_pattern.fullmatch(head_ref)
+          ):
+              raise SystemExit("HEAD_REF input is invalid")
+          base_sha = os.environ.get("BASE_SHA", "")
+          if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
+              raise SystemExit("BASE_SHA input is invalid")
+          head_sha = os.environ.get("HEAD_SHA", "")
+          if os.environ.get("OPERATION") == "review" and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+              raise SystemExit("HEAD_SHA input is invalid")
+          head_repository = os.environ.get("HEAD_REPOSITORY", "")
+          if head_repository and not repository_pattern.fullmatch(head_repository):
+              raise SystemExit("head repository input is invalid")
+          if not version_pattern.fullmatch(os.environ.get("REVIEW_SENSEI_VERSION", "")):
+              raise SystemExit("ReviewSensei version must be exact")
+          PY
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
@@ -377,3 +493,12 @@ jobs:
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
             --allow-write --enable-reply
+
+      - name: Upload opt-in review artifact
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-sensei-review
+          path: review.json
+          if-no-files-found: error
+          retention-days: 7

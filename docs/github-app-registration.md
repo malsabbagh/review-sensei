@@ -175,8 +175,11 @@ git tag is the update channel: the Worker validates it before setup and the
 generated caller follows the tag. The caller requests
 `contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
 and defaults every write/artifact switch to `false`.
-Automatic cloud pull-request review is GitHub-hosted and same-repository only;
-local Ollama is manual or trusted-event-only on the operator's labeled runner.
+Cloud review and conversation operations use GitHub-hosted compute; local review
+and conversation operations use the operator's labelled self-hosted runner.
+Both provider modes support automatic/manual review, learning proposals,
+artifacts, and authorized `@sensei` replies. Automatic fork review remains
+disabled.
 
 The App may pass the customer-owned `OLLAMA_API_KEY` secret by name only. It
 does not create, fetch, reveal, log, persist, or place the secret value in a

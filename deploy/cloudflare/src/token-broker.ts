@@ -164,12 +164,15 @@ export class TokenBroker {
     if (!workflowAuthorized) {
       throw new Error("broker_workflow_rejected");
     }
-    if (claims.event_name === "pull_request") {
-      if (claims.runner_environment !== "github-hosted") {
-        throw new Error("broker_runner_rejected");
-      }
-    } else if (!["workflow_dispatch", "issue_comment", "pull_request_review_comment"].includes(claims.event_name)) {
+    if (
+      !["pull_request", "workflow_dispatch", "issue_comment", "pull_request_review_comment"].includes(
+        claims.event_name,
+      )
+    ) {
       throw new Error("broker_event_rejected");
+    }
+    if (!["github-hosted", "self-hosted"].includes(claims.runner_environment)) {
+      throw new Error("broker_runner_rejected");
     }
     if (claims.repository_owner !== claims.repository.split("/", 1)[0]) {
       throw new Error("broker_repository_rejected");

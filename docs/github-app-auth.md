@@ -194,3 +194,10 @@ metadata token for the private-repository check, validates repository and fork
 state server-side, and then requests a repository-scoped token for only the
 selected capability. The response is
 `Cache-Control: no-store`; there is no browser CORS contract.
+
+The broker accepts `pull_request`, `workflow_dispatch`, `issue_comment`, and
+`pull_request_review_comment` only, on either `github-hosted` or `self-hosted`
+runner environments. The inline and issue reply capabilities also create and
+delete the App's temporary `eyes` reaction on the corresponding source comment;
+they do not broaden beyond their existing `pull_requests: write` or
+`issues: write` permission.

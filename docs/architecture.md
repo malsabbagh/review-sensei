@@ -356,6 +356,52 @@ rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
 whether a maintainer should publish; those are explicit external operations.
 
+## Public landing-page analytics boundary
+
+`docs/site/index.html` is a static GitHub Pages artifact. The Google Tag
+Manager bootstrap for container `GTM-5W7TJV38` is an intentional exception to
+the otherwise self-contained page: normal visits request
+`https://www.googletagmanager.com/gtm.js?id=GTM-5W7TJV38`, while browsers
+without JavaScript receive the corresponding `ns.html` iframe. The remote
+container can execute tags and is therefore code outside the repository's
+reviewed commit.
+
+Ownership is split explicitly:
+
+- ReviewSensei maintainers own the bootstrap, container ID, data-layer
+  contract, privacy requirements, and repository changes.
+- Google Tag Manager workspace administrators own container versions, tag
+  configuration, publish permissions, and emergency pause/revert actions.
+- The GitHub Pages workflow owns delivery of the reviewed bootstrap after a
+  merge to `main`.
+
+The browser-to-Google request may expose normal request metadata such as the
+source IP address, user agent, referrer, and cookies, plus any additional data
+collected by the published tags. The page must not put source code, diffs,
+prompts, review comments, credentials, or other sensitive ReviewSensei data in
+`dataLayer`. Container tags must follow the site's privacy notice and
+applicable consent requirements; adding a new data field or tag requires
+maintainer review in the GTM workspace and repository policy review.
+
+Controls:
+
+- `GTM-5W7TJV38` and both Google endpoints are literal, reviewed source
+  values; no visitor or workflow input can select a container or script URL.
+- The standard loader and its noscript fallback are the only integration in
+  `docs/site/index.html`; additional collection is visible in the container's
+  published tag configuration.
+- Workspace access and publish permissions are limited to designated
+  maintainers, and published container versions are retained for audit and
+  rollback.
+- Changes to the integration or its privacy/data-layer contract go through a
+  normal PR and the existing Pages deployment workflow.
+
+Rollback is code-only for the repository integration: revert the snippets in
+a reviewed PR, merge to `main`, and verify that the deployed page no longer
+requests the GTM endpoints. For an active incident, the GTM workspace owner
+can pause the container or restore the last approved container version before
+the Pages revert completes. No review-engine data migration is required.
+
 ## Publication boundary
 
 The private development repository produces the public
@@ -409,7 +455,7 @@ customer setup-v4 caller (operator-managed @v4 tag; all opt-ins false)
     -> public reusable workflow
        -> trusted-base checkout and bounded diff
        -> PyPI package or executing-SHA public GitHub source fallback
-       -> GitHub-hosted cloud review or trusted local Ollama review
+       -> provider-selected cloud or local review/reply runtime
        -> typed result/reply validation
        -> Actions OIDC assertion
           -> Cloudflare POST /github/token
@@ -417,6 +463,7 @@ customer setup-v4 caller (operator-managed @v4 tag; all opt-ins false)
              -> hashed replay/rate Durable Object claim
              -> one least-privileged capability token
        -> App-authored exact-head review, learning PR, or authorized reply
+          -> temporary eyes reaction around each authorized provider turn
 ```
 
 The generated setup PR is limited to the workflow caller, uninstall workflow,
@@ -432,6 +479,22 @@ future clients are no-write cases. A byte-exact managed v3 workflow or managed
 v4 workflow following another valid public tag is stale and is migrated; absent
 and legacy/v2 clients are also reconciled through at most one reviewable
 setup-v4 PR per selected repository.
+
+One generated caller passes `provider_mode` explicitly. Cloud and local runtime
+jobs expose the same operation matrix—automatic/manual review, review and
+learning publication, optional artifacts, and bounded `@sensei` replies—while
+retaining different compute and egress boundaries. Cloud uses GitHub-hosted
+compute and Ollama Cloud; local uses the labelled self-hosted Ollama runner.
+Older setup-v4 callers remain recognized as managed content and migrate through
+the existing reviewable setup PR path.
+
+Conversation turns are authorized before capability exchange or provider
+execution. The reply capability adds an App-authored `eyes` reaction to the
+source comment, the provider receives the already-bounded thread/diff/findings/
+learnings context, and a `finally` cleanup removes the reaction after reply
+publication or another terminal outcome. Reply markers still provide
+idempotency, so a retry can reconcile an already-published response without
+creating a duplicate.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

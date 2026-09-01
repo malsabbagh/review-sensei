@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
@@ -43,9 +44,21 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
   });
 
-  it("generates both reusable jobs with the supplied tag", () => {
-    const workflow = buildTaggedV4SetupFiles("stable")[0].content;
-    expect(workflow.match(/review-sensei-run\.yml@stable/g)).toHaveLength(2);
+  it("generates one provider-neutral reusable job with the supplied tag", () => {
+    const tag = "stable";
+    const workflow = buildTaggedV4SetupFiles(tag)[0].content;
+    const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
+    expect(workflow.match(workflowPattern)).toHaveLength(1);
     expect(workflow).toContain("# ReviewSensei setup version: 4");
+    expect(workflow).toContain("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}");
+    expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'");
+    expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'");
+    expect(workflow).not.toContain("default: main");
+    expect(workflow).toBe(
+      readFileSync(
+        new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
+        "utf8",
+      ).replace("@v4", `@${tag}`),
+    );
   });
 });

@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-08-29
+Last updated: 2026-09-01
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -33,6 +33,7 @@ Process: `docs/process/adr-process.md`
 | [0022](0022-actions-publication-learning-and-conversations.md) | Proposed | Tagged setup-v4 publication, deterministic learning PRs, and authorized conversations | #64 | Exact-head App writes behind an issuance-only OIDC capability broker |
 | [0023](0023-pypi-first-github-package-fallback.md) | Proposed | Prefer PyPI and fall back to the executing-SHA public GitHub package source | #37 | Missing-release compatibility without unverified refs or masked install failures |
 | [0024](0024-tag-only-setup-v4-channel.md) | Proposed | Use the protected public `v4` tag as the sole setup-v4 workflow channel | #64 | Worker validates the tag; broker resolves it and checks the runtime SHA |
+| [0025](0025-cloud-local-feature-parity-and-conversation-reactions.md) | Proposed | Keep cloud and local feature-complete with ephemeral conversation reactions | #64 | One provider-neutral caller; symmetric review/reply operations |
 
 ## Policy
 

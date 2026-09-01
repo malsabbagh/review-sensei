@@ -21,6 +21,13 @@ from .http import GitHubHttp
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
+DISCUSSION_INSTRUCTION = (
+    "To discuss this finding, reply with @sensei followed by your question."
+)
+
+
+def _with_discussion_instruction(text: str) -> str:
+    return f"{text}\n\n{DISCUSSION_INSTRUCTION}"
 
 
 def _result_digest(result: ReviewResult) -> str:
@@ -162,13 +169,13 @@ class ReviewPublisher:
         if write_preflight is not None:
             return write_preflight
 
-        body = f"{result.summary}\n\n{marker}"
+        body = f"{_with_discussion_instruction(result.summary)}\n\n{marker}"
         comments = [
             {
                 "path": comment.path,
                 "line": comment.line,
                 "side": "RIGHT",
-                "body": comment.body,
+                "body": _with_discussion_instruction(comment.body),
             }
             for comment in result.comments
         ]

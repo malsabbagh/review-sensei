@@ -19,7 +19,6 @@ on:
       base_ref:
         description: Repository default branch (must match the repository setting)
         required: true
-        default: main
       head_ref:
         description: Head branch or ref to review
         required: true
@@ -62,38 +61,14 @@ permissions:
   id-token: write
 
 jobs:
-  automatic-cloud-review:
+  review-or-reply:
     if: >-
-      github.event_name == 'pull_request' &&
+      (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
       vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
-    with:
-      mode: automatic
-      operation: review
-      repository: ${{ github.repository }}
-      repository_id: ${{ github.repository_id }}
-      pull_request_number: ${{ github.event.pull_request.number }}
-      base_ref: ${{ github.event.pull_request.base.ref }}
-      base_sha: ${{ github.event.pull_request.base.sha }}
-      head_ref: ${{ github.event.pull_request.head.ref }}
-      head_repository: ${{ github.event.pull_request.head.repo.full_name }}
-      head_sha: ${{ github.event.pull_request.head.sha }}
-      review_sensei_version: ${{ vars.REVIEWSENSEI_VERSION }}
-      enable_review: ${{ vars.REVIEWSENSEI_AUTO_REVIEW }}
-      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
-      enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
-      enable_mention_replies: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}
-      upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
-    secrets:
-      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-
-  trusted-local-manual:
-    if: >-
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@sensei') &&
@@ -108,10 +83,12 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')) &&
-      vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
     with:
-      mode: manual
+      mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
@@ -126,7 +103,7 @@ jobs:
       source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: ${{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
       review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
-      enable_review: ${{ (inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply') == 'review' && vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
       enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
       enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
       enable_mention_replies: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}

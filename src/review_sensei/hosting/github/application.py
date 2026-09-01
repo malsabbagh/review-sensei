@@ -223,25 +223,40 @@ class GitHubApplication:
         )
         if not isinstance(prepared, PreparedConversation):
             return prepared
-        reply = ConversationService(reply_provider).reply(
-            prepared.context,
-            model=model,
-        )
         capability_token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability=(
                 "inline_reply" if prepared.source_kind == "inline" else "issue_reply"
             ),
         )
-        return self.replier.publish(
+        reaction = self.replier.add_processing_reaction(
             token=capability_token,
             repository=repository,
-            pull_request=pull_request,
             source_comment_id=prepared.source_comment_id,
-            source_updated_at=prepared.source_updated_at,
-            head_sha=prepared.head_sha,
-            reply=reply,
-            app_slug=app_slug,
-            root_comment_id=prepared.root_comment_id,
             source_kind=prepared.source_kind,
         )
+        try:
+            reply = ConversationService(reply_provider).reply(
+                prepared.context,
+                model=model,
+            )
+            return self.replier.publish(
+                token=capability_token,
+                repository=repository,
+                pull_request=pull_request,
+                source_comment_id=prepared.source_comment_id,
+                source_updated_at=prepared.source_updated_at,
+                head_sha=prepared.head_sha,
+                reply=reply,
+                app_slug=app_slug,
+                root_comment_id=prepared.root_comment_id,
+                source_kind=prepared.source_kind,
+            )
+        finally:
+            self.replier.remove_processing_reaction(
+                token=capability_token,
+                repository=repository,
+                source_comment_id=prepared.source_comment_id,
+                source_kind=prepared.source_kind,
+                reaction_id=reaction.reaction_id,
+            )

@@ -122,8 +122,16 @@ class ReviewPublisherTests(unittest.TestCase):
         post = calls[3]
         body = __import__("json").loads(post[2].decode("utf-8"))
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
+        self.assertIn(
+            "To discuss this finding, reply with @sensei followed by your question.",
+            body["body"],
+        )
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["comments"][0]["path"], "src/app.py")
+        self.assertIn(
+            "To discuss this finding, reply with @sensei followed by your question.",
+            body["comments"][0]["body"],
+        )
 
     def test_head_is_rechecked_after_marker_pagination_before_write(self):
         head = "b" * 40

@@ -206,10 +206,13 @@ existing variable/secret values are preserved.
 
 ### Setup-v4 execution and broker boundary
 
-Automatic cloud pull-request review uses GitHub-hosted compute. Local Ollama
-uses only manual or trusted-event dispatch on the labeled self-hosted runner.
-Explicit `@sensei` replies use that trusted local path only; cloud mode does not
-send PR conversation or inline-thread context to the cloud provider.
+Cloud review and `@sensei` reply operations use GitHub-hosted compute. Local
+review and reply operations use the labelled self-hosted runner. Both provider
+modes support automatic/manual review, learning proposals, optional artifacts,
+and bounded multi-turn PR conversations. Cloud mode sends the selected review
+or conversation context to Ollama Cloud; local mode keeps it on the configured
+local service. An authorized mention receives a temporary 👀 reaction until the
+reply or another terminal outcome.
 Generated write and artifact switches default to false. The generated caller
 may pass `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}` by name only; the App
 never creates, retrieves, logs, persists, or reveals that secret value.
@@ -218,7 +221,7 @@ The isolated `POST /github/token` route accepts a bounded OIDC exchange for
 `review_publish`, `inline_reply`, `issue_reply`, or `learning_write`. It
 resolves the configured workflow tag, verifies its tag ref and runtime SHA,
 and checks repository identity; it rejects
-forks and unsupported runners/events, resolves the installation server-side,
+forks and unsupported runner environments/events, resolves the installation server-side,
 and claims replay/rate state in `BrokerLedger`. A bounded pre-auth admission
 check runs before JWKS work, public JWKS reads are cached for five minutes with
 concurrent refresh coalescing, and a verified assertion is claimed before any

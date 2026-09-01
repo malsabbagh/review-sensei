@@ -7,6 +7,9 @@ Pull Request: not configured
 Owners/Reviewers: Maintainers
 Approved by: not configured
 
+Revised by: ADR 0025 removes the provider-specific feature restrictions while
+preserving this ADR's authorization, idempotency, and setup-v4 boundaries.
+
 ## Context
 
 ReviewSensei needs an opt-in GitHub integration without moving model
@@ -141,3 +144,4 @@ PyPI package is not yet available.
 - [GitHub App registration](../github-app-registration.md)
 - [Public contracts](../public-contracts.md)
 - [Cloudflare Worker package](../../deploy/cloudflare/README.md)
+- [ADR 0025](0025-cloud-local-feature-parity-and-conversation-reactions.md)

@@ -41,9 +41,12 @@ The page is adapted from the provided prototype with these changes:
 - The install command examples use the ReviewSensei package and CLI identity
   established by ADR 0016.
 
-The site is a single self-contained HTML file with inline CSS and JS. No build
-step, framework, or external runtime dependency is required. This keeps the
-deployment surface minimal and the page fast.
+The site is a single static HTML file with inline CSS and JS. No build step or
+framework is required. The page's core content and behavior remain
+self-contained; the approved Google Tag Manager bootstrap is the sole external
+runtime dependency and can load code managed outside the reviewed repository.
+This keeps the deployment surface minimal while making the analytics boundary
+explicit.
 
 ## Consequences
 
@@ -71,3 +74,63 @@ deployment surface minimal and the page fast.
   flow through the existing publication audit.
 - A hosted CMS or dynamic backend: contradicts the open-source-first,
   customer-owned execution model.
+
+## Amendment - Google Tag Manager analytics (PR #92)
+
+Date: 2026-09-01
+
+### Context
+
+The landing page now uses the standard Google Tag Manager bootstrap for
+container `GTM-5W7TJV38` to support approved site analytics. This introduces a
+third-party runtime boundary: the reviewed HTML contains the bootstrap, but
+the remote container can change which tags execute between repository
+commits. The original self-contained-page statement therefore needs an
+explicit exception and operating controls.
+
+### Decision
+
+Keep the page as static HTML under `docs/site/` and deploy it through the
+existing GitHub Pages workflow. The approved integration is limited to the
+literal GTM loader and its matching noscript iframe in
+`docs/site/index.html`; the container ID and Google endpoints cannot be
+selected by visitors or workflow inputs. This amendment narrows the original
+"no external runtime dependency" statement: the page's core content, CSS, and
+interaction code remain in the reviewed file, while GTM is an intentional
+external analytics dependency.
+
+### Ownership and privacy
+
+ReviewSensei maintainers own the repository bootstrap, container ID,
+data-layer contract, and privacy requirements. GTM workspace administrators
+own the remote container's tags, versions, publish permissions, and emergency
+pause/revert operations. GitHub Pages owns delivery of the reviewed bootstrap
+after a merge to `main`.
+
+A visit can send ordinary request metadata (including source IP address, user
+agent, referrer, and cookies) to Google, and the published tags may collect
+additional data. The page must not put source code, diffs, prompts, review
+comments, credentials, or other sensitive ReviewSensei data in `dataLayer`.
+Published tags must comply with the site's privacy notice and applicable
+consent requirements.
+
+### Controls
+
+- The container ID and both Google endpoints are literal values reviewed in
+  the normal PR process.
+- The standard loader and noscript fallback are the only GTM integration in
+  the page; new tags or data fields require maintainer review in the GTM
+  workspace and repository privacy-policy review.
+- GTM workspace access and publish permissions are restricted to designated
+  maintainers, and approved container versions are retained for audit.
+- The architecture and data-handling documentation must remain consistent
+  with any future analytics or data-layer change.
+
+### Rollout and rollback
+
+Roll out through the normal reviewed PR and GitHub Pages deployment. For an
+active analytics incident, the GTM workspace owner can pause the container or
+restore the last approved container version. Remove the repository integration
+by reverting the two snippets in a reviewed PR, merging to `main`, and
+verifying that the deployed page no longer requests the GTM endpoints. No
+review-engine data migration is required.
