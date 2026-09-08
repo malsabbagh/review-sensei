@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-comment.schema.json",
+  "title": "ReviewSensei review comment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "line", "body"],
+  "properties": {
+    "path": {"type": "string", "minLength": 1},
+    "line": {"type": "integer", "minimum": 1},
+    "body": {"type": "string", "minLength": 1},
+    "severity": {"type": "string", "minLength": 1},
+    "fix_effort": {"type": "string", "minLength": 1},
+    "category": {"type": "string", "minLength": 1}
+  }
+}

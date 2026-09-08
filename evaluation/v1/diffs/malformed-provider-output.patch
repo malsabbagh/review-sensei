@@ -1,0 +1,7 @@
+diff --git a/src/command.py b/src/command.py
+--- a/src/command.py
++++ b/src/command.py
+@@ -1,2 +1,2 @@
+ def run_ls(directory):
+-    return os.listdir(directory)
++    return sorted(os.listdir(directory))

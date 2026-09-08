@@ -1,0 +1,515 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact npm package version, for example 0.1.0"
+        required: true
+        type: string
+        default: "0.1.0"
+      publish:
+        description: "Publish after validation (false prepares only the attested package bundle)"
+        required: true
+        type: boolean
+        default: false
+      bootstrap:
+        description: "Use the one-time NPM_TOKEN bootstrap for 0.1.0 only"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  verify-request:
+    name: Verify public npm release request
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Require the canonical public default branch
+        env:
+          EXPECTED_REPOSITORY: malsabbagh/review-sensei
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$BOOTSTRAP" = "true" || test "$BOOTSTRAP" = "false"
+
+      - name: Check out the immutable dispatch source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Validate source and release version
+        id: source
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          test "$source_sha" = "$GITHUB_SHA"
+          python scripts/check_release_version.py --tag "v$VERSION"
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+  native-build:
+    name: Native standalone (${{ matrix.target }})
+    needs: verify-request
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-14
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: linux-arm64-gnu
+            os: ubuntu-24.04-arm
+          - target: linux-x64-gnu
+            os: ubuntu-latest
+          - target: win32-x64
+            os: windows-latest
+    runs-on: ${{ (matrix.os == 'ubuntu-latest' && vars.ENABLE_UBICLOUD_HOSTED == 'true') && 'ubicloud-standard-2' || matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the verified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-request.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install standalone smoke oracle
+        run: python -m pip install --disable-pip-version-check .
+
+      - name: Install pinned PyInstaller
+        run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
+
+      - name: Build one-folder standalone executable
+        run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
+
+      - name: Run native standalone smoke equivalence
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          executable="dist/standalone/${{ matrix.target }}/review-sensei/review-sensei"
+          if [[ "${{ matrix.target }}" == "win32-x64" ]]; then
+            executable+=".exe"
+          fi
+          base_ref="$(git rev-parse HEAD^)"
+          head_ref="$(git rev-parse HEAD)"
+          python scripts/standalone_smoke.py \
+            --executable "$executable" \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json \
+            --base-ref "$base_ref" \
+            --head-ref "$head_ref"
+
+      - name: Upload native bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-standalone-${{ matrix.target }}
+          if-no-files-found: error
+          path: dist/standalone/${{ matrix.target }}/review-sensei
+
+  assemble-npm:
+    name: Assemble and validate npm package set
+    needs: [verify-request, native-build]
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the verified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-request.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Install pinned npm pack CLI
+        run: npm install --global --ignore-scripts npm@11.5.1
+
+      - name: Download native bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: review-sensei-standalone-*
+          path: dist/native
+          merge-multiple: false
+
+      - name: Restore POSIX executable modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu; do
+            root="dist/native/review-sensei-standalone-$target"
+            mapfile -t payloads < <(find "$root" -type f -name review-sensei -print)
+            test "${#payloads[@]}" -eq 1
+            chmod u=rwx,go=rx "${payloads[0]}"
+          done
+
+      - name: Assemble six package directories
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python scripts/prepare_npm_packages.py \
+            --output dist/npm \
+            --bundle darwin-arm64=dist/native/review-sensei-standalone-darwin-arm64 \
+            --bundle darwin-x64=dist/native/review-sensei-standalone-darwin-x64 \
+            --bundle linux-arm64-gnu=dist/native/review-sensei-standalone-linux-arm64-gnu \
+            --bundle linux-x64-gnu=dist/native/review-sensei-standalone-linux-x64-gnu \
+            --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
+          python scripts/validate_npm_package.py dist/npm --expected-version "$VERSION"
+          python scripts/check_release_version.py --tag "v$VERSION"
+
+      - name: Run native smoke harness where the runner can execute it
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
+
+      - name: Pack and validate exact npm tarballs
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/npm
+          packages=(cli darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64)
+          : > release/npm/SHA256SUMS
+          : > release/npm/integrity.jsonl
+          for package in "${packages[@]}"; do
+            npm pack --ignore-scripts --json --pack-destination release/npm "dist/npm/$package" > "release/npm/$package.pack.json"
+            tarball=$(python - "$package" <<'PY'
+          import json
+          import pathlib
+          import sys
+          value = json.loads(pathlib.Path("release/npm", f"{sys.argv[1]}.pack.json").read_text())
+          print(value[0]["filename"])
+          PY
+            )
+            python scripts/validate_npm_package.py "release/npm/$tarball" --expected-version "$VERSION"
+            python - "$package" "$tarball" <<'PY'
+          import base64
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          package_record = json.loads(pathlib.Path("release/npm", f"{sys.argv[1]}.pack.json").read_text())[0]
+          path = pathlib.Path("release/npm", sys.argv[2])
+          digest = hashlib.sha256(path.read_bytes()).digest()
+          hex_digest = digest.hex()
+          sri = "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode("ascii")
+          with pathlib.Path("release/npm/SHA256SUMS").open("a", encoding="utf-8") as sums:
+              sums.write(f"{hex_digest}  {path.name}\n")
+          with pathlib.Path("release/npm/integrity.jsonl").open("a", encoding="utf-8") as record:
+              record.write(json.dumps({"file": path.name, "name": package_record["name"], "version": package_record["version"], "sha256": hex_digest, "integrity": sri}) + "\n")
+          PY
+          done
+
+      - name: Attest exact npm tarballs
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/npm/SHA256SUMS
+
+      - name: Upload exact npm release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-npm-release-bundle
+          if-no-files-found: error
+          path: |
+            release/npm/*.tgz
+            release/npm/SHA256SUMS
+            release/npm/integrity.jsonl
+
+  publish-npm:
+    name: Publish npm packages
+    needs: [verify-request, assemble-npm]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/org/reviewsensei
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Set up Python for release metadata checks
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned npm Trusted Publishing CLI
+        run: npm install --global --ignore-scripts npm@11.5.1
+
+      - name: Download validated npm release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: review-sensei-npm-release-bundle
+          path: release/npm
+
+      - name: Verify downloaded npm tarball checksums
+        shell: bash
+        working-directory: release/npm
+        run: sha256sum --check SHA256SUMS
+
+      - name: Configure bootstrap authentication when present
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$BOOTSTRAP" == "true" ]]; then
+            test "$VERSION" = "0.1.0"
+            test -n "$NPM_TOKEN"
+            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          elif [[ -n "$NPM_TOKEN" ]]; then
+            echo "NPM_TOKEN is configured but bootstrap=false; remove the bootstrap secret before Trusted Publishing."
+            exit 1
+          else
+            echo "Using npm Trusted Publishing OIDC."
+          fi
+
+      - name: Verify registry state against attested tarballs
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - "$VERSION" <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+          import sys
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import quote
+          from urllib.request import urlopen
+
+          version = sys.argv[1]
+          packages = (
+              "@reviewsensei/cli-darwin-arm64",
+              "@reviewsensei/cli-darwin-x64",
+              "@reviewsensei/cli-linux-arm64-gnu",
+              "@reviewsensei/cli-linux-x64-gnu",
+              "@reviewsensei/cli-win32-x64",
+              "@reviewsensei/cli",
+          )
+          records = [
+              json.loads(line)
+              for line in Path("release/npm/integrity.jsonl").read_text(
+                  encoding="utf-8"
+              ).splitlines()
+          ]
+          expected = {
+              item["name"]: item
+              for item in records
+              if item.get("version") == version
+          }
+          if set(expected) != set(packages) or len(expected) != len(records):
+              raise SystemExit("release bundle has an invalid package integrity set")
+          state = []
+          for package in packages:
+              local = expected[package]
+              url = f"https://registry.npmjs.org/{quote(package, safe='')}/{quote(version, safe='')}"
+              try:
+                  with urlopen(url, timeout=30) as response:
+                      remote = json.loads(response.read().decode("utf-8"))
+              except HTTPError as exc:
+                  if exc.code == 404:
+                      state.append({"name": package, "action": "publish"})
+                      continue
+                  raise SystemExit(f"registry preflight failed for {package}: HTTP {exc.code}") from exc
+              except URLError as exc:
+                  raise SystemExit(f"registry preflight failed for {package}: {exc.reason}") from exc
+              if (
+                  remote.get("name") != package
+                  or remote.get("version") != version
+                  or not isinstance(remote.get("dist"), dict)
+                  or remote["dist"].get("integrity") != local["integrity"]
+              ):
+                  raise SystemExit(
+                      f"published npm bytes do not match the attested release bundle: {package}@{version}"
+                  )
+              state.append({"name": package, "action": "verified"})
+          Path("release/npm/publish-state.json").write_text(
+              json.dumps({"version": version, "packages": state}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          for item in state:
+              print(f"{item['name']}: {item['action']}")
+          PY
+
+      - name: Publish platform packages first and read back integrity
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for package in \
+            @reviewsensei/cli-darwin-arm64 \
+            @reviewsensei/cli-darwin-x64 \
+            @reviewsensei/cli-linux-arm64-gnu \
+            @reviewsensei/cli-linux-x64-gnu \
+            @reviewsensei/cli-win32-x64; do
+            action=$(python - "$package" <<'PY'
+          import json
+          import pathlib
+          import sys
+          state = json.loads(pathlib.Path("release/npm/publish-state.json").read_text())
+          matches = [item["action"] for item in state["packages"] if item.get("name") == sys.argv[1]]
+          if len(matches) != 1 or matches[0] not in {"publish", "verified"}:
+              raise SystemExit("missing unique package registry state")
+          print(matches[0])
+          PY
+            )
+            if [[ "$action" == "verified" ]]; then
+              echo "Registry already contains the attested bytes for $package@$VERSION"
+              continue
+            fi
+            test "$action" = "publish"
+            file=$(python - "$package" "$VERSION" <<'PY'
+          import json
+          import pathlib
+          import sys
+          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
+          matches = [item["file"] for item in records if item.get("name") == sys.argv[1] and item.get("version") == sys.argv[2]]
+          if len(matches) != 1:
+              raise SystemExit("missing unique package tarball")
+          print(matches[0])
+          PY
+            )
+            npm publish --ignore-scripts "release/npm/$file" --access public --provenance
+            remote_version=$(npm view "$package@$VERSION" version)
+            remote_integrity=$(npm view "$package@$VERSION" dist.integrity)
+            local_integrity=$(python - "$file" <<'PY'
+          import json
+          import pathlib
+          import sys
+          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
+              value = json.loads(line)
+              if value["file"] == sys.argv[1]:
+                  print(value["integrity"])
+                  break
+          else:
+              raise SystemExit("integrity record missing")
+          PY
+            )
+            test "$remote_version" = "$VERSION"
+            test "$remote_integrity" = "$local_integrity"
+          done
+
+      - name: Publish launcher last and read back integrity
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          action=$(python - <<'PY'
+          import json
+          import pathlib
+          state = json.loads(pathlib.Path("release/npm/publish-state.json").read_text())
+          matches = [item["action"] for item in state["packages"] if item.get("name") == "@reviewsensei/cli"]
+          if len(matches) != 1 or matches[0] not in {"publish", "verified"}:
+              raise SystemExit("missing unique launcher registry state")
+          print(matches[0])
+          PY
+          )
+          if [[ "$action" == "verified" ]]; then
+            echo "Registry already contains the attested bytes for @reviewsensei/cli@$VERSION"
+            exit 0
+          fi
+          test "$action" = "publish"
+          file=$(python - "$VERSION" <<'PY'
+          import json
+          import pathlib
+          import sys
+          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
+          matches = [item["file"] for item in records if item.get("name") == "@reviewsensei/cli" and item.get("version") == sys.argv[1]]
+          if len(matches) != 1:
+              raise SystemExit("missing unique launcher tarball")
+          print(matches[0])
+          PY
+          )
+          npm publish --ignore-scripts "release/npm/$file" --access public --provenance
+          remote_version=$(npm view "@reviewsensei/cli@$VERSION" version)
+          remote_integrity=$(npm view "@reviewsensei/cli@$VERSION" dist.integrity)
+          local_integrity=$(python - "$file" <<'PY'
+          import json
+          import pathlib
+          import sys
+          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
+              value = json.loads(line)
+              if value["file"] == sys.argv[1]:
+                  print(value["integrity"])
+                  break
+          else:
+              raise SystemExit("integrity record missing")
+          PY
+          )
+          test "$remote_version" = "$VERSION"
+          test "$remote_integrity" = "$local_integrity"
+
+      - name: Verify a clean Linux consumer installation
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d)"
+          trap 'rm -rf "$prefix"' EXIT
+          npm install --ignore-scripts --prefix "$prefix" "@reviewsensei/cli@$VERSION"
+          node - "$prefix" <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const prefix = process.argv[2];
+          const launcher = fs.realpathSync(
+            path.join(prefix, "node_modules/@reviewsensei/cli/bin/review-sensei.js"),
+          );
+          const command = fs.realpathSync(
+            path.join(prefix, "node_modules/.bin/review-sensei"),
+          );
+          if (command !== launcher) {
+            throw new Error("review-sensei command is not owned by the launcher package");
+          }
+          NODE
+          "$prefix/node_modules/.bin/review-sensei" --help >/dev/null
+          npm audit signatures --prefix "$prefix"

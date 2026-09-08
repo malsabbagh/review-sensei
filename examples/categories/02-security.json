@@ -1,0 +1,8 @@
+{
+  "id": "security",
+  "title": "Security",
+  "focus": [
+    "Trust-boundary violations and unsafe input handling",
+    "Authentication, authorization, secrets, and sensitive data"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@reviewsensei/cli-linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "ReviewSensei native CLI for glibc Linux arm64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/malsabbagh/review-sensei.git"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md", "LICENSE"]
+}

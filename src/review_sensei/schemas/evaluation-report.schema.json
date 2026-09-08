@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/evaluation-report.schema.json",
+  "title": "ReviewSensei evaluation report v1",
+  "description": "Closed structural contract for one non-secret evaluation report.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "corpus",
+    "run",
+    "configuration",
+    "privacy",
+    "cases",
+    "metrics",
+    "deterministic",
+    "quality",
+    "threshold_failures",
+    "passed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sha256"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "review_sensei_version",
+        "provider",
+        "provider_version",
+        "model",
+        "endpoint_scope",
+        "package_stage_digest",
+        "configuration_digest"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["fixture", "live"]
+        },
+        "review_sensei_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_version": {
+          "type": ["string", "null"]
+        },
+        "model": {
+          "type": ["string", "null"]
+        },
+        "endpoint_scope": {
+          "enum": ["none", "loopback", "remote"]
+        },
+        "package_stage_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "configuration_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_configuration_id"],
+      "properties": {
+        "review_configuration_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "scanned_inventory_count"],
+      "properties": {
+        "status": {
+          "enum": ["clean"]
+        },
+        "scanned_inventory_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/caseResult"
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_calls",
+        "prompt_bytes",
+        "response_bytes",
+        "token_proxy_4_bytes",
+        "elapsed_total_ms",
+        "elapsed_mean_ms",
+        "elapsed_p95_ms"
+      ],
+      "properties": {
+        "provider_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_proxy_4_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsed_total_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsed_mean_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "elapsed_p95_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "deterministic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exact_fixture_result_rate",
+        "expected_contract_rejection_rate"
+      ],
+      "properties": {
+        "exact_fixture_result_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "expected_contract_rejection_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actionable_precision",
+        "false_positive_rate",
+        "expected_finding_recall",
+        "location_validity",
+        "category_coverage"
+      ],
+      "properties": {
+        "actionable_precision": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "false_positive_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "expected_finding_recall": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "location_validity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "category_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "threshold_failures": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "passed": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "caseResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "category",
+        "status",
+        "expected_matches",
+        "actual_matches",
+        "false_positives",
+        "location_valid",
+        "category_valid",
+        "elapsed_ms",
+        "provider_calls",
+        "prompt_bytes",
+        "response_bytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": ["quality", "contract-rejection"]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": ["passed", "failed", "rejected-expected", "rejected-unexpected"]
+        },
+        "expected_matches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actual_matches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "false_positives": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "location_valid": {
+          "type": "boolean"
+        },
+        "category_valid": {
+          "type": "boolean"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "corpus": {
+        "id": "review-sensei-synthetic-v1",
+        "version": "1.0",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "run": {
+        "mode": "fixture",
+        "review_sensei_version": "0.1.0",
+        "provider": "fixture",
+        "provider_version": null,
+        "model": "fixture-v1",
+        "endpoint_scope": "none",
+        "package_stage_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "configuration_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "configuration": {
+        "review_configuration_id": "packaged-defaults-v1"
+      },
+      "privacy": {
+        "status": "clean",
+        "scanned_inventory_count": 1
+      },
+      "cases": [
+        {
+          "id": "example",
+          "kind": "quality",
+          "category": "correctness",
+          "status": "passed",
+          "expected_matches": 0,
+          "actual_matches": 0,
+          "false_positives": 0,
+          "location_valid": true,
+          "category_valid": true,
+          "elapsed_ms": 0,
+          "provider_calls": 1,
+          "prompt_bytes": 0,
+          "response_bytes": 0
+        }
+      ],
+      "metrics": {
+        "provider_calls": 1,
+        "prompt_bytes": 0,
+        "response_bytes": 0,
+        "token_proxy_4_bytes": 0,
+        "elapsed_total_ms": 0,
+        "elapsed_mean_ms": 0,
+        "elapsed_p95_ms": 0
+      },
+      "deterministic": {
+        "exact_fixture_result_rate": 1.0,
+        "expected_contract_rejection_rate": 1.0
+      },
+      "quality": {
+        "actionable_precision": 0.0,
+        "false_positive_rate": 0.0,
+        "expected_finding_recall": 1.0,
+        "location_validity": 1.0,
+        "category_coverage": 1.0
+      },
+      "threshold_failures": [],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,283 @@
+{
+  "schema_version": "1.0",
+  "corpus_id": "review-sensei-synthetic-v1",
+  "version": "1.0",
+  "description": "Synthetic regression corpus for deterministic ReviewSensei evaluation.",
+  "license": "CC0-1.0",
+  "provenance": {
+    "synthetic": true,
+    "statement": "All source, diffs, responses, and expected results are synthetic and contain no private or production data."
+  },
+  "files": [
+    {
+      "path": "corpus.json",
+      "sha256": "a83cc877936dfc5a36e3d194e032b08d561bd8679236a71d1677787a5a42dd3a",
+      "purpose": "manifest"
+    },
+    {
+      "path": "README.md",
+      "sha256": "09418b200ad5a7236a3e393e85fd56df48a2060ad57a5df9b9f598525942e473",
+      "purpose": "readme"
+    },
+    {
+      "path": "diffs/clean-guard.patch",
+      "sha256": "c2d9d9af009b698f0d6266772087c266b214838420c1a5613d9aa08e4374942a",
+      "purpose": "diff"
+    },
+    {
+      "path": "diffs/layer-violation.patch",
+      "sha256": "8d937c23f89e54455a386ded1cc52fa533e3362227f4f665dd4212af598d6a9b",
+      "purpose": "diff"
+    },
+    {
+      "path": "diffs/malformed-provider-output.patch",
+      "sha256": "c2d9d9af009b698f0d6266772087c266b214838420c1a5613d9aa08e4374942a",
+      "purpose": "diff"
+    },
+    {
+      "path": "diffs/missing-regression-test.patch",
+      "sha256": "d22c1057f27f8229f073d22aee3e12084fd3388d9c7c5f3b76ae8bba73c5163d",
+      "purpose": "diff"
+    },
+    {
+      "path": "diffs/off-by-one.patch",
+      "sha256": "6061252886e861f67f6357e405e7a90fd293fba932584aceb7e33111942b9d9b",
+      "purpose": "diff"
+    },
+    {
+      "path": "diffs/shell-injection.patch",
+      "sha256": "18c8fe5d1096796b07b8f0091538e5186f3db4865d29838ca99bb5dfffd0443a",
+      "purpose": "diff"
+    },
+    {
+      "path": "expected/clean-guard.review.json",
+      "sha256": "bf8df5c741b33b27311cfc6afacaac4c067fb6d7b644e727de25131aef9b74ae",
+      "purpose": "expected result"
+    },
+    {
+      "path": "expected/layer-violation.review.json",
+      "sha256": "714612a72d09536fdfdcb260ff0f77b2d003dc2b80af495db00ced61a8021a72",
+      "purpose": "expected result"
+    },
+    {
+      "path": "expected/missing-regression-test.review.json",
+      "sha256": "b46dfc93157b8246f0960576d85b2d0fab10f709eafb63f71aa33281e7a60ad8",
+      "purpose": "expected result"
+    },
+    {
+      "path": "expected/off-by-one.review.json",
+      "sha256": "a93a992ab56e3ecd449cc601e76160789e73228e611565931a04b9705d61d28d",
+      "purpose": "expected result"
+    },
+    {
+      "path": "expected/shell-injection.review.json",
+      "sha256": "bcb5d14a5fd691a0c76611bc81b7d429909ba716824e0527d1fd48a610235993",
+      "purpose": "expected result"
+    },
+    {
+      "path": "responses/clean-guard.json",
+      "sha256": "8fa05a5388fe23d3c15c53f02d1c117cf3909c2107e4ec5a809261cba8a9db0a",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "responses/layer-violation.json",
+      "sha256": "bbd92f8bcac208a5f3690b15c0b45b163cd68ef2262f86d25ba3c3119ec79ba0",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "responses/malformed-provider-output.json",
+      "sha256": "00130c0cfbbf34060d11eaea7f8051fd8100ec86541a013ce40697da71b30430",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "responses/missing-regression-test.json",
+      "sha256": "2968e3e08d9f0dfccbbcc4034d53cf07b6f687e2d8138db216d4cc81df695c0d",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "responses/off-by-one.json",
+      "sha256": "21e75576bbe720d244f90a4562c5c87bea307b771dcab7fa0b274b535f3c01b6",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "responses/shell-injection.json",
+      "sha256": "1cc213eb351495099fa55a8ba5823695d6f5109f3a9c38931fca9ec9cd9584b4",
+      "purpose": "fixture response"
+    },
+    {
+      "path": "sample-repository/base/src/command.py",
+      "sha256": "68f40e58c0219dcdcb9ae881d89c5c35df4e394f9b98ab08e81b12d75a84d4d8",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/base/src/guard.py",
+      "sha256": "f707c4ac89b5f0962f3c060437f126745a636cce9d5ce1882cc6adb8e4ce0b9a",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/base/src/order.py",
+      "sha256": "02caae9e09a0986c8174a81f2728f06e0a8ed91742a2094fc4876ac1aa5601a6",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/base/src/pagination.py",
+      "sha256": "b2faf6cbada9a9c76e98da2eaed58aef8e647d26f8d72cfc7eb66a6d1037029b",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/base/src/runner.py",
+      "sha256": "99cb8433d67de43c8157746b12577b41cda69a3505bbeffe881e4a20a1b803aa",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/head/src/command.py",
+      "sha256": "5de3ac61ee30bc688215c421d5684f92c25f50868f7bab045ade5094c923c1af",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/head/src/guard.py",
+      "sha256": "6e12280e8589381d123e359249e7989693b96361d7eda5c4bf3ae58ae3e190a7",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/head/src/order.py",
+      "sha256": "2997a0360afafd571a82162150a9fcac7e1f8dfe0b38cbc92c1a5c3b5135bd81",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/head/src/pagination.py",
+      "sha256": "93c4de4d416fe575306f7d42e719357121952f4d5fef150acdfee0c76f75ed4b",
+      "purpose": "sample source"
+    },
+    {
+      "path": "sample-repository/head/src/runner.py",
+      "sha256": "52c8dd72a44182b376e7ab33193b904da88e024a065d70a04c16b57247a2df78",
+      "purpose": "sample source"
+    }
+  ],
+  "sample_repository": {
+    "base_root": "sample-repository/base",
+    "head_root": "sample-repository/head"
+  },
+  "review_configuration": {
+    "id": "packaged-defaults-v1"
+  },
+  "deterministic_thresholds": {
+    "exact_fixture_result_rate": 1.0,
+    "expected_contract_rejection_rate": 1.0
+  },
+  "quality_thresholds": {
+    "actionable_precision_minimum": 0.75,
+    "false_positive_rate_maximum": 0.25,
+    "expected_finding_recall_minimum": 0.75,
+    "location_validity_minimum": 1.0,
+    "category_coverage_minimum": 0.75
+  },
+  "cases": [
+    {
+      "id": "off-by-one",
+      "title": "Off-by-one pagination",
+      "kind": "quality",
+      "category": "correctness",
+      "diff_path": "diffs/off-by-one.patch",
+      "response_path": "responses/off-by-one.json",
+      "expected_result_path": "expected/off-by-one.review.json",
+      "expected_findings": [
+        {
+          "path": "src/pagination.py",
+          "line": 3,
+          "category": "correctness",
+          "body_terms": [
+            "start",
+            "page_size"
+          ]
+        }
+      ],
+      "expected_error_category": "none"
+    },
+    {
+      "id": "shell-injection",
+      "title": "Shell injection risk",
+      "kind": "quality",
+      "category": "security",
+      "diff_path": "diffs/shell-injection.patch",
+      "response_path": "responses/shell-injection.json",
+      "expected_result_path": "expected/shell-injection.review.json",
+      "expected_findings": [
+        {
+          "path": "src/runner.py",
+          "line": 2,
+          "category": "security",
+          "body_terms": [
+            "shell",
+            "injection"
+          ]
+        }
+      ],
+      "expected_error_category": "none"
+    },
+    {
+      "id": "layer-violation",
+      "title": "Architecture layer violation",
+      "kind": "quality",
+      "category": "architecture",
+      "diff_path": "diffs/layer-violation.patch",
+      "response_path": "responses/layer-violation.json",
+      "expected_result_path": "expected/layer-violation.review.json",
+      "expected_findings": [
+        {
+          "path": "src/order.py",
+          "line": 5,
+          "category": "architecture",
+          "body_terms": [
+            "pricing",
+            "module"
+          ]
+        }
+      ],
+      "expected_error_category": "none"
+    },
+    {
+      "id": "missing-regression-test",
+      "title": "Missing regression test",
+      "kind": "quality",
+      "category": "tests",
+      "diff_path": "diffs/missing-regression-test.patch",
+      "response_path": "responses/missing-regression-test.json",
+      "expected_result_path": "expected/missing-regression-test.review.json",
+      "expected_findings": [
+        {
+          "path": "src/guard.py",
+          "line": 2,
+          "category": "tests",
+          "body_terms": [
+            "regression",
+            "test"
+          ]
+        }
+      ],
+      "expected_error_category": "none"
+    },
+    {
+      "id": "clean-guard",
+      "title": "Acceptable no-finding change",
+      "kind": "quality",
+      "category": "maintainability",
+      "diff_path": "diffs/clean-guard.patch",
+      "response_path": "responses/clean-guard.json",
+      "expected_result_path": "expected/clean-guard.review.json",
+      "expected_findings": [],
+      "acceptable_no_finding": true,
+      "expected_error_category": "none"
+    },
+    {
+      "id": "malformed-provider-output",
+      "title": "Malformed provider output",
+      "kind": "contract-rejection",
+      "category": "correctness",
+      "diff_path": "diffs/malformed-provider-output.patch",
+      "response_path": "responses/malformed-provider-output.json",
+      "expected_error_category": "format"
+    }
+  ]
+}

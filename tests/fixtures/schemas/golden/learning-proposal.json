@@ -1,0 +1,7 @@
+{
+  "title": "Preserve canonical paths",
+  "rule": "Repository paths must be canonical NFC UTF-8 relative paths.",
+  "scope": ["**"],
+  "rationale": "Ambiguous paths can bypass repository-local safety checks.",
+  "category": "security"
+}

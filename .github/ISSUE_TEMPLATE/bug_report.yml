@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible problem with ReviewSensei.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search existing issues first and include only the smallest useful reproduction.
+
+        Do not include credentials, private diffs, private source code, personal data, or raw provider responses. Use [SECURITY.md](../../SECURITY.md) for suspected vulnerabilities.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Tell us the ReviewSensei version, Python version, operating system, installation method, and provider type. Remove secrets.
+      placeholder: |
+        ReviewSensei: 0.1.0
+        Python: 3.12
+        OS: Ubuntu 24.04
+        Install: wheel / editable checkout
+        Provider: local Ollama / other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: List the smallest commands or steps that reproduce the problem. Redact private source and credentials.
+      placeholder: |
+        1. Run ...
+        2. Configure ... (without secrets)
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include sanitized error output only.
+    validations:
+      required: true
+  - type: checkboxes
+    id: security_privacy
+    attributes:
+      label: Security and privacy check
+      description: Confirm that this public issue contains no sensitive material.
+      options:
+        - label: I have removed credentials, private diffs/source, personal data, and raw provider responses.
+          required: true
+        - label: This is not a suspected security vulnerability; if it is, I will follow SECURITY.md instead of posting details publicly.
+          required: true

@@ -1,0 +1,7 @@
+diff --git a/src/guard.py b/src/guard.py
+--- a/src/guard.py
++++ b/src/guard.py
+@@ -1,2 +1,2 @@
+ def is_ready(config):
+-    return config.get("ready", False)
++    return config.get("ready", False) and config.get("enabled", True)

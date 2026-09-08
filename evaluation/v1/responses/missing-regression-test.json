@@ -1,0 +1,13 @@
+{
+  "summary": "The guard behavior change has no regression test.",
+  "comments": [
+    {
+      "path": "src/guard.py",
+      "line": 2,
+      "body": "Add a regression test for the enabled flag behavior.",
+      "severity": "suggestion",
+      "category": "tests"
+    }
+  ],
+  "learning_proposals": []
+}

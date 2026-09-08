@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  compatibility:
+    name: Compatibility (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      # Ubicloud provides Linux runners. When it is enabled, omit the native
+      # Windows/macOS lanes instead of dispatching jobs to unavailable hosts.
+      # The complete compatibility matrix remains available in fallback mode.
+      matrix: ${{ fromJSON(vars.ENABLE_UBICLOUD_HOSTED == 'true' && '{"include":[{"os":"ubuntu-latest","python-version":"3.11"},{"os":"ubuntu-latest","python-version":"3.14"}]}' || '{"include":[{"os":"ubuntu-latest","python-version":"3.11"},{"os":"windows-latest","python-version":"3.12"},{"os":"macos-latest","python-version":"3.13"},{"os":"ubuntu-latest","python-version":"3.14"}]}') }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and CI tools
+        run: |
+          python -m pip install -r requirements/ci.txt
+          python -m pip install -e .
+      - name: Compile sources
+        run: python -m compileall -q src
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  quality:
+    name: Quality gates
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install package and CI tools
+        run: |
+          python -m pip install -r requirements/ci.txt
+          python -m pip install -e .
+      - name: Format check
+        run: python -m ruff format --check setup.py src tests scripts
+      - name: Lint check
+        run: python -m ruff check setup.py src tests scripts
+      - name: Type check
+        run: python -m mypy src
+      - name: Compile sources
+        run: python -m compileall -q src
+      - name: Branch coverage
+        run: |
+          python -m coverage run --source=review_sensei --branch -m unittest discover -s tests -v
+          python -m coverage report --precision=2 --show-missing --fail-under=80
+
+  schemas:
+    name: Schemas and Action pins
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install package and CI tools
+        run: |
+          python -m pip install -r requirements/ci.txt
+          python -m pip install -e .
+      - name: Check immutable Action pins
+        run: python scripts/check_action_pins.py
+      - name: Validate JSON contracts
+        run: python scripts/validate_json_contracts.py
+      - name: Validate versioned public schemas
+        run: python scripts/validate_public_schemas.py
+      - name: Validate evaluation corpus
+        run: python scripts/validate_evaluation_corpus.py
+      - name: Run deterministic fixture evaluation
+        run: |
+          python -m review_sensei evaluate --mode fixture \
+            --corpus evaluation/v1/corpus.json \
+            --output "$RUNNER_TEMP/evaluation-report.json"
+
+  package:
+    name: Build and verify package
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: python -m pip install -r requirements/ci.txt
+      - name: Build sdist and wheel
+        run: python -m build --outdir dist
+      - name: Check sdist contents
+        shell: bash
+        run: |
+          tar -tzf dist/*.tar.gz | grep -E 'src/review_sensei/schemas/(review-category|review-stage|learning-entry|evaluation-corpus|evaluation-report)\.schema\.json$'
+          tar -tzf dist/*.tar.gz | grep -E 'evaluation/v1/corpus\.json$'
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: review-sensei-distributions
+          path: dist/*
+      - name: Verify wheel outside checkout
+        shell: bash
+        run: |
+          wheel_venv="$RUNNER_TEMP/review-sensei-wheel-venv"
+          python -m venv "$wheel_venv"
+          "$wheel_venv/bin/python" -m pip install -r "$GITHUB_WORKSPACE/requirements/ci.txt"
+          "$wheel_venv/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$wheel_venv/bin/python" - <<'PY'
+          import importlib.resources
+          import pathlib
+          import sys
+
+          import review_sensei
+
+          package_path = pathlib.Path(review_sensei.__file__).resolve()
+          prefix = pathlib.Path(sys.prefix).resolve()
+          assert prefix in package_path.parents, (package_path, prefix)
+          for name in (
+              "review-category.schema.json",
+              "review-stage.schema.json",
+              "learning-entry.schema.json",
+              "evaluation-corpus.schema.json",
+              "evaluation-report.schema.json",
+          ):
+              assert importlib.resources.files("review_sensei").joinpath("schemas", name).is_file()
+          PY
+          "$wheel_venv/bin/python" -I -m review_sensei --help
+          "$wheel_venv/bin/python" -I -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
+          "$wheel_venv/bin/python" -m pip check
+
+  npm:
+    name: Node launcher and npm package contracts
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install package and CI tools
+        run: |
+          python -m pip install -r requirements/ci.txt
+          python -m pip install -e .
+      - name: Run launcher tests
+        run: node --test packages/npm/cli/test/launcher.test.js
+      - name: Validate npm manifests and synthetic package cases
+        run: python -m unittest tests.test_npm_distribution -v
+      - name: Pack launcher without lifecycle hooks
+        run: npm pack --ignore-scripts --dry-run --json packages/npm/cli
+      - name: Validate publication boundary
+        # The manifest is intentionally excluded from the public projection;
+        # private CI must validate it, while public CI must not require it.
+        if: ${{ hashFiles('.publication/exclusions.json') != '' }}
+        run: python scripts/validate_publication_boundary.py --print-files
+
+  workers:
+    name: Cloudflare Worker
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: deploy/cloudflare/package-lock.json
+      - name: Install Worker dependencies
+        working-directory: deploy/cloudflare
+        run: npm ci
+      - name: Run Worker tests
+        working-directory: deploy/cloudflare
+        run: npm test
+      - name: Typecheck Worker
+        working-directory: deploy/cloudflare
+        run: npm run typecheck
+      - name: Generate Worker bindings
+        working-directory: deploy/cloudflare
+        run: npx wrangler types "$RUNNER_TEMP/reviewsensei-worker-env.d.ts"
+      - name: Validate Worker dry-run bundle
+        working-directory: deploy/cloudflare
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/reviewsensei-64-worker"
+
+  codeql:
+    name: CodeQL
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          # This private repository does not have GitHub Code Scanning enabled.
+          # Keep the analysis fail-closed and retain its SARIF for inspection.
+          upload: never
+          output: ${{ runner.temp }}/codeql-results
+      - name: Archive CodeQL SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: codeql-sarif
+          path: ${{ runner.temp }}/codeql-results
+          if-no-files-found: error
+
+  required-checks:
+    name: Required checks
+    if: ${{ !cancelled() }}
+    needs: [compatibility, quality, schemas, package, npm, workers, codeql]
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - name: Require every gate
+        run: |
+          # A skipped required job is intentionally not accepted: branch
+          # protection must never treat an incomplete gate as green.
+          require_success() {
+            if [ "$1" != success ]; then
+              echo "Required gate result was $1" >&2
+              return 1
+            fi
+          }
+          require_success "${{ needs.compatibility.result }}"
+          require_success "${{ needs.quality.result }}"
+          require_success "${{ needs.schemas.result }}"
+          require_success "${{ needs.package.result }}"
+          require_success "${{ needs.npm.result }}"
+          require_success "${{ needs.workers.result }}"
+          require_success "${{ needs.codeql.result }}"

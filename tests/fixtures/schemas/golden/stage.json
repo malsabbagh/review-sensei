@@ -1,0 +1,6 @@
+{
+  "name": "Comments Stage",
+  "outputs": ["comments"],
+  "category_ids": ["correctness", "security"],
+  "prompt_template": "Review the diff: {diff}\nUse these categories: {review_categories}"
+}

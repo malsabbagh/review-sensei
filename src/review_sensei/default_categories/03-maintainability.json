@@ -1,0 +1,8 @@
+{
+  "id": "maintainability",
+  "title": "Maintainability",
+  "focus": [
+    "Architecture or dependency-boundary violations",
+    "Resource lifetime, duplicated logic, and contracts that become difficult to change"
+  ]
+}

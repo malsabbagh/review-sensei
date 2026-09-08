@@ -1,0 +1,12 @@
+{
+  "workflow": {
+    "key": "review-sensei:review:16:owner/repository:2:42",
+    "max_active": 1,
+    "cancel_in_progress": true
+  },
+  "provider": {
+    "key": "review-sensei:provider:6:ollama:16:owner/repository:2:42",
+    "max_active": 1,
+    "cancel_in_progress": false
+  }
+}

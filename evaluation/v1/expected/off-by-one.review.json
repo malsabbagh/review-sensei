@@ -1,0 +1,15 @@
+{
+  "summary": "The pagination change introduces an off-by-one error for page numbers greater than one.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "body": "The start index is correct, but the slice end should be start plus page_size.",
+      "severity": "bug",
+      "category": "correctness"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": []
+}

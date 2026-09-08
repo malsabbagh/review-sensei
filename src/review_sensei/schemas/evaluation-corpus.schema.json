@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/evaluation-corpus.schema.json",
+  "title": "ReviewSensei evaluation corpus v1",
+  "description": "Closed structural contract for one privacy-safe evaluation corpus.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "corpus_id",
+    "version",
+    "description",
+    "license",
+    "provenance",
+    "files",
+    "sample_repository",
+    "review_configuration",
+    "deterministic_thresholds",
+    "quality_thresholds",
+    "cases"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "corpus_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["synthetic", "statement"],
+      "properties": {
+        "synthetic": {
+          "const": true
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/fileEntry"
+      }
+    },
+    "sample_repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_root", "head_root"],
+      "properties": {
+        "base_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "head_root": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "review_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "deterministic_thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exact_fixture_result_rate", "expected_contract_rejection_rate"],
+      "properties": {
+        "exact_fixture_result_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "expected_contract_rejection_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "quality_thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actionable_precision_minimum",
+        "false_positive_rate_maximum",
+        "expected_finding_recall_minimum",
+        "location_validity_minimum",
+        "category_coverage_minimum"
+      ],
+      "properties": {
+        "actionable_precision_minimum": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "false_positive_rate_maximum": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "expected_finding_recall_minimum": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "location_validity_minimum": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "category_coverage_minimum": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "$defs": {
+    "fileEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "purpose"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "expectedFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "category", "body_terms"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_terms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "category",
+        "diff_path",
+        "response_path",
+        "expected_error_category"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": ["quality", "contract-rejection"]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "diff_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "response_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_result_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_findings": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/expectedFinding"
+          }
+        },
+        "acceptable_no_finding": {
+          "type": "boolean"
+        },
+        "expected_error_category": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "corpus_id": "review-sensei-synthetic-v1",
+      "version": "1.0",
+      "description": "Synthetic regression corpus.",
+      "license": "CC0-1.0",
+      "provenance": {
+        "synthetic": true,
+        "statement": "All contents are synthetic."
+      },
+      "files": [
+        {
+          "path": "corpus.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "purpose": "manifest"
+        }
+      ],
+      "sample_repository": {
+        "base_root": "sample-repository/base",
+        "head_root": "sample-repository/head"
+      },
+      "review_configuration": {
+        "id": "packaged-defaults-v1"
+      },
+      "deterministic_thresholds": {
+        "exact_fixture_result_rate": 1.0,
+        "expected_contract_rejection_rate": 1.0
+      },
+      "quality_thresholds": {
+        "actionable_precision_minimum": 0.75,
+        "false_positive_rate_maximum": 0.25,
+        "expected_finding_recall_minimum": 0.75,
+        "location_validity_minimum": 1.0,
+        "category_coverage_minimum": 0.75
+      },
+      "cases": [
+        {
+          "id": "example",
+          "title": "Example case",
+          "kind": "quality",
+          "category": "correctness",
+          "diff_path": "diffs/example.patch",
+          "response_path": "responses/example.json",
+          "expected_error_category": "none"
+        }
+      ]
+    }
+  ]
+}

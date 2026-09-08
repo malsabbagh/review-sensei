@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-category.schema.json",
+  "title": "ReviewSensei review category v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "focus"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "title": {"type": "string", "minLength": 1},
+    "focus": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "applies_to": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "learnings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "categories": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1}
+            },
+            "include_uncategorized": {"type": "boolean"}
+          }
+        },
+        "documents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "include": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              },
+              "exclude": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              },
+              "required": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "id": "security",
+      "title": "Security",
+      "focus": ["Trust-boundary violations and unsafe input handling"],
+      "applies_to": ["**"],
+      "context": {
+        "learnings": {
+          "categories": ["security"],
+          "include_uncategorized": true
+        },
+        "documents": [{"path": "SECURITY.md"}]
+      }
+    }
+  ]
+}

@@ -1,0 +1,426 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and attest release bundle
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Check tag and version consistency
+        run: python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+
+      - name: Install build frontend
+        run: python -m pip install --disable-pip-version-check build
+
+      - name: Build source distribution and wheel
+        run: python -m build --sdist --wheel --outdir dist
+
+      - name: Validate release artifacts
+        run: python scripts/validate_release.py dist --version "${GITHUB_REF_NAME#v}"
+
+      - name: Smoke test the wheel outside the checkout
+        env:
+          WHEEL_ENV: ${{ runner.temp }}/review-sensei-wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          wheels=()
+          while IFS= read -r -d '' wheel; do
+            wheels+=("$wheel")
+          done < <(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -type f -name '*.whl' -print0)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "expected exactly one wheel in dist/" >&2
+            exit 1
+          fi
+          python -m venv "$WHEEL_ENV"
+          "$WHEEL_ENV/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+          "$WHEEL_ENV/bin/python" -m pip check
+          "$WHEEL_ENV/bin/review-sensei" --help
+
+      - name: Create release checksums
+        run: |
+          mkdir -p release
+          (cd dist && sha256sum -- *.tar.gz *.whl) > release/SHA256SUMS
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: release/review-sensei-sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Attest package checksums
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Upload validated release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-release-bundle
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.whl
+            release/SHA256SUMS
+            release/review-sensei-sbom.spdx.json
+
+  native-build:
+    # npm publication is owned exclusively by the public manual lane.
+    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
+    name: Native standalone (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-14
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: linux-arm64-gnu
+            os: ubuntu-24.04-arm
+          - target: linux-x64-gnu
+            os: ubuntu-latest
+          - target: win32-x64
+            os: windows-latest
+    runs-on: ${{ (matrix.os == 'ubuntu-latest' && vars.ENABLE_UBICLOUD_HOSTED == 'true') && 'ubicloud-standard-2' || matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install standalone smoke oracle
+        run: python -m pip install --disable-pip-version-check .
+      - name: Install pinned PyInstaller
+        run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
+      - name: Build one-folder standalone executable
+        run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
+      - name: Run native standalone smoke equivalence
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          executable="dist/standalone/${{ matrix.target }}/review-sensei/review-sensei"
+          if [[ "${{ matrix.target }}" == "win32-x64" ]]; then
+            executable+=".exe"
+          fi
+          base_ref="$(git rev-parse HEAD^)"
+          head_ref="$(git rev-parse HEAD)"
+          python scripts/standalone_smoke.py \
+            --executable "$executable" \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json \
+            --base-ref "$base_ref" \
+            --head-ref "$head_ref"
+      - name: Upload native bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-standalone-${{ matrix.target }}
+          if-no-files-found: error
+          path: dist/standalone/${{ matrix.target }}/review-sensei
+
+  assemble-npm:
+    # npm publication is owned exclusively by the public manual lane.
+    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
+    name: Assemble and validate npm package set
+    needs: native-build
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Install pinned npm pack CLI
+        run: npm install --global npm@11.5.1
+      - name: Download native bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: review-sensei-standalone-*
+          path: dist/native
+          merge-multiple: false
+      - name: Assemble six package directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/prepare_npm_packages.py \
+            --output dist/npm \
+            --bundle darwin-arm64=dist/native/review-sensei-standalone-darwin-arm64 \
+            --bundle darwin-x64=dist/native/review-sensei-standalone-darwin-x64 \
+            --bundle linux-arm64-gnu=dist/native/review-sensei-standalone-linux-arm64-gnu \
+            --bundle linux-x64-gnu=dist/native/review-sensei-standalone-linux-x64-gnu \
+            --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
+          python scripts/validate_npm_package.py dist/npm --expected-version "${GITHUB_REF_NAME#v}"
+          python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - name: Run native smoke harness where the runner can execute it
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The matrix already exercised the native executable. This check
+          # validates launcher inputs and keeps the smoke contract explicit;
+          # clean-machine registry smoke remains a maintainer-owned gate.
+          python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
+      - name: Pack and validate exact npm tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/npm
+          packages=(cli darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64)
+          : > release/npm/SHA256SUMS
+          : > release/npm/integrity.jsonl
+          for package in "${packages[@]}"; do
+            npm pack --ignore-scripts --json --pack-destination release/npm "dist/npm/$package" > "release/npm/$package.pack.json"
+            tarball=$(python - "$package" <<'PY'
+          import json
+          import pathlib
+          import sys
+          value = json.loads(pathlib.Path("release/npm", f"{sys.argv[1]}.pack.json").read_text())
+          print(value[0]["filename"])
+          PY
+            )
+            python scripts/validate_npm_package.py "release/npm/$tarball" --expected-version "${GITHUB_REF_NAME#v}"
+            python - "$package" "$tarball" <<'PY'
+          import base64
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          package_record = json.loads(pathlib.Path("release/npm", f"{sys.argv[1]}.pack.json").read_text())[0]
+          path = pathlib.Path("release/npm", sys.argv[2])
+          digest = hashlib.sha256(path.read_bytes()).digest()
+          hex_digest = digest.hex()
+          sri = "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode("ascii")
+          with pathlib.Path("release/npm/SHA256SUMS").open("a", encoding="utf-8") as sums:
+              sums.write(f"{hex_digest}  {path.name}\n")
+          with pathlib.Path("release/npm/integrity.jsonl").open("a", encoding="utf-8") as record:
+              record.write(json.dumps({"file": path.name, "name": package_record["name"], "version": package_record["version"], "sha256": hex_digest, "integrity": sri}) + "\n")
+          PY
+          done
+      - name: Attest exact npm tarballs
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/npm/SHA256SUMS
+      - name: Upload exact npm release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-sensei-npm-release-bundle
+          if-no-files-found: error
+          path: |
+            release/npm/*.tgz
+            release/npm/SHA256SUMS
+            release/npm/integrity.jsonl
+
+  publish-npm:
+    # npm publication is owned exclusively by the public manual lane.
+    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
+    name: Publish npm packages with Trusted Publishing
+    needs: assemble-npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/org/reviewsensei
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      - name: Set up Python for release metadata checks
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned npm Trusted Publishing CLI
+        run: npm install --global npm@11.5.1
+      - name: Download validated npm release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: review-sensei-npm-release-bundle
+          path: release/npm
+      - name: Verify downloaded npm tarball checksums
+        shell: bash
+        working-directory: release/npm
+        run: sha256sum --check SHA256SUMS
+      - name: Publish platform packages first and read back integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          for package in \
+            @reviewsensei/cli-darwin-arm64 \
+            @reviewsensei/cli-darwin-x64 \
+            @reviewsensei/cli-linux-arm64-gnu \
+            @reviewsensei/cli-linux-x64-gnu \
+            @reviewsensei/cli-win32-x64; do
+            file=$(python - "$package" "$version" <<'PY'
+          import json
+          import pathlib
+          import sys
+          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
+          matches = [item["file"] for item in records if item.get("name") == sys.argv[1] and item.get("version") == sys.argv[2]]
+          if len(matches) != 1:
+              raise SystemExit("missing unique package tarball")
+          print(matches[0])
+          PY
+            )
+            npm publish --ignore-scripts "release/npm/$file" --access public --provenance
+            remote_version=$(npm view "$package@$version" version)
+            remote_integrity=$(npm view "$package@$version" dist.integrity)
+            local_integrity=$(python - "$file" <<'PY'
+          import json
+          import pathlib
+          import sys
+          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
+              value = json.loads(line)
+              if value["file"] == sys.argv[1]:
+                  print(value["integrity"])
+                  break
+          else:
+              raise SystemExit("integrity record missing")
+          PY
+            )
+            test "$remote_version" = "$version"
+            test "$remote_integrity" = "$local_integrity"
+          done
+      - name: Publish launcher last
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          file=$(python - "$version" <<'PY'
+          import json
+          import pathlib
+          import sys
+          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
+          matches = [item["file"] for item in records if item.get("name") == "@reviewsensei/cli" and item.get("version") == sys.argv[1]]
+          if len(matches) != 1:
+              raise SystemExit("missing unique launcher tarball")
+          print(matches[0])
+          PY
+          )
+          npm publish --ignore-scripts "release/npm/$file" --access public --provenance
+          remote_version=$(npm view "@reviewsensei/cli@$version" version)
+          remote_integrity=$(npm view "@reviewsensei/cli@$version" dist.integrity)
+          local_integrity=$(python - "$file" <<'PY'
+          import json
+          import pathlib
+          import sys
+          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
+              value = json.loads(line)
+              if value["file"] == sys.argv[1]:
+                  print(value["integrity"])
+                  break
+          else:
+              raise SystemExit("integrity record missing")
+          PY
+          )
+          test "$remote_version" = "$version"
+          test "$remote_integrity" = "$local_integrity"
+
+  publish:
+    name: Publish to PyPI with Trusted Publishing
+    needs: build
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    environment:
+      name: pypi
+      url: https://pypi.org/p/review-sensei
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download validated release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review-sensei-release-bundle
+          path: .
+
+      - name: Publish wheel and source distribution
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+          verify-metadata: true
+          skip-existing: false
+          attestations: true
+
+  github-release:
+    name: Create GitHub release assets
+    needs: build
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review-sensei-release-bundle
+          path: .
+
+      - name: Create tagged GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sdists=(dist/*.tar.gz)
+          wheels=(dist/*.whl)
+          if (( ${#sdists[@]} != 1 || ${#wheels[@]} != 1 )); then
+            echo "expected exactly one sdist and one wheel" >&2
+            exit 1
+          fi
+          assets=("${sdists[0]}" "${wheels[0]}" release/SHA256SUMS release/review-sensei-sbom.spdx.json)
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag --generate-notes --title "ReviewSensei $GITHUB_REF_NAME"

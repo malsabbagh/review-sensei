@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "corpus_id": "review-sensei-synthetic-v1",
+  "version": "1.0",
+  "description": "Synthetic regression corpus.",
+  "license": "CC0-1.0",
+  "provenance": {
+    "synthetic": true,
+    "statement": "All contents are synthetic."
+  },
+  "files": [],
+  "sample_repository": {
+    "base_root": "sample-repository/base",
+    "head_root": "sample-repository/head"
+  },
+  "review_configuration": {
+    "id": "packaged-defaults-v1"
+  },
+  "deterministic_thresholds": {
+    "exact_fixture_result_rate": 1.0,
+    "expected_contract_rejection_rate": 1.0
+  },
+  "quality_thresholds": {
+    "actionable_precision_minimum": 0.75,
+    "false_positive_rate_maximum": 0.25,
+    "expected_finding_recall_minimum": 0.75,
+    "location_validity_minimum": 1.0,
+    "category_coverage_minimum": 0.75
+  },
+  "cases": [
+    {
+      "id": "example",
+      "title": "Example case",
+      "kind": "quality",
+      "category": "correctness",
+      "diff_path": "diffs/example.patch",
+      "response_path": "responses/example.json",
+      "expected_error_category": "none"
+    }
+  ]
+}

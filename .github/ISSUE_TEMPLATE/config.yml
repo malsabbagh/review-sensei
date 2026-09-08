@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md
+    about: Use the private security reporting route. Do not disclose vulnerabilities in a public issue.
+  - name: Support, questions, and troubleshooting
+    url: https://github.com/malsabbagh/review-sensei/issues
+    about: Read SUPPORT.md and open a public issue with sanitized, reproducible details.

@@ -1,0 +1,20 @@
+{
+  "name": "@reviewsensei/cloudflare-github-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker and SQLite Durable Object package for ReviewSensei GitHub App setup.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260819.1",
+    "typescript": "5.9.2",
+    "wrangler": "4.123.0",
+    "vitest": "3.2.7"
+  }
+}

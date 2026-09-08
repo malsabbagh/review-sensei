@@ -1,0 +1,13 @@
+{
+  "name": "@reviewsensei/cli-darwin-arm64",
+  "version": "0.1.0",
+  "description": "ReviewSensei native CLI for macOS arm64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/malsabbagh/review-sensei.git"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md", "LICENSE"]
+}

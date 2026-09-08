@@ -1,0 +1,7 @@
+diff --git a/src/runner.py b/src/runner.py
+--- a/src/runner.py
++++ b/src/runner.py
+@@ -1,2 +1,2 @@
+ def run(command):
+-    return subprocess.run(command)
++    return subprocess.run(command, shell=True)

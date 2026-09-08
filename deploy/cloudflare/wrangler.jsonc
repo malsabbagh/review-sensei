@@ -1,0 +1,55 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "reviewsensei-github-app",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-08-16",
+	"workers_dev": true,
+	"preview_urls": true,
+	"vars": {
+		"PUBLIC_WORKFLOW_TAG": "v4"
+	},
+	"routes": [
+		{
+			"pattern": "github.reviewsensei.dev",
+			"zone_name": "reviewsensei.dev",
+			"custom_domain": true,
+			"enabled": true,
+			"previews_enabled": false
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "DELIVERY_LEDGER",
+				"class_name": "DeliveryLedger"
+			},
+			{
+				"name": "BROKER_LEDGER",
+				"class_name": "BrokerLedger"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"DeliveryLedger"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"BrokerLedger"
+			]
+		}
+	],
+	"observability": {
+		"redact_query_string": false,
+		"logs": {
+			"enabled": true
+		},
+		"traces": {
+			"enabled": true
+		}
+	}
+}

@@ -1,0 +1,8 @@
+{
+  "path": "src/app.py",
+  "line": 2,
+  "body": "Use a constant for this value.",
+  "severity": "suggestion",
+  "fix_effort": "small",
+  "category": "maintainability"
+}
