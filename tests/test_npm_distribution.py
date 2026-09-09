@@ -99,6 +99,9 @@ class AssemblyAndSetTests(unittest.TestCase):
             internal = bundle / "_internal"
             internal.mkdir()
             (internal / "runtime.dat").write_bytes(b"runtime sibling\n")
+            certifi = internal / "certifi"
+            certifi.mkdir()
+            (certifi / "cacert.pem").write_bytes(b"public CA roots\n")
             self.bundles[target_id] = bundle
 
     def tearDown(self):
@@ -275,6 +278,23 @@ class ValidatorTests(unittest.TestCase):
                 VALIDATOR.validate_tarball(
                     _valid_platform_tar(directory, command_bin=True), "0.1.0"
                 )
+
+            certifi_bundle = _valid_platform_tar(
+                directory, extra_member="package/bin/_internal/certifi/cacert.pem"
+            )
+            self.assertEqual(
+                VALIDATOR.validate_tarball(certifi_bundle, "0.1.0")["role"],
+                "platform",
+            )
+            for private_path in (
+                "package/bin/other.pem",
+                "package/bin/_internal/not-certifi/cacert.pem",
+            ):
+                with self.assertRaises(VALIDATOR.NpmPackageValidationError):
+                    VALIDATOR.validate_tarball(
+                        _valid_platform_tar(directory, extra_member=private_path),
+                        "0.1.0",
+                    )
 
     def test_validator_rejects_traversal_links_special_and_private_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

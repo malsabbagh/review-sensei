@@ -79,6 +79,7 @@ MAX_PACKAGE_FILES = 10_000
 MAX_PACKAGE_FILE_SIZE = 64 * 1024 * 1024
 MAX_PACKAGE_SIZE = 256 * 1024 * 1024
 PACKAGE_SET_METADATA = {"checksums.json", "SHA256SUMS", "package-set.json"}
+CERTIFI_CA_BUNDLE_SUFFIX = ("bin", "_internal", "certifi", "cacert.pem")
 
 
 class NpmPackageValidationError(ValueError):
@@ -117,6 +118,7 @@ def _forbidden_path(path: str) -> bool:
     lowered = path.casefold()
     parts = lowered.split("/")
     basename = parts[-1]
+    is_certifi_ca_bundle = tuple(parts[-4:]) == CERTIFI_CA_BUNDLE_SUFFIX
     return (
         basename.endswith(".map")
         or basename == ".env"
@@ -124,7 +126,10 @@ def _forbidden_path(path: str) -> bool:
         or basename == ".project-ai"
         or ".project-ai" in parts
         or any(part in {"credentials", "secrets", "private", ".ssh"} for part in parts)
-        or basename.endswith((".pem", ".key", ".pfx", ".p12"))
+        or (
+            basename.endswith((".pem", ".key", ".pfx", ".p12"))
+            and not is_certifi_ca_bundle
+        )
         or basename.startswith(("id_rsa", "id_ed25519"))
     )
 
