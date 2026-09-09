@@ -40,6 +40,7 @@ REQUIRED_SETUP_PERMISSIONS = frozenset(
 )
 SETUP_VERSION = 4
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
+CURRENT_PACKAGE_VERSION = "0.1.1"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
@@ -50,7 +51,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
-    ("REVIEWSENSEI_VERSION", "0.1.0"),
+    ("REVIEWSENSEI_VERSION", "0.1.1"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_GITHUB_WRITES", "false"),
     ("REVIEWSENSEI_LEARNING_PRS", "false"),
@@ -772,13 +773,15 @@ upload_artifacts: false
 def _v4_config_file() -> str:
     """Return the current setup-v4 configuration without approval toggles."""
 
-    return _historical_v4_config_file()
+    return _historical_v4_config_file().replace(
+        "version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1
+    )
 
 
 def _legacy_auto_approve_v4_config_file() -> str:
     """Return the released setup-v4 config with the removed approval toggle."""
 
-    return _historical_v4_config_file().replace(
+    return _v4_config_file().replace(
         "auto_review: false\n",
         "auto_review: false\nauto_approve: false\n",
         1,

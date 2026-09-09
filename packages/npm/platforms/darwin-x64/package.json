@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli-darwin-x64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ReviewSensei native CLI for macOS x64",
   "license": "MIT",
   "repository": {

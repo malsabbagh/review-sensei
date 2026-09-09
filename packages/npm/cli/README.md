@@ -11,7 +11,7 @@ Requirements: Node.js 22 or newer and an external `git` executable when using
 or contacts a provider. Install the exact version and invoke it with:
 
 ```console
-npx --yes @reviewsensei/cli@0.1.0 --version
+npx --yes @reviewsensei/cli@0.1.1 --version
 ```
 
 Supported targets are macOS arm64/x64, Linux arm64/x64 with glibc, and

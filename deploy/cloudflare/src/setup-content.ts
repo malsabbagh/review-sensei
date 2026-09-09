@@ -55,7 +55,7 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_PROVIDER_MODE", value: DEFAULT_PROVIDER_MODE },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
-  { name: "REVIEWSENSEI_VERSION", value: "0.1.0" },
+  { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
   { name: "REVIEWSENSEI_GITHUB_WRITES", value: "false" },
   { name: "REVIEWSENSEI_LEARNING_PRS", value: "false" },
@@ -482,6 +482,7 @@ function historicalV3UninstallWorkflowTemplate(): string {
 
 function configFile(version: number, includeAutoApprove = false): string {
   const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
+  const packageVersion = version === 3 ? "0.1.0" : "0.1.1";
   return (
     `# ReviewSensei setup version: ${version}\n` +
     `setup_version: ${version}\n` +
@@ -491,7 +492,7 @@ function configFile(version: number, includeAutoApprove = false): string {
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
     `cloud_model: ${DEFAULT_CLOUD_MODEL}\n` +
-    "version: 0.1.0\n" +
+    `version: ${packageVersion}\n` +
     "auto_review: false\n" +
     autoApprove +
     "github_writes: false\n" +

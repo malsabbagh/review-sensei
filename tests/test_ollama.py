@@ -1,4 +1,5 @@
 import json
+import ssl
 import unittest
 
 from review_sensei.errors import ProviderError
@@ -71,9 +72,10 @@ class OllamaProviderTests(unittest.TestCase):
             b'{"response":"{\\"summary\\":\\"ok\\",\\"comments\\":[]}"}'
         )
 
-        def opener(request, timeout):
+        def opener(request, timeout, context=None):
             captured["request"] = request
             captured["timeout"] = timeout
+            captured["context"] = context
             return raw_response
 
         provider = OllamaProvider(
@@ -92,6 +94,8 @@ class OllamaProviderTests(unittest.TestCase):
             captured["request"].full_url, "https://ollama.example/api/generate"
         )
         self.assertEqual(captured["timeout"], 42)
+        self.assertIsInstance(captured["context"], ssl.SSLContext)
+        self.assertTrue(captured["context"].check_hostname)
         self.assertEqual(payload["model"], "review-model")
         self.assertEqual(payload["prompt"], "review this")
         self.assertFalse(payload["stream"])

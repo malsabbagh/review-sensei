@@ -9,8 +9,8 @@ install lifecycle hook. An external `git` executable is also required for
 `prepare-diff`.
 
 ```bash
-npx --yes @reviewsensei/cli@0.1.0 --version
-npx --yes @reviewsensei/cli@0.1.0 prepare-diff \
+npx --yes @reviewsensei/cli@0.1.1 --version
+npx --yes @reviewsensei/cli@0.1.1 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
 

@@ -9,6 +9,7 @@ datas = collect_data_files(
     includes=["default_categories/*.json", "default_stages/*.json", "schemas/*.json"],
 )
 datas += copy_metadata("review-sensei")
+datas += collect_data_files("certifi")
 
 a = Analysis(
     ["entrypoint.py"],

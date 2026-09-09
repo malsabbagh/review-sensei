@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import ssl
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import certifi
 
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
@@ -78,7 +82,15 @@ class OllamaProvider:
         )
 
         try:
-            with self._opener(http_request, timeout=self.timeout_seconds) as response:
+            open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
+            if self.base_url.lower().startswith("https://"):
+                # Standalone PyInstaller bundles do not inherit a usable system
+                # CA path on every supported host. Prefer an explicit operator
+                # override, then the bundled certifi roots, while retaining
+                # normal certificate verification.
+                cafile = os.getenv("SSL_CERT_FILE") or certifi.where()
+                open_kwargs["context"] = ssl.create_default_context(cafile=cafile)
+            with self._opener(http_request, **open_kwargs) as response:
                 read_limit = request.max_response_bytes + 1
                 body = bytearray()
                 while len(body) <= request.max_response_bytes:

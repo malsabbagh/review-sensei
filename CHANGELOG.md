@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 - 2026-09-08
+
+- Fixed standalone HTTPS provider calls by bundling and using a trusted CA
+  bundle in native npm executables.
+- Bumped the Python distribution and all npm launcher/platform packages to
+  `0.1.1`.
+
 ## Unreleased
 
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
