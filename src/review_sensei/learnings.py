@@ -97,32 +97,49 @@ class LearningStore:
         for entry in self.all_entries:
             if entry.superseded_by and entry.superseded_by not in by_id:
                 diagnostics.append(
-                    LearningDiagnostic("missing-superseder", entry.id, (entry.superseded_by,))
+                    LearningDiagnostic(
+                        "missing-superseder", entry.id, (entry.superseded_by,)
+                    )
                 )
             if entry.expires_at:
-                expires = datetime.fromisoformat(entry.expires_at.replace("Z", "+00:00"))
+                expires = datetime.fromisoformat(
+                    entry.expires_at.replace("Z", "+00:00")
+                )
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=timezone.utc)
                 if expires <= instant:
-                    diagnostics.append(LearningDiagnostic("stale", entry.id, detail="expired"))
+                    diagnostics.append(
+                        LearningDiagnostic("stale", entry.id, detail="expired")
+                    )
             elif entry.reviewed_at:
-                reviewed = datetime.fromisoformat(entry.reviewed_at.replace("Z", "+00:00"))
+                reviewed = datetime.fromisoformat(
+                    entry.reviewed_at.replace("Z", "+00:00")
+                )
                 if reviewed.tzinfo is None:
                     reviewed = reviewed.replace(tzinfo=timezone.utc)
                 if reviewed + stale_after <= instant:
-                    diagnostics.append(LearningDiagnostic("stale", entry.id, detail="review date exceeded"))
+                    diagnostics.append(
+                        LearningDiagnostic(
+                            "stale", entry.id, detail="review date exceeded"
+                        )
+                    )
 
         # Overlapping scopes with materially different rules are advisory conflicts.
         for index, left in enumerate(self.all_entries):
             for right in self.all_entries[index + 1 :]:
-                if left.rule == right.rule or (left.category and right.category and left.category != right.category):
+                if left.rule == right.rule or (
+                    left.category and right.category and left.category != right.category
+                ):
                     continue
                 overlap = any(
                     fnmatchcase(pattern, candidate) or fnmatchcase(candidate, pattern)
-                    for pattern in left.scope for candidate in right.scope
+                    for pattern in left.scope
+                    for candidate in right.scope
                 )
                 if overlap:
-                    diagnostics.append(LearningDiagnostic("conflict", left.id, (right.id,)))
+                    diagnostics.append(
+                        LearningDiagnostic("conflict", left.id, (right.id,))
+                    )
 
         # Detect supersession cycles without recursion limits.
         graph = {entry.id: tuple(entry.supersedes) for entry in self.all_entries}
@@ -132,11 +149,15 @@ class LearningStore:
                 current, trail = stack.pop()
                 for target in graph.get(current, ()):
                     if target == start:
-                        diagnostics.append(LearningDiagnostic("supersession-cycle", start, trail))
+                        diagnostics.append(
+                            LearningDiagnostic("supersession-cycle", start, trail)
+                        )
                     elif target in graph and target not in trail:
                         stack.append((target, trail + (target,)))
         # Stable de-duplication and a bounded diagnostic surface.
-        unique = {(item.code, item.entry_id, item.related_ids): item for item in diagnostics}
+        unique = {
+            (item.code, item.entry_id, item.related_ids): item for item in diagnostics
+        }
         return tuple(unique[key] for key in sorted(unique)[:MAX_LEARNING_FILES])
 
 

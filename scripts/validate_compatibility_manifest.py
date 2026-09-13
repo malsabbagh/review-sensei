@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate a release compatibility manifest before publication/execution."""
+
 from __future__ import annotations
 
 import argparse

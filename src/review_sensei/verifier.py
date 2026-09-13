@@ -4,6 +4,7 @@ This pass never asks a model to adjudicate itself.  It verifies that bounded
 evidence references exist in the exact snapshot reviewed and that candidates
 are actionable before a publisher is allowed to consider them.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -29,15 +30,26 @@ class EvidenceReference:
 
     def __post_init__(self) -> None:
         validate_repository_path(self.path, label="evidence path")
-        if isinstance(self.line, bool) or not isinstance(self.line, int) or self.line < 1:
+        if (
+            isinstance(self.line, bool)
+            or not isinstance(self.line, int)
+            or self.line < 1
+        ):
             raise ReviewInputError("evidence line must be positive")
         if not _SHA256.fullmatch(self.snapshot_sha256):
             raise ReviewInputError("evidence snapshot_sha256 must be a SHA-256 digest")
-        if self.excerpt is not None and (not isinstance(self.excerpt, str) or len(self.excerpt) > 512):
+        if self.excerpt is not None and (
+            not isinstance(self.excerpt, str) or len(self.excerpt) > 512
+        ):
             raise ReviewInputError("evidence excerpt is too long")
 
     def to_dict(self) -> dict[str, object]:
-        return {"path": self.path, "line": self.line, "snapshot_sha256": self.snapshot_sha256, "excerpt": self.excerpt}
+        return {
+            "path": self.path,
+            "line": self.line,
+            "snapshot_sha256": self.snapshot_sha256,
+            "excerpt": self.excerpt,
+        }
 
 
 @dataclass(frozen=True)
@@ -50,10 +62,17 @@ class CandidateFinding:
     assumptions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("claim", "triggering_conditions", "impacted_path", "severity_rationale"):
+        for name in (
+            "claim",
+            "triggering_conditions",
+            "impacted_path",
+            "severity_rationale",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip() or len(value) > 1024:
-                raise ReviewInputError(f"candidate {name} must be a bounded non-empty string")
+                raise ReviewInputError(
+                    f"candidate {name} must be a bounded non-empty string"
+                )
         validate_repository_path(self.impacted_path, label="candidate impacted_path")
         if not self.evidence:
             raise ReviewInputError("candidate must include evidence")
@@ -67,7 +86,14 @@ class CandidateFinding:
         try:
             evidence = tuple(EvidenceReference(**item) for item in value["evidence"])  # type: ignore[arg-type]
             assumptions = tuple(str(item) for item in value.get("assumptions", ()))
-            return cls(str(value["claim"]), str(value["triggering_conditions"]), str(value["impacted_path"]), evidence, str(value["severity_rationale"]), assumptions)
+            return cls(
+                str(value["claim"]),
+                str(value["triggering_conditions"]),
+                str(value["impacted_path"]),
+                evidence,
+                str(value["severity_rationale"]),
+                assumptions,
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewInputError("candidate finding is malformed") from exc
 
@@ -84,12 +110,20 @@ class VerificationResult:
             raise ReviewInputError("verification disposition is unsupported")
 
     def to_dict(self) -> dict[str, object]:
-        value = {"schema_version": "1.0", "disposition": self.disposition, "reasons": list(self.reasons), "evidence_valid": self.evidence_valid, "actionable": self.actionable}
+        value = {
+            "schema_version": "1.0",
+            "disposition": self.disposition,
+            "reasons": list(self.reasons),
+            "evidence_valid": self.evidence_valid,
+            "actionable": self.actionable,
+        }
         validate_public_document(value, "verification-result")
         return value
 
 
-def verify_candidate(candidate: CandidateFinding, snapshot: Mapping[str, str], *, snapshot_sha256: str) -> VerificationResult:
+def verify_candidate(
+    candidate: CandidateFinding, snapshot: Mapping[str, str], *, snapshot_sha256: str
+) -> VerificationResult:
     """Verify evidence paths/lines and excerpts against a reviewed snapshot.
 
     ``snapshot`` maps canonical repository paths to source text.  It is treated
@@ -98,7 +132,10 @@ def verify_candidate(candidate: CandidateFinding, snapshot: Mapping[str, str], *
     if not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
     canonical_snapshot = json.dumps(
-        dict(sorted(snapshot.items())), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        dict(sorted(snapshot.items())),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
     ).encode("utf-8")
     if hashlib.sha256(canonical_snapshot).hexdigest() != snapshot_sha256:
         raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
@@ -119,28 +156,48 @@ def verify_candidate(candidate: CandidateFinding, snapshot: Mapping[str, str], *
             evidence_valid = False
             reasons.append("evidence line is outside reviewed snapshot")
             continue
-        if reference.excerpt is not None and reference.excerpt not in lines[reference.line - 1]:
+        if (
+            reference.excerpt is not None
+            and reference.excerpt not in lines[reference.line - 1]
+        ):
             evidence_valid = False
             reasons.append("evidence excerpt does not match reviewed snapshot")
-    actionable = bool(candidate.claim.strip() and candidate.triggering_conditions.strip() and candidate.impacted_path.strip())
+    actionable = bool(
+        candidate.claim.strip()
+        and candidate.triggering_conditions.strip()
+        and candidate.impacted_path.strip()
+    )
     if not actionable:
         reasons.append("candidate lacks actionable triggering conditions")
     if not evidence_valid:
-        return VerificationResult("rejected", tuple(dict.fromkeys(reasons)), False, actionable)
+        return VerificationResult(
+            "rejected", tuple(dict.fromkeys(reasons)), False, actionable
+        )
     if not actionable:
-        return VerificationResult("insufficient-evidence", tuple(dict.fromkeys(reasons)), True, False)
+        return VerificationResult(
+            "insufficient-evidence", tuple(dict.fromkeys(reasons)), True, False
+        )
     return VerificationResult("confirmed", (), True, True)
 
 
-def verify_candidates(candidates: Sequence[CandidateFinding], snapshot: Mapping[str, str], *, snapshot_sha256: str) -> tuple[VerificationResult, ...]:
+def verify_candidates(
+    candidates: Sequence[CandidateFinding],
+    snapshot: Mapping[str, str],
+    *,
+    snapshot_sha256: str,
+) -> tuple[VerificationResult, ...]:
     """Verify candidates independently, de-duplicating identical claims."""
     seen: set[tuple[str, str, int]] = set()
     results: list[VerificationResult] = []
     for candidate in candidates:
         key = (candidate.impacted_path, candidate.claim, candidate.evidence[0].line)
         if key in seen:
-            results.append(VerificationResult("rejected", ("duplicate candidate",), False, True))
+            results.append(
+                VerificationResult("rejected", ("duplicate candidate",), False, True)
+            )
             continue
         seen.add(key)
-        results.append(verify_candidate(candidate, snapshot, snapshot_sha256=snapshot_sha256))
+        results.append(
+            verify_candidate(candidate, snapshot, snapshot_sha256=snapshot_sha256)
+        )
     return tuple(results)

@@ -294,21 +294,37 @@ class LearningEntry:
             raise ReviewInputError("learning supersedes must contain safe identifiers")
         if len(self.supersedes) != len(set(self.supersedes)):
             raise ReviewInputError("learning supersedes must be unique")
-        for label, value in (("reviewed_at", self.reviewed_at), ("expires_at", self.expires_at)):
+        for label, value in (
+            ("reviewed_at", self.reviewed_at),
+            ("expires_at", self.expires_at),
+        ):
             if value is not None:
                 try:
                     datetime.fromisoformat(value.replace("Z", "+00:00"))
                 except ValueError as exc:
-                    raise ReviewInputError(f"learning {label} must be ISO-8601") from exc
+                    raise ReviewInputError(
+                        f"learning {label} must be ISO-8601"
+                    ) from exc
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "LearningEntry":
         if not isinstance(value, Mapping):
             raise ReviewInputError("learning entry must be a JSON object")
         allowed = {
-            "id", "title", "rule", "scope", "rationale", "category", "source",
-            "status", "owner", "provenance", "reviewed_at", "expires_at",
-            "supersedes", "superseded_by",
+            "id",
+            "title",
+            "rule",
+            "scope",
+            "rationale",
+            "category",
+            "source",
+            "status",
+            "owner",
+            "provenance",
+            "reviewed_at",
+            "expires_at",
+            "supersedes",
+            "superseded_by",
         }
         if any(key not in allowed for key in value):
             raise ReviewInputError("learning entry contains an unsupported field")
@@ -321,7 +337,9 @@ class LearningEntry:
         if not isinstance(raw_supersedes, list) or not all(
             isinstance(identifier, str) for identifier in raw_supersedes
         ):
-            raise ReviewInputError("learning supersedes must be a JSON array of strings")
+            raise ReviewInputError(
+                "learning supersedes must be a JSON array of strings"
+            )
         return cls(
             id=cast(str, value["id"]),
             title=cast(str, value["title"]),

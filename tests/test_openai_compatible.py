@@ -52,7 +52,9 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         payload = json.loads(captured["request"].data)
         self.assertEqual(result.text, '{"summary":"ok"}')
         self.assertEqual(result.provider, "openai-compatible")
-        self.assertEqual(captured["request"].full_url, "https://example.test/v1/chat/completions")
+        self.assertEqual(
+            captured["request"].full_url, "https://example.test/v1/chat/completions"
+        )
         self.assertEqual(captured["timeout"], 7)
         self.assertEqual(payload["model"], "triage")
         self.assertEqual(payload["messages"], [{"role": "user", "content": "review"}])
@@ -69,4 +71,3 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

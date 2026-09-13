@@ -53,10 +53,16 @@ class OpenAICompatibleProvider:
             raise ValueError("OpenAI-compatible provider requires an API key")
         if timeout_seconds <= 0:
             raise ValueError("OpenAI-compatible timeout_seconds must be positive")
-        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int):
-            raise ValueError("OpenAI-compatible max_output_tokens must be a positive integer")
+        if isinstance(max_output_tokens, bool) or not isinstance(
+            max_output_tokens, int
+        ):
+            raise ValueError(
+                "OpenAI-compatible max_output_tokens must be a positive integer"
+            )
         if max_output_tokens < 1 or max_output_tokens > 16_384:
-            raise ValueError("OpenAI-compatible max_output_tokens exceeds the configured limit")
+            raise ValueError(
+                "OpenAI-compatible max_output_tokens exceeds the configured limit"
+            )
         if not base_url.lower().startswith("https://"):
             raise ValueError("OpenAI-compatible endpoint must use HTTPS")
         self.base_url = base_url.rstrip("/")
@@ -111,9 +117,11 @@ class OpenAICompatibleProvider:
             open_kwargs["context"] = ssl.create_default_context(cafile=cafile)
             opener = self._opener
             if opener is urlopen:
+
                 class _NoRedirect(HTTPRedirectHandler):
                     def redirect_request(self, req, fp, code, msg, headers, new):
                         raise ProviderError("OpenAI-compatible endpoint redirected")
+
                 opener = build_opener(
                     _NoRedirect(), HTTPSHandler(context=open_kwargs.pop("context"))
                 )
@@ -125,7 +133,9 @@ class OpenAICompatibleProvider:
                         if not chunk:
                             break
                         if not isinstance(chunk, (bytes, bytearray)):
-                            raise ProviderError("OpenAI-compatible response body is invalid")
+                            raise ProviderError(
+                                "OpenAI-compatible response body is invalid"
+                            )
                         body.extend(chunk)
             else:
                 with opener(http_request, **open_kwargs) as response:
@@ -136,7 +146,9 @@ class OpenAICompatibleProvider:
                         if not chunk:
                             break
                         if not isinstance(chunk, (bytes, bytearray)):
-                            raise ProviderError("OpenAI-compatible response body is invalid")
+                            raise ProviderError(
+                                "OpenAI-compatible response body is invalid"
+                            )
                         body.extend(chunk)
         except HTTPError as exc:
             raise ProviderError(
@@ -158,14 +170,20 @@ class OpenAICompatibleProvider:
             raise ProviderError("OpenAI-compatible request failed") from exc
 
         if len(body) > request.max_response_bytes:
-            raise ProviderError("OpenAI-compatible response exceeded the configured size limit")
+            raise ProviderError(
+                "OpenAI-compatible response exceeded the configured size limit"
+            )
         try:
             body_text = body.decode("utf-8", errors="strict")
             data = json.loads(body_text)
         except UnicodeDecodeError as exc:
-            raise ProviderError("OpenAI-compatible response was not valid UTF-8") from exc
+            raise ProviderError(
+                "OpenAI-compatible response was not valid UTF-8"
+            ) from exc
         except (TypeError, json.JSONDecodeError) as exc:
-            raise ProviderError("OpenAI-compatible response was not valid JSON") from exc
+            raise ProviderError(
+                "OpenAI-compatible response was not valid JSON"
+            ) from exc
 
         text: object = None
         if isinstance(data, dict):
@@ -175,7 +193,9 @@ class OpenAICompatibleProvider:
                 if isinstance(message, dict):
                     text = message.get("content")
         if not isinstance(text, str) or not text.strip():
-            raise ProviderError("OpenAI-compatible response did not contain review text")
+            raise ProviderError(
+                "OpenAI-compatible response did not contain review text"
+            )
         try:
             validate_bounded_text(
                 text,
@@ -187,4 +207,6 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 "OpenAI-compatible review response exceeded the configured size limit"
             ) from exc
-        return ProviderResponse(text=text, provider=self.name, model=model, limits=request.limits)
+        return ProviderResponse(
+            text=text, provider=self.name, model=model, limits=request.limits
+        )

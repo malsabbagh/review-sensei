@@ -36,7 +36,11 @@ class PatchSuggestion:
     accepted: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.finding_id, str) or not self.finding_id.strip() or len(self.finding_id) > 256:
+        if (
+            not isinstance(self.finding_id, str)
+            or not self.finding_id.strip()
+            or len(self.finding_id) > 256
+        ):
             raise ReviewInputError("patch finding_id must be non-empty")
         for label, value in (("base_sha", self.base_sha), ("head_sha", self.head_sha)):
             if not isinstance(value, str) or not _SHA.fullmatch(value):
@@ -47,7 +51,11 @@ class PatchSuggestion:
             raise ReviewInputError("patch exceeds the bounded size limit")
         if "GIT binary patch" in self.patch or "Binary files" in self.patch:
             raise ReviewInputError("binary patches are not supported")
-        if "new file mode 120000" in self.patch or "old mode 120000" in self.patch or "new mode 120000" in self.patch:
+        if (
+            "new file mode 120000" in self.patch
+            or "old mode 120000" in self.patch
+            or "new mode 120000" in self.patch
+        ):
             raise ReviewInputError("symlink patches are not supported")
         if not isinstance(self.affected_paths, tuple) or not self.affected_paths:
             raise ReviewInputError("patch must declare affected paths")
@@ -55,13 +63,28 @@ class PatchSuggestion:
             raise ReviewInputError("patch affects too many files")
         for path in self.affected_paths:
             validate_repository_path(path, label="patch affected path")
-        if len(self.assumptions) > MAX_PATCH_METADATA_ITEMS or len(self.validation) > MAX_PATCH_METADATA_ITEMS:
+        if (
+            len(self.assumptions) > MAX_PATCH_METADATA_ITEMS
+            or len(self.validation) > MAX_PATCH_METADATA_ITEMS
+        ):
             raise ReviewInputError("patch metadata has too many entries")
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 1024 for item in self.assumptions):
+        if any(
+            not isinstance(item, str) or not item.strip() or len(item) > 1024
+            for item in self.assumptions
+        ):
             raise ReviewInputError("patch assumptions must be non-empty strings")
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 1024 for item in self.validation):
+        if any(
+            not isinstance(item, str) or not item.strip() or len(item) > 1024
+            for item in self.validation
+        ):
             raise ReviewInputError("patch validation entries must be non-empty strings")
-        if sum(len(item.encode("utf-8")) for item in (*self.assumptions, *self.validation)) > MAX_PATCH_METADATA_BYTES:
+        if (
+            sum(
+                len(item.encode("utf-8"))
+                for item in (*self.assumptions, *self.validation)
+            )
+            > MAX_PATCH_METADATA_BYTES
+        ):
             raise ReviewInputError("patch metadata exceeds the bounded size limit")
         if self.accepted:
             raise ReviewInputError("patch suggestions cannot self-authorize acceptance")
@@ -110,7 +133,9 @@ def create_patch_suggestion(
     if any(Path(path).is_symlink() for path in changed):
         raise ReviewInputError("patch cannot target symlink paths")
     if not changed.issubset(set(allowed)):
-        raise ReviewInputError("patch touches a path outside the validated finding scope")
+        raise ReviewInputError(
+            "patch touches a path outside the validated finding scope"
+        )
     if any(path.startswith("/") or ".." in path.split("/") for path in changed):
         raise ReviewInputError("patch contains an unsafe path")
     return PatchSuggestion(

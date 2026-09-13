@@ -30,7 +30,9 @@ class ProviderSettings:
         """Build settings from a named profile without reading the environment."""
 
         selected = get_provider_profile(profile)
-        if selected.requires_api_key and (not isinstance(api_key, str) or not api_key.strip()):
+        if selected.requires_api_key and (
+            not isinstance(api_key, str) or not api_key.strip()
+        ):
             raise ProviderError(
                 f"provider profile '{selected.name}' requires an explicit API key"
             )
@@ -81,7 +83,9 @@ class ProviderRegistry:
             if settings.timeout_seconds not in {900, profile.timeout_seconds}:
                 raise ProviderError("provider profile timeout cannot be overridden")
             if settings.max_output_tokens not in {2048, profile.max_output_tokens}:
-                raise ProviderError("provider profile output budget cannot be overridden")
+                raise ProviderError(
+                    "provider profile output budget cannot be overridden"
+                )
             settings = ProviderSettings(
                 name=profile.provider,
                 model=profile.model,

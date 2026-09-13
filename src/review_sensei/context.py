@@ -273,9 +273,15 @@ class SourceContextExcerpt:
         validate_path = self.path
         try:
             # Reuse the same canonical path policy as ReviewDocument.
-            ReviewDocument(path=validate_path, content=self.content, sha256=hashlib.sha256(self.content.encode("utf-8")).hexdigest())
+            ReviewDocument(
+                path=validate_path,
+                content=self.content,
+                sha256=hashlib.sha256(self.content.encode("utf-8")).hexdigest(),
+            )
         except Exception as exc:
-            raise ContextLoadError("source context excerpt path/content is invalid") from exc
+            raise ContextLoadError(
+                "source context excerpt path/content is invalid"
+            ) from exc
         if not isinstance(self.snapshot, ContextSnapshot):
             raise ContextLoadError("source context excerpt snapshot is invalid")
         if not self.blob_sha:
@@ -288,7 +294,9 @@ class SourceContextExcerpt:
             raise ContextLoadError("source context excerpt reason is required")
         expected = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
         if self.sha256 and self.sha256 != expected:
-            raise ContextLoadError("source context excerpt digest does not match content")
+            raise ContextLoadError(
+                "source context excerpt digest does not match content"
+            )
         object.__setattr__(self, "sha256", expected)
 
 
@@ -327,7 +335,10 @@ class SymbolAwareContextSelector:
         self.max_files = max_files
         self.max_bytes = max_bytes
         self.max_depth = max_depth
-        if not (1 <= max_files <= MAX_CONTEXT_FILES and 1 <= max_bytes <= MAX_CONTEXT_TOTAL_BYTES):
+        if not (
+            1 <= max_files <= MAX_CONTEXT_FILES
+            and 1 <= max_bytes <= MAX_CONTEXT_TOTAL_BYTES
+        ):
             raise ContextLoadError("source context budgets are invalid")
         if not (0 <= max_depth <= 4):
             raise ContextLoadError("source context depth is invalid")
@@ -338,7 +349,14 @@ class SymbolAwareContextSelector:
     def _read(self, path: Path) -> str | None:
         if _has_symlink_component(self.store.root, path) or not path.is_file():
             return None
-        if _is_secret_like(path) or path.suffix.lower() not in {".py", ".pyi", ".js", ".jsx", ".ts", ".tsx"}:
+        if _is_secret_like(path) or path.suffix.lower() not in {
+            ".py",
+            ".pyi",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+        }:
             return None
         try:
             path.relative_to(self.store.root)
@@ -350,8 +368,12 @@ class SymbolAwareContextSelector:
         return content
 
     def select(self, changed_paths: Iterable[str]) -> SourceContextSelection:
-        changed = tuple(sorted({path for path in changed_paths if isinstance(path, str) and path}))
-        queue: list[tuple[str, int, str]] = [(path, 0, "changed-file") for path in changed]
+        changed = tuple(
+            sorted({path for path in changed_paths if isinstance(path, str) and path})
+        )
+        queue: list[tuple[str, int, str]] = [
+            (path, 0, "changed-file") for path in changed
+        ]
         seen: set[str] = set()
         excerpts: list[SourceContextExcerpt] = []
         outcomes: dict[str, str] = {}
@@ -415,7 +437,9 @@ class SymbolAwareContextSelector:
                 if relative not in seen:
                     queue.append((relative, depth + 1, "associated-test"))
         ordered_outcomes = tuple(sorted(outcomes.items()))
-        complete = all(value in {"reviewed", "partially-reviewed"} for _, value in ordered_outcomes)
+        complete = all(
+            value in {"reviewed", "partially-reviewed"} for _, value in ordered_outcomes
+        )
         return SourceContextSelection(tuple(excerpts), ordered_outcomes, complete)
 
 
@@ -438,7 +462,9 @@ def stable_finding_fingerprint(
     }
     if not any(parts.values()):
         raise ContextLoadError("finding fingerprint requires stable evidence")
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True)

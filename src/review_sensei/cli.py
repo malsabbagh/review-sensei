@@ -217,7 +217,11 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stages-dir", type=Path)
     parser.add_argument("--categories-dir", type=Path)
     parser.add_argument("--context-root", type=Path)
-    parser.add_argument("--network", action="store_true", help="Report optional network checks as unknown (never probes).")
+    parser.add_argument(
+        "--network",
+        action="store_true",
+        help="Report optional network checks as unknown (never probes).",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 

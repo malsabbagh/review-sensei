@@ -61,7 +61,9 @@ def run_doctor(
     version = _package_version()
     checks.append(
         DiagnosticCheck(
-            "package", "pass" if version else "action", version or "package metadata unavailable"
+            "package",
+            "pass" if version else "action",
+            version or "package metadata unavailable",
         )
     )
     asset_root = Path(__file__).parent
@@ -72,39 +74,76 @@ def run_doctor(
     missing = [path.name for path in required_assets if not path.is_file()]
     checks.append(
         DiagnosticCheck(
-            "packaged-assets", "action" if missing else "pass",
-            "missing packaged assets" if missing else "default stages and categories available",
+            "packaged-assets",
+            "action" if missing else "pass",
+            "missing packaged assets"
+            if missing
+            else "default stages and categories available",
         )
     )
     mode = os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local").strip().lower()
     if mode not in {"local", "cloud"}:
-        checks.append(DiagnosticCheck("provider-mode", "action", "provider mode must be local or cloud"))
+        checks.append(
+            DiagnosticCheck(
+                "provider-mode", "action", "provider mode must be local or cloud"
+            )
+        )
     else:
-        checks.append(DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)"))
+        checks.append(
+            DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)")
+        )
     for label, configured, expected in (
         ("stages", stages_dir, "stages"),
         ("categories", categories_dir, "categories"),
     ):
         if configured is None:
-            checks.append(DiagnosticCheck(label, "pass", f"packaged default {expected} selected"))
+            checks.append(
+                DiagnosticCheck(label, "pass", f"packaged default {expected} selected")
+            )
         elif configured.is_symlink() or not configured.is_dir():
-            checks.append(DiagnosticCheck(label, "action", "configured directory is unavailable"))
-        elif not any(path.is_file() and not path.is_symlink() for path in configured.iterdir()):
-            checks.append(DiagnosticCheck(label, "action", "configured directory is empty"))
+            checks.append(
+                DiagnosticCheck(label, "action", "configured directory is unavailable")
+            )
+        elif not any(
+            path.is_file() and not path.is_symlink() for path in configured.iterdir()
+        ):
+            checks.append(
+                DiagnosticCheck(label, "action", "configured directory is empty")
+            )
         else:
-            checks.append(DiagnosticCheck(label, "pass", "configured trusted-base directory is readable"))
+            checks.append(
+                DiagnosticCheck(
+                    label, "pass", "configured trusted-base directory is readable"
+                )
+            )
     if context_root is None:
-        checks.append(DiagnosticCheck("context", "pass", "no supplemental context configured"))
+        checks.append(
+            DiagnosticCheck("context", "pass", "no supplemental context configured")
+        )
     elif not context_root.is_dir():
-        checks.append(DiagnosticCheck("context", "action", "configured context root is unavailable"))
+        checks.append(
+            DiagnosticCheck(
+                "context", "action", "configured context root is unavailable"
+            )
+        )
     else:
         checks.append(DiagnosticCheck("context", "pass", "context root is readable"))
     if include_network:
-        checks.append(DiagnosticCheck("network", "unknown", "network probes are not run by doctor"))
+        checks.append(
+            DiagnosticCheck(
+                "network", "unknown", "network probes are not run by doctor"
+            )
+        )
     else:
-        checks.append(DiagnosticCheck("network", "unknown", "not checked (offline mode)"))
-    status = "action" if any(check.status == "action" for check in checks) else (
-        "unknown" if any(check.status == "unknown" for check in checks) else "pass"
+        checks.append(
+            DiagnosticCheck("network", "unknown", "not checked (offline mode)")
+        )
+    status = (
+        "action"
+        if any(check.status == "action" for check in checks)
+        else (
+            "unknown" if any(check.status == "unknown" for check in checks) else "pass"
+        )
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -136,7 +175,11 @@ def build_plan(
             "changed_lines": len(analysis.changed_lines),
         }
     selected_stages = tuple(stages) or tuple(stage.name for stage in DEFAULT_STAGES)
-    mode = (provider_mode or os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")).strip().lower()
+    mode = (
+        (provider_mode or os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local"))
+        .strip()
+        .lower()
+    )
     if mode not in {"local", "cloud"}:
         raise ReviewInputError("provider mode must be local or cloud")
     return {
@@ -162,7 +205,9 @@ def build_plan(
             "approval": False,
         },
         "diff": diff_summary,
-        "skip_reasons": [] if diff_summary["status"] == "ready" else ["diff-not-supplied"],
+        "skip_reasons": []
+        if diff_summary["status"] == "ready"
+        else ["diff-not-supplied"],
     }
 
 
@@ -182,7 +227,9 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         lines.append(f"stages: {len(document['stages'])}")
     if "operations" in document:
         operations = document["operations"]
-        lines.append(f"operations: provider_calls={operations.get('provider_calls', 0)}, github_writes={operations.get('github_writes', 0)}")
+        lines.append(
+            f"operations: provider_calls={operations.get('provider_calls', 0)}, github_writes={operations.get('github_writes', 0)}"
+        )
     return "\n".join(lines) + "\n"
 
 

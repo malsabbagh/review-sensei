@@ -798,16 +798,19 @@ upload_artifacts: false
 def _v4_config_file() -> str:
     """Return the current setup-v4 configuration without approval toggles."""
 
-    return _historical_v4_config_file().replace(
-        "version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1
-    ).replace(
-        "auto_review: false\n",
-        "auto_review: false\nlearning_proposals: false\n",
-        1,
-    ).replace(
-        "upload_artifacts: false\n",
-        "upload_artifacts: false\nstages_dir: ''\ncategories_dir: ''\n",
-        1,
+    return (
+        _historical_v4_config_file()
+        .replace("version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1)
+        .replace(
+            "auto_review: false\n",
+            "auto_review: false\nlearning_proposals: false\n",
+            1,
+        )
+        .replace(
+            "upload_artifacts: false\n",
+            "upload_artifacts: false\nstages_dir: ''\ncategories_dir: ''\n",
+            1,
+        )
     )
 
 

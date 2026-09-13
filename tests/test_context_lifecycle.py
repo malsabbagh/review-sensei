@@ -25,26 +25,38 @@ class ContextLifecycleTests(unittest.TestCase):
             result = SymbolAwareContextSelector(
                 root, snapshot=ContextSnapshot("a" * 40), max_files=2
             ).select(("main.py",))
-            self.assertEqual([item.path for item in result.excerpts], ["main.py", "helper.py"])
-            self.assertTrue(all(item.snapshot.revision == "a" * 40 for item in result.excerpts))
+            self.assertEqual(
+                [item.path for item in result.excerpts], ["main.py", "helper.py"]
+            )
+            self.assertTrue(
+                all(item.snapshot.revision == "a" * 40 for item in result.excerpts)
+            )
             self.assertEqual(result.outcomes[-1], ("main.py", "reviewed"))
 
     def test_fingerprint_ignores_line_and_prose(self):
-        one = stable_finding_fingerprint(path="src/a.py", symbol="run", defect_kind="Race")
-        two = stable_finding_fingerprint(path="src/a.py", symbol="run", defect_kind="race")
+        one = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", defect_kind="Race"
+        )
+        two = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", defect_kind="race"
+        )
         self.assertEqual(one, two)
         self.assertEqual(
             reconcile_finding_lifecycle(None, one).state,
             "new",
         )
         self.assertEqual(
-            reconcile_finding_lifecycle(FindingLifecycle(one, "still-present"), one).state,
+            reconcile_finding_lifecycle(
+                FindingLifecycle(one, "still-present"), one
+            ).state,
             "still-present",
         )
 
     def test_cache_is_keyed_by_snapshot_and_bounded(self):
         cache = ReviewContextCache(max_entries=1)
-        key = ReviewContextCacheKey("o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l")
+        key = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l"
+        )
         cache.put(key, ("metadata",))
         self.assertEqual(cache.get(key), ("metadata",))
 
@@ -52,10 +64,16 @@ class ContextLifecycleTests(unittest.TestCase):
         store = LearningStore(
             (
                 LearningEntry(
-                    id="one", title="One", rule="Use A", reviewed_at="2020-01-01T00:00:00Z"
+                    id="one",
+                    title="One",
+                    rule="Use A",
+                    reviewed_at="2020-01-01T00:00:00Z",
                 ),
                 LearningEntry(
-                    id="two", title="Two", rule="Use B", reviewed_at="2020-01-01T00:00:00Z"
+                    id="two",
+                    title="Two",
+                    rule="Use B",
+                    reviewed_at="2020-01-01T00:00:00Z",
                 ),
             )
         )

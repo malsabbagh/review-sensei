@@ -4,6 +4,7 @@ The review engine intentionally keeps this module provider-neutral.  It is a
 small wire contract for callers that need to distinguish a skipped run from a
 partial or failed run without retaining prompts, responses, or source text.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -45,7 +46,13 @@ class ResourceBudget:
     max_output_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
-        for name in ("max_provider_calls", "max_retry_attempts", "timeout_ms", "max_prompt_bytes", "max_output_bytes"):
+        for name in (
+            "max_provider_calls",
+            "max_retry_attempts",
+            "timeout_ms",
+            "max_prompt_bytes",
+            "max_output_bytes",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewInputError(f"{name} must be a non-negative integer")
@@ -69,15 +76,27 @@ class RunOutcome:
     def __post_init__(self) -> None:
         if self.status not in RUN_STATUSES:
             raise ReviewInputError("run outcome status is unsupported")
-        for name in ("provider_calls", "retry_attempts", "prompt_bytes", "response_bytes", "elapsed_ms"):
+        for name in (
+            "provider_calls",
+            "retry_attempts",
+            "prompt_bytes",
+            "response_bytes",
+            "elapsed_ms",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewInputError(f"run outcome {name} must be non-negative")
         if self.base_sha is not None and not _SNAPSHOT.fullmatch(self.base_sha):
-            raise ReviewInputError("run outcome base_sha must be a commit or snapshot digest")
+            raise ReviewInputError(
+                "run outcome base_sha must be a commit or snapshot digest"
+            )
         if self.head_sha is not None and not _SNAPSHOT.fullmatch(self.head_sha):
-            raise ReviewInputError("run outcome head_sha must be a commit or snapshot digest")
-        if self.diagnostic is not None and (not isinstance(self.diagnostic, str) or len(self.diagnostic) > 512):
+            raise ReviewInputError(
+                "run outcome head_sha must be a commit or snapshot digest"
+            )
+        if self.diagnostic is not None and (
+            not isinstance(self.diagnostic, str) or len(self.diagnostic) > 512
+        ):
             raise ReviewInputError("run outcome diagnostic is too long")
 
     def to_dict(self) -> dict[str, object]:
@@ -127,15 +146,43 @@ class RecoveryArtifact:
         import json
 
         created = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        canonical = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return cls(repository, pull_request_number, base_sha, head_sha, result, created, expires_at, _digest(canonical))
+        canonical = json.dumps(
+            result, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        return cls(
+            repository,
+            pull_request_number,
+            base_sha,
+            head_sha,
+            result,
+            created,
+            expires_at,
+            _digest(canonical),
+        )
 
-    def validate(self, *, repository: str, pull_request_number: int, base_sha: str, head_sha: str, now: datetime | None = None) -> None:
+    def validate(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        base_sha: str,
+        head_sha: str,
+        now: datetime | None = None,
+    ) -> None:
         import json
 
-        if (self.repository, self.pull_request_number, self.base_sha, self.head_sha) != (repository, pull_request_number, base_sha, head_sha):
-            raise ReviewInputError("recovery artifact identity does not match current review")
-        canonical = json.dumps(self.result, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        if (
+            self.repository,
+            self.pull_request_number,
+            self.base_sha,
+            self.head_sha,
+        ) != (repository, pull_request_number, base_sha, head_sha):
+            raise ReviewInputError(
+                "recovery artifact identity does not match current review"
+            )
+        canonical = json.dumps(
+            self.result, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
         if _digest(canonical) != self.result_sha256:
             raise ReviewInputError("recovery artifact integrity check failed")
         try:

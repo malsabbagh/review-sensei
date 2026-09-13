@@ -54,19 +54,44 @@ class PromotionRecord:
     rollback_decision: str = "revert-to-baseline"
 
     def __post_init__(self) -> None:
-        for name in ("engine_digest", "prompt_digest", "configuration_digest", "corpus_digest"):
+        for name in (
+            "engine_digest",
+            "prompt_digest",
+            "configuration_digest",
+            "corpus_digest",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
-                raise ReviewInputError(f"promotion record {name} must be a SHA-256 digest")
-        if not all(isinstance(value, str) and value.strip() for value in (self.provider, self.model, self.observed_revision, self.evaluated_at)):
+                raise ReviewInputError(
+                    f"promotion record {name} must be a SHA-256 digest"
+                )
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (
+                self.provider,
+                self.model,
+                self.observed_revision,
+                self.evaluated_at,
+            )
+        ):
             raise ReviewInputError("promotion record identity fields are required")
-        if isinstance(self.run_count, bool) or not isinstance(self.run_count, int) or self.run_count < 1:
+        if (
+            isinstance(self.run_count, bool)
+            or not isinstance(self.run_count, int)
+            or self.run_count < 1
+        ):
             raise ReviewInputError("promotion record run_count must be positive")
         if self.status not in {"supported", "insufficient", "unsupported"}:
             raise ReviewInputError("promotion record status is unsupported")
         if self.status == "supported" and self.run_count < 3:
-            raise ReviewInputError("supported promotion evidence requires at least three runs")
-        if self.status == "supported" and self.provider.strip().casefold() in {"fixture", "stub", "fake"}:
+            raise ReviewInputError(
+                "supported promotion evidence requires at least three runs"
+            )
+        if self.status == "supported" and self.provider.strip().casefold() in {
+            "fixture",
+            "stub",
+            "fake",
+        }:
             raise ReviewInputError("fixture-only evidence cannot support promotion")
         if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:
             raise ReviewInputError("promotion record rollback decision is unsupported")
@@ -98,10 +123,25 @@ def validate_promotion_record(value: Mapping[str, Any]) -> PromotionRecord:
         raise ReviewInputError("promotion record must be a JSON object")
     validate_public_document(value, "promotion-record")
     try:
-        return PromotionRecord(**{key: value[key] for key in (
-            "engine_digest", "prompt_digest", "configuration_digest", "corpus_digest",
-            "provider", "model", "observed_revision", "run_count", "evaluated_at",
-            "reproducibility", "status", "rollback_decision")})
+        return PromotionRecord(
+            **{
+                key: value[key]
+                for key in (
+                    "engine_digest",
+                    "prompt_digest",
+                    "configuration_digest",
+                    "corpus_digest",
+                    "provider",
+                    "model",
+                    "observed_revision",
+                    "run_count",
+                    "evaluated_at",
+                    "reproducibility",
+                    "status",
+                    "rollback_decision",
+                )
+            }
+        )
     except KeyError as exc:
         raise ReviewInputError("promotion record is incomplete") from exc
 
@@ -565,7 +605,10 @@ def run_case(
         )
         # Pre-status fixtures remain valid as complete deterministic outputs;
         # this compatibility applies only to evaluation, never publication.
-        if isinstance(expected_document, dict) and "review_status" not in expected_document:
+        if (
+            isinstance(expected_document, dict)
+            and "review_status" not in expected_document
+        ):
             expected_document["review_status"] = "complete"
         status = "passed" if expected_document == result.to_dict() else "failed"
     location_valid = all(

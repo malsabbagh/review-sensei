@@ -40,7 +40,9 @@ class ProviderProfile:
             raise ValueError("provider profile max_output_tokens must be positive")
         if self.requires_api_key and not self.api_key_env:
             raise ValueError("credentialed provider profiles require api_key_env")
-        if self.endpoint_scope == "remote" and not self.base_url.lower().startswith("https://"):
+        if self.endpoint_scope == "remote" and not self.base_url.lower().startswith(
+            "https://"
+        ):
             raise ValueError("remote provider profiles require an HTTPS endpoint")
 
 
@@ -105,4 +107,3 @@ def profile_names() -> tuple[str, ...]:
     """Return canonical profile names in deterministic order."""
 
     return tuple(sorted(PROVIDER_PROFILES))
-

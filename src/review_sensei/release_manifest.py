@@ -1,4 +1,5 @@
 """Versioned release compatibility manifest validation."""
+
 from __future__ import annotations
 
 import re
@@ -80,6 +81,8 @@ def validate_compatibility_manifest(value: Mapping[str, Any]) -> CompatibilityMa
         or manifest.release != manifest.workflow.version
     ):
         raise ReviewInputError("release artifacts do not share one release version")
-    if not manifest.npm or any(item.version != manifest.release for item in manifest.npm):
+    if not manifest.npm or any(
+        item.version != manifest.release for item in manifest.npm
+    ):
         raise ReviewInputError("npm artifacts do not match the release version")
     return manifest
