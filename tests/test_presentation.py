@@ -24,8 +24,23 @@ class ReviewPresentationTests(unittest.TestCase):
         )
         self.assertEqual(
             format_review_comment(comment),
-            "[Severity: High] [Fix effort: Small] [Lens: Api Security]\n\n"
+            "[🟠 Severity: High] [⚡ Fix effort: Small] [🔎 Lens: Api Security]\n\n"
             "Handle the missing return value.",
+        )
+
+    def test_inline_comment_uses_known_icons_and_safe_fallbacks(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            severity="medium",
+            fix_effort="unknown",
+            category="architecture",
+        )
+        self.assertEqual(
+            format_review_comment(comment),
+            "[🟡 Severity: Medium] [❔ Fix effort: Unknown] [🏗️ Lens: Architecture]"
+            "\n\nfinding",
         )
 
     def test_legacy_inline_comment_is_unchanged(self):
@@ -42,8 +57,8 @@ class ReviewPresentationTests(unittest.TestCase):
         )
         self.assertEqual(
             format_review_comment(comment),
-            "[Severity: High\\] \\[Lens: Spoofed] "
-            "[Lens: Security\\]\\(https://example.com\\)]\n\n"
+            "[🔎 Severity: High\\] \\[Lens: Spoofed] "
+            "[🔎 Lens: Security\\]\\(https://example.com\\)]\n\n"
             "finding",
         )
 

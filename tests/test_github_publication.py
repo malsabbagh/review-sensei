@@ -221,7 +221,7 @@ class ReviewPublisherTests(unittest.TestCase):
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertIn("Review classification:", body["body"])
         self.assertIn(
-            "[Severity: High] [Fix effort: Small] [Lens: Correctness]",
+            "[🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
             body["comments"][0]["body"],
         )
         self.assertEqual(body["commit_id"], head)

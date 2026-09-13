@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +36,7 @@ DEFAULT_STAGES = tuple(
 )
 _PROMPT_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _MAX_PROVIDER_OUTPUT_ATTEMPTS = 2
+_LOGGER = logging.getLogger(__name__)
 _PROVIDER_OUTPUT_CORRECTION = """
 
 <review-output-correction>
@@ -359,17 +361,29 @@ class ReviewService:
                     msg = f"[{stage.name}] {msg}"
                 raise ReviewFormatError(msg)
             for index, value in enumerate(comments):
-                stage_comments.append(
-                    self._validate_comment(
-                        value,
-                        index=index,
-                        changed_lines=changed_lines,
-                        stage=stage,
-                        allowed_category_ids={
-                            category.id for category in active_categories
-                        },
-                    )
+                comment = self._validate_comment(
+                    value,
+                    index=index,
+                    stage=stage,
+                    allowed_category_ids={
+                        category.id for category in active_categories
+                    },
                 )
+                if self.enforce_locations and comment.line not in changed_lines.get(
+                    comment.path, frozenset()
+                ):
+                    # The provider has already supplied a valid, bounded comment
+                    # shape, but its target is not publishable as a GitHub inline
+                    # annotation. Do not make one bad coordinate discard the
+                    # independently valid summary or comments. Keep the log
+                    # intentionally free of provider-controlled path and body text.
+                    _LOGGER.warning(
+                        "review-sensei: omitted inline comment %d because its target "
+                        "is not an added or modified diff line",
+                        index,
+                    )
+                    continue
+                stage_comments.append(comment)
 
         if "learning_proposals" in stage.outputs:
             learning_values = payload.get("learning_proposals", [])
@@ -412,7 +426,6 @@ class ReviewService:
         value: object,
         *,
         index: int,
-        changed_lines: dict[str, frozenset[int]],
         stage: Stage,
         allowed_category_ids: set[str],
     ) -> ReviewComment:
@@ -439,10 +452,4 @@ class ReviewService:
                 f"[{stage.name}] comment {index} uses a category that is not declared by the stage"
             )
 
-        if self.enforce_locations and comment.line not in changed_lines.get(
-            comment.path, frozenset()
-        ):
-            raise ReviewFormatError(
-                f"comment {index} targets a line that is not added or modified in the diff"
-            )
         return comment

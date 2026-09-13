@@ -282,10 +282,9 @@ aggregate size violations. Selection and serialization are deterministic.
 ## Failure behavior
 
 - Provider transport or envelope failures raise `ProviderError`.
-- Invalid JSON, stage output, comment locations, categories, or learning
-  proposals receive one sanitized provider correction attempt. The rejected
-  attempt is discarded transactionally; a second invalid response raises
-  `ReviewFormatError`.
+- Invalid JSON, stage output, categories, or learning proposals receive one
+  sanitized provider correction attempt. The rejected attempt is discarded
+  transactionally; a second invalid response raises `ReviewFormatError`.
 - Provider transport failures, oversized responses, invalid provider protocol
   objects, prompt-limit failures, and aggregate result-limit failures are not
   retried by the structured-output recovery policy.
@@ -293,7 +292,10 @@ aggregate size violations. Selection and serialization are deterministic.
   is called.
 - A model-supplied comment category outside a stage's declared ids raises
   `ReviewFormatError`.
-- Invalid locations fail closed instead of being sent to a publisher.
+- A structurally valid inline comment that targets an unchanged or deleted line
+  is omitted with a sanitized diagnostic; valid comments and the summary remain
+  eligible for publication. The publisher still revalidates every retained
+  location against the exact diff and fails closed before any write.
 - Invalid, oversized, duplicate, retired, or out-of-repository learning files
   are rejected or excluded before prompt construction.
 - Missing required lens sources, unsafe paths, symlinks, secret-like files, and

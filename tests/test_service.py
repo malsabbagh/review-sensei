@@ -165,19 +165,28 @@ class ReviewServiceTests(unittest.TestCase):
         with self.assertRaises(ReviewFormatError):
             ReviewService(provider).review(ReviewRequest(diff=DIFF))
 
-    def test_accepts_a_json_code_fence_but_rejects_invalid_locations(self):
+    def test_accepts_a_json_code_fence_and_omits_invalid_locations(self):
         provider = FakeProvider(
             "```json\n"
             '{"summary":"Review complete.","comments":[{"path":"src/app.py","line":1,"body":"This line is unchanged."}]}\n'
             "```"
         )
 
-        with self.assertRaises(ReviewFormatError):
-            ReviewService(provider).review(ReviewRequest(diff=DIFF))
+        with self.assertLogs("review_sensei.service", level="WARNING") as logs:
+            result = ReviewService(provider).review(ReviewRequest(diff=DIFF))
 
-        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(result.summary, "Review complete.")
+        self.assertEqual(result.comments, ())
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:review_sensei.service:review-sensei: omitted inline "
+                "comment 0 because its target is not an added or modified diff line"
+            ],
+        )
 
-    def test_retries_invalid_comment_locations_with_a_sanitized_correction(self):
+    def test_omits_invalid_comment_locations_and_keeps_valid_comments(self):
         marker = "PRIVATE_INVALID_PROVIDER_OUTPUT"
         provider = SequenceProvider(
             [
@@ -198,38 +207,29 @@ class ReviewServiceTests(unittest.TestCase):
                         ],
                     }
                 ),
-                json.dumps(
-                    {
-                        "summary": "Corrected attempt.",
-                        "comments": [
-                            {
-                                "path": "src/app.py",
-                                "line": 2,
-                                "body": "Corrected finding.",
-                            }
-                        ],
-                    }
-                ),
             ]
         )
 
-        result = ReviewService(provider).review(ReviewRequest(diff=DIFF))
+        with self.assertLogs("review_sensei.service", level="WARNING") as logs:
+            result = ReviewService(provider).review(ReviewRequest(diff=DIFF))
 
-        self.assertEqual(result.summary, "Corrected attempt.")
+        self.assertEqual(result.summary, "First attempt.")
         self.assertEqual(
-            [comment.body for comment in result.comments], ["Corrected finding."]
+            [comment.body for comment in result.comments],
+            ["Valid but must not leak from a failed attempt."],
         )
-        self.assertEqual(len(provider.requests), 2)
-        self.assertIn(
-            "previous response failed validation", provider.requests[1].prompt
+        self.assertEqual(len(provider.requests), 1)
+        self.assertNotIn(marker, "\n".join(logs.output))
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:review_sensei.service:review-sensei: omitted inline "
+                "comment 1 because its target is not an added or modified diff line"
+            ],
         )
-        self.assertNotIn(marker, provider.requests[1].prompt)
 
     def test_provider_output_retry_is_bounded(self):
-        invalid = (
-            '{"summary":"Review complete.","comments":'
-            '[{"path":"src/app.py","line":1,"body":"unchanged"}]}'
-        )
+        invalid = "not valid JSON"
         provider = SequenceProvider(
             [
                 invalid,

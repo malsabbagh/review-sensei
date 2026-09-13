@@ -23,14 +23,21 @@ responses must not be accepted by raising the existing transport ceiling.
 ## Decision
 
 `ReviewService` performs at most two provider-output attempts per stage. When
-the first response fails JSON, stage-output, category, proposal, or changed-line
-validation, the service discards the complete attempt and issues one fresh
-provider request. The retry appends a trusted, static correction that restates
-the JSON and changed-line requirements without including the rejected response
-or validation details. Only a completely validated attempt is accumulated.
-Transport failures, oversized provider responses, invalid provider protocol
-objects, prompt-limit failures, and aggregate result-limit failures are not
-retried by this policy. A second invalid structured response fails closed.
+the first response fails JSON, stage-output, category, or proposal validation,
+the service discards the complete attempt and issues one fresh provider request.
+The retry appends a trusted, static correction that restates the JSON and
+changed-line requirements without including the rejected response or validation
+details. Only a completely validated attempt is accumulated. Transport
+failures, oversized provider responses, invalid provider protocol objects,
+prompt-limit failures, and aggregate result-limit failures are not retried by
+this policy. A second invalid structured response fails closed.
+
+A structurally valid inline comment with a path and line outside the added or
+modified diff lines is different: it is omitted, a bounded diagnostic is
+logged, and the independently valid summary and inline comments continue to
+publication. The diagnostic contains the comment index and static reason only,
+never model-controlled path or body text. The publisher independently
+revalidates every retained location against the exact diff before writing.
 
 The GitHub learning publisher retains the 512 KiB per-response ceiling and the
 existing 1,000-pull-request discovery ceiling. Historical candidate discovery
@@ -45,8 +52,10 @@ history beyond the existing item bound fails closed.
 
 Positive:
 
-- A nondeterministic location or JSON mistake receives one bounded chance to
-  recover without weakening publisher validation.
+- A malformed response receives one bounded chance to recover without weakening
+  publisher validation.
+- One invalid inline coordinate no longer discards independently valid review
+  content; it cannot reach the publisher.
 - Rejected attempt content cannot leak into the corrected prompt or final
   result.
 - Large repositories can reconcile learning PR history without accepting
@@ -65,11 +74,12 @@ Tradeoffs:
 
 ## Alternatives Considered
 
-### Drop invalid inline comments
+### Fail the entire result for an invalid inline coordinate
 
-Rejected because silently deleting provider findings changes the review and can
-hide a material result. A corrected provider response must remain internally
-coherent.
+Rejected because one model-coordinate error needlessly discards valid findings
+and makes a review workflow unreliable. Omission is observable through a
+sanitized diagnostic, while the publisher continues to accept only exact-diff
+locations.
 
 ### Include the rejected output in a repair prompt
 
@@ -89,8 +99,9 @@ failure without changing authentication or dependency direction.
 
 ## Validation And Rollout
 
-- Unit tests prove transactional, sanitized, single-retry provider recovery and
-  exhaustion after two invalid attempts.
+- Unit tests prove transactional, sanitized, single-retry recovery and
+  exhaustion after two malformed attempts, plus omission and sanitized logging
+  for invalid inline coordinates while valid findings remain publishable.
 - Learning-publisher tests force oversized 20- and 10-item responses, prove the
   20/10/5 fallback, verify exact-offset continuation, reject unrelated retry
   errors, and prove that an oversized single-item response fails closed.

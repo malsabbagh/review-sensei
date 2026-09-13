@@ -11,6 +11,27 @@ from .models import ReviewComment
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _QUICK_WIN_EFFORTS = frozenset(("trivial", "small"))
 _MARKDOWN_LABEL_CHARS = re.compile(r"([\\`*_[\]{}()<>#!|~])")
+_SEVERITY_ICONS = {
+    "critical": "🔴",
+    "high": "🟠",
+    "medium": "🟡",
+    "low": "🔵",
+}
+_FIX_EFFORT_ICONS = {
+    "trivial": "⚡",
+    "small": "⚡",
+    "moderate": "🔧",
+    "large": "🛠️",
+    "unknown": "❔",
+}
+_LENS_ICONS = {
+    "architecture": "🏗️",
+    "correctness": "✅",
+    "maintainability": "🧹",
+    "security": "🔒",
+    "tests": "🧪",
+}
+_DEFAULT_ICON = "🔎"
 
 
 def humanize_lens(category: str) -> str:
@@ -35,18 +56,29 @@ def _escape_markdown_label(value: str) -> str:
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
 
 
+def _metadata_icon(icons: dict[str, str], value: str) -> str:
+    """Return a static visual cue without trusting metadata as presentation."""
+
+    return icons.get(value.lower(), _DEFAULT_ICON)
+
+
 def format_review_comment(comment: ReviewComment) -> str:
     """Render a validated comment with any available classification labels."""
 
     labels: list[str] = []
     if comment.severity is not None:
-        labels.append(f"Severity: {_escape_markdown_label(_label(comment.severity))}")
+        labels.append(
+            f"{_metadata_icon(_SEVERITY_ICONS, comment.severity)} "
+            f"Severity: {_escape_markdown_label(_label(comment.severity))}"
+        )
     if comment.fix_effort is not None:
         labels.append(
+            f"{_metadata_icon(_FIX_EFFORT_ICONS, comment.fix_effort)} "
             f"Fix effort: {_escape_markdown_label(_label(comment.fix_effort))}"
         )
     if comment.category is not None:
         labels.append(
+            f"{_metadata_icon(_LENS_ICONS, comment.category)} "
             f"Lens: {_escape_markdown_label(humanize_lens(comment.category))}"
         )
     if not labels:
