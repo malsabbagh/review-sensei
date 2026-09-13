@@ -28,7 +28,10 @@ function capability(value: unknown): Capability {
   if (value === undefined) {
     return "review_publish";
   }
-  if (typeof value !== "string" || !(value in CAPABILITIES)) {
+  // `in` also accepts names inherited from Object.prototype (for example
+  // `constructor` and `toString`).  Capability names are a closed protocol;
+  // never let a prototype property become a broker capability.
+  if (typeof value !== "string" || !Object.hasOwn(CAPABILITIES, value)) {
     throw new Error("broker_capability_invalid");
   }
   return value as Capability;
