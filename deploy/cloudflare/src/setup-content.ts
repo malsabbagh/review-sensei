@@ -297,8 +297,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: read
+  pull-requests: write
+  issues: write
   id-token: write
 
 jobs:
@@ -365,14 +365,16 @@ function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
 }
 
 export function previousProviderParityWorkflowTemplate(publicWorkflowTag: string): string {
-  return providerParityWorkflowTemplate(publicWorkflowTag);
+  return providerParityWorkflowTemplate(publicWorkflowTag)
+    .replace("  pull-requests: write\n", "  pull-requests: read\n")
+    .replace("  issues: write\n", "  issues: read\n");
 }
 
 /** Released setup-v4 caller with the removed approval toggle retained for migration. */
 export function legacyAutoApproveProviderParityWorkflowTemplate(
   publicWorkflowTag: string,
 ): string {
-  return providerParityWorkflowTemplate(publicWorkflowTag).replace(
+  return previousProviderParityWorkflowTemplate(publicWorkflowTag).replace(
     "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
     "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n" +
       "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",

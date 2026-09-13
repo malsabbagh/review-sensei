@@ -628,8 +628,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: read
+  pull-requests: write
+  issues: write
   id-token: write
 
 jobs:
@@ -692,9 +692,13 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
 
 
 def _previous_provider_parity_workflow(public_workflow_tag: str) -> str:
-    """Return the pre-issue-96 provider-parity caller with current mapping."""
+    """Return the pre-write-permission provider-parity caller."""
 
-    return _provider_parity_workflow(public_workflow_tag)
+    return (
+        _provider_parity_workflow(public_workflow_tag)
+        .replace("  pull-requests: write\n", "  pull-requests: read\n", 1)
+        .replace("  issues: write\n", "  issues: read\n", 1)
+    )
 
 
 _LEGACY_AUTO_APPROVE_WORKFLOW_LINE = (
@@ -705,7 +709,7 @@ _LEGACY_AUTO_APPROVE_WORKFLOW_LINE = (
 def _legacy_auto_approve_provider_parity_workflow(public_workflow_tag: str) -> str:
     """Return the released v4 caller that exposed the removed approval toggle."""
 
-    return _provider_parity_workflow(public_workflow_tag).replace(
+    return _previous_provider_parity_workflow(public_workflow_tag).replace(
         "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
         _LEGACY_AUTO_APPROVE_WORKFLOW_LINE
         + "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
