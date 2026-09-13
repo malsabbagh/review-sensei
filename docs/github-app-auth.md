@@ -181,14 +181,16 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
 The `review_publish` capability covers both `COMMENT` and `APPROVE` events; no
-additional App permission or secret is required. When the existing automatic
-review and GitHub-writes path is active, the publisher emits `APPROVE` only for
-a validated exact-head result with no blocking findings and a complete, bounded
-GraphQL review-thread sweep showing every existing thread resolved. Any open
-thread or incomplete sweep remains a comment or fails closed. Explicit
-non-blocking follow-ups can accompany an approval; omitted flags are
-blocking only for case-insensitive critical/high severity; missing,
-lower-severity, and legacy free-form values are non-blocking.
+additional App permission or secret is required. Automatic approval is a
+separate opt-in (`REVIEWSENSEI_AUTO_APPROVE=true`). When enabled alongside the
+automatic review and GitHub-writes path, the publisher emits `APPROVE` only for
+a validated exact-head result marked `complete`, with no blocking findings and
+a complete, bounded GraphQL review-thread sweep showing every existing thread
+resolved. Explicit non-blocking follow-ups can accompany an approval; any open
+thread, partial/incomplete/summary-only result, or incomplete sweep remains a
+comment or fails closed. Omitted finding classifications are blocking only for
+case-insensitive critical/high severity; missing, lower-severity, and legacy
+free-form values are non-blocking.
 
 The signed assertion must use issuer
 `https://token.actions.githubusercontent.com`, audience

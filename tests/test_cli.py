@@ -126,6 +126,7 @@ class CliTests(unittest.TestCase):
         review_call = FakeApplication.instances[0].calls[0][1]
         self.assertEqual(review_call["base_branch"], "main")
         self.assertEqual(review_call["base_sha"], "b" * 40)
+        self.assertFalse(review_call["options"].auto_approve)
 
     def test_github_parser_uses_the_installed_app_bot_slug(self):
         args = _github_parser().parse_args(
@@ -146,6 +147,7 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.app_slug, "reviewsensei[bot]")
+        self.assertFalse(hasattr(args, "enable_auto_approve"))
 
     def test_github_generated_reply_cli_reads_named_token_and_publishes(self):
         from review_sensei.hosting import github as github_module

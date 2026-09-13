@@ -368,6 +368,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -397,6 +398,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         query = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -429,6 +431,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -456,6 +459,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=clean_result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                auto_approve=True,
             )
         self.assertEqual(len(calls), 4)
 
@@ -481,6 +485,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=clean_result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                auto_approve=True,
             )
         self.assertEqual(len(calls), 4)
 
@@ -511,6 +516,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         second_query = __import__("json").loads(calls[4][2].decode("utf-8"))
