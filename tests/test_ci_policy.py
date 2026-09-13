@@ -122,6 +122,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
+    def test_generated_review_workflow_can_authorize_opt_in_replies(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-review.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("pull-requests: write", text)
+        self.assertIn("issues: write", text)
+
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
             Path(__file__).resolve().parents[1]
