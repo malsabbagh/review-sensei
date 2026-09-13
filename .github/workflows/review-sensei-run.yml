@@ -219,7 +219,7 @@ jobs:
           title = data.get("title", "")
           if not isinstance(title, str) or len(title.encode("utf-8")) > 4096:
               raise SystemExit("pull request title is invalid")
-          encoded = base64.urlsafe_b64encode(title.encode("utf-8")).decode("ascii")
+          encoded = base64.b64encode(title.encode("utf-8")).decode("ascii")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"pull_request_title_b64={encoded}\n")
           PY
