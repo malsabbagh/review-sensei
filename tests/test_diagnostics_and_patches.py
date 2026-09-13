@@ -1,11 +1,8 @@
-import json
 import unittest
-from pathlib import Path
 
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.errors import ReviewInputError
 from review_sensei.patches import create_patch_suggestion
-
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py

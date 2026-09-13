@@ -13,7 +13,13 @@ import ssl
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 import certifi
 
@@ -36,6 +42,7 @@ class OpenAICompatibleProvider:
         api_key: str | None = None,
         timeout_seconds: float = 120,
         max_output_tokens: int = 2048,
+        allow_model_override: bool = True,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
         if not base_url.strip():
@@ -57,6 +64,7 @@ class OpenAICompatibleProvider:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
+        self.allow_model_override = allow_model_override
         self._opener = opener
 
     @property
@@ -66,7 +74,7 @@ class OpenAICompatibleProvider:
         return f"{self.base_url}/chat/completions"
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
-        model = request.model or self.model
+        model = (request.model if self.allow_model_override else None) or self.model
         try:
             validate_bounded_text(
                 model,
@@ -101,16 +109,35 @@ class OpenAICompatibleProvider:
             open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
             cafile = os.getenv("SSL_CERT_FILE") or certifi.where()
             open_kwargs["context"] = ssl.create_default_context(cafile=cafile)
-            with self._opener(http_request, **open_kwargs) as response:
-                read_limit = request.max_response_bytes + 1
-                body = bytearray()
-                while len(body) <= request.max_response_bytes:
-                    chunk = response.read(read_limit - len(body))
-                    if not chunk:
-                        break
-                    if not isinstance(chunk, (bytes, bytearray)):
-                        raise ProviderError("OpenAI-compatible response body is invalid")
-                    body.extend(chunk)
+            opener = self._opener
+            if opener is urlopen:
+                class _NoRedirect(HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, new):
+                        raise ProviderError("OpenAI-compatible endpoint redirected")
+                opener = build_opener(
+                    _NoRedirect(), HTTPSHandler(context=open_kwargs.pop("context"))
+                )
+                with opener.open(http_request, **open_kwargs) as response:
+                    read_limit = request.max_response_bytes + 1
+                    body = bytearray()
+                    while len(body) <= request.max_response_bytes:
+                        chunk = response.read(read_limit - len(body))
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise ProviderError("OpenAI-compatible response body is invalid")
+                        body.extend(chunk)
+            else:
+                with opener(http_request, **open_kwargs) as response:
+                    read_limit = request.max_response_bytes + 1
+                    body = bytearray()
+                    while len(body) <= request.max_response_bytes:
+                        chunk = response.read(read_limit - len(body))
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise ProviderError("OpenAI-compatible response body is invalid")
+                        body.extend(chunk)
         except HTTPError as exc:
             raise ProviderError(
                 f"OpenAI-compatible request failed with HTTP {exc.code}"
@@ -161,4 +188,3 @@ class OpenAICompatibleProvider:
                 "OpenAI-compatible review response exceeded the configured size limit"
             ) from exc
         return ProviderResponse(text=text, provider=self.name, model=model, limits=request.limits)
-

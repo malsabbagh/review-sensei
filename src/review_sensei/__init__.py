@@ -16,13 +16,14 @@ from .context import (
     stable_finding_fingerprint,
 )
 from .conversation import ConversationService
+from .diagnostics import build_plan, run_doctor
+from .evaluation import PromotionRecord, validate_promotion_record
 from .learnings import (
     LearningDiagnostic,
     LearningFeedback,
     LearningStore,
     load_repository_learnings,
 )
-from .diagnostics import build_plan, run_doctor
 from .models import (
     ConversationContext,
     ConversationFinding,
@@ -38,7 +39,13 @@ from .models import (
     ReviewRequest,
     ReviewResult,
 )
+from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from .patches import PatchSuggestion, create_patch_suggestion
+from .release_manifest import (
+    Artifact,
+    CompatibilityManifest,
+    validate_compatibility_manifest,
+)
 from .service import ReviewService
 from .stages import (
     ContextDocumentSource,
@@ -49,11 +56,14 @@ from .stages import (
     load_stages_from_dir,
 )
 from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
+from .verifier import (
+    CandidateFinding,
+    EvidenceReference,
+    VerificationResult,
+    verify_candidate,
+    verify_candidates,
+)
 from .workflow import ReviewExecutionPlan, plan_review_execution
-from .evaluation import PromotionRecord, validate_promotion_record
-from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
-from .release_manifest import Artifact, CompatibilityManifest, validate_compatibility_manifest
-from .verifier import CandidateFinding, EvidenceReference, VerificationResult, verify_candidate, verify_candidates
 
 __all__ = [
     "ConcurrencyGroup",

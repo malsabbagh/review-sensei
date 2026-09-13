@@ -2,12 +2,12 @@ import unittest
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest, ProviderResponse
+from review_sensei.providers.profiles import get_provider_profile, profile_names
 from review_sensei.providers.registry import (
     ProviderRegistry,
     ProviderSettings,
     default_registry,
 )
-from review_sensei.providers.profiles import get_provider_profile, profile_names
 
 
 class FakeProvider:
@@ -54,3 +54,31 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_local_profile_rejects_credential_forwarding(self):
         with self.assertRaisesRegex(ProviderError, "does not accept an API key"):
             ProviderSettings.for_profile("local-private", api_key="secret")
+
+    def test_named_profile_rejects_endpoint_and_model_overrides(self):
+        registry = default_registry()
+        with self.assertRaisesRegex(ProviderError, "endpoint cannot be overridden"):
+            registry.create(
+                ProviderSettings(
+                    name="ollama",
+                    profile="deep-verification",
+                    base_url="https://attacker.example/api",
+                    api_key="secret",
+                )
+            )
+        with self.assertRaisesRegex(ProviderError, "model cannot be overridden"):
+            registry.create(
+                ProviderSettings(
+                    name="openai-compatible",
+                    profile="fast-triage",
+                    model="attacker-model",
+                    api_key="secret",
+                )
+            )
+
+    def test_profile_locks_model_and_output_budget(self):
+        provider = default_registry().create(
+            ProviderSettings.for_profile("deep-verification", api_key="secret")
+        )
+        self.assertEqual(provider.model, "deepseek-v4-flash:cloud")
+        self.assertEqual(provider.max_output_tokens, 8192)

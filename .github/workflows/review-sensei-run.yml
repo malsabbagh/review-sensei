@@ -145,6 +145,8 @@ jobs:
   authoritative-preflight:
     needs: validate-provider-mode
     if: always()
+    outputs:
+      pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -152,6 +154,7 @@ jobs:
       issues: read
     steps:
       - name: Validate live pull-request identity before provider execution
+        id: fetch-pr
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -180,7 +183,7 @@ jobs:
           payload="$RUNNER_TEMP/review-sensei-pr.json"
           gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$payload"
           python - "$payload" <<'PY'
-          import json, os, re, sys
+          import base64, json, os, re, sys
           path = sys.argv[1]
           if os.path.getsize(path) > 512 * 1024:
               raise SystemExit("pull request metadata exceeds the configured response limit")
@@ -213,6 +216,12 @@ jobs:
               raise SystemExit("pull request head identity is invalid")
           if not re.fullmatch(r"[a-f0-9]{40}", str(base.get("sha", ""))):
               raise SystemExit("pull request base identity is invalid")
+          title = data.get("title", "")
+          if not isinstance(title, str) or len(title.encode("utf-8")) > 4096:
+              raise SystemExit("pull request title is invalid")
+          encoded = base64.urlsafe_b64encode(title.encode("utf-8")).decode("ascii")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"pull_request_title_b64={encoded}\n")
           PY
 
   cloud:
@@ -221,7 +230,7 @@ jobs:
     # dependency spelling: needs: validate-provider-mode
     if: (inputs.operation == 'reply' || inputs.enable_review == 'true') && (inputs.provider_mode == 'cloud' || (inputs.provider_mode == '' && inputs.mode == 'automatic'))
     concurrency:
-      group: reviewsensei-provider-${{ inputs.provider_mode || 'cloud' }}-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+      group: reviewsensei-provider-${{ inputs.operation == 'review' && format('{0}-{1}-{2}-{3}', inputs.provider_mode || 'cloud', inputs.repository, inputs.pull_request_number, 'review') || format('reply-{0}', github.run_id) }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
@@ -360,7 +369,7 @@ jobs:
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
-          TITLE: ${{ inputs.pull_request_title }}
+          TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
           LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
@@ -369,6 +378,7 @@ jobs:
             echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
             exit 1
           fi
+          TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
@@ -447,7 +457,7 @@ jobs:
     needs: [validate-provider-mode, authoritative-preflight]
     if: (inputs.operation == 'reply' || inputs.enable_review == 'true') && (inputs.provider_mode == 'local' || (inputs.provider_mode == '' && inputs.mode == 'manual'))
     concurrency:
-      group: reviewsensei-provider-${{ inputs.provider_mode || 'local' }}-${{ inputs.repository }}-${{ inputs.pull_request_number }}
+      group: reviewsensei-provider-${{ inputs.operation == 'review' && format('{0}-{1}-{2}-{3}', inputs.provider_mode || 'local', inputs.repository, inputs.pull_request_number, 'review') || format('reply-{0}', github.run_id) }}
       cancel-in-progress: false
     runs-on: [self-hosted, linux, x64, ollama]
     permissions:
@@ -568,7 +578,7 @@ jobs:
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
-          TITLE: ${{ inputs.pull_request_title }}
+          TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
           LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
@@ -581,6 +591,7 @@ jobs:
             --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
+          TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
@@ -601,6 +612,7 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           review_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -608,6 +620,9 @@ jobs:
           fi
           if [[ "$LEARNING_PRS" == "true" ]]; then
             review_args+=(--enable-learning-prs)
+          fi
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            review_args+=(--enable-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \

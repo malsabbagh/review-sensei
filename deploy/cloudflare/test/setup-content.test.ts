@@ -32,7 +32,7 @@ describe("setup-v4 public boundary", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
     expect(SETUP_VERSION).toBe(4);
-    expect(SETUP_VARIABLES).not.toContainEqual(
+    expect(SETUP_VARIABLES).toContainEqual(
       expect.objectContaining({ name: "REVIEWSENSEI_AUTO_APPROVE" }),
     );
     expect(workflow).toContain("opened, reopened, synchronize, ready_for_review");
@@ -43,7 +43,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
     expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
-    expect(workflow).not.toContain("enable_auto_approve");
+    expect(workflow).toContain("enable_auto_approve");
     expect(workflow).toContain("source_kind:\n        description: Source kind for manual dispatch");
     expect(workflow).toContain("root_comment_id:\n        description: Root comment ID for manual reply thread");
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");

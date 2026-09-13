@@ -57,7 +57,7 @@ def _write_corpus(
     if expected_result_text is None:
         expected_result_text = (
             '{"summary":"ok","comments":[],"provider":"fixture",'
-            '"model":"fixture-v1","learning_proposals":[]}'
+            '"model":"fixture-v1","learning_proposals":[],"review_status":"complete"}'
         )
     _write_utf8(expected / "example.review.json", expected_result_text)
     _write_utf8(

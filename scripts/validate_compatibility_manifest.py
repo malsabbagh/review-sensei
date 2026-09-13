@@ -9,8 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from review_sensei.release_manifest import validate_compatibility_manifest
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewInputError  # noqa: E402
+from review_sensei.release_manifest import validate_compatibility_manifest  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

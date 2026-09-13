@@ -7,6 +7,7 @@ are actionable before a publisher is allowed to consider them.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Mapping, Sequence
@@ -96,6 +97,11 @@ def verify_candidate(candidate: CandidateFinding, snapshot: Mapping[str, str], *
     """
     if not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
+    canonical_snapshot = json.dumps(
+        dict(sorted(snapshot.items())), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    if hashlib.sha256(canonical_snapshot).hexdigest() != snapshot_sha256:
+        raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
     reasons: list[str] = []
     evidence_valid = True
     for reference in candidate.evidence:
@@ -138,4 +144,3 @@ def verify_candidates(candidates: Sequence[CandidateFinding], snapshot: Mapping[
         seen.add(key)
         results.append(verify_candidate(candidate, snapshot, snapshot_sha256=snapshot_sha256))
     return tuple(results)
-

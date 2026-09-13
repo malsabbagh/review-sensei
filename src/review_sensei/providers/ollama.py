@@ -28,6 +28,8 @@ class OllamaProvider:
         model: str = "qwen3.5:4b",
         api_key: str | None = None,
         timeout_seconds: float = 900,
+        max_output_tokens: int | None = None,
+        allow_model_override: bool = True,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
         if not base_url.strip():
@@ -40,6 +42,8 @@ class OllamaProvider:
         self.model = model
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.max_output_tokens = max_output_tokens
+        self.allow_model_override = allow_model_override
         self._opener = opener
 
     @property
@@ -49,7 +53,7 @@ class OllamaProvider:
         return f"{self.base_url}/generate"
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
-        model = request.model or self.model
+        model = (request.model if self.allow_model_override else None) or self.model
         try:
             validate_bounded_text(
                 model,
@@ -69,6 +73,8 @@ class OllamaProvider:
         }
         if request.json_mode:
             payload["format"] = "json"
+        if self.max_output_tokens is not None:
+            payload["options"] = {"num_predict": self.max_output_tokens}
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:

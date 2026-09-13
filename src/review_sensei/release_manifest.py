@@ -74,9 +74,12 @@ class CompatibilityManifest:
 
 def validate_compatibility_manifest(value: Mapping[str, Any]) -> CompatibilityManifest:
     manifest = CompatibilityManifest.from_dict(value)
-    if manifest.release != manifest.python.version or manifest.release != manifest.worker.version:
+    if (
+        manifest.release != manifest.python.version
+        or manifest.release != manifest.worker.version
+        or manifest.release != manifest.workflow.version
+    ):
         raise ReviewInputError("release artifacts do not share one release version")
     if not manifest.npm or any(item.version != manifest.release for item in manifest.npm):
         raise ReviewInputError("npm artifacts do not match the release version")
     return manifest
-

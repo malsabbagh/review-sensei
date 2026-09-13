@@ -71,6 +71,27 @@ class ProviderRegistry:
                 raise ProviderError(
                     "provider profile and provider name must select the same adapter"
                 )
+            # A named profile is an immutable routing and budget policy.  The
+            # generic dataclass defaults are treated as omitted values; every
+            # other caller-supplied value must match the canonical profile.
+            if settings.model is not None and settings.model != profile.model:
+                raise ProviderError("provider profile model cannot be overridden")
+            if settings.base_url is not None and settings.base_url != profile.base_url:
+                raise ProviderError("provider profile endpoint cannot be overridden")
+            if settings.timeout_seconds not in {900, profile.timeout_seconds}:
+                raise ProviderError("provider profile timeout cannot be overridden")
+            if settings.max_output_tokens not in {2048, profile.max_output_tokens}:
+                raise ProviderError("provider profile output budget cannot be overridden")
+            settings = ProviderSettings(
+                name=profile.provider,
+                model=profile.model,
+                base_url=profile.base_url,
+                api_key=settings.api_key,
+                fixture_response=settings.fixture_response,
+                timeout_seconds=profile.timeout_seconds,
+                max_output_tokens=profile.max_output_tokens,
+                profile=profile.name,
+            )
         name = settings.name.strip().lower()
         try:
             factory = self._factories[name]
@@ -91,6 +112,8 @@ def default_registry() -> ProviderRegistry:
             model=settings.model or "qwen3.5:4b",
             api_key=settings.api_key,
             timeout_seconds=settings.timeout_seconds,
+            max_output_tokens=settings.max_output_tokens,
+            allow_model_override=settings.profile is None,
         )
 
     registry.register("ollama", ollama_factory)
@@ -104,6 +127,7 @@ def default_registry() -> ProviderRegistry:
             api_key=settings.api_key,
             timeout_seconds=settings.timeout_seconds,
             max_output_tokens=settings.max_output_tokens,
+            allow_model_override=settings.profile is None,
         )
 
     registry.register("openai-compatible", openai_compatible_factory)

@@ -57,10 +57,14 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
   { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
+  { name: "REVIEWSENSEI_AUTO_APPROVE", value: "false" },
+  { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
   { name: "REVIEWSENSEI_GITHUB_WRITES", value: "false" },
   { name: "REVIEWSENSEI_LEARNING_PRS", value: "false" },
   { name: "REVIEWSENSEI_MENTION_REPLIES", value: "false" },
   { name: "REVIEWSENSEI_UPLOAD_ARTIFACTS", value: "false" },
+  { name: "REVIEWSENSEI_STAGES_DIR", value: "" },
+  { name: "REVIEWSENSEI_CATEGORIES_DIR", value: "" },
 ];
 
 export function validatePublicWorkflowSha(value: string): string {
@@ -278,6 +282,15 @@ on:
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+      pull_request_title:
+        description: Authoritative pull request title for review context
+        required: false
+      stages_dir:
+        description: Trusted-base stage JSON directory (optional)
+        required: false
+      categories_dir:
+        description: Trusted-base category JSON directory (optional)
+        required: false
       source_kind:
         description: Source kind for manual dispatch (issue or inline)
         required: false
@@ -306,7 +319,6 @@ jobs:
     if: >-
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
-      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch' ||
       ((github.event_name == 'issue_comment' &&
@@ -344,7 +356,12 @@ jobs:
       source_updated_at: @@{{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: @@{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
       review_sensei_version: @@{{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
+      pull_request_title: @@{{ inputs.pull_request_title || github.event.pull_request.title }}
+      stages_dir: @@{{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
+      categories_dir: @@{{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
       enable_review: @@{{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_auto_approve: @@{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}
+      enable_learning_proposals: @@{{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: @@{{ vars.REVIEWSENSEI_GITHUB_WRITES }}
       enable_learning_prs: @@{{ vars.REVIEWSENSEI_LEARNING_PRS }}
       enable_mention_replies: @@{{ vars.REVIEWSENSEI_MENTION_REPLIES }}
@@ -497,6 +514,7 @@ function configFile(version: number, includeAutoApprove = false): string {
     `version: ${packageVersion}\n` +
     "auto_review: false\n" +
     autoApprove +
+    "learning_proposals: false\n" +
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +

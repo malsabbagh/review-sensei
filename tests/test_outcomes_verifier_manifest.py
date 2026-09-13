@@ -1,13 +1,13 @@
 import hashlib
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.evaluation import PromotionRecord, validate_promotion_record
+from review_sensei.evaluation import PromotionRecord
 from review_sensei.outcomes import RecoveryArtifact, RunOutcome
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.verifier import CandidateFinding, EvidenceReference, verify_candidate
-
 
 SHA = "a" * 64
 
@@ -29,11 +29,13 @@ class ContractsTests(unittest.TestCase):
 
     def test_evidence_verifier_requires_exact_snapshot(self):
         text = "line one\nline two\n"
-        candidate = CandidateFinding("bug", "when called", "src/app.py", (EvidenceReference("src/app.py", 2, SHA, "line two"),), "causes failure")
-        self.assertEqual(verify_candidate(candidate, {"src/app.py": text}, snapshot_sha256=SHA).disposition, "confirmed")
+        snapshot = {"src/app.py": text}
+        snapshot_sha = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+        candidate = CandidateFinding("bug", "when called", "src/app.py", (EvidenceReference("src/app.py", 2, snapshot_sha, "line two"),), "causes failure")
+        self.assertEqual(verify_candidate(candidate, snapshot, snapshot_sha256=snapshot_sha).disposition, "confirmed")
         bad = EvidenceReference("src/app.py", 2, "b" * 64, "line two")
         bad_candidate = CandidateFinding("bug", "when called", "src/app.py", (bad,), "causes failure")
-        self.assertEqual(verify_candidate(bad_candidate, {"src/app.py": text}, snapshot_sha256=SHA).disposition, "rejected")
+        self.assertEqual(verify_candidate(bad_candidate, snapshot, snapshot_sha256=snapshot_sha).disposition, "rejected")
 
     def test_manifest_rejects_mismatched_release_versions(self):
         artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}

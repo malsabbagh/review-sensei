@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from .diff import analyze_diff
 from .errors import ReviewInputError
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
-from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
+from .validation import DEFAULT_REVIEW_LIMITS
 
 DOCTOR_OK = 0
 DOCTOR_ACTION_REQUIRED = 2
@@ -87,8 +87,10 @@ def run_doctor(
     ):
         if configured is None:
             checks.append(DiagnosticCheck(label, "pass", f"packaged default {expected} selected"))
-        elif not configured.is_dir():
+        elif configured.is_symlink() or not configured.is_dir():
             checks.append(DiagnosticCheck(label, "action", "configured directory is unavailable"))
+        elif not any(path.is_file() and not path.is_symlink() for path in configured.iterdir()):
+            checks.append(DiagnosticCheck(label, "action", "configured directory is empty"))
         else:
             checks.append(DiagnosticCheck(label, "pass", "configured trusted-base directory is readable"))
     if context_root is None:
@@ -174,6 +176,13 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         lines.append(f"version: {document.get('version') or 'unknown'}")
     for check in document.get("checks", []):
         lines.append(f"{check['status']}: {check['name']} — {check['detail']}")
+    if "provider_mode" in document:
+        lines.append(f"provider_mode: {document['provider_mode']}")
+    if "stages" in document:
+        lines.append(f"stages: {len(document['stages'])}")
+    if "operations" in document:
+        operations = document["operations"]
+        lines.append(f"operations: provider_calls={operations.get('provider_calls', 0)}, github_writes={operations.get('github_writes', 0)}")
     return "\n".join(lines) + "\n"
 
 

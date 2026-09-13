@@ -64,7 +64,9 @@ class PromotionRecord:
             raise ReviewInputError("promotion record run_count must be positive")
         if self.status not in {"supported", "insufficient", "unsupported"}:
             raise ReviewInputError("promotion record status is unsupported")
-        if self.status == "supported" and self.provider in {"fixture", "stub", "fake"}:
+        if self.status == "supported" and self.run_count < 3:
+            raise ReviewInputError("supported promotion evidence requires at least three runs")
+        if self.status == "supported" and self.provider.strip().casefold() in {"fixture", "stub", "fake"}:
             raise ReviewInputError("fixture-only evidence cannot support promotion")
         if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:
             raise ReviewInputError("promotion record rollback decision is unsupported")

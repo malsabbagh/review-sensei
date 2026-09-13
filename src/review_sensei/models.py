@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Mapping, cast
 
 from .errors import ReviewInputError
@@ -529,8 +529,8 @@ class ReviewResult:
     # that only contains a partial or summary pass can never be mistaken for a
     # complete review eligible for an approval event.  ``complete`` remains the
     # backwards-compatible default for results produced by the current service.
-    review_status: str = "complete"
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    review_status: str = "complete"
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):
@@ -638,10 +638,9 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
-        # Keep the v1 wire shape byte-compatible for complete results while
-        # making non-complete artifacts explicit and machine-checkable.
-        if self.review_status != "complete":
-            value["review_status"] = self.review_status
+        # Completeness is always explicit so legacy artifacts cannot be
+        # interpreted as approval-eligible merely because the field is absent.
+        value["review_status"] = self.review_status
         return value
 
     @classmethod
@@ -655,7 +654,9 @@ class ReviewResult:
         provider = value.get("provider")
         model = value.get("model")
         proposals = value.get("learning_proposals", [])
-        review_status = value.get("review_status", "complete")
+        # Missing status is a legacy/incomplete artifact and must fail closed
+        # in publication/approval paths.
+        review_status = value.get("review_status", "incomplete")
         if not isinstance(summary, str):
             raise ReviewInputError("review result summary must be a string")
         if not isinstance(comments, list):
