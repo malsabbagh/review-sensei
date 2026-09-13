@@ -419,6 +419,21 @@ provider's API and returning `ProviderResponse`. The review service, diff
 validation, output schema, and GitHub-independent behavior remain unchanged.
 See [the architecture guide](docs/architecture.md).
 
+The registry includes one explicit additional adapter, `openai-compatible`, for
+OpenAI Chat Completions-compatible HTTPS endpoints. It requires an API key at
+construction time and never falls back to Ollama. Deterministic presets are
+available through `ProviderSettings.for_profile(...)`:
+
+| Profile | Adapter and endpoint | Credential | Budget |
+| --- | --- | --- | --- |
+| `local-private` (aliases `local`, `private`) | local Ollama (`127.0.0.1`) | none | 900s, 4,096 output tokens |
+| `fast-triage` | OpenAI-compatible (`api.openai.com`) | explicit `OPENAI_API_KEY` value | 120s, 2,048 output tokens |
+| `deep-verification` | Ollama Cloud | explicit `OLLAMA_API_KEY` value | 900s, 8,192 output tokens |
+
+Profiles select exactly one provider; they do not race or fail over between
+providers. Profile construction does not read environment variables, so callers
+must deliberately retrieve and pass a credential when policy requires one.
+
 ## GitHub integration
 
 The GitHub App opens a setup-v4 PR containing a thin caller that follows the

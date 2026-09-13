@@ -151,6 +151,14 @@ read bounded response bodies, and must sanitize transport errors before they
 reach the review service. Timeout and network failures should raise
 `ProviderError(transient=True)`.
 
+The built-in `openai-compatible` adapter targets an explicit HTTPS
+`/v1/chat/completions` endpoint and requires a non-empty API key; it has no
+provider fallback. Named registry profiles are deterministic presets:
+`local-private`, `fast-triage`, and `deep-verification` (with `local` and
+`private` aliases for the first). Profiles carry bounded timeout/output-token
+budgets and endpoint/credential policy. `ProviderSettings.for_profile()` never
+reads the environment or forwards a credential to a profile that disallows it.
+
 ## CLI Contract
 
 The command is `review-sensei`. Supported flags are:
