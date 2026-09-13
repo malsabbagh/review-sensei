@@ -147,11 +147,16 @@ switch defaults to `false`.
 Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
 name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
 does not create, read, persist, log, or reveal that secret value. The Worker
-broker only issues one capability-scoped installation token after verifying
+broker issues a short-lived, capability-scoped installation token for each
+authorized exchange after verifying
 the signed Actions OIDC identity, exact v4 workflow ref and runtime SHA,
 repository identity, fork status, installation, replay state, and rate limit.
-The workflow uses that short-lived token for App-attributed review publication,
-inline or pull-request replies, and (when enabled) learning pull requests.
+For each write operation, the workflow obtains a separate short-lived token for
+the requested capability: `review_publish` for review publication,
+`inline_reply` or `issue_reply` for replies, and `learning_write` for learning
+pull requests. Review and reply capabilities grant `pull_requests: write`;
+`learning_write` additionally grants `contents: write`. A review-publication
+token cannot write repository contents.
 Cloudflare does not run the review engine or send prompts to the model provider;
 the GitHub Actions job performs those operations in the configured provider
 environment.
