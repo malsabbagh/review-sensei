@@ -122,6 +122,22 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
+    def test_generated_review_workflow_can_authorize_opt_in_replies(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-review.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("pull-requests: write", text)
+        self.assertIn("issues: write", text)
+        self.assertIn("github.event.issue.pull_request", text)
+        self.assertIn("github.event.comment.author_association == 'OWNER'", text)
+        self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
+        self.assertIn("github.event.comment.author_association == 'COLLABORATOR'", text)
+        self.assertIn("github.event.comment.user.type != 'Bot'", text)
+
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
             Path(__file__).resolve().parents[1]
@@ -313,11 +329,19 @@ class ActionPinPolicyTests(unittest.TestCase):
                     # trusted Ollama self-hosted label; the repository's private
                     # CI runner policy does not apply to this public contract.
                     continue
+                lines = workflow.read_text(encoding="utf-8").splitlines()
                 runs_on_lines = [
                     line.strip()
-                    for line in workflow.read_text(encoding="utf-8").splitlines()
+                    for line in lines
                     if line.strip().startswith("runs-on:")
                 ]
+                if not runs_on_lines:
+                    # A caller of a reusable workflow has no runner of its
+                    # own. Its called workflow owns runner selection instead.
+                    self.assertTrue(
+                        [line for line in lines if line.strip().startswith("uses:")]
+                    )
+                    continue
                 self.assertTrue(runs_on_lines)
                 for line in runs_on_lines:
                     # npm Trusted Publishing must use an explicitly eligible
