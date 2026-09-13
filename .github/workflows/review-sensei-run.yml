@@ -75,6 +75,10 @@ on:
         required: false
         default: 'false'
         type: string
+      enable_auto_approve:
+        required: false
+        default: 'false'
+        type: string
       enable_learning_proposals:
         required: false
         default: 'false'
@@ -385,6 +389,7 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           review_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -392,6 +397,9 @@ jobs:
           fi
           if [[ "$LEARNING_PRS" == "true" ]]; then
             review_args+=(--enable-learning-prs)
+          fi
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            review_args+=(--enable-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \

@@ -147,7 +147,7 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.app_slug, "reviewsensei[bot]")
-        self.assertFalse(hasattr(args, "enable_auto_approve"))
+        self.assertFalse(args.enable_auto_approve)
 
     def test_github_generated_reply_cli_reads_named_token_and_publishes(self):
         from review_sensei.hosting import github as github_module

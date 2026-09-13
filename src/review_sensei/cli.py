@@ -316,6 +316,11 @@ def _github_parser() -> argparse.ArgumentParser:
         help="Opt into review publication for this invocation.",
     )
     review.add_argument(
+        "--enable-auto-approve",
+        action="store_true",
+        help="Opt into APPROVE publication after complete-review checks.",
+    )
+    review.add_argument(
         "--enable-learning-prs",
         action="store_true",
         help="Opt into deterministic draft learning-PR publication.",
@@ -405,6 +410,7 @@ def _run_github(args: argparse.Namespace) -> int:
             options=GitHubWriteOptions(
                 github_writes=True,
                 auto_review=args.enable_review,
+                auto_approve=args.enable_auto_approve,
             ),
             oidc_token=args.oidc_token,
             repository=args.repository,

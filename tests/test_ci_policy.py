@@ -114,7 +114,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             with self.subTest(input_name=input_name):
                 self.assertIn(f"inputs.{input_name}", text)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
-        self.assertNotIn("REVIEWSENSEI_AUTO_APPROVE", text)
+        self.assertIn("REVIEWSENSEI_AUTO_APPROVE", text)
         self.assertEqual(text.count("review-sensei-run.yml@" + "v4"), 1)
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
@@ -147,9 +147,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("provider_mode:", text)
-        self.assertNotIn("enable_auto_approve:", text)
-        self.assertNotIn("AUTO_APPROVE", text)
-        self.assertNotIn("--enable-auto-approve", text)
+        self.assertIn("enable_auto_approve:", text)
+        self.assertIn("AUTO_APPROVE", text)
+        self.assertIn("--enable-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("validate-provider-mode:", text)
