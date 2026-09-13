@@ -132,6 +132,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("pull-requests: write", text)
         self.assertIn("issues: write", text)
+        self.assertIn("github.event.issue.pull_request", text)
+        self.assertIn("github.event.comment.author_association == 'OWNER'", text)
+        self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
+        self.assertIn("github.event.comment.author_association == 'COLLABORATOR'", text)
+        self.assertIn("github.event.comment.user.type != 'Bot'", text)
 
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
