@@ -122,6 +122,7 @@ class ReviewPublisher:
         result: ReviewResult,
         diff: str,
         app_slug: str,
+        auto_approve: bool = False,
     ) -> PublicationResult:
         if (
             isinstance(repository_id, bool)
@@ -239,13 +240,14 @@ class ReviewPublisher:
                 "formatted review exceeds the configured publication limit"
             ) from exc
         has_open_review_threads = False
-        if not result.comments and not write_preflight.app_authored:
+        if auto_approve and not result.comments and not write_preflight.app_authored:
             has_open_review_threads = self._has_open_review_threads(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
             )
         approval = evaluate_auto_approval(
+            enabled=auto_approve,
             app_authored=write_preflight.app_authored,
             result=result,
             has_open_review_threads=has_open_review_threads,

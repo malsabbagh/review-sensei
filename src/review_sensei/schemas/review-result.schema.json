@@ -24,6 +24,10 @@
       }
     },
     "provider": {"type": "string", "minLength": 1},
+    "review_status": {
+      "type": "string",
+      "enum": ["complete", "partial", "incomplete", "summary-only"]
+    },
     "model": {
       "anyOf": [
         {"type": "string", "minLength": 1},

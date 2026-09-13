@@ -126,7 +126,7 @@ class CliTests(unittest.TestCase):
         review_call = FakeApplication.instances[0].calls[0][1]
         self.assertEqual(review_call["base_branch"], "main")
         self.assertEqual(review_call["base_sha"], "b" * 40)
-        self.assertFalse(hasattr(review_call["options"], "auto_approve"))
+        self.assertFalse(review_call["options"].auto_approve)
 
     def test_github_parser_uses_the_installed_app_bot_slug(self):
         args = _github_parser().parse_args(

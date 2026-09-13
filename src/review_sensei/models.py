@@ -473,6 +473,11 @@ class ReviewResult:
     provider: str
     model: str | None = None
     learning_proposals: tuple[LearningProposal, ...] = ()
+    # Provider/orchestrator status is carried into publication so an artifact
+    # that only contains a partial or summary pass can never be mistaken for a
+    # complete review eligible for an approval event.  ``complete`` remains the
+    # backwards-compatible default for results produced by the current service.
+    review_status: str = "complete"
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
 
     def __post_init__(self) -> None:
@@ -511,6 +516,15 @@ class ReviewResult:
                 self.limits.max_model_bytes,
                 label="review model",
                 allow_empty=False,
+            )
+        if self.review_status not in {
+            "complete",
+            "partial",
+            "incomplete",
+            "summary-only",
+        }:
+            raise ReviewInputError(
+                "review_status must be complete, partial, incomplete, or summary-only"
             )
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
@@ -563,7 +577,7 @@ class ReviewResult:
             raise ReviewInputError("review result exceeds the configured size limit")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value = {
             "summary": self.summary,
             "comments": [comment.to_dict() for comment in self.comments],
             "provider": self.provider,
@@ -572,6 +586,11 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
+        # Keep the v1 wire shape byte-compatible for complete results while
+        # making non-complete artifacts explicit and machine-checkable.
+        if self.review_status != "complete":
+            value["review_status"] = self.review_status
+        return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "ReviewResult":
@@ -584,6 +603,7 @@ class ReviewResult:
         provider = value.get("provider")
         model = value.get("model")
         proposals = value.get("learning_proposals", [])
+        review_status = value.get("review_status", "complete")
         if not isinstance(summary, str):
             raise ReviewInputError("review result summary must be a string")
         if not isinstance(comments, list):
@@ -594,6 +614,8 @@ class ReviewResult:
             raise ReviewInputError("review result model must be a string or null")
         if not isinstance(proposals, list):
             raise ReviewInputError("review result learning_proposals must be an array")
+        if not isinstance(review_status, str):
+            raise ReviewInputError("review result review_status must be a string")
         comment_values: list[ReviewComment] = []
         for index, comment in enumerate(comments):
             if not isinstance(comment, Mapping):
@@ -647,6 +669,7 @@ class ReviewResult:
             provider=provider,
             model=cast(str | None, model),
             learning_proposals=tuple(parsed_proposals),
+            review_status=review_status,
         )
 
 

@@ -424,17 +424,20 @@ terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
 idempotent conversation turn over the current thread and exact PR head.
 
 All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
-`REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
+`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
 `REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`) default to
-`false`. When automatic review and GitHub writes are enabled, `APPROVE` is
-emitted only when the validated result has no inline comments and a bounded
-GraphQL `reviewThreads` sweep confirms that every existing review thread is
-resolved. Findings, unresolved threads, and `@sensei` replies remain
-`COMMENT`. Draft, closed, stale, fork, or App-authored pull requests are never
+`false`. Automatic approval is independently opt-in and remains disabled unless
+`REVIEWSENSEI_AUTO_APPROVE=true`. When automatic review, GitHub writes, and that
+approval opt-in are enabled, `APPROVE` is emitted only when the validated result
+is marked `complete`, has no inline comments, and a bounded GraphQL
+`reviewThreads` sweep confirms that every existing review thread is resolved.
+Findings, unresolved threads, and `@sensei` replies remain `COMMENT`. Partial,
+incomplete, or summary-only artifacts are always comments, even when approval
+is enabled. Draft, closed, stale, fork, or App-authored pull requests are never
 approved. A malformed, unauthorized, incomplete, or over-limit thread response
-fails closed before the write. The existing marker deduplicates one review
-write per exact head; resolution after publication does not retroactively create
-an approval. The generated caller may contain only the name-only secret mapping
+fails closed before the write. The existing marker deduplicates one review write
+per exact head; resolution after publication does not retroactively create an
+approval. The generated caller may contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 

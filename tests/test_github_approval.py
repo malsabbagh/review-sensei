@@ -11,6 +11,7 @@ def clean_result() -> ReviewResult:
 class AutoApprovalPolicyTests(unittest.TestCase):
     def test_clean_review_with_resolved_threads_is_approved(self):
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=clean_result(),
             has_open_review_threads=False,
@@ -20,6 +21,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
 
     def test_open_threads_block_clean_review(self):
         blocked = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=clean_result(),
             has_open_review_threads=True,
@@ -43,6 +45,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             provider="fixture",
         )
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=result,
             has_open_review_threads=True,
@@ -55,12 +58,50 @@ class AutoApprovalPolicyTests(unittest.TestCase):
 
     def test_app_authored_pull_requests_cannot_be_approved(self):
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=True,
             result=clean_result(),
             has_open_review_threads=False,
         )
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("app-authored-pull-request",))
+
+    def test_opt_in_is_required_and_reports_stable_blocker(self):
+        decision = evaluate_auto_approval(
+            app_authored=False,
+            result=clean_result(),
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("auto-approval-disabled",))
+
+    def test_non_complete_results_cannot_be_approved(self):
+        for status in ("partial", "incomplete", "summary-only"):
+            with self.subTest(status=status):
+                result = ReviewResult(
+                    summary="Summary.",
+                    comments=(),
+                    provider="fixture",
+                    review_status=status,
+                )
+                decision = evaluate_auto_approval(
+                    enabled=True,
+                    app_authored=False,
+                    result=result,
+                    has_open_review_threads=False,
+                )
+                self.assertFalse(decision.approved)
+                self.assertEqual(decision.blockers, (f"review-{status}",))
+
+    def test_incomplete_thread_sweep_fails_closed(self):
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=clean_result(),
+            has_open_review_threads=None,
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("review-threads-incomplete",))
 
 
 if __name__ == "__main__":
