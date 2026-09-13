@@ -313,11 +313,19 @@ class ActionPinPolicyTests(unittest.TestCase):
                     # trusted Ollama self-hosted label; the repository's private
                     # CI runner policy does not apply to this public contract.
                     continue
+                lines = workflow.read_text(encoding="utf-8").splitlines()
                 runs_on_lines = [
                     line.strip()
-                    for line in workflow.read_text(encoding="utf-8").splitlines()
+                    for line in lines
                     if line.strip().startswith("runs-on:")
                 ]
+                if not runs_on_lines:
+                    # A caller of a reusable workflow has no runner of its
+                    # own. Its called workflow owns runner selection instead.
+                    self.assertTrue(
+                        [line for line in lines if line.strip().startswith("uses:")]
+                    )
+                    continue
                 self.assertTrue(runs_on_lines)
                 for line in runs_on_lines:
                     # npm Trusted Publishing must use an explicitly eligible
