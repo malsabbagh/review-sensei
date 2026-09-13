@@ -154,7 +154,9 @@ repository identity, fork status, installation, replay state, and rate limit.
 For each write operation, the workflow obtains a separate short-lived token for
 the requested capability: `review_publish` for review publication,
 `inline_reply` or `issue_reply` for replies, and `learning_write` for learning
-pull requests. Review and reply capabilities grant `pull_requests: write`;
+pull requests. The broker-issued token grants the workflow the capability to
+make the corresponding GitHub API write; Cloudflare does not perform that
+write. Review and reply capabilities grant `pull_requests: write`;
 `learning_write` additionally grants `contents: write`. A review-publication
 token cannot write repository contents.
 Cloudflare does not run the review engine or send prompts to the model provider;
