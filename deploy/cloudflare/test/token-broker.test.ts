@@ -110,6 +110,17 @@ describe("token broker authorization", () => {
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])(
+    "rejects inherited capability name %s",
+    async (inheritedCapability) => {
+      const { broker, github } = harness();
+      await expect(
+        broker.exchange({ oidc_token: "signed-jwt", capability: inheritedCapability }),
+      ).rejects.toThrow("broker_capability_invalid");
+      expect(github.capabilityToken).not.toHaveBeenCalled();
+    },
+  );
+
   it("resolves the configured tag before authorizing the runtime SHA", async () => {
     const { broker, github } = harness();
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
