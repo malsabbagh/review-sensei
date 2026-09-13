@@ -80,13 +80,20 @@ other PyPI failures remain fatal. It then checks out only trusted base content,
 validates refs, and computes a bounded diff without installing or executing the
 head branch.
 
-The App creates nine repository variables: provider mode, local model, cloud
-model, package version, automatic review, GitHub writes, learning PRs, mention
-replies, and artifact upload. The five feature switches default to `false`.
+The App creates repository variables for provider mode/model selection, package
+version, independent analysis/publication controls, learning proposals and
+learning PRs, mention replies, artifact upload, and optional trusted stage and
+category directories. Feature switches default to `false`; empty stage/category
+paths preserve the packaged defaults.
 The App does not create a placeholder secret or overwrite an existing variable.
 
-To enable automatic same-repository review, set
-`REVIEWSENSEI_AUTO_REVIEW=true` and `REVIEWSENSEI_GITHUB_WRITES=true`.
+To enable automatic same-repository analysis, set
+`REVIEWSENSEI_AUTO_REVIEW=true`. Set `REVIEWSENSEI_GITHUB_WRITES=true`
+separately when the validated result may publish to GitHub; analysis remains
+provider-only while writes are disabled. Set
+`REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated
+learning proposals are desired, and `REVIEWSENSEI_LEARNING_PRS=true` to publish
+those proposals as draft PRs.
 `REVIEWSENSEI_PROVIDER_MODE=cloud` runs on `ubuntu-latest` and requires the
 customer-owned `OLLAMA_API_KEY` under Repository Settings → Secrets and
 variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` runs the same review

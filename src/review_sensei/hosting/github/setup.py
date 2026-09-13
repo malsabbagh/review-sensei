@@ -53,10 +53,15 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.1.1"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
+    ("REVIEWSENSEI_LEARNING_PROPOSALS", "false"),
     ("REVIEWSENSEI_GITHUB_WRITES", "false"),
     ("REVIEWSENSEI_LEARNING_PRS", "false"),
     ("REVIEWSENSEI_MENTION_REPLIES", "false"),
     ("REVIEWSENSEI_UPLOAD_ARTIFACTS", "false"),
+    # Optional trusted-base configuration. Empty values preserve packaged
+    # stage/category defaults and are never read from the pull-request head.
+    ("REVIEWSENSEI_STAGES_DIR", ""),
+    ("REVIEWSENSEI_CATEGORIES_DIR", ""),
 )
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -609,6 +614,15 @@ on:
       review_sensei_version:
         description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
         required: true
+      pull_request_title:
+        description: Authoritative pull request title for review context
+        required: false
+      stages_dir:
+        description: Trusted-base stage JSON directory (optional)
+        required: false
+      categories_dir:
+        description: Trusted-base category JSON directory (optional)
+        required: false
       source_kind:
         description: Source kind for manual dispatch (issue or inline)
         required: false
@@ -637,7 +651,6 @@ jobs:
     if: >-
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
-      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch' ||
       ((github.event_name == 'issue_comment' &&
@@ -675,7 +688,11 @@ jobs:
       source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: ${{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
       review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
+      pull_request_title: ${{ inputs.pull_request_title || github.event.pull_request.title }}
+      stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
+      categories_dir: ${{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
       enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_learning_proposals: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
       enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
       enable_mention_replies: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}
@@ -779,6 +796,14 @@ def _v4_config_file() -> str:
 
     return _historical_v4_config_file().replace(
         "version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1
+    ).replace(
+        "auto_review: false\n",
+        "auto_review: false\nlearning_proposals: false\n",
+        1,
+    ).replace(
+        "upload_artifacts: false\n",
+        "upload_artifacts: false\nstages_dir: ''\ncategories_dir: ''\n",
+        1,
     )
 
 
