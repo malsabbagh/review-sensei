@@ -14,7 +14,7 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 
 from .diff import analyze_diff
 from .errors import ReviewInputError
@@ -287,10 +287,10 @@ def plan_review_execution(
         repository_id=repository_id,
         pull_request_number=number,
         base_ref=validated_base,
-        base_sha=base_sha,
+        base_sha=cast(str, base_sha),
         head_ref=validated_head,
         head_repository=validated_head_repository,
-        head_sha=head_sha,
+        head_sha=cast(str, head_sha),
         operation=operation,
         title=title,
         eligible=reason is None,

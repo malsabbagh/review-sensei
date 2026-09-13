@@ -84,8 +84,14 @@ class CandidateFinding:
         if not isinstance(value, Mapping):
             raise ReviewInputError("candidate must be an object")
         try:
-            evidence = tuple(EvidenceReference(**item) for item in value["evidence"])  # type: ignore[arg-type]
-            assumptions = tuple(str(item) for item in value.get("assumptions", ()))
+            raw_evidence = value["evidence"]
+            if not isinstance(raw_evidence, (list, tuple)):
+                raise TypeError("evidence must be iterable")
+            evidence = tuple(EvidenceReference(**item) for item in raw_evidence)  # type: ignore[arg-type]
+            raw_assumptions = value.get("assumptions", ())
+            if not isinstance(raw_assumptions, (list, tuple)):
+                raise TypeError("assumptions must be iterable")
+            assumptions = tuple(str(item) for item in raw_assumptions)
             return cls(
                 str(value["claim"]),
                 str(value["triggering_conditions"]),

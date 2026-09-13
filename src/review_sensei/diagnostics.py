@@ -175,11 +175,12 @@ def build_plan(
             "changed_lines": len(analysis.changed_lines),
         }
     selected_stages = tuple(stages) or tuple(stage.name for stage in DEFAULT_STAGES)
-    mode = (
-        (provider_mode or os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local"))
-        .strip()
-        .lower()
+    raw_mode = (
+        provider_mode
+        if provider_mode is not None
+        else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
     )
+    mode = raw_mode.strip().lower()
     if mode not in {"local", "cloud"}:
         raise ReviewInputError("provider mode must be local or cloud")
     return {

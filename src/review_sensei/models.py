@@ -294,13 +294,13 @@ class LearningEntry:
             raise ReviewInputError("learning supersedes must contain safe identifiers")
         if len(self.supersedes) != len(set(self.supersedes)):
             raise ReviewInputError("learning supersedes must be unique")
-        for label, value in (
+        for label, timestamp in (
             ("reviewed_at", self.reviewed_at),
             ("expires_at", self.expires_at),
         ):
-            if value is not None:
+            if timestamp is not None:
                 try:
-                    datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    datetime.fromisoformat(cast(str, timestamp).replace("Z", "+00:00"))
                 except ValueError as exc:
                     raise ReviewInputError(
                         f"learning {label} must be ISO-8601"
@@ -647,7 +647,7 @@ class ReviewResult:
             raise ReviewInputError("review result exceeds the configured size limit")
 
     def to_dict(self) -> dict[str, object]:
-        value = {
+        value: dict[str, object] = {
             "summary": self.summary,
             "comments": [comment.to_dict() for comment in self.comments],
             "provider": self.provider,

@@ -11,7 +11,7 @@ import json
 import os
 import ssl
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import (
     HTTPRedirectHandler,
@@ -115,17 +115,17 @@ class OpenAICompatibleProvider:
             open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
             cafile = os.getenv("SSL_CERT_FILE") or certifi.where()
             open_kwargs["context"] = ssl.create_default_context(cafile=cafile)
-            opener = self._opener
-            if opener is urlopen:
+            if self._opener is urlopen:
 
                 class _NoRedirect(HTTPRedirectHandler):
                     def redirect_request(self, req, fp, code, msg, headers, new):
                         raise ProviderError("OpenAI-compatible endpoint redirected")
 
-                opener = build_opener(
-                    _NoRedirect(), HTTPSHandler(context=open_kwargs.pop("context"))
-                )
-                with opener.open(http_request, **open_kwargs) as response:
+                context = cast(ssl.SSLContext, open_kwargs.pop("context"))
+                safe_opener = build_opener(_NoRedirect(), HTTPSHandler(context=context))
+                with safe_opener.open(
+                    http_request, timeout=cast(float, open_kwargs["timeout"])
+                ) as response:
                     read_limit = request.max_response_bytes + 1
                     body = bytearray()
                     while len(body) <= request.max_response_bytes:
@@ -138,7 +138,7 @@ class OpenAICompatibleProvider:
                             )
                         body.extend(chunk)
             else:
-                with opener(http_request, **open_kwargs) as response:
+                with self._opener(http_request, **open_kwargs) as response:
                     read_limit = request.max_response_bytes + 1
                     body = bytearray()
                     while len(body) <= request.max_response_bytes:

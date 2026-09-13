@@ -100,7 +100,7 @@ class RunOutcome:
             raise ReviewInputError("run outcome diagnostic is too long")
 
     def to_dict(self) -> dict[str, object]:
-        value = {
+        value: dict[str, object] = {
             "schema_version": "1.0",
             "status": self.status,
             "repository": self.repository,
