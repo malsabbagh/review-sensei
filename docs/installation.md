@@ -85,6 +85,11 @@ version, independent analysis/publication controls, learning proposals and
 learning PRs, mention replies, artifact upload, and optional trusted stage and
 category directories. Feature switches default to `false`; empty stage/category
 paths preserve the packaged defaults.
+The generated setup exposes nine independent operational controls so analysis,
+publication, approval, learning, replies, and artifact retention can be enabled
+separately.
+The five setup files and generated workflow references remain byte-addressed
+and are migrated only when their managed content matches exactly.
 The App does not create a placeholder secret or overwrite an existing variable.
 
 To enable automatic same-repository analysis, set

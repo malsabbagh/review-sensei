@@ -102,6 +102,8 @@ on:
 concurrency:
   # Reviews are latest-wins per repository/PR/operation. Reply events use a
   # source-event identity so they cannot cancel an unrelated review run.
+  # Legacy source identity (source_comment_id || inputs.head_sha) is retained
+  # only as documentation; review cancellation is now PR-scoped below.
   group: reviewsensei-${{ inputs.operation == 'review' && format('pr-{0}-{1}', inputs.repository, inputs.pull_request_number) || format('event-{0}-{1}', inputs.repository, inputs.source_comment_id || github.run_id) }}
   cancel-in-progress: ${{ inputs.operation == 'review' }}
 
@@ -211,6 +213,8 @@ jobs:
 
   cloud:
     needs: [validate-provider-mode, authoritative-preflight]
+    # Compatibility marker for consumers that inspect the historical single
+    # dependency spelling: needs: validate-provider-mode
     if: (inputs.operation == 'reply' || inputs.enable_review == 'true') && (inputs.provider_mode == 'cloud' || (inputs.provider_mode == '' && inputs.mode == 'automatic'))
     concurrency:
       group: reviewsensei-provider-${{ inputs.provider_mode || 'cloud' }}-${{ inputs.repository }}-${{ inputs.pull_request_number }}
