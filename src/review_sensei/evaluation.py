@@ -553,20 +553,21 @@ def run_case(
     )
     if case.get("acceptable_no_finding", False) and result.comments:
         status = "failed"
-    elif (
-        not case.get("expected_result_path")
-        or json.loads(
+    elif not case.get("expected_result_path"):
+        status = "passed"
+    else:
+        expected_document = json.loads(
             corpus.read_asset(
                 str(case["expected_result_path"]),
                 maximum=MAX_JSON_FILE_BYTES,
                 label="expected result",
             )
         )
-        == result.to_dict()
-    ):
-        status = "passed"
-    else:
-        status = "failed"
+        # Pre-status fixtures remain valid as complete deterministic outputs;
+        # this compatibility applies only to evaluation, never publication.
+        if isinstance(expected_document, dict) and "review_status" not in expected_document:
+            expected_document["review_status"] = "complete"
+        status = "passed" if expected_document == result.to_dict() else "failed"
     location_valid = all(
         comment.line > 0 and comment.path for comment in result.comments
     )
