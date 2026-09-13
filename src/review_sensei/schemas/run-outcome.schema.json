@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/run-outcome.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "stage_summary", "provider_calls", "retry_attempts", "prompt_bytes", "response_bytes", "elapsed_ms", "diagnostic"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["reviewed", "partial", "skipped_stale", "skipped_policy", "provider_failed", "budget_exhausted", "publication_failed", "already_published"]},
+    "repository": {"type": ["string", "null"], "maxLength": 256},
+    "pull_request_number": {"type": ["integer", "null"], "minimum": 1},
+    "base_sha": {"type": ["string", "null"], "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "head_sha": {"type": ["string", "null"], "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "stage_summary": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": "string", "maxLength": 128}},
+    "provider_calls": {"type": "integer", "minimum": 0},
+    "retry_attempts": {"type": "integer", "minimum": 0},
+    "prompt_bytes": {"type": "integer", "minimum": 0},
+    "response_bytes": {"type": "integer", "minimum": 0},
+    "elapsed_ms": {"type": "integer", "minimum": 0},
+    "diagnostic": {"type": ["string", "null"], "maxLength": 512}
+  }
+}

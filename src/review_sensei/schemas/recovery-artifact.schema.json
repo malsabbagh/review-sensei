@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/recovery-artifact.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "pull_request_number", "base_sha", "head_sha", "result", "created_at", "expires_at", "result_sha256"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 256},
+    "pull_request_number": {"type": "integer", "minimum": 1},
+    "base_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "head_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "result": {"type": "object", "maxProperties": 64},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "result_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

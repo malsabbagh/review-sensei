@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .errors import ReviewInputError, ReviewSenseiError
 from .models import ProviderRequest, ProviderResponse, ReviewComment, ReviewRequest
@@ -34,6 +34,74 @@ _PRIVACY_PATTERNS = (
     re.compile(r"[A-Za-z0-9._%+-]+@(?!example\.com)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
 )
 _SECRET_MARKERS = ("PRIVATE_DIFF_MARKER", "PRIVATE_PROMPT_MARKER", "PROD_OUTPUT_MARKER")
+
+
+@dataclass(frozen=True)
+class PromotionRecord:
+    """Evidence required before promoting a real model/prompt configuration."""
+
+    engine_digest: str
+    prompt_digest: str
+    configuration_digest: str
+    corpus_digest: str
+    provider: str
+    model: str
+    observed_revision: str
+    run_count: int
+    evaluated_at: str
+    reproducibility: dict[str, Any]
+    status: str = "supported"
+    rollback_decision: str = "revert-to-baseline"
+
+    def __post_init__(self) -> None:
+        for name in ("engine_digest", "prompt_digest", "configuration_digest", "corpus_digest"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise ReviewInputError(f"promotion record {name} must be a SHA-256 digest")
+        if not all(isinstance(value, str) and value.strip() for value in (self.provider, self.model, self.observed_revision, self.evaluated_at)):
+            raise ReviewInputError("promotion record identity fields are required")
+        if isinstance(self.run_count, bool) or not isinstance(self.run_count, int) or self.run_count < 1:
+            raise ReviewInputError("promotion record run_count must be positive")
+        if self.status not in {"supported", "insufficient", "unsupported"}:
+            raise ReviewInputError("promotion record status is unsupported")
+        if self.status == "supported" and self.provider in {"fixture", "stub", "fake"}:
+            raise ReviewInputError("fixture-only evidence cannot support promotion")
+        if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:
+            raise ReviewInputError("promotion record rollback decision is unsupported")
+
+    def to_dict(self) -> dict[str, Any]:
+        value = {
+            "schema_version": "1.0",
+            "engine_digest": self.engine_digest,
+            "prompt_digest": self.prompt_digest,
+            "configuration_digest": self.configuration_digest,
+            "corpus_digest": self.corpus_digest,
+            "provider": self.provider,
+            "model": self.model,
+            "observed_revision": self.observed_revision,
+            "run_count": self.run_count,
+            "evaluated_at": self.evaluated_at,
+            "reproducibility": dict(self.reproducibility),
+            "status": self.status,
+            "rollback_decision": self.rollback_decision,
+        }
+        validate_public_document(value, "promotion-record")
+        return value
+
+
+def validate_promotion_record(value: Mapping[str, Any]) -> PromotionRecord:
+    """Parse and validate promotion evidence, rejecting incomplete records."""
+
+    if not isinstance(value, dict):
+        raise ReviewInputError("promotion record must be a JSON object")
+    validate_public_document(value, "promotion-record")
+    try:
+        return PromotionRecord(**{key: value[key] for key in (
+            "engine_digest", "prompt_digest", "configuration_digest", "corpus_digest",
+            "provider", "model", "observed_revision", "run_count", "evaluated_at",
+            "reproducibility", "status", "rollback_decision")})
+    except KeyError as exc:
+        raise ReviewInputError("promotion record is incomplete") from exc
 
 
 def _sha256_bytes(data: bytes) -> str:
