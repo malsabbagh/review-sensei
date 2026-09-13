@@ -19,7 +19,8 @@ providers later.
 - Keeps review business logic independent of GitHub and model vendors.
 - Sends a structured prompt to a replaceable provider adapter.
 - Requires provider output to be valid JSON.
-- Rejects inline comments that target files or lines outside the supplied diff.
+- Filters inline comments that target files or lines outside the supplied diff
+  while preserving independently valid findings.
 - Supports local Ollama servers and Ollama Cloud through the same adapter.
 - Loads approved repository-local learnings and returns validated learning proposals.
 - Supports ordered review stages with structured categories and explicit focus
@@ -30,6 +31,8 @@ providers later.
   runs and one provider slot per pull request.
 - Publishes versioned JSON Schemas for review results, learnings, categories,
   stages, and concurrency plans.
+- Adds optional severity, fix-effort, and lens labels with deterministic summary
+  counts and visual cues for fast triage.
 - Provides a narrow GitHub App JWT and installation-token auth adapter for
   optional App-identity comments or reviews.
 - Avoids retaining raw prompts and provider responses in the engine.
@@ -84,7 +87,7 @@ The package version is intentionally identical to the Python project and
 release tag. See [`docs/installation.md`](docs/installation.md),
 [`docs/releasing.md`](docs/releasing.md), and [ADR 0031](docs/adr/0031-npm-launcher-and-standalone-platform-packages.md)
 for prerequisites, release ordering, provenance, and version-forward rollback
-guidance (internal tracking issue #103).
+guidance.
 
 Generate a bounded diff and run a review:
 
@@ -147,6 +150,15 @@ does not create, read, persist, log, or reveal that secret value. The Worker
 broker only issues one capability-scoped installation token after verifying
 the signed Actions OIDC identity, exact v4 workflow ref and runtime SHA,
 repository identity, fork status, installation, replay state, and rate limit.
+The workflow uses that short-lived token for App-attributed review publication,
+inline or pull-request replies, and (when enabled) learning pull requests.
+Cloudflare does not run the review engine or send prompts to the model provider;
+the GitHub Actions job performs those operations in the configured provider
+environment.
+
+During installation or migration, the Worker separately uses GitHub App
+authentication to obtain a repository-scoped installation token for the setup
+branch, pull request, and default variables.
 
 Installation, reinstall, permission-acceptance, and repository-added events
 reconcile absent or older generated clients through at most one setup-v4 PR.
@@ -160,8 +172,8 @@ that never distributes the App private key.
 
 ## Offline evaluation
 
-Issue #9 includes a synthetic, CC0-1.0 corpus that runs without network access
-or provider credentials:
+The repository includes a synthetic, CC0-1.0 corpus that runs without network
+access or provider credentials:
 
 ```bash
 python scripts/validate_evaluation_corpus.py
@@ -402,12 +414,11 @@ See [the architecture guide](docs/architecture.md).
 
 ## GitHub integration
 
-The GitHub App opens a setup-v4 PR containing a thin caller pinned to the full
-SHA resolved from the operator-managed `v4` public git tag at installation
-time. The reusable workflow prefers the requested exact package from PyPI and,
-only when that package/version is unavailable, installs the executing workflow
-commit directly from the public GitHub source. Unrelated PyPI installation
-failures remain fatal. All nine
+The GitHub App opens a setup-v4 PR containing a thin caller that follows the
+operator-managed `v4` public git tag. The reusable workflow prefers the
+requested exact package from PyPI and falls back to its executing workflow
+commit only when that package/version is unavailable. Unrelated PyPI
+installation failures remain fatal. All nine
 `REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
 review, GitHub writes, learning PRs, mention replies, and artifact upload are
 off. The App never creates the customer-owned
