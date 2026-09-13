@@ -126,6 +126,12 @@ class ReviewService:
                 if request.active_category_ids is not None
                 else stage.categories
             )
+            # A stage whose configured lenses do not apply to the changed paths
+            # has no useful provider work.  Stages without categories are
+            # intentionally independent and continue to run (for example an
+            # overall summary stage).
+            if stage.categories and not active_categories:
+                continue
             prompt = self._format_prompt(
                 stage,
                 request,
