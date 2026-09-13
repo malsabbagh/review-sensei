@@ -79,9 +79,10 @@ The repository quality boundary is deterministic and provider-independent. The
 `quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
 coverage; the `schemas` job validates the three packaged Draft 2020-12
 contracts and immutable GitHub Action pins; the `package` job builds both
-distributions and verifies a wheel from outside the checkout; CodeQL is the only
-job granted `security-events: write`. All other workflow permissions default to
-`contents: read`, and the `required-checks` aggregate publishes the stable
+distributions and verifies a wheel from outside the checkout; CodeQL analyzes
+Python and JavaScript/TypeScript and its deterministic SARIF findings gate is
+the enforcement surface. All workflow permissions default to `contents: read`,
+and the `required-checks` aggregate publishes the stable
 `Required checks` status used by branch protection.
 
 The public JSON schemas are structural contracts only. They reject malformed

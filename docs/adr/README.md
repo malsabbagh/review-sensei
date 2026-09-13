@@ -41,6 +41,7 @@ Process: `docs/process/adr-process.md`
 | [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | not configured | Superseded by ADR 0032. |
 | [0031](0031-npm-launcher-and-standalone-platform-packages.md) | Proposed | Thin npx launcher with five native standalone platform packages | #103 | Exact target selection, public-source provenance, protected npm publication, registry readback, and version-forward rollback |
 | [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; only critical/high severity blocks when the flag is absent, while resolved-thread safety remains. |
+| [0033](0033-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 
 ## Policy
 
