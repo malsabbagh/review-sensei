@@ -262,6 +262,8 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
         self.assertIn("id-token: write", workflow)
+        self.assertIn("pull-requests: write", workflow)
+        self.assertIn("issues: write", workflow)
         self.assertIn("github.event.comment.author_association == 'OWNER'", workflow)
         self.assertIn("github.event.comment.user.type != 'Bot'", workflow)
         self.assertIn("github.event.issue.pull_request", workflow)
@@ -633,10 +635,13 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             "operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' "
             "&& 'review') || 'reply' }}"
         )
-        files = {
-            file.path: file.content.replace(current_operation, historical_operation, 1)
-            for file in plan.files
-        }
+        files = {file.path: file.content for file in plan.files}
+        files[".github/workflows/review-sensei-review.yml"] = (
+            files[".github/workflows/review-sensei-review.yml"]
+            .replace(current_operation, historical_operation, 1)
+            .replace("pull-requests: write", "pull-requests: read", 1)
+            .replace("issues: write", "issues: read", 1)
+        )
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
@@ -652,13 +657,16 @@ class SetupPullRequestServiceTests(unittest.TestCase):
     ):
         plan = SetupPlanBuilder().build("owner/repo")
         files = {file.path: file.content for file in plan.files}
-        files[".github/workflows/review-sensei-review.yml"] = files[
-            ".github/workflows/review-sensei-review.yml"
-        ].replace(
-            "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-            "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n"
-            "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-            1,
+        files[".github/workflows/review-sensei-review.yml"] = (
+            files[".github/workflows/review-sensei-review.yml"]
+            .replace(
+                "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
+                "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n"
+                "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
+                1,
+            )
+            .replace("pull-requests: write", "pull-requests: read", 1)
+            .replace("issues: write", "issues: read", 1)
         )
         files[".github/review-sensei/config.yml"] = files[
             ".github/review-sensei/config.yml"

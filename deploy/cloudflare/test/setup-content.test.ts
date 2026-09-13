@@ -55,6 +55,8 @@ describe("setup-v4 public boundary", () => {
     const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
     expect(workflow.match(workflowPattern)).toHaveLength(1);
     expect(workflow).toContain("# ReviewSensei setup version: 4");
+    expect(workflow).toContain("pull-requests: write");
+    expect(workflow).toContain("issues: write");
     expect(workflow).toContain("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}");
     expect(workflow).toContain(
       "operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}",
