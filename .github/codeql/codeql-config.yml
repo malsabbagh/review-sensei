@@ -1,0 +1,9 @@
+name: ReviewSensei CodeQL configuration
+paths:
+  - src
+  - deploy/cloudflare
+  - packages/npm/cli
+paths-ignore:
+  - docs/site
+  - dist
+  - node_modules

@@ -40,6 +40,7 @@ Process: `docs/process/adr-process.md`
 | [0029](0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Not configured | Additive v1 classification metadata and deterministic publisher rendering |
 | [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Proposed | Gate App approvals on resolved review threads and exact-head review safety | not configured | Existing automatic review/write path approves only after a clean exact-head result and complete resolved-thread sweep; unresolved findings remain comments. |
 | [0031](0031-npm-launcher-and-standalone-platform-packages.md) | Proposed | Thin npx launcher with five native standalone platform packages | #103 | Exact target selection, public-source provenance, protected npm publication, registry readback, and version-forward rollback |
+| [0032](0032-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 
 ## Policy
 
