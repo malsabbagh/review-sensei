@@ -248,6 +248,14 @@ identify GitHub API or App failures. A code such as
 `github_capability_issue_failed_422` preserves only GitHub's HTTP status; raw
 tokens, claims, response bodies, and exception text are never logged or returned.
 
+Capability tokens require the returned permission map to exactly match the
+requested map plus GitHub's mandatory `metadata: read`. `review_publish` alone
+may also receive an unrequested `contents: read` because GitHub can return it
+to allow repository-data access while publishing a review. The broker never
+requests that permission, and `inline_reply`, `issue_reply`, and
+`learning_write` reject it if it is returned. This is a narrow compatibility
+exception, not an additional capability grant.
+
 ## Rollback and operations
 
 Deploy from a known Git commit. To roll back, redeploy the previous Worker

@@ -283,6 +283,7 @@ describe("GitHubApi capability issuance", () => {
   it.each([
     ["an inherited writable capability", { pull_requests: "write", contents: "write", metadata: "read" }],
     ["an unrecognized read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
+    ["a hyphenated lookalike permission", { "pull-requests": "write", metadata: "read" }],
     ["a missing mandatory metadata grant", { pull_requests: "write" }],
     ["an unexpected writable implicit capability", {
       pull_requests: "write",

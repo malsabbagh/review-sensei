@@ -13,6 +13,17 @@ const MAX_PUBLIC_REF_BYTES = 64 * 1024;
 // A capability can separately opt in to accepting contents:read only when its
 // broker policy documents that GitHub may add the grant implicitly.
 const IMPLICIT_METADATA_PERMISSION = "read";
+const RETURNED_CONTENTS_READ_PERMISSION = "read";
+const KNOWN_PERMISSION_NAMES = new Set([
+  "contents",
+  "metadata",
+  "pull_requests",
+  "variables",
+  "workflows",
+]);
+const PERMISSION_NAME_ALIASES: Readonly<Record<string, string>> = {
+  actions_variables: "variables",
+};
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -47,14 +58,17 @@ function isObject(value: unknown): value is JsonObject {
 }
 
 function canonicalPermissionName(value: string): string | null {
-  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  const normalized = value.trim().toLowerCase();
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(normalized)) {
     return null;
   }
   // GitHub's API uses `actions_variables` in some payloads while the
   // permission map has historically used `variables`. Accept either spelling
-  // alone, but reject responses containing both aliases as ambiguous.
-  return normalized === "actions_variables" ? "variables" : normalized;
+  // alone, but reject responses containing both aliases as ambiguous. Every
+  // other name must be an explicitly supported canonical permission so a
+  // future GitHub permission cannot silently normalize into this boundary.
+  const canonical = PERMISSION_NAME_ALIASES[normalized] ?? normalized;
+  return KNOWN_PERMISSION_NAMES.has(canonical) ? canonical : null;
 }
 
 /**
@@ -135,7 +149,9 @@ function hasExactPermissions(
     }
     return (
       (name === "metadata" && level === IMPLICIT_METADATA_PERMISSION) ||
-      (acceptReturnedContentsRead && name === "contents" && level === "read")
+      (acceptReturnedContentsRead &&
+        name === "contents" &&
+        level === RETURNED_CONTENTS_READ_PERMISSION)
     );
   });
 }
