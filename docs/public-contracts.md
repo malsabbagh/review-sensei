@@ -114,20 +114,21 @@ against `review-result.schema.json`.
 
 ### Finding classification and presentation
 
-`ReviewComment` accepts optional, independent classification fields. `severity`
-uses the preferred `critical`, `high`, `medium`, or `low` values to describe
-likely impact; `fix_effort` uses `trivial`, `small`, `moderate`, `large`, or
-`unknown` to describe remediation scope; and `category` remains the configured
-lens id that produced the finding. The v1 parser keeps legacy arbitrary
-severity strings readable and all three fields remain optional.
+`ReviewComment` accepts optional, independent classification fields. `blocking`
+is a boolean that determines whether the finding prevents automatic approval;
+when omitted, only the preferred `critical` and `high` severity values are
+blocking. `severity` uses the preferred `critical`, `high`, `medium`, or `low`
+values to describe likely impact; `fix_effort` uses `trivial`, `small`,
+`moderate`, `large`, or `unknown` to describe remediation scope; and `category`
+remains the configured lens id that produced the finding.
 Classification labels are bounded by the provider-text limit, must be
 printable, and are Markdown-escaped at render time; this keeps legacy values
 readable without allowing control-character or structural injection or
 oversized formatted publication bodies.
 
 The provider-neutral presentation layer renders available labels on inline
-comments and appends deterministic summary counts grouped by severity and lens,
-plus a quick-win count for trivial/small effort. Results without classification
+comments and appends deterministic summary counts grouped by blocking state,
+severity, and lens, plus a quick-win count for trivial/small effort. Results without classification
 metadata keep their existing summary and inline body text byte-for-byte. The
 GitHub publisher applies this rendering without changing marker hashing, exact
 head checks, event selection, location validation, or duplicate reconciliation.
@@ -427,7 +428,7 @@ All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
 `REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
 `REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`) default to
 `false`. When automatic review and GitHub writes are enabled, `APPROVE` is
-emitted only when the validated result has no inline comments and a bounded
+emitted only when the validated result has no blocking findings and a bounded
 GraphQL `reviewThreads` sweep confirms that every existing review thread is
 resolved. Findings, unresolved threads, and `@sensei` replies remain
 `COMMENT`. Draft, closed, stale, fork, or App-authored pull requests are never
@@ -440,7 +441,8 @@ run. The generated caller may contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 
-The approval decision is deterministic and does not trust provider confidence or
-classification labels to override open-thread safety. The policy exposes stable
+The approval decision is deterministic: explicit blocking findings, or
+unclassified critical/high findings, block approval and open-thread safety
+remains independent. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.

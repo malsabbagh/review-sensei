@@ -13,7 +13,7 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
-from .approval import evaluate_auto_approval
+from .approval import evaluate_auto_approval, has_blocking_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -247,7 +247,7 @@ class ReviewPublisher:
                 "formatted review exceeds the configured publication limit"
             ) from exc
         has_open_review_threads = False
-        if not result.comments and not write_preflight.app_authored:
+        if not has_blocking_findings(result) and not write_preflight.app_authored:
             has_open_review_threads = self._has_open_review_threads(
                 token=token,
                 repository=repository,

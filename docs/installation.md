@@ -97,22 +97,24 @@ learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically. Before choosing `APPROVE`,
-the publisher requires a validated exact-head result with no inline findings, a
+the publisher requires a validated exact-head result with no blocking findings, a
 same-repository non-draft PR, and a final bounded GraphQL sweep showing that all
-existing review threads are resolved. An open thread, an App-authored PR, an
+existing review threads are resolved. Non-blocking findings are published as
+optional follow-ups and can accompany an approval. An open thread, an App-authored PR, an
 incomplete/error response, or any stale/fork/closed target keeps the event as
 `COMMENT` or fails closed before writing. All `@sensei` replies remain ordinary
 comments.
 
 The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
-After every thread is resolved, a fresh clean workflow run on the same exact
+After every thread is resolved, a fresh workflow run with no blocking findings on the same exact
 head can promote the earlier ReviewSensei comment to one formal approval. It
 does not duplicate the comment or approval. GitHub Actions does not start a run
 when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
 the current exact PR head and base) or push a new head. Classification metadata
-(severity, fix effort, and lens) is displayed for triage but cannot weaken this
-approval boundary. See
-[ADR 0030](adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
+(blocking, severity, fix effort, and lens) controls the approval boundary:
+explicit `false` does not prevent approval, while an omitted flag falls back to
+critical/high severity. See
+[ADR 0032](adr/0032-blocking-finding-classification-for-approvals.md)
 for the full criteria and rollback procedure.
 
 For local Ollama, install and pull `qwen3.5:4b` on the labelled self-hosted

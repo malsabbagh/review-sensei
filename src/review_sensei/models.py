@@ -408,6 +408,7 @@ class ReviewComment:
     path: str
     line: int
     body: str
+    blocking: bool | None = None
     severity: str | None = None
     category: str | None = None
     fix_effort: str | None = None
@@ -448,6 +449,8 @@ class ReviewComment:
                     raise ReviewInputError(
                         f"comment {label} contains a forbidden control character"
                     )
+        if self.blocking is not None and not isinstance(self.blocking, bool):
+            raise ReviewInputError("comment blocking must be a boolean")
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -461,6 +464,8 @@ class ReviewComment:
             value["fix_effort"] = self.fix_effort
         if self.category is not None:
             value["category"] = self.category
+        if self.blocking is not None:
+            value["blocking"] = self.blocking
         return value
 
 
@@ -616,6 +621,11 @@ class ReviewResult:
                 raise ReviewInputError(
                     f"review result comment {index} fix_effort must be a string"
                 )
+            blocking = comment.get("blocking")
+            if blocking is not None and not isinstance(blocking, bool):
+                raise ReviewInputError(
+                    f"review result comment {index} blocking must be a boolean"
+                )
             comment_values.append(
                 ReviewComment(
                     path=path,
@@ -632,6 +642,7 @@ class ReviewResult:
                         else None
                     ),
                     fix_effort=fix_effort,
+                    blocking=blocking,
                 )
             )
         parsed_proposals: list[LearningProposal] = []

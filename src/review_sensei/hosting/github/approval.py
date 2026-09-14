@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from ...models import ReviewResult
 
+_SEVERE_FINDING_LEVELS = frozenset(("critical", "high"))
+
 
 @dataclass(frozen=True)
 class AutoApprovalDecision:
@@ -23,21 +25,38 @@ def evaluate_auto_approval(
 ) -> AutoApprovalDecision:
     """Apply the repository's conservative approval criteria.
 
-    Every inline finding emitted by the review service is an open actionable
-    comment until a later GitHub thread-resolution sweep observes it resolved.
-    Unknown classification values are intentionally not special-cased here:
-    they remain visible to readers, but they cannot weaken the no-open-finding
-    approval boundary.
+    A finding blocks when it is explicitly classified as blocking. When the
+    optional classification is absent, only canonical critical/high severity is
+    blocking; other or missing severity is non-blocking. Unresolved GitHub
+    review threads remain an independent fail-closed gate.
     """
 
     blockers: list[str] = []
     if app_authored:
         blockers.append("app-authored-pull-request")
-    if result.comments:
-        blockers.append("inline-findings-open")
+    if has_blocking_findings(result):
+        blockers.append("blocking-findings-open")
     if has_open_review_threads:
         blockers.append("review-threads-open")
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 
-__all__ = ["AutoApprovalDecision", "evaluate_auto_approval"]
+def has_blocking_findings(result: ReviewResult) -> bool:
+    """Whether a validated result contains a finding that blocks approval."""
+
+    return any(
+        comment.blocking is True
+        or (
+            comment.blocking is None
+            and comment.severity is not None
+            and comment.severity.lower() in _SEVERE_FINDING_LEVELS
+        )
+        for comment in result.comments
+    )
+
+
+__all__ = [
+    "AutoApprovalDecision",
+    "evaluate_auto_approval",
+    "has_blocking_findings",
+]

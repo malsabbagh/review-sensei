@@ -31,8 +31,8 @@ providers later.
   runs and one provider slot per pull request.
 - Publishes versioned JSON Schemas for review results, learnings, categories,
   stages, and concurrency plans.
-- Adds optional severity, fix-effort, and lens labels with deterministic summary
-  counts and visual cues for fast triage.
+- Adds optional blocking, severity, fix-effort, and lens labels with
+  deterministic summary counts and visual cues for fast triage.
 - Provides a narrow GitHub App JWT and installation-token auth adapter for
   optional App-identity comments or reviews.
 - Avoids retaining raw prompts and provider responses in the engine.
@@ -296,17 +296,19 @@ category to a comment, it must use one of the active stage ids; classification
 is optional for compatibility. If multiple stages reuse an id, the entire lens
 definition must be identical.
 
-Inline findings may also carry independent `severity` (`critical`, `high`,
-`medium`, or `low`) and `fix_effort` (`trivial`, `small`, `moderate`, `large`,
-or `unknown`) labels. Severity describes likely impact, while fix effort
-describes remediation scope rather than a time estimate. The existing
-`category` id is the lens source and is shown as a human-readable lens label;
-no composite priority score or second `lens` field is emitted. These fields are
-optional so legacy provider results remain valid. When present, the same labels
-appear on inline GitHub comments and deterministic severity/lens/quick-win
-counts appear in the review summary. Labels are validated as printable,
-bounded provider text and Markdown-escaped before publication so untrusted
-output cannot inject structure or exceed the configured comment-body limit.
+Inline findings may also carry independent `blocking`, `severity`
+(`critical`, `high`, `medium`, or `low`), and `fix_effort` (`trivial`, `small`,
+`moderate`, `large`, or `unknown`) labels. `blocking` controls whether the
+finding prevents automatic approval; `false` identifies an optional follow-up.
+If it is omitted, only `critical` and `high` severity findings block approval.
+Severity describes likely impact, while fix effort describes remediation scope
+rather than a time estimate. The existing `category` id is the lens source and
+is shown as a human-readable lens label; no composite priority score or second
+`lens` field is emitted. When present, the same labels appear on inline GitHub
+comments and deterministic blocking/severity/lens/quick-win counts appear in
+the review summary. Labels are validated as printable, bounded provider text
+and Markdown-escaped before publication so untrusted output cannot inject
+structure or exceed the configured comment-body limit.
 The formatted summary is checked against `max_summary_bytes`, and the complete
 framed GitHub review body is bounded to 65,536 bytes before publication.
 
@@ -445,9 +447,10 @@ transport ceiling remains unchanged. Fork pull requests fail closed before
 provider or broker access.
 
 When automatic review and GitHub writes are enabled, ReviewSensei selects
-`APPROVE` for a validated exact-head result only when it has no inline findings
+`APPROVE` for a validated exact-head result only when it has no blocking finding
 and a final bounded GitHub thread sweep confirms that every existing review
-thread is resolved. Any open finding or thread, draft/closed/fork/stale PR,
+thread is resolved. Non-blocking findings are published as optional follow-ups
+and do not independently prevent approval. Any open thread, draft/closed/fork/stale PR,
 App-authored PR, or incomplete thread lookup keeps the event as `COMMENT` or
 fails closed; `@sensei` replies are always ordinary comments. Existing review
 markers deduplicate each review state per head. A fresh clean review run on the
@@ -455,11 +458,11 @@ same exact head may promote an earlier `COMMENTED` review to `APPROVED` after
 the final thread sweep confirms that every thread is resolved; it never posts
 a duplicate comment or approval.
 
-The approval policy is deliberately conservative: severity, fix effort, lens,
-and model confidence help triage findings but never override an unresolved
-thread. Resolving a thread does not itself start a GitHub Actions run, so rerun
+The approval policy is deliberately conservative: an explicit blocking label,
+or unclassified critical/high severity, blocks approval; unresolved threads
+also remain blocking. Resolving a thread does not itself start a GitHub Actions run, so rerun
 the review workflow (or push a new head) after the final resolution. See
-[ADR 0030](docs/adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
+[ADR 0032](docs/adr/0032-blocking-finding-classification-for-approvals.md)
 for the criteria and rollback path.
 
 Manual review and authorized `@sensei` replies use the same selected provider

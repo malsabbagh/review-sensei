@@ -19,6 +19,7 @@
           "body": {"type": "string", "minLength": 1},
           "severity": {"type": "string", "minLength": 1},
           "fix_effort": {"type": "string", "minLength": 1},
+          "blocking": {"type": "boolean"},
           "category": {"type": "string", "minLength": 1}
         }
       }

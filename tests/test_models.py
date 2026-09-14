@@ -75,6 +75,37 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             ReviewComment(path="src/app.py", line=1, body="finding", fix_effort=1)
 
+    def test_review_comment_requires_a_boolean_blocking_classification(self):
+        with self.assertRaises(ReviewInputError):
+            ReviewComment(path="src/app.py", line=1, body="finding", blocking="no")
+
+    def test_review_comment_round_trips_blocking_classification(self):
+        comment = ReviewComment(
+            path="src/app.py", line=1, body="follow up", blocking=False
+        )
+        self.assertEqual(
+            ReviewResult.from_dict(
+                {
+                    "summary": "Review complete.",
+                    "comments": [comment.to_dict()],
+                    "provider": "fake",
+                }
+            ).comments[0],
+            comment,
+        )
+
+    def test_review_result_allows_an_unclassified_comment(self):
+        result = ReviewResult.from_dict(
+            {
+                "summary": "Review complete.",
+                "comments": [
+                    {"path": "src/app.py", "line": 1, "body": "finding"}
+                ],
+                "provider": "fake",
+            }
+        )
+        self.assertIsNone(result.comments[0].blocking)
+
     def test_review_comment_rejects_oversized_or_control_labels(self):
         for label, value in (
             ("severity", "x" * 257),

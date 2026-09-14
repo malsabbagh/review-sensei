@@ -21,11 +21,21 @@ class ReviewPresentationTests(unittest.TestCase):
             severity="high",
             fix_effort="small",
             category="api-security",
+            blocking=True,
         )
         self.assertEqual(
             format_review_comment(comment),
-            "[🟠 Severity: High] [⚡ Fix effort: Small] [🔎 Lens: Api Security]\n\n"
+            "[🚫 Blocking] [🟠 Severity: High] [⚡ Fix effort: Small] [🔎 Lens: Api Security]\n\n"
             "Handle the missing return value.",
+        )
+
+    def test_inline_comment_marks_non_blocking_follow_ups(self):
+        comment = ReviewComment(
+            path="src/app.py", line=2, body="Consider extracting this.", blocking=False
+        )
+        self.assertEqual(
+            format_review_comment(comment),
+            "[💬 Non-blocking]\n\nConsider extracting this.",
         )
 
     def test_inline_comment_uses_known_icons_and_safe_fallbacks(self):

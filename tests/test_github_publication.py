@@ -26,7 +26,9 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 def result():
     return ReviewResult(
         summary="Summary.",
-        comments=(ReviewComment(path="src/app.py", line=2, body="finding"),),
+        comments=(
+            ReviewComment(path="src/app.py", line=2, body="finding", blocking=True),
+        ),
         provider="ollama",
     )
 
@@ -47,9 +49,25 @@ def classified_result():
                 path="src/app.py",
                 line=2,
                 body="finding",
+                blocking=True,
                 severity="high",
                 fix_effort="small",
                 category="correctness",
+            ),
+        ),
+        provider="ollama",
+    )
+
+
+def non_blocking_result():
+    return ReviewResult(
+        summary="Summary.",
+        comments=(
+            ReviewComment(
+                path="src/app.py",
+                line=2,
+                body="Optional follow-up.",
+                blocking=False,
             ),
         ),
         provider="ollama",
@@ -230,12 +248,41 @@ class ReviewPublisherTests(unittest.TestCase):
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertIn("Review classification:", body["body"])
         self.assertIn(
-            "[🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
+            "[🚫 Blocking] [🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
             body["comments"][0]["body"],
         )
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["event"], "COMMENT")
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
+
+    def test_non_blocking_finding_can_publish_an_approval(self):
+        head = "b" * 40
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=non_blocking_result(),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+        )
+
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+        self.assertEqual(body["comments"][0]["path"], "src/app.py")
 
     def test_rejects_formatted_comment_that_exceeds_output_limit(self):
         head = "b" * 40

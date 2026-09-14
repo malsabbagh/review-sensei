@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-09-07
+Last updated: 2026-09-14
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -38,8 +38,9 @@ Process: `docs/process/adr-process.md`
 | [0027](0027-opt-in-app-approvals-for-clean-pull-request-reviews.md) | Superseded | Historical opt-in App approvals for clean pull-request reviews | #96 | Separate approval toggle superseded by ADR 0030 |
 | [0028](0028-bounded-review-output-recovery.md) | Proposed | Recover once from invalid provider structure and page GitHub history within response bounds | Not configured | Transactional provider retry and 20-item learning-PR discovery pages |
 | [0029](0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Not configured | Additive v1 classification metadata and deterministic publisher rendering |
-| [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Proposed | Gate App approvals on resolved review threads and exact-head review safety | not configured | Existing automatic review/write path approves only after a clean exact-head result and complete resolved-thread sweep; unresolved findings remain comments. |
+| [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | not configured | Superseded by ADR 0032. |
 | [0031](0031-npm-launcher-and-standalone-platform-packages.md) | Proposed | Thin npx launcher with five native standalone platform packages | #103 | Exact target selection, public-source provenance, protected npm publication, registry readback, and version-forward rollback |
+| [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; omitted values fall back to critical/high severity while resolved-thread safety remains. |
 
 ## Policy
 
