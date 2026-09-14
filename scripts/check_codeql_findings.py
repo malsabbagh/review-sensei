@@ -281,7 +281,15 @@ def finding_fingerprint(result: dict[str, Any]) -> str:
 def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
     """Normalize a SARIF/baseline artifact location to a repository path."""
 
-    value = unquote(uri.strip())
+    value = uri.strip()
+    # SARIF URIs can be nested-encoded (for example ``%252e%252e``). Decode
+    # repeatedly so traversal checks see the actual path, while bounding the
+    # work performed on attacker-controlled input.
+    for _ in range(8):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
     # A repository filename may legitimately contain a colon (for example
     # ``docs/file:example.md``).  Only strip a URI scheme when the URI has the
     # unambiguous ``scheme://`` form; ``urlsplit`` alone would misclassify such

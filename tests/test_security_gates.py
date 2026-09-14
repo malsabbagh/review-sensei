@@ -596,6 +596,11 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 module._normalize_location("src%2F..%2Foutside.py")
             )
         )
+        self.assertFalse(
+            module._is_safe_location(
+                module._normalize_location("src%252F..%252Foutside.py")
+            )
+        )
         self.assertTrue(
             module._is_safe_location(module._normalize_location("src%2Ffile.py"))
         )
