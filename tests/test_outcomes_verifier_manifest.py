@@ -1,22 +1,40 @@
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import PromotionRecord
-from review_sensei.outcomes import RecoveryArtifact, RunOutcome
+from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.verifier import (
     CandidateFinding,
     EvidenceReference,
+    VerificationResult,
     verify_candidate,
+    verify_candidates,
 )
 
 SHA = "a" * 64
 
 
 class ContractsTests(unittest.TestCase):
+    RESULT = {"summary": "ok", "comments": [], "provider": "fixture"}
+
+    @staticmethod
+    def _artifact(**kwargs):
+        values = {
+            "repository": "acme/repo",
+            "pull_request_number": 1,
+            "base_sha": SHA,
+            "head_sha": SHA,
+            "result": ContractsTests.RESULT,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }
+        values.update(kwargs)
+        return RecoveryArtifact.create(**values)
+
     def test_fixture_promotion_is_rejected(self):
         with self.assertRaises(ReviewInputError):
             PromotionRecord(
@@ -26,6 +44,82 @@ class ContractsTests(unittest.TestCase):
     def test_run_outcome_round_trip(self):
         value = RunOutcome("skipped_policy", diagnostic="policy").to_dict()
         self.assertEqual(value["status"], "skipped_policy")
+
+    def test_budget_and_outcome_validation_boundaries(self):
+        for field in (
+            "max_provider_calls",
+            "max_retry_attempts",
+            "timeout_ms",
+            "max_prompt_bytes",
+            "max_output_bytes",
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                ResourceBudget(**{field: -1})
+        with self.assertRaises(ReviewInputError):
+            ResourceBudget(max_provider_calls=True)
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("not-a-status")
+        for field in (
+            "provider_calls",
+            "retry_attempts",
+            "prompt_bytes",
+            "response_bytes",
+            "elapsed_ms",
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                RunOutcome("reviewed", **{field: -1})
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", base_sha="bad")
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", head_sha="bad")
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", diagnostic="x" * 513)
+
+    def test_recovery_artifact_serialization_and_fail_closed_expiry(self):
+        artifact = self._artifact()
+        self.assertEqual(artifact.to_dict()["result_sha256"], artifact.result_sha256)
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result=[],  # type: ignore[arg-type]
+                expires_at=artifact.expires_at,
+            )
+        with self.assertRaises(ReviewInputError):
+            replace(artifact, result_sha256="b" * 64).validate(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+            )
+        with self.assertRaises(ReviewInputError):
+            replace(artifact, expires_at="not-a-date").validate(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+            )
+        with self.assertRaises(ReviewInputError):
+            replace(
+                artifact,
+                expires_at=(
+                    datetime.now(timezone.utc) - timedelta(hours=1)
+                ).isoformat(),
+            ).validate(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+            )
+        artifact.validate(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            now=datetime.now().replace(tzinfo=None),
+        )
 
     def test_recovery_artifact_rejects_tampering_and_identity_mismatch(self):
         result = {"summary": "ok", "comments": [], "provider": "fixture"}
@@ -125,6 +219,120 @@ class ContractsTests(unittest.TestCase):
             ).disposition,
             "rejected",
         )
+
+    def test_evidence_and_candidate_contracts_are_bounded(self):
+        reference = EvidenceReference("src/app.py", 1, SHA, "line")
+        self.assertEqual(reference.to_dict()["path"], "src/app.py")
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", True, SHA)
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", 1, "bad")
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", 1, SHA, "x" * 513)
+        base = {
+            "claim": "bug",
+            "triggering_conditions": "when called",
+            "impacted_path": "src/app.py",
+            "evidence": [reference.to_dict()],
+            "severity_rationale": "causes failure",
+        }
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict([])  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "evidence": "bad"})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "evidence": ["bad"]})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "assumptions": "bad"})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "assumptions": [1]})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                (),
+                "causes failure",
+            )
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                tuple(reference for _ in range(9)),
+                "causes failure",
+            )
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                (reference,),
+                "causes failure",
+                ("",),
+            )
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                (reference,),
+                "causes failure",
+                tuple("ok" for _ in range(17)),
+            )
+
+    def test_verification_result_and_candidate_batch_contracts(self):
+        result = VerificationResult("confirmed", (), True, True)
+        self.assertEqual(result.to_dict()["disposition"], "confirmed")
+        with self.assertRaises(ReviewInputError):
+            VerificationResult("unknown", (), False, False)
+        with self.assertRaises(ReviewInputError):
+            verify_candidates([object()], {}, snapshot_sha256=SHA)  # type: ignore[list-item]
+
+    def test_verifier_rejects_invalid_snapshot_and_each_evidence_mismatch(self):
+        text = "line one\nline two\n"
+        snapshot = {"src/app.py": text}
+        snapshot_sha = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        candidate = CandidateFinding(
+            "bug",
+            "when called",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 1, snapshot_sha, "line one"),),
+            "causes failure",
+        )
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(object(), snapshot, snapshot_sha256=snapshot_sha)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(candidate, [], snapshot_sha256=snapshot_sha)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(candidate, snapshot, snapshot_sha256="bad")
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(candidate, {1: text}, snapshot_sha256=snapshot_sha)  # type: ignore[dict-item]
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(candidate, {"src/app.py": 1}, snapshot_sha256=snapshot_sha)  # type: ignore[dict-item]
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(candidate, snapshot, snapshot_sha256="b" * 64)
+        for reference in (
+            EvidenceReference("src/missing.py", 1, snapshot_sha),
+            EvidenceReference("src/app.py", 9, snapshot_sha),
+            EvidenceReference("src/app.py", 1, snapshot_sha, "absent"),
+            EvidenceReference("src/app.py", 1, "b" * 64),
+        ):
+            with self.subTest(reference=reference):
+                rejected = verify_candidate(
+                    replace(candidate, evidence=(reference,)),
+                    snapshot,
+                    snapshot_sha256=snapshot_sha,
+                )
+                self.assertEqual(rejected.disposition, "rejected")
+        duplicate = verify_candidates(
+            [candidate, candidate], snapshot, snapshot_sha256=snapshot_sha
+        )
+        self.assertEqual(duplicate[1].reasons, ("duplicate candidate",))
 
     def test_candidate_parser_rejects_non_string_fields_and_assumptions(self):
         evidence = {
