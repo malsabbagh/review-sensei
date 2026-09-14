@@ -2,6 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-07
+Last amended: 2026-09-14
 GitHub Issue: not configured
 Pull Request: 102
 Owners/Reviewers: Maintainers
@@ -29,7 +30,11 @@ sweep confirms that every existing pull-request review thread is resolved. Any
 open thread, App-authored PR, draft/closed/fork/stale target, or lookup failure
 keeps the event as COMMENT or fails closed before writing. Use one deterministic
 policy seam so the review process records why approval was blocked without
-trusting provider text; no separate approval toggle is introduced.
+trusting provider text; no separate approval toggle is introduced. Reconcile
+published GitHub review states separately: a fresh clean run may promote an
+existing same-head ReviewSensei `COMMENTED` review to one `APPROVED` review
+after the final thread sweep passes, while repeated comments and approvals
+remain idempotent.
 
 ## Scope
 
@@ -62,7 +67,8 @@ Negative or tradeoffs:
 - A missing, malformed, unauthorized, or oversized thread response fails closed
   rather than approving; the review may need a retry or manual approval.
 - A thread resolved after the final sweep does not retroactively change the
-  already-published event; the per-head marker remains idempotent.
+  already-published event by itself; a fresh review run is required to perform
+  a guarded same-head promotion.
 - GitHub GraphQL availability becomes a dependency only for clean review
   publication; finding-bearing COMMENT publication is unchanged.
 
@@ -92,15 +98,20 @@ Negative or tradeoffs:
   just before POST. It queries `reviewThreads` with a maximum of ten pages and
   asks only for `isResolved`; malformed pages, GraphQL errors, and transport
   failures fail closed before any write.
-- Marker reconciliation still happens first. A marker for the same head keeps
-  the operation idempotent, so resolving a thread does not create a second
-  review for an already-published head.
+- Marker reconciliation still happens first and reads the matching review's
+  GitHub state. Existing `APPROVED` reviews and repeated finding-bearing
+  `COMMENTED` reviews remain no-ops. A clean rerun may continue past an existing
+  `COMMENTED` marker, repeat the authoritative PR preflight and bounded thread
+  sweep, and submit one `APPROVE` event. Ambiguous write reconciliation matches
+  the intended state, so an older comment cannot be mistaken for a successful
+  approval.
 
 ## Validation And Rollout
 
-- Validation: Deterministic HTTP fakes cover clean approval, open and resolved
-  threads, cursor pagination, malformed/error responses, App-authored PRs,
-  findings, stale heads, and ordinary COMMENT publication. Run the full
+- Validation: Deterministic HTTP fakes cover clean approval, same-head comment
+  promotion, promotion failure reconciliation, open and resolved threads,
+  cursor pagination, malformed/error responses, App-authored PRs, findings,
+  stale heads, and ordinary COMMENT publication. Run the full
   repository quality sequence and verify no provider or conversation path
   consumes the approval policy.
 - Rollout: After the public workflow/package and customer setup are current,

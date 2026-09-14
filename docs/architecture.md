@@ -554,8 +554,10 @@ App-authored PRs, and conversation replies remain `COMMENT`; malformed or
 unavailable thread state fails closed before a write. The sweep asks only for
 `isResolved`, is capped at ten pages, and runs after marker reconciliation and
 the final PR preflight. The existing `pull_requests: write` capability and
-per-head marker/idempotency boundary are shared, so approval adds no credential
-or persistence boundary.
+per-head marker/idempotency boundary are shared. Reconciliation tracks the
+published GitHub review state, allowing one same-head `COMMENTED` to
+`APPROVED` promotion after a fresh clean run while deduplicating repeated
+events, so approval adds no credential or persistence boundary.
 
 Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the

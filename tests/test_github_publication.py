@@ -85,6 +85,15 @@ def pr_payload(*, head_sha, fork=False, state="open", draft=False, author="alice
     }
 
 
+def published_review(*, marker, head_sha, state):
+    return {
+        "body": marker,
+        "commit_id": head_sha,
+        "state": state,
+        "user": {"login": "reviewsensei[bot]"},
+    }
+
+
 def graphql_review_threads_response(
     *, nodes=(), has_next_page=False, end_cursor=None, status=200
 ):
@@ -562,7 +571,7 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
-    def test_existing_marker_is_reconciled_before_post(self):
+    def test_existing_approval_is_reconciled_before_post(self):
         head = "b" * 40
         marker = review_marker(
             repository_id=1,
@@ -575,11 +584,11 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response(
                     [
-                        {
-                            "body": f"Summary.\n\n{marker}",
-                            "commit_id": head,
-                            "user": {"login": "reviewsensei[bot]"},
-                        }
+                        published_review(
+                            marker=f"Summary.\n\n{marker}",
+                            head_sha=head,
+                            state="APPROVED",
+                        )
                     ]
                 ),
             ]
@@ -599,6 +608,128 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET"])
 
+    def test_clean_rerun_promotes_same_head_comment_after_threads_resolve(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="COMMENTED")]
+                ),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=({"isResolved": True},)),
+                json_response({"id": 6}, 200),
+            ],
+            result=clean_result(),
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+        self.assertEqual(body["commit_id"], head)
+        self.assertEqual(body["comments"], [])
+
+    def test_clean_rerun_does_not_duplicate_comment_while_threads_are_open(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="COMMENTED")]
+                ),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=({"isResolved": False},)),
+            ],
+            result=clean_result(),
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
+
+    def test_finding_rerun_does_not_duplicate_same_head_comment(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="COMMENTED")]
+                ),
+            ]
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertEqual([call[0] for call in calls], ["GET", "GET"])
+
+    def test_promotion_failure_does_not_reconcile_to_prior_comment(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        prior_comment = published_review(
+            marker=marker, head_sha=head, state="COMMENTED"
+        )
+        with self.assertRaises(GitHubPublicationTransientError):
+            self.publish(
+                [
+                    json_response(pr_payload(head_sha=head)),
+                    json_response([prior_comment]),
+                    json_response(pr_payload(head_sha=head)),
+                    graphql_review_threads_response(),
+                    json_response({}, 500),
+                    json_response([prior_comment]),
+                ],
+                result=clean_result(),
+            )
+
+    def test_matching_review_with_unknown_state_fails_closed(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="DISMISSED")]
+                ),
+            ]
+        )
+        with self.assertRaises(GitHubPublicationError):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=clean_result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertEqual([call[0] for call in calls], ["GET", "GET"])
+
     def test_same_head_deduplicates_even_when_model_result_changes(self):
         head = "b" * 40
         different = ReviewResult(
@@ -616,13 +747,7 @@ class ReviewPublisherTests(unittest.TestCase):
             [
                 json_response(pr_payload(head_sha=head)),
                 json_response(
-                    [
-                        {
-                            "body": marker,
-                            "commit_id": head,
-                            "user": {"login": "reviewsensei[bot]"},
-                        }
-                    ]
+                    [published_review(marker=marker, head_sha=head, state="APPROVED")]
                 ),
             ]
         )

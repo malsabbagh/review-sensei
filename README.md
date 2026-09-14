@@ -450,13 +450,16 @@ and a final bounded GitHub thread sweep confirms that every existing review
 thread is resolved. Any open finding or thread, draft/closed/fork/stale PR,
 App-authored PR, or incomplete thread lookup keeps the event as `COMMENT` or
 fails closed; `@sensei` replies are always ordinary comments. Existing review
-markers still deduplicate one publication per head, so resolving a thread does
-not retroactively approve an already-published review.
+markers deduplicate each review state per head. A fresh clean review run on the
+same exact head may promote an earlier `COMMENTED` review to `APPROVED` after
+the final thread sweep confirms that every thread is resolved; it never posts
+a duplicate comment or approval.
 
 The approval policy is deliberately conservative: severity, fix effort, lens,
 and model confidence help triage findings but never override an unresolved
-thread. A later head must receive a fresh clean review after the final
-resolution sweep. See [ADR 0030](docs/adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
+thread. Resolving a thread does not itself start a GitHub Actions run, so rerun
+the review workflow (or push a new head) after the final resolution. See
+[ADR 0030](docs/adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
 for the criteria and rollback path.
 
 Manual review and authorized `@sensei` replies use the same selected provider

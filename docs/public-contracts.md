@@ -432,9 +432,11 @@ GraphQL `reviewThreads` sweep confirms that every existing review thread is
 resolved. Findings, unresolved threads, and `@sensei` replies remain
 `COMMENT`. Draft, closed, stale, fork, or App-authored pull requests are never
 approved. A malformed, unauthorized, incomplete, or over-limit thread response
-fails closed before the write. The existing marker deduplicates one review
-write per exact head; resolution after publication does not retroactively create
-an approval. The generated caller may contain only the name-only secret mapping
+fails closed before the write. The marker deduplicates each review state per
+exact head: a clean rerun may promote an earlier same-head `COMMENTED` review
+to one `APPROVED` review after all threads resolve, while repeated comments and
+approvals remain no-ops. Thread resolution alone does not trigger a workflow
+run. The generated caller may contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 

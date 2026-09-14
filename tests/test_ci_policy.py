@@ -119,6 +119,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
         )
+        self.assertIn(
+            "enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' "
+            "|| vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}",
+            text,
+        )
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
@@ -157,6 +162,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('case "$PROVIDER_MODE" in', text)
         self.assertEqual(text.count("github reply \\\n"), 2)
         self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertEqual(text.count("Publish or promote"), 2)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 

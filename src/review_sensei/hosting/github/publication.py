@@ -84,7 +84,7 @@ def review_marker(
 def review_identity_marker(
     *, repository_id: int, pull_request: int, head_sha: str
 ) -> str:
-    """Return the one-review-per-head reconciliation identity."""
+    """Return the per-head review-state reconciliation identity."""
 
     return (
         f"{REVIEW_MARKER_PREFIX} repo={repository_id} pr={pull_request} head={head_sha}"
@@ -164,17 +164,22 @@ class ReviewPublisher:
         )
         if preflight.result is not None:
             return preflight.result
-        # Reconcile before POST so retries never create a duplicate review.
-        # Any pagination/transport failure is an uncertainty and therefore
-        # fails closed instead of being treated as "no marker".
+        # Reconcile before POST so retries never create a duplicate event. A
+        # same-head COMMENTED review may still be promoted once to APPROVED
+        # after a clean rerun and a fresh resolved-thread sweep. Any
+        # pagination/transport failure is an uncertainty and therefore fails
+        # closed instead of being treated as "no marker".
         try:
-            if self._has_marker(
+            published_states = self._published_states(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 marker=identity_marker,
                 app_slug=app_slug,
+            )
+            if "APPROVED" in published_states or (
+                result.comments and "COMMENTED" in published_states
             ):
                 return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
@@ -251,6 +256,9 @@ class ReviewPublisher:
             has_open_review_threads=has_open_review_threads,
         )
         event = "APPROVE" if approval.approved else "COMMENT"
+        published_state = "APPROVED" if event == "APPROVE" else "COMMENTED"
+        if published_state in published_states:
+            return PublicationResult(status="already_published")
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",
@@ -275,6 +283,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 marker=identity_marker,
                 app_slug=app_slug,
+                expected_state=published_state,
             ):
                 return PublicationResult(status="already_published")
             raise GitHubPublicationTransientError(
@@ -297,6 +306,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 marker=identity_marker,
                 app_slug=app_slug,
+                expected_state=published_state,
             ):
                 return PublicationResult(status="already_published")
             raise GitHubPublicationError("review publication was rejected")
@@ -308,6 +318,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 marker=identity_marker,
                 app_slug=app_slug,
+                expected_state=published_state,
             ):
                 return PublicationResult(status="already_published")
             raise GitHubPublicationTransientError(
@@ -405,7 +416,7 @@ class ReviewPublisher:
             raise GitHubPublicationError("review preflight author was invalid")
         return _PreflightDecision(app_authored=author_login == app_slug)
 
-    def _has_marker(
+    def _published_states(
         self,
         *,
         token: str,
@@ -414,9 +425,10 @@ class ReviewPublisher:
         head_sha: str,
         marker: str,
         app_slug: str,
-    ) -> bool:
+    ) -> frozenset[str]:
         path = self.http.repository_path(repository, f"/pulls/{pull_request}/reviews")
         payload = self.http.paginate(path=path, token=token)
+        states: set[str] = set()
         for review in payload:
             if not isinstance(review, dict):
                 continue
@@ -430,8 +442,13 @@ class ReviewPublisher:
                 and isinstance(user, dict)
                 and user.get("login") == app_slug
             ):
-                return True
-        return False
+                state = review.get("state")
+                if state not in {"COMMENTED", "APPROVED"}:
+                    raise GitHubPublicationError(
+                        "review reconciliation response was invalid"
+                    )
+                states.add(state)
+        return frozenset(states)
 
     def _has_open_review_threads(
         self,
@@ -532,9 +549,10 @@ class ReviewPublisher:
         head_sha: str,
         marker: str,
         app_slug: str,
+        expected_state: str,
     ) -> bool:
         try:
-            return self._has_marker(
+            return expected_state in self._published_states(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
