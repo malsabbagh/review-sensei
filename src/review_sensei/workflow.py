@@ -152,16 +152,34 @@ class ReviewExecutionPlan:
     skip_reason: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "repository", _validate_repository(self.repository) or "")
-        if isinstance(self.repository_id, bool) or not isinstance(self.repository_id, int) or self.repository_id < 1:
+        object.__setattr__(
+            self, "repository", _validate_repository(self.repository) or ""
+        )
+        if (
+            isinstance(self.repository_id, bool)
+            or not isinstance(self.repository_id, int)
+            or self.repository_id < 1
+        ):
             raise _invalid("repository_id must be a positive integer")
-        object.__setattr__(self, "pull_request_number", _positive_int(self.pull_request_number, label="pull_request_number", default=1))
-        object.__setattr__(self, "base_ref", _validate_ref(self.base_ref, label="base_ref"))
-        object.__setattr__(self, "head_ref", _validate_ref(self.head_ref, label="head_ref"))
+        object.__setattr__(
+            self,
+            "pull_request_number",
+            _positive_int(
+                self.pull_request_number, label="pull_request_number", default=1
+            ),
+        )
+        object.__setattr__(
+            self, "base_ref", _validate_ref(self.base_ref, label="base_ref")
+        )
+        object.__setattr__(
+            self, "head_ref", _validate_ref(self.head_ref, label="head_ref")
+        )
         for label, value in (("base_sha", self.base_sha), ("head_sha", self.head_sha)):
             if not isinstance(value, str) or _SHA.fullmatch(value) is None:
                 raise _invalid(f"{label} must be a 40-character commit SHA")
-        object.__setattr__(self, "head_repository", _validate_repository(self.head_repository) or "")
+        object.__setattr__(
+            self, "head_repository", _validate_repository(self.head_repository) or ""
+        )
         if self.operation not in {"review", "reply"}:
             raise _invalid("operation must be review or reply")
         if self.title is not None:
@@ -171,7 +189,9 @@ class ReviewExecutionPlan:
             # bounded-text contract as ReviewRequest.
             from .validation import validate_bounded_text
 
-            validate_bounded_text(self.title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title")
+            validate_bounded_text(
+                self.title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title"
+            )
         if not isinstance(self.eligible, bool):
             raise _invalid("eligible must be a boolean")
         if self.skip_reason is not None and (
@@ -223,7 +243,11 @@ def plan_review_execution(
     validated_repository = _validate_repository(repository)
     if validated_repository is None:
         raise _invalid("repository must be an owner/repo slug")
-    if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id < 1:
+    if (
+        isinstance(repository_id, bool)
+        or not isinstance(repository_id, int)
+        or repository_id < 1
+    ):
         raise _invalid("repository_id must be a positive integer")
     number = _positive_int(pull_request_number, label="pull_request_number", default=1)
     validated_base = _validate_ref(base_ref, label="base_ref")
@@ -247,7 +271,9 @@ def plan_review_execution(
     if title is not None:
         from .validation import validate_bounded_text
 
-        validate_bounded_text(title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title")
+        validate_bounded_text(
+            title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title"
+        )
 
     reason: str | None = None
     if state != "open":
