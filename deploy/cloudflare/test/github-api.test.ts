@@ -416,7 +416,7 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_installation_permissions_invalid");
   });
 
-  it("accepts GitHub's single Variables alias only as the requested Variables scope", async () => {
+  it("accepts the controlled setup Variables alias only as the requested Variables scope", async () => {
     const client = api();
     vi.spyOn(client, "request").mockResolvedValue({
       status: 201,

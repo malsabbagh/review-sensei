@@ -256,10 +256,12 @@ repository-data access while publishing a review. The broker never requests
 that permission, and `inline_reply`, `issue_reply`, and `learning_write`
 reject it if it is returned. This is a narrow compatibility exception, not an
 additional capability grant. GitHub's `variables` and `actions_variables`
-spellings represent the same requested Variables scope and are accepted only
-when that scope was requested; a response containing both is rejected as
-ambiguous rather than silently selecting one. No capability requests Variables,
-so this compatibility rule cannot add authority to a capability token.
+spellings represent the same requested Variables scope. The setup-token request
+uses the documented `actions_variables` field and normalizes it only to compare
+that controlled request with GitHub's returned `variables` map; capability
+maps use canonical permission names only. A response containing both aliases is
+rejected as ambiguous rather than silently selecting one, so this compatibility
+seam cannot add authority to a capability token.
 Any unknown returned permission, unexpected level, or requested-level mismatch
 also fails closed: the broker issues a token only after GitHub's returned map
 matches the approved capability contract exactly. This can temporarily reject
