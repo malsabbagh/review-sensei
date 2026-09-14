@@ -1,0 +1,44 @@
+name: Protection policy readback
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruleset_id:
+        description: Active branch ruleset ID to capture and compare
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  readback:
+    name: Compare live ruleset
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Capture active ruleset readback
+        env:
+          GH_TOKEN: ${{ secrets.REVIEWSENSEI_RULESET_READ_TOKEN }}
+          RULESET_ID: ${{ inputs.ruleset_id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "Configure the REVIEWSENSEI_RULESET_READ_TOKEN secret before running readback" >&2
+            exit 1
+          fi
+          if [[ ! "$RULESET_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ruleset_id must be a positive integer" >&2
+            exit 1
+          fi
+          gh api --fail-with-body \
+            "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
+            > "$RUNNER_TEMP/reviewsensei-ruleset.json"
+      - name: Validate protection policy against readback
+        run: |
+          python scripts/check_protection_policy.py \
+            --policy .github/protection-policy.json \
+            --readback "$RUNNER_TEMP/reviewsensei-ruleset.json"

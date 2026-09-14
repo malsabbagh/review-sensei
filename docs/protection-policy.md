@@ -10,11 +10,12 @@ GitHub and retain the authoritative API response as evidence.
 - `main` requires pull requests, one approval, code-owner review, stale-review
   dismissal, conversation resolution, latest-push approval, and the `Required
   checks` status with strict/up-to-date semantics.
-- Bypass is limited to one configured named maintainer actor for pull-request
-  recovery (`max_bypass_actors: 1`). This is one policy entry, not necessarily
-  one human principal; replace and revalidate the actor identity before copying
-  the repository-specific contract. Do not add a blanket `always` bypass or a
-  bot bypass; record any recovery use.
+- Bypass is limited to the repository owner `@malsabbagh` (user ID `13791232`)
+  for pull-request recovery (`max_bypass_actors: 1`). The identity is explicit
+  so a future maintainer or collaborator cannot inherit break-glass authority
+  accidentally. Revalidate the user ID before copying this repository-specific
+  contract. Do not add a blanket `always` bypass or a bot bypass; record any
+  recovery use.
 - Immutable semantic version tags (`vMAJOR.MINOR.PATCH`) cannot be deleted or
   replaced. `v4` is the sole movable operator-managed setup channel, and every
   promotion is recorded in `.publication/publication-ledger.jsonl`.
@@ -43,6 +44,14 @@ python scripts/check_protection_policy.py \
   --policy .github/protection-policy.json \
   --readback /tmp/reviewsensei-ruleset.json
 ```
+
+The manual `Protection policy readback` workflow performs the same capture and
+comparison from a controlled runner. Configure the repository secret
+`REVIEWSENSEI_RULESET_READ_TOKEN` with a narrowly scoped GitHub App or
+fine-grained token that can read this ruleset (the API only includes
+`bypass_actors` when the caller can view the ruleset details), then dispatch the
+workflow with the active ruleset ID. The workflow runs only a GET request and
+fails closed when the secret or ID is missing.
 
 The check fails closed when the response is malformed, the target branch or
 pull-request/status-check parameters drift, `Required checks` is missing, or a

@@ -3,7 +3,7 @@
 The command never mutates GitHub.  Pass ``--readback`` with a JSON response
 captured from ``gh api repos/OWNER/REPO/rulesets/ID`` to detect drift.  Without
 that option it validates the checked-in policy document, which is safe to run
-in ordinary pull-request CI where administration read permission is unavailable.
+in ordinary pull-request CI where ruleset API credentials are unavailable.
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
         if max_bypass_actors is not None and len(actors) > max_bypass_actors:
             errors.append("policy.bypass_actors must not exceed max_bypass_actors")
         seen_names: set[str] = set()
+        seen_identities: set[tuple[int, str]] = set()
         for actor in actors:
             if not isinstance(actor, dict):
                 errors.append("bypass actors must be objects")
@@ -82,13 +83,19 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             else:
                 seen_names.add(name)
             actor_id = actor.get("actor_id")
+            actor_type = actor.get("actor_type")
             if (
                 isinstance(actor_id, bool)
                 or not isinstance(actor_id, int)
                 or actor_id <= 0
             ):
                 errors.append("bypass actors must have a positive actor_id")
-            actor_type = actor.get("actor_type")
+            elif isinstance(actor_type, str) and actor_type.strip():
+                identity = (actor_id, actor_type)
+                if identity in seen_identities:
+                    errors.append("bypass actors must have unique actor identities")
+                else:
+                    seen_identities.add(identity)
             if not isinstance(actor_type, str) or not actor_type.strip():
                 errors.append("bypass actors must have a non-empty actor_type")
             reason = actor.get("reason")

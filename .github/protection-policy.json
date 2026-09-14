@@ -15,10 +15,10 @@
   "max_bypass_actors": 1,
   "bypass_actors": [
     {
-      "name": "repository maintainer",
-      "actor_id": 5,
-      "actor_type": "RepositoryRole",
-      "reason": "Break-glass recovery only; record every use",
+      "name": "malsabbagh",
+      "actor_id": 13791232,
+      "actor_type": "User",
+      "reason": "Break-glass recovery for the repository owner only; record every use",
       "bypass_mode": "pull_request"
     }
   ],

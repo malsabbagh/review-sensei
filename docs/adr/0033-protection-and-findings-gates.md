@@ -27,9 +27,10 @@ job.
 
 The baseline is intentionally empty and exceptions expire after 30 days; any
 addition is a reviewed change. Each CodeQL matrix job requires exactly one
-metadata-labelled report for its language, and the aggregate required check
-requires both language jobs to pass, preventing a missing analysis from
-appearing as zero findings. A read-only policy check in CI validates the
-contract but cannot prove GitHub's live ruleset; maintainers must capture and
-compare the authoritative API response and run disposable behavioral tests
-before applying settings.
+metadata-labelled report for its language. The `required-checks` aggregate job
+depends on the complete matrix, so both language jobs must pass before the
+single branch-protection status is green; a missing analysis cannot appear as
+zero findings. The pull-request CI check validates the policy document only;
+the manual ruleset-readback workflow compares an administrator-captured API
+response and reports live drift. Maintainers must still run disposable
+behavioral tests before applying settings.

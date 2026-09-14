@@ -3,7 +3,7 @@ import json
 import re
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -151,6 +151,88 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             module.finding_fingerprint(first),
             module.finding_fingerprint({**first, "ruleId": "js/test"}),
         )
+
+    def test_partial_fingerprint_baseline_remains_scoped_to_location(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline.json"
+            old_result = {
+                "ruleId": "py/test",
+                "level": "warning",
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": "src/old.py"},
+                            "region": {"startLine": 3},
+                        }
+                    }
+                ],
+                "partialFingerprints": {"primaryLocationLineHash": "abc123"},
+            }
+            moved_result = {
+                **old_result,
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": "src/new.py"},
+                            "region": {"startLine": 99},
+                        }
+                    }
+                ],
+            }
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "policy": {
+                            "fail_on_levels": ["warning"],
+                            "minimum_score": 2,
+                            "exception_expiry_days": 30,
+                        },
+                        "findings": [
+                            {
+                                "fingerprint": module.finding_fingerprint(old_result),
+                                "rule": "py/test",
+                                "location": "src/old.py",
+                                "rationale": "test",
+                                "owner": "test",
+                                "expires_on": (
+                                    date.today() + timedelta(days=1)
+                                ).isoformat(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._sarif(
+                root,
+                name="python.sarif",
+                language="python",
+                runs=[
+                    {
+                        "tool": {
+                            "driver": {
+                                "name": "CodeQL",
+                                "organization": "GitHub",
+                                "rules": [],
+                            }
+                        },
+                        "properties": {"language": "python"},
+                        "automationDetails": {"id": "/language:python"},
+                        "results": [moved_result],
+                    }
+                ],
+            )
+            violations = module.evaluate(
+                root,
+                baseline,
+                expected_reports=1,
+                expected_languages=("python",),
+            )
+            self.assertEqual(len(violations), 1)
+            self.assertIn("unreviewed", violations[0])
 
     def test_codeql_rejects_invalid_severity_and_partial_fingerprints(self):
         module = _load_script("check_codeql_findings.py")
@@ -652,6 +734,19 @@ class ProtectionPolicyTests(unittest.TestCase):
         errors = module.validate_policy(drifted)
         self.assertTrue(any("ruleset.target" in error for error in errors))
 
+    def test_bypass_actor_identity_is_concrete_and_unique(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        actor = policy["bypass_actors"][0]
+        self.assertEqual(actor["name"], "malsabbagh")
+        self.assertEqual(actor["actor_id"], 13791232)
+        self.assertEqual(actor["actor_type"], "User")
+
+        duplicate = json.loads(json.dumps(policy))
+        duplicate["bypass_actors"].append(dict(actor))
+        errors = module.validate_policy(duplicate)
+        self.assertTrue(any("unique actor identities" in error for error in errors))
+
     def test_drifted_readback_is_rejected(self):
         module = _load_script("check_protection_policy.py")
         policy = module.load_object(ROOT / ".github" / "protection-policy.json")
@@ -709,8 +804,8 @@ class ProtectionPolicyTests(unittest.TestCase):
             ],
             "bypass_actors": [
                 {
-                    "actor_id": 5,
-                    "actor_type": "RepositoryRole",
+                    "actor_id": 13791232,
+                    "actor_type": "User",
                     "bypass_mode": "pull_request",
                 }
             ],
@@ -800,8 +895,8 @@ class ProtectionPolicyTests(unittest.TestCase):
             ],
             "bypass_actors": [
                 {
-                    "actor_id": 5,
-                    "actor_type": "RepositoryRole",
+                    "actor_id": 13791232,
+                    "actor_type": "User",
                     "bypass_mode": "pull_request",
                 }
             ],

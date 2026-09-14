@@ -143,6 +143,23 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("github.event.comment.author_association == 'COLLABORATOR'", text)
         self.assertIn("github.event.comment.user.type != 'Bot'", text)
 
+    def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "protection-policy-readback.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("ruleset_id:", text)
+        self.assertIn("REVIEWSENSEI_RULESET_READ_TOKEN", text)
+        self.assertIn("gh api --fail-with-body", text)
+        self.assertIn("--readback", text)
+        self.assertNotIn("gh api -X", text)
+        self.assertNotIn("PATCH", text)
+        self.assertNotIn("administration:", text)
+
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
             Path(__file__).resolve().parents[1]
