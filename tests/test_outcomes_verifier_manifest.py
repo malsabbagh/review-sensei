@@ -28,12 +28,13 @@ class ContractsTests(unittest.TestCase):
         self.assertEqual(value["status"], "skipped_policy")
 
     def test_recovery_artifact_rejects_tampering_and_identity_mismatch(self):
+        result = {"summary": "ok", "comments": [], "provider": "fixture"}
         artifact = RecoveryArtifact.create(
             repository="acme/repo",
             pull_request_number=1,
             base_sha=SHA,
             head_sha=SHA,
-            result={"summary": "ok"},
+            result=result,
             expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         )
         artifact.validate(
@@ -42,6 +43,52 @@ class ContractsTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             artifact.validate(
                 repository="other/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+            )
+
+    def test_recovery_artifact_rejects_invalid_or_oversized_results(self):
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result={"summary": "missing required fields"},
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+            )
+        oversized = {
+            "summary": "x" * (2_097_152 + 1),
+            "comments": [],
+            "provider": "fixture",
+        }
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result=oversized,
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+            )
+
+    def test_recovery_artifact_rejects_timezone_less_expiry(self):
+        artifact = RecoveryArtifact.create(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            result={"summary": "ok", "comments": [], "provider": "fixture"},
+            expires_at="2099-01-01T00:00:00",
+        )
+        with self.assertRaises(ReviewInputError):
+            artifact.validate(
+                repository="acme/repo",
                 pull_request_number=1,
                 base_sha=SHA,
                 head_sha=SHA,

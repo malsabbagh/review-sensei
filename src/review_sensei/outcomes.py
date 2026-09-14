@@ -8,6 +8,7 @@ partial or failed run without retaining prompts, responses, or source text.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from typing import Mapping
 
 from .errors import ReviewInputError
 from .schemas import validate_public_document
+from .validation import DEFAULT_REVIEW_LIMITS
 
 RUN_STATUSES = frozenset(
     {
@@ -29,10 +31,33 @@ RUN_STATUSES = frozenset(
     }
 )
 _SNAPSHOT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
+MAX_RECOVERY_RESULT_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
 
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _canonical_recovery_result(result: Mapping[str, object]) -> str:
+    """Validate and serialize a retained review result before hashing it."""
+
+    if not isinstance(result, Mapping):
+        raise ReviewInputError("recovery artifact result must be an object")
+    document = dict(result)
+    validate_public_document(document, "review-result")
+    try:
+        canonical = json.dumps(
+            document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReviewInputError(
+            "recovery artifact result is not JSON-serializable"
+        ) from exc
+    if len(canonical.encode("utf-8")) > MAX_RECOVERY_RESULT_BYTES:
+        raise ReviewInputError(
+            "recovery artifact result exceeds the configured size limit"
+        )
+    return canonical
 
 
 @dataclass(frozen=True)
@@ -143,12 +168,8 @@ class RecoveryArtifact:
         result: Mapping[str, object],
         expires_at: str,
     ) -> "RecoveryArtifact":
-        import json
-
         created = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        canonical = json.dumps(
-            result, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        )
+        canonical = _canonical_recovery_result(result)
         return cls(
             repository,
             pull_request_number,
@@ -169,8 +190,6 @@ class RecoveryArtifact:
         head_sha: str,
         now: datetime | None = None,
     ) -> None:
-        import json
-
         if (
             self.repository,
             self.pull_request_number,
@@ -180,16 +199,18 @@ class RecoveryArtifact:
             raise ReviewInputError(
                 "recovery artifact identity does not match current review"
             )
-        canonical = json.dumps(
-            self.result, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        )
+        canonical = _canonical_recovery_result(self.result)
         if _digest(canonical) != self.result_sha256:
             raise ReviewInputError("recovery artifact integrity check failed")
         try:
             expiry = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ReviewInputError("recovery artifact expiry is invalid") from exc
+        if expiry.tzinfo is None or expiry.utcoffset() is None:
+            raise ReviewInputError("recovery artifact expiry must include a timezone")
         current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            current = current.replace(tzinfo=timezone.utc)
         if expiry <= current:
             raise ReviewInputError("recovery artifact has expired")
 
