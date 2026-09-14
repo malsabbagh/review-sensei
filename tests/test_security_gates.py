@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +120,20 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             self.assertTrue(module.evaluate(root, baseline))
             (root / "broken.sarif").write_text("{}", encoding="utf-8")
             self.assertTrue(module.evaluate(root, baseline))
+
+    def test_sarif_scan_rejects_too_many_non_sarif_entries(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            filenames = [
+                f"ignored-{index}.txt"
+                for index in range(module.MAX_SARIF_SCAN_ENTRIES + 1)
+            ]
+            with mock.patch.object(
+                module.os, "walk", return_value=[(root, [], filenames)]
+            ):
+                with self.assertRaisesRegex(ValueError, "too many entries"):
+                    module._sarif_paths(root)
 
     def test_partial_fingerprint_survives_location_changes(self):
         module = _load_script("check_codeql_findings.py")
@@ -400,6 +415,21 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             )
             self.assertTrue(ambiguous)
             self.assertTrue(any("conflicting" in violation for violation in ambiguous))
+
+    def test_expected_languages_reject_empty_cli_entries(self):
+        module = _load_script("check_codeql_findings.py")
+        with self.assertRaises(SystemExit) as raised:
+            module.main(
+                [
+                    "--sarif-dir",
+                    "sarif",
+                    "--baseline",
+                    "baseline.json",
+                    "--expected-languages",
+                    "python,",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
 
     def test_rule_prefix_without_run_metadata_fails_closed(self):
         module = _load_script("check_codeql_findings.py")
@@ -792,6 +822,22 @@ class ProtectionPolicyTests(unittest.TestCase):
         }
         errors = module.compare_readback(policy, readback)
         self.assertTrue(any("Required checks" in error for error in errors))
+        self.assertTrue(any("blanket" in error for error in errors))
+
+    def test_malformed_rules_still_validate_bypass_actors(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = {
+            "enforcement": "active",
+            "target": "branch",
+            "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
+            "rules": {},
+            "bypass_actors": [
+                {"actor_id": 1, "actor_type": "Integration", "bypass_mode": "always"}
+            ],
+        }
+        errors = module.compare_readback(policy, readback)
+        self.assertTrue(any("rules must be an array" in error for error in errors))
         self.assertTrue(any("blanket" in error for error in errors))
 
     def test_complete_readback_matches_every_required_control(self):

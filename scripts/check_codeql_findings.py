@@ -24,6 +24,10 @@ _SARIF_VERSION = "2.1.0"
 _LEVELS = {"none": 0, "note": 1, "warning": 2, "error": 3}
 _SHA256 = set("0123456789abcdef")
 MAX_SARIF_FILES = 32
+# Bound directory traversal as well as accepted report count.  Non-SARIF files
+# are ignored for findings, but an unbounded directory walk could still exhaust
+# the runner before the report-count limit is reached.
+MAX_SARIF_SCAN_ENTRIES = 4096
 MAX_FINDINGS = 4096
 MAX_SARIF_FILE_BYTES = 8 * 1024 * 1024
 MAX_METADATA_TEXT = 512
@@ -392,9 +396,13 @@ def _sarif_paths(sarif_dir: Path) -> list[Path]:
     if sarif_dir.is_symlink() or not sarif_dir.is_dir():
         raise ValueError(f"SARIF directory does not exist: {sarif_dir}")
     paths: list[Path] = []
+    scanned_entries = 0
     for directory, directories, filenames in os.walk(
         sarif_dir, topdown=True, followlinks=False
     ):
+        scanned_entries += len(directories) + len(filenames)
+        if scanned_entries > MAX_SARIF_SCAN_ENTRIES:
+            raise ValueError("SARIF directory contains too many entries")
         directories[:] = sorted(
             name for name in directories if not (Path(directory) / name).is_symlink()
         )
@@ -683,7 +691,10 @@ def main(argv: list[str] | None = None) -> int:
         "--expected-reports",
         type=int,
         default=1,
-        help="minimum SARIF files expected (CI uses one report per analyzed language)",
+        help=(
+            "minimum SARIF files expected without --expected-languages; "
+            "with language metadata, exactly one report per language is required"
+        ),
     )
     parser.add_argument(
         "--expected-languages",
@@ -696,15 +707,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.expected_reports < 1:
         parser.error("--expected-reports must be positive")
+    if args.expected_languages:
+        language_parts = args.expected_languages.split(",")
+        if any(not language.strip() for language in language_parts):
+            parser.error("--expected-languages must not contain empty entries")
+        expected_languages = tuple(language.strip() for language in language_parts)
+    else:
+        expected_languages = ()
     violations = evaluate(
         args.sarif_dir,
         args.baseline,
         expected_reports=args.expected_reports,
-        expected_languages=tuple(
-            language.strip()
-            for language in args.expected_languages.split(",")
-            if language.strip()
-        ),
+        expected_languages=expected_languages,
     )
     if violations:
         print("\n".join(violations), file=sys.stderr)

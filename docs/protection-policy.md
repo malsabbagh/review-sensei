@@ -51,7 +51,11 @@ comparison from a controlled runner. Configure the repository secret
 fine-grained token that can read this ruleset (the API only includes
 `bypass_actors` when the caller can view the ruleset details), then dispatch the
 workflow with the active ruleset ID. The workflow runs only a GET request and
-fails closed when the secret or ID is missing.
+fails closed when the secret or ID is missing. Provision this as a dedicated
+readback credential and enforce its scope when creating the secret; the
+workflow cannot introspect or reduce permissions on an opaque token. Never
+reuse a deployment credential, and rotate or revoke the readback credential
+independently if the runner boundary is compromised.
 
 The check fails closed when the response is malformed, the target branch or
 pull-request/status-check parameters drift, `Required checks` is missing, or a

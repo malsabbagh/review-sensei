@@ -161,7 +161,10 @@ def compare_readback(policy: dict[str, Any], readback: dict[str, Any]) -> list[s
 
     rules = readback.get("rules", [])
     if not isinstance(rules, list):
-        return [*errors, "ruleset readback.rules must be an array"]
+        errors.append("ruleset readback.rules must be an array")
+        # Continue with an empty list so bypass actors are still checked and
+        # the caller receives every independently actionable drift signal.
+        rules = []
 
     def _rule_parameters(rule_type: str) -> dict[str, Any] | None:
         matching = [
@@ -247,6 +250,8 @@ def compare_readback(policy: dict[str, Any], readback: dict[str, Any]) -> list[s
     if not isinstance(bypass, list):
         errors.append("ruleset readback.bypass_actors must be an array")
     else:
+        # The ruleset API returns actor_id, actor_type, and bypass_mode but no
+        # descriptive actor name; the numeric/type identity is authoritative.
         actual_actors: list[tuple[int, str, str]] = []
         for actor in bypass:
             if not isinstance(actor, dict):
