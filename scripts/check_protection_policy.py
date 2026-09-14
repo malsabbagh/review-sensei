@@ -58,7 +58,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
         or not isinstance(max_bypass_actors, int)
         or max_bypass_actors != 1
     ):
-        errors.append("policy.max_bypass_actors must be 1")
+        errors.append("policy.max_bypass_actors must be exactly the integer 1")
         max_bypass_actors = None
     actors = policy.get("bypass_actors")
     if not isinstance(actors, list) or not actors:

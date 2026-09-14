@@ -491,6 +491,11 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             "src/file:example.py",
         )
         self.assertEqual(
+            module._normalize_location("src/file.ts:123", strip_line_suffix=False),
+            "src/file.ts:123",
+        )
+        self.assertEqual(module._normalize_location("src/file.ts:123"), "src/file.ts")
+        self.assertEqual(
             module._normalize_location("file:///etc/passwd"),
             "/etc/passwd",
         )

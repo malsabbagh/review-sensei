@@ -233,7 +233,11 @@ def finding_fingerprint(result: dict[str, Any]) -> str:
     uri_value = artifact.get("uri", "") if isinstance(artifact, dict) else ""
     if not isinstance(uri_value, str):
         raise ValueError("SARIF finding artifactLocation.uri must be a string")
-    normalized_uri = _normalize_location(uri_value) if uri_value.strip() else ""
+    normalized_uri = (
+        _normalize_location(uri_value, strip_line_suffix=False)
+        if uri_value.strip()
+        else ""
+    )
     payload = {
         "rule": rule,
         "uri": normalized_uri,
@@ -272,7 +276,7 @@ def finding_fingerprint(result: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _normalize_location(uri: str) -> str:
+def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
     """Normalize a SARIF/baseline artifact location to a repository path."""
 
     value = unquote(uri.strip())
@@ -285,10 +289,13 @@ def _normalize_location(uri: str) -> str:
         if parsed.path:
             value = parsed.path
     value = value.removeprefix("./")
-    # Baseline entries may carry the historical ``path:line`` spelling.  Keep
-    # only the artifact identity so partial fingerprints can survive line
-    # movement while still requiring the same file.
-    value = re.sub(r":\d+$", "", value)
+    if strip_line_suffix:
+        # Baseline entries may carry the historical ``path:line`` spelling.
+        # Keep only the artifact identity so partial fingerprints can survive
+        # line movement while still requiring the same file.  SARIF URIs use
+        # this helper with stripping disabled because a colon-plus-digits can
+        # be a legitimate repository filename.
+        value = re.sub(r":\d+$", "", value)
     return value
 
 
@@ -302,7 +309,7 @@ def _result_location(result: dict[str, Any]) -> str:
     uri = artifact.get("uri") if isinstance(artifact, dict) else None
     if not isinstance(uri, str) or not uri.strip():
         return ""
-    return _normalize_location(uri)
+    return _normalize_location(uri, strip_line_suffix=False)
 
 
 def _is_safe_location(location: str) -> bool:
