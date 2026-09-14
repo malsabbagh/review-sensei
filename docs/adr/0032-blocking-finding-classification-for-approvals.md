@@ -30,9 +30,8 @@ Add optional boolean `blocking` metadata to `ReviewComment` and the v1 review
 comment/result schemas. The default prompt instructs providers to emit it for
 every finding: `true` means the finding must be resolved before merge and
 `false` marks an optional follow-up. Explicit `blocking` always wins. When it
-is absent, only case-insensitive `medium`/`low` severity values or a missing
-severity are non-blocking; `critical`, `high`, and unrecognized nonempty values
-block.
+is absent, only case-insensitive `critical`/`high` severity values block.
+Missing, lower-severity, and legacy free-form severity values are non-blocking.
 
 Automatic approval requires no blocking findings and the existing bounded
 GitHub review-thread sweep to report every prior thread resolved. Non-blocking
@@ -95,9 +94,9 @@ earlier review feedback and weakens the existing publication-control boundary.
 
 Run model/schema, service, presentation, approval-policy, and GitHub publisher
 tests. Verify that explicit `false` can publish an approval after a resolved
-thread sweep; explicit `true`, omitted `critical`/`high`, and omitted unknown
-classifications remain comments; and omitted medium/low classifications are
-eligible subject to the same thread/preflight gates.
+thread sweep; explicit `true` and omitted `critical`/`high` classifications
+remain comments; and omitted lower-severity, missing, and legacy free-form
+classifications are eligible subject to the same thread/preflight gates.
 
 ## Rollout and Rollback
 

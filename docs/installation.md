@@ -113,7 +113,8 @@ when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
 the current exact PR head and base) or push a new head. Classification metadata
 (blocking, severity, fix effort, and lens) controls the approval boundary:
 explicit `false` does not prevent approval, while an omitted flag is
-non-blocking only for case-insensitive `medium`, `low`, or missing severity. See
+blocking only for case-insensitive `critical` or `high` severity; missing,
+lower-severity, and legacy free-form values are non-blocking. See
 [ADR 0032](adr/0032-blocking-finding-classification-for-approvals.md)
 for the full criteria and rollback procedure.
 

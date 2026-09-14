@@ -97,25 +97,30 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("blocking-findings-open",))
 
-    def test_unclassified_high_severity_findings_prevent_approval(self):
-        result = ReviewResult(
-            summary="Summary.",
-            comments=(
-                ReviewComment(
-                    path="src/app.py", line=2, body="Severe finding", severity="high"
-                ),
-            ),
-            provider="fixture",
-        )
+    def test_unclassified_severe_findings_prevent_approval(self):
+        for severity in ("critical", "high"):
+            with self.subTest(severity=severity):
+                result = ReviewResult(
+                    summary="Summary.",
+                    comments=(
+                        ReviewComment(
+                            path="src/app.py",
+                            line=2,
+                            body="Severe finding",
+                            severity=severity,
+                        ),
+                    ),
+                    provider="fixture",
+                )
 
-        decision = evaluate_auto_approval(
-            app_authored=False,
-            result=result,
-            has_open_review_threads=False,
-        )
+                decision = evaluate_auto_approval(
+                    app_authored=False,
+                    result=result,
+                    has_open_review_threads=False,
+                )
 
-        self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("blocking-findings-open",))
+                self.assertFalse(decision.approved)
+                self.assertEqual(decision.blockers, ("blocking-findings-open",))
 
     def test_unclassified_low_severity_findings_do_not_prevent_approval(self):
         result = ReviewResult(
@@ -155,28 +160,30 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertTrue(decision.approved)
         self.assertEqual(decision.blockers, ())
 
-    def test_unclassified_unknown_severity_findings_prevent_approval(self):
-        result = ReviewResult(
-            summary="Summary.",
-            comments=(
-                ReviewComment(
-                    path="src/app.py",
-                    line=2,
-                    body="Unknown finding",
-                    severity="warning",
-                ),
-            ),
-            provider="fixture",
-        )
+    def test_unclassified_free_form_severity_findings_do_not_prevent_approval(self):
+        for severity in ("warning", "suggestion"):
+            with self.subTest(severity=severity):
+                result = ReviewResult(
+                    summary="Summary.",
+                    comments=(
+                        ReviewComment(
+                            path="src/app.py",
+                            line=2,
+                            body="Non-severe follow-up",
+                            severity=severity,
+                        ),
+                    ),
+                    provider="fixture",
+                )
 
-        decision = evaluate_auto_approval(
-            app_authored=False,
-            result=result,
-            has_open_review_threads=False,
-        )
+                decision = evaluate_auto_approval(
+                    app_authored=False,
+                    result=result,
+                    has_open_review_threads=False,
+                )
 
-        self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("blocking-findings-open",))
+                self.assertTrue(decision.approved)
+                self.assertEqual(decision.blockers, ())
 
     def test_app_authored_pull_requests_cannot_be_approved(self):
         decision = evaluate_auto_approval(

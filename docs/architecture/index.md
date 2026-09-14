@@ -85,8 +85,8 @@ transport calls; future GitHub publishers consume only validated
 | [`0027`](../adr/0027-opt-in-app-approvals-for-clean-pull-request-reviews.md) | Superseded | Historical opt-in App approvals for clean pull-request reviews | Superseded by ADR 0030; the separate toggle was removed |
 | [`0028`](../adr/0028-bounded-review-output-recovery.md) | Proposed | Bounded review-output recovery | One sanitized provider correction and response-budgeted learning history discovery |
 | [`0029`](../adr/0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Additive v1 classification metadata and deterministic publisher rendering |
-| [`0032`](../adr/0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | Explicit blocking controls approval with medium/low-only fallback and resolved-thread safety |
-| [`0030`](../adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Proposed | Gate App approvals on resolved review threads and exact-head review safety | Bounded GraphQL thread sweep; clean reruns can promote same-head comments |
+| [`0032`](../adr/0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | Explicit blocking controls approval; absent flags block only for critical/high severity, with resolved-thread safety |
+| [`0030`](../adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | Bounded GraphQL thread sweep; clean reruns can promote same-head comments |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

@@ -116,8 +116,8 @@ against `review-result.schema.json`.
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`
 is a boolean that determines whether the finding prevents automatic approval;
-when omitted, only case-insensitive preferred `medium`/`low` values or no severity are
-non-blocking; `critical`, `high`, and other nonempty values are blocking.
+when omitted, only case-insensitive preferred `critical`/`high` values are
+blocking; missing, lower-severity, and legacy free-form values are non-blocking.
 `severity` uses the preferred `critical`, `high`, `medium`, or `low`
 values to describe likely impact; `fix_effort` uses `trivial`, `small`,
 `moderate`, `large`, or `unknown` to describe remediation scope; and `category`
@@ -431,7 +431,7 @@ All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
 `false`. When automatic review and GitHub writes are enabled, `APPROVE` is
 emitted only when the validated result has no blocking findings and a bounded
 GraphQL `reviewThreads` sweep confirms that every existing review thread is
-resolved. Findings, unresolved threads, and `@sensei` replies remain
+resolved. Blocking findings, unresolved threads, and `@sensei` replies remain
 `COMMENT`. Draft, closed, stale, fork, or App-authored pull requests are never
 approved. A malformed, unauthorized, incomplete, or over-limit thread response
 fails closed before the write. The marker deduplicates each review state per
@@ -442,8 +442,8 @@ run. The generated caller may contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 
-The approval decision is deterministic: explicit blocking findings, or
-unclassified severity other than `medium`/`low`, block approval and open-thread safety
-remains independent. The policy exposes stable
+The approval decision is deterministic: explicit blocking findings or
+unclassified canonical `critical`/`high` severity block approval; open-thread
+safety remains independent. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.
