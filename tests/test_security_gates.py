@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -601,6 +602,11 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 module._normalize_location("src%252F..%252Foutside.py")
             )
         )
+        deeply_encoded = "src/../outside.py"
+        for _ in range(9):
+            deeply_encoded = quote(deeply_encoded, safe="")
+        with self.assertRaises(ValueError):
+            module._normalize_location(deeply_encoded)
         self.assertTrue(
             module._is_safe_location(module._normalize_location("src%2Ffile.py"))
         )

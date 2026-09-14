@@ -290,6 +290,9 @@ def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
         if decoded == value:
             break
         value = decoded
+    else:
+        if unquote(value) != value:
+            raise ValueError("SARIF URI is too deeply percent-encoded")
     # A repository filename may legitimately contain a colon (for example
     # ``docs/file:example.md``).  Only strip a URI scheme when the URI has the
     # unambiguous ``scheme://`` form; ``urlsplit`` alone would misclassify such
