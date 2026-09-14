@@ -125,8 +125,10 @@ function hasExactPermissions(
     return false;
   }
   // Apart from mandatory metadata, the broker accepts contents:read only for
-  // capabilities that explicitly opt in. Every other extra permission,
-  // especially any write grant, is rejected.
+  // capabilities that explicitly opt in. Requested contents grants were
+  // already required at their exact level above, so this exception applies
+  // only when contents was omitted from the requested scope. Every other
+  // extra permission, especially any write grant, is rejected.
   return Object.entries(actual).every(([name, level]) => {
     if (Object.hasOwn(expectedRequested, name)) {
       return true;

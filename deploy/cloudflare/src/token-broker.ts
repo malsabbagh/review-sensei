@@ -15,8 +15,10 @@ const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
 
 type Capability = keyof typeof CAPABILITIES;
 
-// Only review publication may receive contents:read as a GitHub implicit
-// grant. Reply capabilities are mutation-only and reject it if returned.
+// GitHub may return contents:read alongside review publication's requested
+// pull-request write scope so the token can read repository data for the
+// review. This is a narrow acceptance rule for GitHub's returned scope, not a
+// broker request for an additional permission; reply capabilities reject it.
 const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["review_publish"]);
 
 interface BrokerBody {

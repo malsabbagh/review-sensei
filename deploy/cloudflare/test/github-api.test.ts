@@ -255,6 +255,31 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_capability_permissions_invalid");
   });
 
+  it("rejects a downgraded requested contents grant even when returned contents read is accepted", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "write",
+          contents: "read",
+          metadata: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(
+        2468,
+        "acme/widgets",
+        { pull_requests: "write", contents: "write" },
+        true,
+      ),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
   it.each([
     ["an inherited writable capability", { pull_requests: "write", contents: "write", metadata: "read" }],
     ["an unrecognized read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
