@@ -695,9 +695,31 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             self._sarif(root)
             violations = module.evaluate(root, baseline, expected_reports=1)
             self.assertTrue(violations)
-            self.assertTrue(
-                any("must not exceed" in violation for violation in violations)
+            self.assertTrue(any("must equal" in violation for violation in violations))
+
+    def test_minimum_score_must_match_declared_fail_levels(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "policy": {
+                            "fail_on_levels": ["error"],
+                            "minimum_score": 2,
+                            "exception_expiry_days": 30,
+                        },
+                        "findings": [],
+                    }
+                ),
+                encoding="utf-8",
             )
+            self._sarif(root)
+            violations = module.evaluate(root, baseline, expected_reports=1)
+            self.assertTrue(violations)
+            self.assertTrue(any("must equal" in violation for violation in violations))
 
     def test_baseline_rejects_unknown_policy_fields(self):
         module = _load_script("check_codeql_findings.py")
@@ -839,6 +861,18 @@ class ProtectionPolicyTests(unittest.TestCase):
         errors = module.compare_readback(policy, readback)
         self.assertTrue(any("rules must be an array" in error for error in errors))
         self.assertTrue(any("blanket" in error for error in errors))
+
+    def test_missing_readback_target_is_explicitly_rejected(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = {
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
+            "rules": [],
+            "bypass_actors": [],
+        }
+        errors = module.compare_readback(policy, readback)
+        self.assertTrue(any("target is missing" in error for error in errors))
 
     def test_complete_readback_matches_every_required_control(self):
         module = _load_script("check_protection_policy.py")

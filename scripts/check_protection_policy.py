@@ -130,8 +130,9 @@ def compare_readback(policy: dict[str, Any], readback: dict[str, Any]) -> list[s
     if not isinstance(ruleset, dict):
         return errors
 
-    target = readback.get("target")
-    if target != ruleset.get("target"):
+    if "target" not in readback:
+        errors.append("ruleset readback.target is missing")
+    elif readback["target"] != ruleset.get("target"):
         errors.append(f"ruleset readback.target must be {ruleset.get('target')!r}")
     if readback.get("enforcement") != "active":
         errors.append("ruleset readback.enforcement must be 'active'")

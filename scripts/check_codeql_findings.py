@@ -63,6 +63,11 @@ def _load_json(path: Path) -> dict[str, Any]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as stream:
+            # Check the descriptor's size before allocating the file buffer.
+            # The post-read bound remains necessary because a file can grow
+            # after this check; fstat also avoids a path-based TOCTOU window.
+            if os.fstat(stream.fileno()).st_size > MAX_SARIF_FILE_BYTES:
+                raise ValueError(f"SARIF file {path} exceeds the configured size limit")
             raw = stream.read(MAX_SARIF_FILE_BYTES + 1)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"unable to read JSON file {path}: {exc}") from exc
@@ -610,9 +615,9 @@ def evaluate(
     if minimum_score < 0 or minimum_score > max(_LEVELS.values()):
         return ["baseline policy.minimum_score must be between 0 and 3"]
     least_fail_score = min(_LEVELS[level] for level in fail_levels)
-    if minimum_score > least_fail_score:
+    if minimum_score != least_fail_score:
         return [
-            "baseline policy.minimum_score must not exceed the least severe "
+            "baseline policy.minimum_score must equal the least severe "
             "baseline policy.fail_on_levels entry"
         ]
     accepted = policy.get("findings", [])

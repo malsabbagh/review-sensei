@@ -160,6 +160,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("PATCH", text)
         self.assertNotIn("administration:", text)
 
+    def test_codeql_matrix_is_aggregated_into_required_checks(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("language: [python, javascript-typescript]", text)
+        self.assertIn(
+            "needs: [compatibility, quality, schemas, package, npm, workers, codeql]",
+            text,
+        )
+
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
             Path(__file__).resolve().parents[1]
