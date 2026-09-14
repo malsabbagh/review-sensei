@@ -382,7 +382,7 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 expected_languages=("python", "javascript-typescript"),
             )
             self.assertTrue(duplicate)
-            self.assertTrue(any("duplicate" in violation for violation in duplicate))
+            self.assertTrue(any("missing" in violation for violation in duplicate))
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -415,6 +415,49 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             )
             self.assertTrue(ambiguous)
             self.assertTrue(any("conflicting" in violation for violation in ambiguous))
+
+    def test_expected_languages_allow_multiple_reports_and_runs_per_language(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = ROOT / "security" / "codeql-baseline.json"
+            javascript_run = {
+                "tool": {
+                    "driver": {
+                        "name": "CodeQL",
+                        "organization": "GitHub",
+                        "rules": [],
+                    }
+                },
+                "properties": {"language": "javascript-typescript"},
+                "automationDetails": {
+                    "id": "review-sensei/language:javascript-typescript"
+                },
+                "results": [],
+            }
+            # CodeQL can split JavaScript and TypeScript work into multiple
+            # runs and can emit more than one SARIF file for a language.
+            self._sarif(
+                root,
+                name="javascript-part-1.sarif",
+                language=None,
+                runs=[javascript_run, {**javascript_run}],
+            )
+            self._sarif(
+                root,
+                name="javascript-part-2.sarif",
+                language="javascript-typescript",
+            )
+            self._sarif(root, name="python.sarif", language="python")
+            self.assertEqual(
+                module.evaluate(
+                    root,
+                    baseline,
+                    expected_reports=0,
+                    expected_languages=("python", "javascript-typescript"),
+                ),
+                [],
+            )
 
     def test_expected_languages_reject_empty_cli_entries(self):
         module = _load_script("check_codeql_findings.py")

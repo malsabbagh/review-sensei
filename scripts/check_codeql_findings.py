@@ -438,27 +438,19 @@ def collect_findings(
     expected_reports: int = 1,
     expected_languages: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
-    if expected_reports < 1:
-        raise ValueError("expected_reports must be positive")
+    if expected_reports < 0:
+        raise ValueError("expected_reports must not be negative")
     paths = _sarif_paths(sarif_dir)
     if len(paths) < expected_reports:
         raise ValueError(
             f"expected at least {expected_reports} SARIF files in {sarif_dir}, found {len(paths)}"
         )
     languages = _normalize_expected_languages(expected_languages)
-    report_languages: dict[str, Path] = {}
-    if languages:
-        # In strict language mode every report must be accounted for exactly
-        # once.  A minimum file count alone permits duplicate Python reports to
-        # masquerade as complete Python + JavaScript/TypeScript coverage.
-        if expected_reports > len(languages):
-            raise ValueError(
-                "expected_reports cannot exceed the number of expected languages"
-            )
-        if len(paths) != len(languages):
-            raise ValueError(
-                "expected exactly one SARIF report per expected CodeQL language"
-            )
+    if expected_reports == 0 and not languages:
+        raise ValueError(
+            "expected_reports must be positive when expected languages are not provided"
+        )
+    covered_languages: set[str] = set()
     findings: list[dict[str, Any]] = []
     for path in paths:
         document = _load_json(path)
@@ -467,42 +459,22 @@ def collect_findings(
         runs = document.get("runs")
         if not isinstance(runs, list) or not runs:
             raise ValueError(f"{path}: SARIF runs must be a non-empty array")
-        report_language: str | None = None
-        if languages:
-            # CodeQL CLI documents one run per language.  Multiple runs are
-            # ambiguous for this gate even when they happen to advertise the
-            # same language.
-            if len(runs) != 1:
-                raise ValueError(
-                    f"{path}: SARIF report must contain exactly one CodeQL run"
-                )
-            if not isinstance(runs[0], dict):
-                raise ValueError(f"{path}: SARIF run is incomplete")
-            report_language = _run_language(runs[0], path)
-            if report_language not in languages:
-                raise ValueError(
-                    f"{path}: unexpected CodeQL language report {report_language}"
-                )
-            if report_language in report_languages:
-                raise ValueError(
-                    f"{path}: duplicate CodeQL language report {report_language}"
-                )
-            report_languages[report_language] = path
-            # A recognizable filename is useful provenance, but it never
-            # establishes identity.  Contradictory provenance is rejected so a
-            # copied report cannot silently hide a language mismatch.
-            stem_language = _canonical_language(path.stem)
-            if stem_language in _CODEQL_LANGUAGES and stem_language != report_language:
-                raise ValueError(
-                    f"{path}: filename language conflicts with SARIF metadata"
-                )
+        report_languages: set[str] = set()
         for run in runs:
+            report_language: str | None = None
             if not isinstance(run, dict) or not isinstance(run.get("tool"), dict):
                 raise ValueError(f"{path}: SARIF run is incomplete")
             driver = run["tool"].get("driver")
             if not isinstance(driver, dict):
                 raise ValueError(f"{path}: SARIF tool.driver is incomplete")
             _validate_driver(driver, path)
+            if languages:
+                report_language = _run_language(run, path)
+                if report_language not in languages:
+                    raise ValueError(
+                        f"{path}: unexpected CodeQL language report {report_language}"
+                    )
+                report_languages.add(report_language)
             rules = driver.get("rules", [])
             rule_map = {
                 str(rule.get("id")): rule
@@ -541,8 +513,23 @@ def collect_findings(
                 )
                 if len(findings) > MAX_FINDINGS:
                     raise ValueError("SARIF reports contain too many findings")
-    if languages and set(report_languages) != set(languages):
-        missing = sorted(set(languages) - set(report_languages))
+        if languages:
+            # A report may contain several runs (for example, JavaScript and
+            # TypeScript runs in one CodeQL SARIF file), and the action may
+            # emit more than one file for a language.  Language identity comes
+            # from each run's trusted metadata; filenames are only checked for
+            # contradictions when they are recognizable.
+            stem_language = _canonical_language(path.stem)
+            if (
+                stem_language in _CODEQL_LANGUAGES
+                and any(language != stem_language for language in report_languages)
+            ):
+                raise ValueError(
+                    f"{path}: filename language conflicts with SARIF metadata"
+                )
+            covered_languages.update(report_languages)
+    if languages and covered_languages != set(languages):
+        missing = sorted(set(languages) - covered_languages)
         raise ValueError(
             "missing expected CodeQL language report(s): " + ", ".join(missing)
         )
@@ -705,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help=(
             "minimum SARIF files expected without --expected-languages; "
-            "with language metadata, exactly one report per language is required"
+            "with language metadata, use 0 to rely on per-language coverage"
         ),
     )
     parser.add_argument(
@@ -717,8 +704,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    if args.expected_reports < 1:
-        parser.error("--expected-reports must be positive")
+    if args.expected_reports < 0:
+        parser.error("--expected-reports must not be negative")
     if args.expected_languages:
         language_parts = args.expected_languages.split(",")
         if any(not language.strip() for language in language_parts):
@@ -726,6 +713,10 @@ def main(argv: list[str] | None = None) -> int:
         expected_languages = tuple(language.strip() for language in language_parts)
     else:
         expected_languages = ()
+    if args.expected_reports == 0 and not expected_languages:
+        parser.error(
+            "--expected-reports must be positive when --expected-languages is omitted"
+        )
     violations = evaluate(
         args.sarif_dir,
         args.baseline,
