@@ -30,7 +30,7 @@ sweep confirms that every existing pull-request review thread is resolved. Any
 open thread, App-authored PR, draft/closed/fork/stale target, or lookup failure
 keeps the event as COMMENT or fails closed before writing. Use one deterministic
 policy seam so the review process records why approval was blocked without
-trusting provider text; no separate approval toggle is introduced. Reconcile
+trusting provider text. Reconcile
 published GitHub review states separately: a fresh clean run may promote an
 existing same-head ReviewSensei `COMMENTED` review to one `APPROVED` review
 after the final thread sweep passes, while repeated comments and approvals
@@ -47,7 +47,7 @@ In scope:
 
 Out of scope:
 
-- Adding a separate approval toggle or new credentials.
+- Adding a separate approval path or new credentials.
 - Approving drafts, forks, App-authored PRs, stale heads, or conversation
   replies.
 - Inferring human acceptance from comment text or model-supplied metadata.
@@ -90,7 +90,7 @@ Negative or tradeoffs:
 
 ## Implementation Notes
 
-- `evaluate_auto_approval` receives the validated result, App-authored state,
+- `evaluate_approval` receives the validated result, App-authored state,
   and the thread-sweep result. Any inline finding or unresolved
   thread yields a COMMENT event; the decision exposes stable blocker reasons
   for diagnostics without exposing provider content.

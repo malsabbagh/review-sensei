@@ -221,10 +221,8 @@ class GitHubApplicationTests(unittest.TestCase):
         )
         self.assertEqual(self.broker.requested, 1)
         self.assertEqual(self.reviewer.calls[0]["token"], "capability-review_publish")
-        self.assertNotIn("auto_approve", self.reviewer.calls[0])
         self.assertEqual(self.learner.calls[0]["token"], "capability-learning_write")
         self.assertEqual(self.replier.calls[0]["token"], "capability-issue_reply")
-        self.assertNotIn("auto_approve", self.replier.calls[0])
 
     def test_learning_proposals_reuse_one_learning_capability(self):
         options = GitHubWriteOptions(github_writes=True, learning_prs=True)

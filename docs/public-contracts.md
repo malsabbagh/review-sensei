@@ -115,7 +115,7 @@ against `review-result.schema.json`.
 ### Finding classification and presentation
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`
-is a boolean that determines whether the finding prevents automatic approval;
+is a boolean that determines whether the finding prevents approval;
 when omitted, only case-insensitive preferred `critical`/`high` values are
 blocking; missing, lower-severity, and legacy free-form values are non-blocking.
 `severity` uses the preferred `critical`, `high`, `medium`, or `low`

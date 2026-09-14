@@ -246,10 +246,6 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
                 _historical_tagged_v4_workflow(tag_matches[0]),
                 _previous_provider_parity_workflow(tag_matches[0]),
                 _historical_provider_parity_workflow(tag_matches[0]),
-                _legacy_auto_approve_provider_parity_workflow(tag_matches[0]),
-                _legacy_auto_approve_historical_provider_parity_workflow(
-                    tag_matches[0]
-                ),
             }
         except GitHubSetupError:
             return False
@@ -259,7 +255,6 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         return content in {
             _v4_config_file(),
             _historical_v4_config_file(),
-            _legacy_auto_approve_v4_config_file(),
         }
     return False
 
@@ -701,42 +696,6 @@ def _previous_provider_parity_workflow(public_workflow_tag: str) -> str:
     )
 
 
-_LEGACY_AUTO_APPROVE_WORKFLOW_LINE = (
-    "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n"
-)
-
-
-def _legacy_auto_approve_provider_parity_workflow(public_workflow_tag: str) -> str:
-    """Return the released v4 caller that exposed the removed approval toggle."""
-
-    return _previous_provider_parity_workflow(public_workflow_tag).replace(
-        "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-        _LEGACY_AUTO_APPROVE_WORKFLOW_LINE
-        + "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-        1,
-    )
-
-
-def _legacy_auto_approve_historical_provider_parity_workflow(
-    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
-) -> str:
-    """Return the removed-toggle caller with the historical operation mapping."""
-
-    tag = _validate_public_workflow_tag(public_workflow_tag)
-    current = (
-        "      operation: ${{ github.event_name == 'pull_request' && 'review' || "
-        "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
-        "'reply' }}\n"
-    )
-    historical = (
-        "      operation: ${{ inputs.operation || (github.event_name == "
-        "'workflow_dispatch' && 'review') || 'reply' }}\n"
-    )
-    return _legacy_auto_approve_provider_parity_workflow(tag).replace(
-        current, historical, 1
-    )
-
-
 def _historical_provider_parity_workflow(
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> str:
@@ -775,20 +734,10 @@ upload_artifacts: false
 
 
 def _v4_config_file() -> str:
-    """Return the current setup-v4 configuration without approval toggles."""
+    """Return the current setup-v4 configuration."""
 
     return _historical_v4_config_file().replace(
         "version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1
-    )
-
-
-def _legacy_auto_approve_v4_config_file() -> str:
-    """Return the released setup-v4 config with the removed approval toggle."""
-
-    return _v4_config_file().replace(
-        "auto_review: false\n",
-        "auto_review: false\nauto_approve: false\n",
-        1,
     )
 
 

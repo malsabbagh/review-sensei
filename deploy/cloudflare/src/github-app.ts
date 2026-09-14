@@ -16,11 +16,8 @@ import {
   buildHistoricalV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
-  buildLegacyAutoApproveV4SetupFiles,
   buildTaggedV4SetupFiles,
   previousProviderParityWorkflowTemplate,
-  legacyAutoApproveHistoricalProviderParityWorkflowTemplate,
-  legacyAutoApproveProviderParityWorkflowTemplate,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
@@ -277,9 +274,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
         content === previousProviderParityWorkflowTemplate(publicWorkflowTag) ||
         content === buildHistoricalTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
-        content === buildHistoricalProviderParityV4SetupFiles(publicWorkflowTag)[0].content ||
-        content === legacyAutoApproveProviderParityWorkflowTemplate(publicWorkflowTag) ||
-        content === legacyAutoApproveHistoricalProviderParityWorkflowTemplate(publicWorkflowTag)
+        content === buildHistoricalProviderParityV4SetupFiles(publicWorkflowTag)[0].content
       );
     } catch {
       return false;
@@ -291,8 +286,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
   if (path === SETUP_FILE_PATHS[2]) {
     return (
       content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content ||
-      content === buildHistoricalTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content ||
-      content === buildLegacyAutoApproveV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content
+      content === buildHistoricalTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content
     );
   }
   return false;

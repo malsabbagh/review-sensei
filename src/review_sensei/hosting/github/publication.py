@@ -13,7 +13,7 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
-from .approval import evaluate_auto_approval, has_blocking_findings
+from .approval import evaluate_approval, has_blocking_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -254,7 +254,7 @@ class ReviewPublisher:
                 repository=repository,
                 pull_request=pull_request,
             )
-        approval = evaluate_auto_approval(
+        approval = evaluate_approval(
             app_authored=write_preflight.app_authored,
             result=result,
             has_open_review_threads=has_open_review_threads,

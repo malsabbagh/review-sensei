@@ -1,6 +1,6 @@
 import unittest
 
-from review_sensei.hosting.github.approval import evaluate_auto_approval
+from review_sensei.hosting.github.approval import evaluate_approval
 from review_sensei.models import ReviewComment, ReviewResult
 
 
@@ -8,9 +8,9 @@ def clean_result() -> ReviewResult:
     return ReviewResult(summary="Summary.", comments=(), provider="fixture")
 
 
-class AutoApprovalPolicyTests(unittest.TestCase):
+class ApprovalPolicyTests(unittest.TestCase):
     def test_clean_review_with_resolved_threads_is_approved(self):
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=clean_result(),
             has_open_review_threads=False,
@@ -19,7 +19,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertEqual(decision.blockers, ())
 
     def test_open_threads_block_clean_review(self):
-        blocked = evaluate_auto_approval(
+        blocked = evaluate_approval(
             app_authored=False,
             result=clean_result(),
             has_open_review_threads=True,
@@ -43,7 +43,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
         )
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=result,
             has_open_review_threads=True,
@@ -68,7 +68,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             provider="fixture",
         )
 
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -88,7 +88,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             provider="fixture",
         )
 
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -113,7 +113,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     provider="fixture",
                 )
 
-                decision = evaluate_auto_approval(
+                decision = evaluate_approval(
                     app_authored=False,
                     result=result,
                     has_open_review_threads=False,
@@ -133,7 +133,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             provider="fixture",
         )
 
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -151,7 +151,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             provider="fixture",
         )
 
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -176,7 +176,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     provider="fixture",
                 )
 
-                decision = evaluate_auto_approval(
+                decision = evaluate_approval(
                     app_authored=False,
                     result=result,
                     has_open_review_threads=False,
@@ -186,7 +186,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 self.assertEqual(decision.blockers, ())
 
     def test_app_authored_pull_requests_cannot_be_approved(self):
-        decision = evaluate_auto_approval(
+        decision = evaluate_approval(
             app_authored=True,
             result=clean_result(),
             has_open_review_threads=False,
