@@ -15,6 +15,10 @@ const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
 
 type Capability = keyof typeof CAPABILITIES;
 
+// Only review publication may receive contents:read as a GitHub implicit
+// grant. Reply capabilities are mutation-only and reject it if returned.
+const CONTENTS_READ_IMPLICIT_CAPABILITIES = new Set<Capability>(["review_publish"]);
+
 interface BrokerBody {
   oidc_token?: unknown;
   capability?: unknown;
@@ -146,6 +150,7 @@ export class TokenBroker {
       installationId,
       claims.repository,
       CAPABILITIES[requested],
+      CONTENTS_READ_IMPLICIT_CAPABILITIES.has(requested),
     );
     return { token, capability: requested };
   }

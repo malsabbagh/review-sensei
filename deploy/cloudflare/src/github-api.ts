@@ -9,14 +9,10 @@ const PUBLIC_WORKFLOW_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PUBLIC_WORKFLOW_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_TAG_DEREFERENCE_DEPTH = 3;
 const MAX_PUBLIC_REF_BYTES = 64 * 1024;
-// GitHub requires repository metadata read access for installation tokens and
-// may include contents:read when a pull-request capability needs repository
-// data. These are the only known implicit grants accepted by the broker; an
-// unexpected read or any additional write permission remains a rejection.
-const IMPLICIT_READ_PERMISSIONS = {
-  metadata: "read",
-  contents: "read",
-} as const;
+// GitHub always grants repository metadata read access to installation tokens.
+// A capability can separately opt in to accepting contents:read only when its
+// broker policy documents that GitHub may add the grant implicitly.
+const IMPLICIT_METADATA_PERMISSION = "read";
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -94,6 +90,7 @@ function normalizePermissionMap(value: unknown): Record<string, string> | null {
 function hasExactPermissions(
   granted: unknown,
   requested: Record<string, string>,
+  allowImplicitContentsRead = false,
 ): boolean {
   const actual = normalizePermissionMap(granted);
   const expectedRequested = normalizePermissionMap(requested);
@@ -122,18 +119,21 @@ function hasExactPermissions(
   }
   if (
     !Object.hasOwn(expectedRequested, "metadata") &&
-    actual.metadata !== IMPLICIT_READ_PERMISSIONS.metadata
+    actual.metadata !== IMPLICIT_METADATA_PERMISSION
   ) {
     return false;
   }
-  // GitHub may return a subset of known read-only repository grants in
-  // addition to the requested scope. Accept only those exact read levels;
-  // every other extra permission (especially a write grant) is rejected.
+  // Apart from mandatory metadata, the broker accepts contents:read only for
+  // capabilities that explicitly opt in. Every other extra permission,
+  // especially any write grant, is rejected.
   return Object.entries(actual).every(([name, level]) => {
     if (Object.hasOwn(expectedRequested, name)) {
       return true;
     }
-    return IMPLICIT_READ_PERMISSIONS[name as keyof typeof IMPLICIT_READ_PERMISSIONS] === level;
+    return (
+      (name === "metadata" && level === IMPLICIT_METADATA_PERMISSION) ||
+      (allowImplicitContentsRead && name === "contents" && level === "read")
+    );
   });
 }
 
@@ -598,6 +598,7 @@ export class GitHubApi {
     installationId: number,
     repository: string,
     permissions: Record<string, "read" | "write">,
+    allowImplicitContentsRead = false,
   ): Promise<string> {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
@@ -631,7 +632,7 @@ export class GitHubApi {
     ) {
       throw new Error("github_capability_response_invalid");
     }
-    if (!hasExactPermissions(granted, permissions)) {
+    if (!hasExactPermissions(granted, permissions, allowImplicitContentsRead)) {
       throw new Error("github_capability_permissions_invalid");
     }
     return token;

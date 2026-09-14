@@ -76,12 +76,12 @@ beforeEach(() => {
 
 describe("token broker authorization", () => {
   it.each([
-    [undefined, "review_publish", { pull_requests: "write" }],
-    ["review_publish", "review_publish", { pull_requests: "write" }],
-    ["inline_reply", "inline_reply", { pull_requests: "write" }],
-    ["issue_reply", "issue_reply", { pull_requests: "write" }],
-    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }],
-  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions) => {
+    [undefined, "review_publish", { pull_requests: "write" }, true],
+    ["review_publish", "review_publish", { pull_requests: "write" }, true],
+    ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
+    ["issue_reply", "issue_reply", { pull_requests: "write" }, false],
+    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false],
+  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions, allowImplicitContentsRead) => {
     const { broker, github } = harness();
     const result = await broker.exchange({ oidc_token: "signed-jwt", capability: requested });
 
@@ -93,7 +93,12 @@ describe("token broker authorization", () => {
       "acme/widgets",
       "ghs_metadata_token",
     );
-    expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", permissions);
+    expect(github.capabilityToken).toHaveBeenCalledWith(
+      2468,
+      "acme/widgets",
+      permissions,
+      allowImplicitContentsRead,
+    );
   });
 
   it.each([

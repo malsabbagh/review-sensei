@@ -174,7 +174,7 @@ describe("GitHubApi public workflow resolution", () => {
 });
 
 describe("GitHubApi capability issuance", () => {
-  it("accepts the requested capability plus known implicit read grants", async () => {
+  it("accepts contents read only when the capability opts in", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({
       status: 201,
@@ -190,7 +190,7 @@ describe("GitHubApi capability issuance", () => {
     });
 
     await expect(
-      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }, true),
     ).resolves.toBe("ghs_scoped_token");
     expect(request).toHaveBeenCalledWith(
       "POST",
@@ -214,6 +214,26 @@ describe("GitHubApi capability issuance", () => {
     await expect(
       client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
     ).resolves.toBe("ghs_scoped_token");
+  });
+
+  it("rejects implicit contents read for a capability that did not opt in", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "write",
+          metadata: "read",
+          contents: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
   });
 
   it.each([
