@@ -161,7 +161,7 @@ jobs:
             echo '::error::repository id must be a positive decimal integer' >&2
             exit 1
           fi
-          if [[ -z "$BASE_REF" || "$BASE_REF" == -* || ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+          if [[ -z "$BASE_REF" || "$BASE_REF" == -* || "$BASE_REF" == *--* || "$BASE_REF" == *- || ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
             echo '::error::base ref input is invalid' >&2
             exit 1
           fi
@@ -178,7 +178,7 @@ jobs:
               echo '::error::pull request number is required for review operations' >&2
               exit 1
             fi
-            if [[ -z "$HEAD_REF" || "$HEAD_REF" == -* || ! "$HEAD_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            if [[ -z "$HEAD_REF" || "$HEAD_REF" == -* || "$HEAD_REF" == *--* || "$HEAD_REF" == *- || ! "$HEAD_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
               echo '::error::head ref input is invalid' >&2
               exit 1
             fi
@@ -244,7 +244,7 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::repository id must be a positive decimal integer' >&2; exit 1; }
-          [[ -n "$BASE_REF" && "$BASE_REF" != -* && "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo '::error::base ref identity is invalid' >&2; exit 1; }
+          [[ -n "$BASE_REF" && "$BASE_REF" != -* && "$BASE_REF" != *--* && "$BASE_REF" != *- && "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo '::error::base ref identity is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
           if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
             echo '::error::base sha identity is invalid' >&2
@@ -315,8 +315,8 @@ jobs:
           if not re.fullmatch(r"[a-f0-9]{40}", str(base.get("sha", ""))):
               raise SystemExit("pull request base identity is invalid")
           title = data.get("title", "")
-          if not isinstance(title, str) or len(title.encode("utf-8")) > 4096:
-              raise SystemExit("pull request title is invalid")
+          if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
+              raise SystemExit("pull request title exceeds the 256-byte limit")
           encoded = base64.b64encode(title.encode("utf-8")).decode("ascii")
           if len(encoded) > 8192:
               raise SystemExit("encoded pull request title exceeds the workflow output limit")
@@ -382,6 +382,16 @@ jobs:
           ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
           repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
           version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+
+          def valid_ref(value: str) -> bool:
+              return bool(
+                  value
+                  and not value.startswith("-")
+                  and "--" not in value
+                  and not value.endswith("-")
+                  and ref_pattern.fullmatch(value)
+              )
+
           if os.environ.get("MODE") not in {"automatic", "manual"}:
               raise SystemExit("workflow mode is invalid")
           if os.environ.get("OPERATION") not in {"review", "reply"}:
@@ -392,12 +402,10 @@ jobs:
               raise SystemExit("repository input is invalid")
           for name in ("BASE_REF",):
               value = os.environ.get(name, "")
-              if not value or value.startswith("-") or not ref_pattern.fullmatch(value):
+              if not valid_ref(value):
                   raise SystemExit(f"{name} input is invalid")
           head_ref = os.environ.get("HEAD_REF", "")
-          if os.environ.get("OPERATION") == "review" and (
-              not head_ref or head_ref.startswith("-") or not ref_pattern.fullmatch(head_ref)
-          ):
+          if os.environ.get("OPERATION") == "review" and not valid_ref(head_ref):
               raise SystemExit("HEAD_REF input is invalid")
           base_sha = os.environ.get("BASE_SHA", "")
           if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
@@ -619,6 +627,16 @@ jobs:
           ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
           repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
           version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+
+          def valid_ref(value: str) -> bool:
+              return bool(
+                  value
+                  and not value.startswith("-")
+                  and "--" not in value
+                  and not value.endswith("-")
+                  and ref_pattern.fullmatch(value)
+              )
+
           if os.environ.get("MODE") not in {"automatic", "manual"}:
               raise SystemExit("workflow mode is invalid")
           if os.environ.get("OPERATION") not in {"review", "reply"}:
@@ -628,12 +646,10 @@ jobs:
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
               raise SystemExit("repository input is invalid")
           base_ref = os.environ.get("BASE_REF", "")
-          if not base_ref or base_ref.startswith("-") or not ref_pattern.fullmatch(base_ref):
+          if not valid_ref(base_ref):
               raise SystemExit("BASE_REF input is invalid")
           head_ref = os.environ.get("HEAD_REF", "")
-          if os.environ.get("OPERATION") == "review" and (
-              not head_ref or head_ref.startswith("-") or not ref_pattern.fullmatch(head_ref)
-          ):
+          if os.environ.get("OPERATION") == "review" and not valid_ref(head_ref):
               raise SystemExit("HEAD_REF input is invalid")
           base_sha = os.environ.get("BASE_SHA", "")
           if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):

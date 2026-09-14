@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +36,13 @@ def _run_blocks(text: str) -> list[str]:
             content.append(candidate[indent:])
         blocks.append("\n".join(content))
     return blocks
+
+
+def _run_block_containing(text: str, marker: str) -> str:
+    matches = [block for block in _run_blocks(text) if marker in block]
+    if len(matches) != 1:
+        raise AssertionError(f"expected one run block containing {marker!r}")
+    return matches[0]
 
 
 class ActionPinPolicyTests(unittest.TestCase):
@@ -349,6 +358,169 @@ class ActionPinPolicyTests(unittest.TestCase):
             ),
             2,
         )
+
+    def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--fail-under=80", ci_text)
+        self.assertNotIn("--fail-under=75", ci_text)
+        self.assertIn('len(title.encode("utf-8")) > 256', workflow_text)
+        self.assertIn('"$BASE_REF" == *--*', workflow_text)
+        self.assertIn('"$BASE_REF" == *-', workflow_text)
+        self.assertIn('"$BASE_REF" != *--*', workflow_text)
+        self.assertIn('"$BASE_REF" != *-', workflow_text)
+        self.assertIn('"--" not in value', workflow_text)
+        self.assertIn('not value.endswith("-")', workflow_text)
+
+    def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "ReviewSensei provider mode is unsupported"
+        )
+        environment = {
+            "PROVIDER_MODE": "cloud",
+            "OPERATION": "review",
+            "REPOSITORY": "owner/repo",
+            "REPOSITORY_ID": "1",
+            "PULL_REQUEST": "1",
+            "BASE_SHA": "",
+            "HEAD_REF": "feature-branch",
+            "HEAD_REPOSITORY": "owner/repo",
+            "HEAD_SHA": "a" * 40,
+            "ENABLE_REVIEW": "true",
+            "ENABLE_AUTO_APPROVE": "false",
+            "ENABLE_LEARNING_PROPOSALS": "false",
+            "ENABLE_GITHUB_WRITES": "false",
+            "ENABLE_LEARNING_PRS": "false",
+            "ENABLE_MENTION_REPLIES": "false",
+            "UPLOAD_ARTIFACTS": "false",
+        }
+        for value in ("main--branch", "main-"):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", block],
+                    env={**os.environ, **environment, "BASE_REF": value},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+        valid = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", block],
+            env={**os.environ, **environment, "BASE_REF": "main-feature"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+
+    def test_local_provider_validation_uses_the_same_safe_ref_rules(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "local job received an invalid provider mode"
+        )
+        block = block.split("python - <<'PY'\n", 1)[1]
+        block = re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0]
+        environment = {
+            "MODE": "manual",
+            "OPERATION": "reply",
+            "PROVIDER_MODE": "local",
+            "REPOSITORY": "owner/repo",
+            "HEAD_REF": "",
+            "HEAD_REPOSITORY": "",
+            "REVIEW_SENSEI_VERSION": "0.1.1",
+            "BASE_SHA": "",
+            "HEAD_SHA": "",
+        }
+        for value in ("main--branch", "main-"):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["python3", "-c", block],
+                    env={**os.environ, **environment, "BASE_REF": value},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+        valid = subprocess.run(
+            ["python3", "-c", block],
+            env={**os.environ, **environment, "BASE_REF": "main-feature"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+
+    def test_authoritative_preflight_caps_pull_request_title_bytes(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "pull request title exceeds the 256-byte limit"
+        )
+        script = block.split("python - \"$payload\" <<'PY'\n", 1)[1]
+        script = re.split(r"\n\s*PY\s*\n?$", script, maxsplit=1)[0]
+        metadata = {
+            "state": "open",
+            "draft": False,
+            "number": 1,
+            "title": "x" * 257,
+            "head": {
+                "sha": "b" * 40,
+                "repo": {"full_name": "owner/repo", "id": 42, "fork": False},
+            },
+            "base": {
+                "ref": "main",
+                "sha": "a" * 40,
+                "repo": {"full_name": "owner/repo", "id": 42},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = Path(temporary) / "pull-request.json"
+            output = Path(temporary) / "github-output"
+            payload.write_text(json.dumps(metadata), encoding="utf-8")
+            environment = {
+                "PULL_REQUEST": "1",
+                "REPOSITORY": "owner/repo",
+                "REPOSITORY_ID": "42",
+                "HEAD_SHA": "b" * 40,
+                "BASE_REF": "main",
+                "BASE_SHA": "",
+                "HEAD_REPOSITORY": "owner/repo",
+                "GITHUB_OUTPUT": str(output),
+            }
+            rejected = subprocess.run(
+                ["python3", "-c", script, str(payload)],
+                env={**os.environ, **environment},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("256-byte limit", rejected.stderr)
+
+            metadata["title"] = "x" * 256
+            payload.write_text(json.dumps(metadata), encoding="utf-8")
+            accepted = subprocess.run(
+                ["python3", "-c", script, str(payload)],
+                env={**os.environ, **environment},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
     def test_reusable_workflow_prefers_pypi_with_sha_verified_github_fallback(self):
         workflow = (
