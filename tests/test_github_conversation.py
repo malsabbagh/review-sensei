@@ -484,6 +484,52 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIn("trusted-base-learnings", prompt)
         self.assertEqual(len(calls), 5)
 
+    def test_prepare_context_ignores_non_json_learning_files(self):
+        updated = "2026-08-19T00:00:00Z"
+        head = "b" * 40
+        source = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei explain this change",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "created_at": updated,
+            "in_reply_to_id": None,
+            "path": "src/app.py",
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+        }
+        responses = [
+            json_response(source),
+            json_response(pr_payload(head)),
+            json_response([source]),
+            json_response(
+                [
+                    {
+                        "type": "file",
+                        "path": ".github/review-sensei/learnings/README.md",
+                        "size": 712,
+                    }
+                ]
+            ),
+        ]
+        http, calls = make_http(responses)
+
+        prepared = ConversationPublisher(http=http).prepare_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at=updated,
+            expected_head_sha=head,
+            app_slug="review-sensei[bot]",
+            source_kind="inline",
+        )
+
+        self.assertIsInstance(prepared, PreparedConversation)
+        self.assertEqual(prepared.context.learnings, ())
+        self.assertEqual(len(calls), 4)
+
     def test_prepare_context_rejects_unauthorized_before_thread_fetch(self):
         http, calls = make_http(
             json_response(

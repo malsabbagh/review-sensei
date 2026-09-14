@@ -674,7 +674,7 @@ class ConversationPublisher:
                 continue
             validate_repository_path(path, label="conversation learning path")
             if not path.startswith(directory + "/") or not path.endswith(".json"):
-                raise GitHubConversationError("conversation learning path was invalid")
+                continue
             size = item.get("size")
             if isinstance(size, int) and size > MAX_LEARNING_FILE_BYTES:
                 raise GitHubConversationError(
