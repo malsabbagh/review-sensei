@@ -408,6 +408,12 @@ class CodeQLFindingsGateTests(unittest.TestCase):
         self.assertFalse(module._is_safe_location("src/file.py\x85"))
         self.assertFalse(module._is_safe_location("C:/workspace/file.py"))
         self.assertFalse(module._is_safe_location(r"C:\\workspace\\file.py"))
+        self.assertFalse(module._is_safe_location("C:workspace/file.py"))
+        self.assertFalse(
+            module._is_safe_location(
+                module._normalize_location("C%3A/workspace/file.py")
+            )
+        )
 
     def test_security_severity_promotes_reported_level(self):
         module = _load_script("check_codeql_findings.py")
@@ -588,3 +594,47 @@ class ProtectionPolicyTests(unittest.TestCase):
             any("strict_required_status_checks_policy" in error for error in errors)
         )
         self.assertTrue(any("bypass" in error for error in errors))
+
+    def test_duplicate_readback_rules_fail_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        pull_request = {
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 1,
+                "require_code_owner_review": True,
+                "dismiss_stale_reviews_on_push": True,
+                "require_last_push_approval": True,
+                "required_review_thread_resolution": True,
+            },
+        }
+        readback = {
+            "enforcement": "active",
+            "target": "branch",
+            "conditions": {
+                "ref_name": {
+                    "include": ["refs/heads/main"],
+                    "exclude": [],
+                }
+            },
+            "rules": [
+                pull_request,
+                dict(pull_request),
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": True,
+                        "required_status_checks": [{"context": "Required checks"}],
+                    },
+                },
+            ],
+            "bypass_actors": [
+                {
+                    "actor_id": 5,
+                    "actor_type": "RepositoryRole",
+                    "bypass_mode": "pull_request",
+                }
+            ],
+        }
+        errors = module.compare_readback(policy, readback)
+        self.assertTrue(any("duplicate pull_request" in error for error in errors))

@@ -39,7 +39,7 @@ _CODEQL_DRIVER_ORGANIZATION = "GitHub"
 _LANGUAGE_CATEGORY_RE = re.compile(
     r"(?:^|/)language:(?P<language>[a-z0-9-]+)(?:/|$)", re.IGNORECASE
 )
-_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\\\/]")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _RULE_LANGUAGE_PREFIXES = {
     "py": "python",
