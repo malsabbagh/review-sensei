@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .diff import analyze_diff
-from .errors import ReviewInputError
+from .errors import ReviewInputError, ReviewSenseiError
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
+from .stages import load_review_categories_from_dir, load_stages_from_dir
 from .validation import DEFAULT_REVIEW_LIMITS
 
 DOCTOR_OK = 0
@@ -67,18 +68,36 @@ def run_doctor(
         )
     )
     asset_root = Path(__file__).parent
-    required_assets = (
-        asset_root / "default_stages" / "01-default-review.json",
-        asset_root / "default_categories" / "01-correctness.json",
-    )
-    missing = [path.name for path in required_assets if not path.is_file()]
+    packaged_stages = asset_root / "default_stages"
+    packaged_categories = asset_root / "default_categories"
+    required_assets = (packaged_stages, packaged_categories)
+    missing = [
+        path.name for path in required_assets if path.is_symlink() or not path.is_dir()
+    ]
+    packaged_error: str | None = None
+    packaged_category_catalog = None
+    if not missing:
+        try:
+            packaged_category_catalog = load_review_categories_from_dir(
+                packaged_categories
+            )
+            load_stages_from_dir(
+                packaged_stages,
+                category_catalog=packaged_category_catalog,
+            )
+        except (OSError, ReviewSenseiError) as exc:
+            packaged_error = str(exc)
     checks.append(
         DiagnosticCheck(
             "packaged-assets",
-            "action" if missing else "pass",
-            "missing packaged assets"
-            if missing
-            else "default stages and categories available",
+            "action" if missing or packaged_error else "pass",
+            (
+                "missing packaged assets: " + ", ".join(missing)
+                if missing
+                else f"packaged configuration failed validation: {packaged_error}"
+                if packaged_error
+                else "default stages and categories available"
+            ),
         )
     )
     mode = os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local").strip().lower()
@@ -111,16 +130,38 @@ def run_doctor(
                 DiagnosticCheck(label, "action", "configured directory is empty")
             )
         else:
+            configuration_error: str | None = None
+            try:
+                if label == "categories":
+                    configured_catalog = load_review_categories_from_dir(configured)
+                    # Keep this local variable alive for parity with stage loading
+                    # below; the loader itself is the validation oracle.
+                    del configured_catalog
+                else:
+                    catalog = (
+                        load_review_categories_from_dir(categories_dir)
+                        if categories_dir is not None
+                        else packaged_category_catalog or DEFAULT_CATEGORY_CATALOG
+                    )
+                    load_stages_from_dir(configured, category_catalog=catalog)
+            except (OSError, ReviewSenseiError) as exc:
+                configuration_error = str(exc)
             checks.append(
                 DiagnosticCheck(
-                    label, "pass", "configured trusted-base directory is readable"
+                    label,
+                    "action" if configuration_error else "pass",
+                    (
+                        f"configured directory failed validation: {configuration_error}"
+                        if configuration_error
+                        else "configured trusted-base directory is readable"
+                    ),
                 )
             )
     if context_root is None:
         checks.append(
             DiagnosticCheck("context", "pass", "no supplemental context configured")
         )
-    elif not context_root.is_dir():
+    elif context_root.is_symlink() or not context_root.is_dir():
         checks.append(
             DiagnosticCheck(
                 "context", "action", "configured context root is unavailable"
@@ -164,6 +205,25 @@ def build_plan(
 ) -> dict[str, Any]:
     """Build a read-only execution preview without provider or GitHub calls."""
 
+    if repository is not None:
+        if not isinstance(repository, str):
+            raise ReviewInputError("repository must be a string")
+        if not repository.strip():
+            raise ReviewInputError("repository must be non-empty")
+        if len(repository.encode("utf-8")) > DEFAULT_REVIEW_LIMITS.max_repository_bytes:
+            raise ReviewInputError("repository exceeds the configured size limit")
+    if pull_request is not None and (
+        isinstance(pull_request, bool)
+        or not isinstance(pull_request, int)
+        or pull_request < 1
+    ):
+        raise ReviewInputError("pull_request must be a positive integer")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise ReviewInputError("title must be a non-empty string")
+        if len(title.encode("utf-8")) > DEFAULT_REVIEW_LIMITS.max_title_bytes:
+            raise ReviewInputError("title exceeds the configured size limit")
+
     if diff is None:
         diff_summary: dict[str, Any] = {"supplied": False, "status": "unknown"}
     else:
@@ -175,6 +235,12 @@ def build_plan(
             "changed_lines": len(analysis.changed_lines),
         }
     selected_stages = tuple(stages) or tuple(stage.name for stage in DEFAULT_STAGES)
+    if any(
+        not isinstance(stage, str) or not stage.strip() for stage in selected_stages
+    ):
+        raise ReviewInputError("stages must contain non-empty strings")
+    if len(selected_stages) != len(set(selected_stages)):
+        raise ReviewInputError("stages must be unique")
     raw_mode = (
         provider_mode
         if provider_mode is not None

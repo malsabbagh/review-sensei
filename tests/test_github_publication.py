@@ -36,6 +36,7 @@ def clean_result():
         summary="Summary.",
         comments=(),
         provider="ollama",
+        review_status="complete",
     )
 
 
@@ -319,6 +320,26 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(body["event"], "APPROVE")
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["comments"], [])
+
+    def test_non_boolean_auto_approve_is_rejected_before_network_calls(self):
+        http, calls = make_http([])
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "auto_approve must be a boolean"
+        ):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha="b" * 40,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=clean_result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+                auto_approve="false",  # type: ignore[arg-type]
+            )
+        self.assertEqual(calls, [])
 
     def test_open_review_thread_downgrades_clean_review_to_comment(self):
         head = "b" * 40

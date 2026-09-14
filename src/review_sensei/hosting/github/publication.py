@@ -124,6 +124,8 @@ class ReviewPublisher:
         app_slug: str,
         auto_approve: bool = False,
     ) -> PublicationResult:
+        if not isinstance(auto_approve, bool):
+            raise GitHubPublicationError("review auto_approve must be a boolean")
         if (
             isinstance(repository_id, bool)
             or not isinstance(repository_id, int)

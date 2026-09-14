@@ -39,6 +39,7 @@ class ProviderRegistryTests(unittest.TestCase):
             profile_names(), ("deep-verification", "fast-triage", "local-private")
         )
         self.assertEqual(get_provider_profile("local").name, "local-private")
+        self.assertEqual(get_provider_profile("local/private").name, "local-private")
         settings = ProviderSettings.for_profile("local/private")
         provider = default_registry().create(settings)
         self.assertEqual(provider.name, "ollama")
@@ -57,6 +58,21 @@ class ProviderRegistryTests(unittest.TestCase):
 
     def test_named_profile_rejects_endpoint_and_model_overrides(self):
         registry = default_registry()
+        with self.assertRaisesRegex(ProviderError, "does not accept an API key"):
+            registry.create(
+                ProviderSettings(
+                    name="ollama",
+                    profile="local-private",
+                    api_key="secret",
+                )
+            )
+        with self.assertRaisesRegex(ProviderError, "requires an explicit API key"):
+            registry.create(
+                ProviderSettings(
+                    name="openai-compatible",
+                    profile="fast-triage",
+                )
+            )
         with self.assertRaisesRegex(ProviderError, "endpoint cannot be overridden"):
             registry.create(
                 ProviderSettings(
@@ -82,3 +98,51 @@ class ProviderRegistryTests(unittest.TestCase):
         )
         self.assertEqual(provider.model, "deepseek-v4-flash:cloud")
         self.assertEqual(provider.max_output_tokens, 8192)
+
+    def test_profile_rejects_explicit_default_values_that_conflict(self):
+        # None is the only omitted-value marker.  A generic default must not
+        # accidentally bypass the profile's timeout or output budget.
+        with self.assertRaisesRegex(ProviderError, "timeout cannot be overridden"):
+            default_registry().create(
+                ProviderSettings(
+                    name="openai-compatible",
+                    profile="fast-triage",
+                    api_key="secret",
+                    timeout_seconds=900,
+                )
+            )
+        with self.assertRaisesRegex(
+            ProviderError, "output budget cannot be overridden"
+        ):
+            default_registry().create(
+                ProviderSettings(
+                    name="ollama",
+                    profile="deep-verification",
+                    api_key="secret",
+                    max_output_tokens=2048,
+                )
+            )
+
+    def test_profile_with_omitted_values_uses_canonical_budget(self):
+        settings = ProviderSettings(
+            name="openai-compatible",
+            profile="fast-triage",
+            api_key="secret",
+        )
+        provider = default_registry().create(settings)
+        self.assertEqual(provider.timeout_seconds, 120)
+        self.assertEqual(provider.max_output_tokens, 2048)
+
+    def test_unprofiled_ollama_keeps_default_output_budget(self):
+        provider = default_registry().create(ProviderSettings(name="ollama"))
+        self.assertEqual(provider.max_output_tokens, 2048)
+
+    def test_custom_endpoint_requires_explicit_registry_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "not allowlisted"):
+            default_registry().create(
+                ProviderSettings(
+                    name="openai-compatible",
+                    base_url="https://example.test/v1",
+                    api_key="secret",
+                )
+            )

@@ -36,6 +36,21 @@ _PRIVACY_PATTERNS = (
 _SECRET_MARKERS = ("PRIVATE_DIFF_MARKER", "PRIVATE_PROMPT_MARKER", "PROD_OUTPUT_MARKER")
 
 
+def _is_fixture_alias(value: str) -> bool:
+    """Recognize fixture-only provider aliases without case sensitivity."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().casefold()).strip("-")
+    return normalized in {
+        "fixture",
+        "fixture-provider",
+        "fixture-v1",
+        "stub",
+        "stub-provider",
+        "fake",
+        "fake-provider",
+    }
+
+
 @dataclass(frozen=True)
 class PromotionRecord:
     """Evidence required before promoting a real model/prompt configuration."""
@@ -75,6 +90,8 @@ class PromotionRecord:
             )
         ):
             raise ReviewInputError("promotion record identity fields are required")
+        if not isinstance(self.reproducibility, dict):
+            raise ReviewInputError("promotion record reproducibility must be an object")
         if (
             isinstance(self.run_count, bool)
             or not isinstance(self.run_count, int)
@@ -87,11 +104,7 @@ class PromotionRecord:
             raise ReviewInputError(
                 "supported promotion evidence requires at least three runs"
             )
-        if self.status == "supported" and self.provider.strip().casefold() in {
-            "fixture",
-            "stub",
-            "fake",
-        }:
+        if self.status == "supported" and _is_fixture_alias(self.provider):
             raise ReviewInputError("fixture-only evidence cannot support promotion")
         if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:
             raise ReviewInputError("promotion record rollback decision is unsupported")
@@ -603,14 +616,19 @@ def run_case(
                 label="expected result",
             )
         )
-        # Pre-status fixtures remain valid as complete deterministic outputs;
-        # this compatibility applies only to evaluation, never publication.
-        if (
-            isinstance(expected_document, dict)
-            and "review_status" not in expected_document
-        ):
-            expected_document["review_status"] = "complete"
-        status = "passed" if expected_document == result.to_dict() else "failed"
+        # Pre-status fixtures remain valid as complete deterministic outputs.
+        # Evaluation accepts both the legacy fixture shape and the additive
+        # explicit ``complete`` status, while publication keeps its
+        # fail-closed parser strict for artifacts missing a status.
+        actual_document = result.to_dict()
+        if isinstance(expected_document, dict):
+            if expected_document.get("review_status") == "complete":
+                expected_document = dict(expected_document)
+                expected_document.pop("review_status")
+            if actual_document.get("review_status") == "complete":
+                actual_document = dict(actual_document)
+                actual_document.pop("review_status")
+        status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(
         comment.line > 0 and comment.path for comment in result.comments
     )

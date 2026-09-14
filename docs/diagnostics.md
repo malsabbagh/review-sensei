@@ -1,7 +1,10 @@
 # Diagnostics and plan previews
 
 `review-sensei doctor` performs bounded offline checks for package metadata,
-packaged stages/categories, configured trusted-base paths, and provider mode.
+packaged stages/categories, configured trusted-base paths, provider mode, and
+the same JSON loaders used by the review runner. Malformed configuration,
+empty directories, and symlinked assets are reported as `action` rather than
+silently treated as available.
 It never calls a model, mints a broker token, or writes to GitHub. Optional
 network checks are reported as `unknown` unless a separately authorized probe
 is run.

@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Mapping
 
 from .diff import analyze_diff
@@ -22,6 +21,124 @@ MAX_PATCH_BYTES = 128 * 1024
 MAX_PATCH_FILES = 20
 MAX_PATCH_METADATA_ITEMS = 32
 MAX_PATCH_METADATA_BYTES = 8 * 1024
+_SYMLINK_MODE_LINE = re.compile(
+    r"^(?:(?:old|new)(?: file)? mode|deleted file mode) 120000$"
+)
+_GIT_MODE = re.compile(r"^[0-7]{6}$")
+
+
+def _reject_unsupported_patch_content(patch: str) -> None:
+    """Reject patch features that cannot be safely represented here."""
+
+    if "GIT binary patch" in patch or "Binary files" in patch:
+        raise ReviewInputError("binary patches are not supported")
+    if any(
+        _SYMLINK_MODE_LINE.fullmatch(line.rstrip("\r"))
+        or (line.startswith("index ") and line.split()[-1:] == ["120000"])
+        for line in patch.splitlines()
+    ):
+        raise ReviewInputError("symlink patches are not supported")
+
+
+def _normalize_git_mode(value: object) -> str:
+    """Validate one mode from the exact reviewed snapshot.
+
+    Git encodes regular files as ``100xxx``.  Keeping the value as its
+    canonical six-digit octal string avoids platform-dependent ``stat`` mode
+    representations and makes the provenance serializable in the suggestion.
+    """
+
+    if not isinstance(value, str) or _GIT_MODE.fullmatch(value) is None:
+        raise ReviewInputError(
+            "patch snapshot modes must be six-digit Git mode strings"
+        )
+    if not value.startswith("100"):
+        raise ReviewInputError("patch snapshot modes must identify regular files")
+    return value
+
+
+def _bounded_allowed_paths(values: Iterable[str]) -> tuple[str, ...]:
+    """Read allowed paths once while bounding both unique and total inputs."""
+
+    try:
+        iterator = iter(values)
+    except (TypeError, AttributeError) as exc:
+        raise ReviewInputError(
+            "patch allowed_paths must be an iterable of paths"
+        ) from exc
+    unique: dict[str, None] = {}
+    for index, path in enumerate(iterator, start=1):
+        # Counting every item (including duplicates) is intentional: an
+        # attacker-controlled generator yielding one path forever must not
+        # bypass the input bound by relying on de-duplication.
+        if index > MAX_PATCH_FILES:
+            raise ReviewInputError("patch allowed_paths has too many entries")
+        if not isinstance(path, str):
+            raise ReviewInputError("patch allowed paths must be strings")
+        validate_repository_path(path, label="patch allowed path")
+        unique.setdefault(path, None)
+    if not unique:
+        raise ReviewInputError("patch allowed_paths must be non-empty")
+    return tuple(unique)
+
+
+def _bounded_metadata(values: Iterable[str], *, label: str) -> tuple[str, ...]:
+    """Read metadata entries without materializing an unbounded iterable."""
+
+    try:
+        iterator = iter(values)
+    except (TypeError, AttributeError) as exc:
+        raise ReviewInputError(f"patch {label} must be an iterable of strings") from exc
+    result: list[str] = []
+    total_bytes = 0
+    for index, item in enumerate(iterator, start=1):
+        if index > MAX_PATCH_METADATA_ITEMS:
+            raise ReviewInputError("patch metadata has too many entries")
+        if not isinstance(item, str) or not item.strip() or len(item) > 1024:
+            raise ReviewInputError(f"patch {label} entries must be non-empty strings")
+        total_bytes += len(item.encode("utf-8"))
+        if total_bytes > MAX_PATCH_METADATA_BYTES:
+            raise ReviewInputError("patch metadata exceeds the bounded size limit")
+        result.append(item)
+    return tuple(result)
+
+
+def _bounded_snapshot_modes(
+    values: Mapping[str, str] | None,
+    *,
+    changed_paths: set[str],
+) -> tuple[tuple[str, str], ...]:
+    """Validate exact regular-file mode provenance for every changed path."""
+
+    if not isinstance(values, Mapping):
+        raise ReviewInputError(
+            "patch requires trusted regular-file snapshot mode provenance"
+        )
+    try:
+        iterator = iter(values.items())
+    except (AttributeError, TypeError) as exc:
+        raise ReviewInputError("patch snapshot modes must be a mapping") from exc
+    normalized: dict[str, str] = {}
+    for index, item in enumerate(iterator, start=1):
+        if index > MAX_PATCH_FILES:
+            raise ReviewInputError("patch snapshot modes have too many entries")
+        try:
+            path, mode = item
+        except (TypeError, ValueError) as exc:
+            raise ReviewInputError(
+                "patch snapshot modes must map paths to modes"
+            ) from exc
+        if not isinstance(path, str):
+            raise ReviewInputError("patch snapshot mode paths must be strings")
+        validate_repository_path(path, label="patch snapshot mode path")
+        if path in normalized:
+            raise ReviewInputError("patch snapshot mode paths must be unique")
+        normalized[path] = _normalize_git_mode(mode)
+    if set(normalized) != changed_paths:
+        raise ReviewInputError(
+            "patch snapshot modes must cover exactly the changed paths"
+        )
+    return tuple(sorted(normalized.items()))
 
 
 @dataclass(frozen=True)
@@ -34,6 +151,11 @@ class PatchSuggestion:
     assumptions: tuple[str, ...] = ()
     validation: tuple[str, ...] = ()
     accepted: bool = False
+    # Immutable mode provenance captured from the exact reviewed snapshot.
+    # Every affected path must have a regular-file Git mode before a patch is
+    # represented; this prevents a mode-less patch from targeting an existing
+    # symlink when a later workflow applies it.
+    snapshot_modes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -49,22 +171,40 @@ class PatchSuggestion:
             raise ReviewInputError("patch content must be non-empty")
         if len(self.patch.encode("utf-8")) > MAX_PATCH_BYTES:
             raise ReviewInputError("patch exceeds the bounded size limit")
-        if "GIT binary patch" in self.patch or "Binary files" in self.patch:
-            raise ReviewInputError("binary patches are not supported")
-        if (
-            "new file mode 120000" in self.patch
-            or "old mode 120000" in self.patch
-            or "new mode 120000" in self.patch
-        ):
-            raise ReviewInputError("symlink patches are not supported")
+        _reject_unsupported_patch_content(self.patch)
         if not isinstance(self.affected_paths, tuple) or not self.affected_paths:
             raise ReviewInputError("patch must declare affected paths")
         if len(self.affected_paths) > MAX_PATCH_FILES:
             raise ReviewInputError("patch affects too many files")
+        if len(self.affected_paths) != len(set(self.affected_paths)):
+            raise ReviewInputError("patch affected paths must be unique")
         for path in self.affected_paths:
             validate_repository_path(path, label="patch affected path")
+        if not isinstance(self.snapshot_modes, tuple) or not self.snapshot_modes:
+            raise ReviewInputError(
+                "patch requires trusted regular-file snapshot mode provenance"
+            )
+        if len(self.snapshot_modes) > MAX_PATCH_FILES:
+            raise ReviewInputError("patch snapshot modes have too many entries")
+        normalized_modes: dict[str, str] = {}
+        for item in self.snapshot_modes:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ReviewInputError("patch snapshot modes must be path/mode tuples")
+            path, mode = item
+            if not isinstance(path, str):
+                raise ReviewInputError("patch snapshot mode paths must be strings")
+            validate_repository_path(path, label="patch snapshot mode path")
+            if path in normalized_modes:
+                raise ReviewInputError("patch snapshot mode paths must be unique")
+            normalized_modes[path] = _normalize_git_mode(mode)
+        if set(normalized_modes) != set(self.affected_paths):
+            raise ReviewInputError(
+                "patch snapshot modes must cover exactly the changed paths"
+            )
         if (
-            len(self.assumptions) > MAX_PATCH_METADATA_ITEMS
+            not isinstance(self.assumptions, tuple)
+            or not isinstance(self.validation, tuple)
+            or len(self.assumptions) > MAX_PATCH_METADATA_ITEMS
             or len(self.validation) > MAX_PATCH_METADATA_ITEMS
         ):
             raise ReviewInputError("patch metadata has too many entries")
@@ -102,6 +242,7 @@ class PatchSuggestion:
             "affected_paths": list(self.affected_paths),
             "assumptions": list(self.assumptions),
             "validation": list(self.validation),
+            "snapshot_modes": dict(self.snapshot_modes),
             "digest": self.digest,
             "accepted": False,
         }
@@ -114,10 +255,18 @@ def create_patch_suggestion(
     base_sha: str,
     head_sha: str,
     allowed_paths: Iterable[str],
+    snapshot_modes: Mapping[str, str] | None = None,
     assumptions: Iterable[str] = (),
     validation: Iterable[str] = (),
 ) -> PatchSuggestion:
-    """Validate and construct a suggestion for one confirmed finding."""
+    """Validate and construct a suggestion for one confirmed finding.
+
+    ``snapshot_modes`` must be read from the exact reviewed base/head snapshot
+    by a trusted caller and must cover every changed path.  Requiring this
+    provenance is deliberate: unified patches commonly omit Git mode headers,
+    so inspecting patch text alone cannot prevent an existing symlink from
+    being modified by a later patch application workflow.
+    """
 
     status = finding.get("status", finding.get("disposition"))
     if status not in {"confirmed", "verified"}:
@@ -125,27 +274,32 @@ def create_patch_suggestion(
     finding_id = finding.get("id", finding.get("finding_id"))
     if not isinstance(finding_id, str) or not finding_id.strip():
         raise ReviewInputError("verified finding must have a stable id")
-    allowed = tuple(dict.fromkeys(allowed_paths))
-    if not allowed:
-        raise ReviewInputError("patch allowed_paths must be non-empty")
+    if isinstance(allowed_paths, (str, bytes)):
+        raise ReviewInputError("patch allowed_paths must be an iterable of paths")
+    if isinstance(assumptions, (str, bytes)) or isinstance(validation, (str, bytes)):
+        raise ReviewInputError("patch metadata must be iterables of strings")
+    allowed = _bounded_allowed_paths(allowed_paths)
     analysis = analyze_diff(patch, limits=DEFAULT_REVIEW_LIMITS)
     changed = set(analysis.changed_paths)
-    if any(Path(path).is_symlink() for path in changed):
-        raise ReviewInputError("patch cannot target symlink paths")
     if not changed.issubset(set(allowed)):
         raise ReviewInputError(
             "patch touches a path outside the validated finding scope"
         )
     if any(path.startswith("/") or ".." in path.split("/") for path in changed):
         raise ReviewInputError("patch contains an unsafe path")
+    _reject_unsupported_patch_content(patch)
+    mode_values = _bounded_snapshot_modes(snapshot_modes, changed_paths=changed)
+    assumption_values = _bounded_metadata(assumptions, label="assumptions")
+    validation_values = _bounded_metadata(validation, label="validation")
     return PatchSuggestion(
         finding_id=finding_id,
         base_sha=base_sha,
         head_sha=head_sha,
         patch=patch,
         affected_paths=tuple(sorted(changed)),
-        assumptions=tuple(assumptions),
-        validation=tuple(validation),
+        assumptions=assumption_values,
+        validation=validation_values,
+        snapshot_modes=mode_values,
     )
 
 

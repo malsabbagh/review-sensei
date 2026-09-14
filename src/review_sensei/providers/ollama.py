@@ -3,16 +3,32 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 import certifi
 
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
+
+MAX_API_KEY_BYTES = 4_096
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Reject redirects before urllib can replay a credentialed request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, new):
+        raise ProviderError("Ollama endpoint redirected")
 
 
 class OllamaProvider:
@@ -38,6 +54,25 @@ class OllamaProvider:
             raise ValueError("Ollama model must be non-empty")
         if timeout_seconds <= 0:
             raise ValueError("Ollama timeout_seconds must be positive")
+        if api_key is not None:
+            if not isinstance(api_key, str):
+                raise ValueError("Ollama api_key must be a string")
+            try:
+                validate_bounded_text(
+                    api_key,
+                    MAX_API_KEY_BYTES,
+                    label="Ollama API key",
+                    allow_empty=False,
+                )
+            except ReviewInputError as exc:
+                raise ValueError(
+                    "Ollama API key exceeds the configured size limit"
+                ) from exc
+            if any(
+                unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+                for character in api_key
+            ):
+                raise ValueError("Ollama API key must not contain control characters")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
@@ -45,6 +80,25 @@ class OllamaProvider:
         self.max_output_tokens = max_output_tokens
         self.allow_model_override = allow_model_override
         self._opener = opener
+        self._ssl_context: ssl.SSLContext | None = None
+        self._safe_opener: Any | None = None
+        if self.base_url.lower().startswith("https://"):
+            # Standalone PyInstaller bundles do not inherit a usable system
+            # CA path on every supported host. Prefer an explicit operator
+            # override, then the bundled certifi roots, while retaining
+            # normal certificate verification.
+            cafile = os.getenv("SSL_CERT_FILE") or certifi.where()
+            try:
+                self._ssl_context = ssl.create_default_context(cafile=cafile)
+            except (OSError, ssl.SSLError) as exc:
+                raise ProviderError(
+                    "Ollama TLS trust store could not be loaded"
+                ) from exc
+        if self._opener is urlopen:
+            handlers: list[Any] = [_NoRedirect()]
+            if self._ssl_context is not None:
+                handlers.append(HTTPSHandler(context=self._ssl_context))
+            self._safe_opener = build_opener(*handlers)
 
     @property
     def endpoint(self) -> str:
@@ -88,26 +142,51 @@ class OllamaProvider:
         )
 
         try:
-            open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
-            if self.base_url.lower().startswith("https://"):
-                # Standalone PyInstaller bundles do not inherit a usable system
-                # CA path on every supported host. Prefer an explicit operator
-                # override, then the bundled certifi roots, while retaining
-                # normal certificate verification.
-                cafile = os.getenv("SSL_CERT_FILE") or certifi.where()
-                open_kwargs["context"] = ssl.create_default_context(cafile=cafile)
-            with self._opener(http_request, **open_kwargs) as response:
-                read_limit = request.max_response_bytes + 1
-                body = bytearray()
-                while len(body) <= request.max_response_bytes:
-                    chunk = response.read(read_limit - len(body))
-                    if not chunk:
-                        break
-                    if not isinstance(chunk, (bytes, bytearray)):
-                        raise ProviderError("Ollama returned an invalid response body")
-                    body.extend(chunk)
+            if self._opener is urlopen:
+                # The built-in transport must reject redirects.  urllib's
+                # default opener follows 301/302/303 responses and may replay
+                # Authorization headers to a different origin.
+                assert self._safe_opener is not None
+                with self._safe_opener.open(
+                    http_request, timeout=self.timeout_seconds
+                ) as response:
+                    read_limit = request.max_response_bytes + 1
+                    body = bytearray()
+                    while len(body) <= request.max_response_bytes:
+                        chunk = response.read(read_limit - len(body))
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise ProviderError(
+                                "Ollama returned an invalid response body"
+                            )
+                        body.extend(chunk)
+            else:
+                open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
+                if self._ssl_context is not None:
+                    open_kwargs["context"] = self._ssl_context
+                with self._opener(http_request, **open_kwargs) as response:
+                    read_limit = request.max_response_bytes + 1
+                    body = bytearray()
+                    while len(body) <= request.max_response_bytes:
+                        chunk = response.read(read_limit - len(body))
+                        if not chunk:
+                            break
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise ProviderError(
+                                "Ollama returned an invalid response body"
+                            )
+                        body.extend(chunk)
         except HTTPError as exc:
             raise ProviderError(f"Ollama request failed with HTTP {exc.code}") from exc
+        except ProviderError as exc:
+            # Keep errors from an injected transport from reflecting a bearer
+            # token supplied by the caller.  The built-in redirect error is
+            # already generic, but this guard preserves that property for
+            # custom openers too.
+            if self.api_key and self.api_key in str(exc):
+                raise ProviderError("Ollama request failed") from exc
+            raise
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc

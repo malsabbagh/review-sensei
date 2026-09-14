@@ -7,7 +7,11 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import PromotionRecord
 from review_sensei.outcomes import RecoveryArtifact, RunOutcome
 from review_sensei.release_manifest import validate_compatibility_manifest
-from review_sensei.verifier import CandidateFinding, EvidenceReference, verify_candidate
+from review_sensei.verifier import (
+    CandidateFinding,
+    EvidenceReference,
+    verify_candidate,
+)
 
 SHA = "a" * 64
 
@@ -74,6 +78,55 @@ class ContractsTests(unittest.TestCase):
             ).disposition,
             "rejected",
         )
+
+    def test_candidate_parser_rejects_non_string_fields_and_assumptions(self):
+        evidence = {
+            "path": "src/app.py",
+            "line": 1,
+            "snapshot_sha256": SHA,
+        }
+        base = {
+            "claim": "bug",
+            "triggering_conditions": "when called",
+            "impacted_path": "src/app.py",
+            "evidence": [evidence],
+            "severity_rationale": "causes failure",
+        }
+        for field in (
+            "claim",
+            "triggering_conditions",
+            "impacted_path",
+            "severity_rationale",
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                CandidateFinding.from_dict({**base, field: 1})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "assumptions": ["ok", 1]})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                (EvidenceReference("src/app.py", 1, SHA),),
+                "causes failure",
+                ("",),
+            )
+
+    def test_evidence_verifier_rejects_noncanonical_snapshot_values(self):
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(
+                CandidateFinding(
+                    "bug",
+                    "when called",
+                    "src/app.py",
+                    (EvidenceReference("src/app.py", 1, SHA),),
+                    "causes failure",
+                ),
+                {"src/app.py": 1},  # type: ignore[dict-item]
+                snapshot_sha256=SHA,
+            )
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", 1, 1)  # type: ignore[arg-type]
 
     def test_manifest_rejects_mismatched_release_versions(self):
         artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}

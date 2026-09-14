@@ -19,9 +19,10 @@ class ProviderSettings:
     base_url: str | None = None
     api_key: str | None = None
     fixture_response: Path | None = None
-    timeout_seconds: float = 900
-    max_output_tokens: int = 2048
+    timeout_seconds: float | None = None
+    max_output_tokens: int | None = None
     profile: str | None = None
+    allow_custom_endpoint: bool = False
 
     @classmethod
     def for_profile(
@@ -73,16 +74,33 @@ class ProviderRegistry:
                 raise ProviderError(
                     "provider profile and provider name must select the same adapter"
                 )
-            # A named profile is an immutable routing and budget policy.  The
-            # generic dataclass defaults are treated as omitted values; every
-            # other caller-supplied value must match the canonical profile.
+            if profile.requires_api_key and (
+                not isinstance(settings.api_key, str) or not settings.api_key.strip()
+            ):
+                raise ProviderError(
+                    f"provider profile '{profile.name}' requires an explicit API key"
+                )
+            if not profile.requires_api_key and settings.api_key is not None:
+                raise ProviderError(
+                    f"provider profile '{profile.name}' does not accept an API key"
+                )
+            # A named profile is an immutable routing and budget policy.  None
+            # means that the caller omitted a value; every explicit value must
+            # match the canonical profile before the settings are replaced by
+            # the profile's complete, canonical values below.
             if settings.model is not None and settings.model != profile.model:
                 raise ProviderError("provider profile model cannot be overridden")
             if settings.base_url is not None and settings.base_url != profile.base_url:
                 raise ProviderError("provider profile endpoint cannot be overridden")
-            if settings.timeout_seconds not in {900, profile.timeout_seconds}:
+            if (
+                settings.timeout_seconds is not None
+                and settings.timeout_seconds != profile.timeout_seconds
+            ):
                 raise ProviderError("provider profile timeout cannot be overridden")
-            if settings.max_output_tokens not in {2048, profile.max_output_tokens}:
+            if (
+                settings.max_output_tokens is not None
+                and settings.max_output_tokens != profile.max_output_tokens
+            ):
                 raise ProviderError(
                     "provider profile output budget cannot be overridden"
                 )
@@ -95,6 +113,7 @@ class ProviderRegistry:
                 timeout_seconds=profile.timeout_seconds,
                 max_output_tokens=profile.max_output_tokens,
                 profile=profile.name,
+                allow_custom_endpoint=False,
             )
         name = settings.name.strip().lower()
         try:
@@ -115,8 +134,16 @@ def default_registry() -> ProviderRegistry:
             base_url=settings.base_url or "http://127.0.0.1:11434/api",
             model=settings.model or "qwen3.5:4b",
             api_key=settings.api_key,
-            timeout_seconds=settings.timeout_seconds,
-            max_output_tokens=settings.max_output_tokens,
+            timeout_seconds=(
+                settings.timeout_seconds
+                if settings.timeout_seconds is not None
+                else 900
+            ),
+            max_output_tokens=(
+                settings.max_output_tokens
+                if settings.max_output_tokens is not None
+                else 2048
+            ),
             allow_model_override=settings.profile is None,
         )
 
@@ -129,9 +156,18 @@ def default_registry() -> ProviderRegistry:
             base_url=settings.base_url or "https://api.openai.com/v1",
             model=settings.model or "gpt-4o-mini",
             api_key=settings.api_key,
-            timeout_seconds=settings.timeout_seconds,
-            max_output_tokens=settings.max_output_tokens,
+            timeout_seconds=(
+                settings.timeout_seconds
+                if settings.timeout_seconds is not None
+                else 120
+            ),
+            max_output_tokens=(
+                settings.max_output_tokens
+                if settings.max_output_tokens is not None
+                else 2048
+            ),
             allow_model_override=settings.profile is None,
+            allow_custom_endpoint=settings.allow_custom_endpoint,
         )
 
     registry.register("openai-compatible", openai_compatible_factory)

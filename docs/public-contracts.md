@@ -118,6 +118,13 @@ These imports are public and stable within a major version:
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
 
+Operational results always include the optional `review_status` key. Directly
+constructed results default to `incomplete`; the trusted review service marks
+its stage aggregate `complete`. Results parsed from legacy JSON without the
+key are classified as `incomplete` and serialize explicitly, so approval paths
+fail closed. Consumers that enforce the original v1 shape should treat this
+additive field as an optional extension during the deprecation window.
+
 ### Finding classification and presentation
 
 `ReviewComment` accepts optional, independent classification fields. `severity`
@@ -160,10 +167,20 @@ reach the review service. Timeout and network failures should raise
 The built-in `openai-compatible` adapter targets an explicit HTTPS
 `/v1/chat/completions` endpoint and requires a non-empty API key; it has no
 provider fallback. Named registry profiles are deterministic presets:
-`local-private`, `fast-triage`, and `deep-verification` (with `local` and
-`private` aliases for the first). Profiles carry bounded timeout/output-token
+`local-private`, `fast-triage`, and `deep-verification` (with `local`, `private`,
+and `local/private` aliases for the first). Profiles carry bounded timeout/output-token
 budgets and endpoint/credential policy. `ProviderSettings.for_profile()` never
 reads the environment or forwards a credential to a profile that disallows it.
+
+The adapter's default endpoint allowlist contains only `https://api.openai.com`.
+An operator who intentionally owns a different HTTPS-compatible service must
+construct the adapter with `allow_custom_endpoint=True`; this explicit opt-in
+acknowledges that review data and the supplied bearer credential leave the
+machine. The default opener rejects redirects and reuses a verified TLS context
+from the system CA store (or a regular file named by `SSL_CERT_FILE`). Injected
+openers are test/transport seams and are responsible for preserving the same
+no-redirect policy. Ollama local and Cloud profiles are independent paths; the
+Cloud profile is the explicit Ollama egress option.
 
 ## CLI Contract
 

@@ -545,10 +545,14 @@ class ReviewResult:
     learning_proposals: tuple[LearningProposal, ...] = ()
     # Provider/orchestrator status is carried into publication so an artifact
     # that only contains a partial or summary pass can never be mistaken for a
-    # complete review eligible for an approval event.  ``complete`` remains the
-    # backwards-compatible default for results produced by the current service.
+    # complete review eligible for an approval event.  The review service marks
+    # its validated aggregate explicitly as ``complete``.
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
-    review_status: str = "complete"
+    # Directly constructed results are not proof that every configured stage
+    # ran successfully.  The service marks its validated aggregate explicitly
+    # as complete; callers reconstructing a legacy artifact without this field
+    # are also classified as incomplete.
+    review_status: str = "incomplete"
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):
@@ -587,7 +591,7 @@ class ReviewResult:
                 label="review model",
                 allow_empty=False,
             )
-        if self.review_status not in {
+        if not isinstance(self.review_status, str) or self.review_status not in {
             "complete",
             "partial",
             "incomplete",
@@ -656,8 +660,10 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
-        # Completeness is always explicit so legacy artifacts cannot be
-        # interpreted as approval-eligible merely because the field is absent.
+        # Explicit status is part of the operational v1 artifact.  Legacy
+        # complete fixtures are normalized by evaluation, while publication
+        # can distinguish an omitted legacy status (parsed as incomplete) from
+        # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
         return value
 
