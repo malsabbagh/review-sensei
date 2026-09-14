@@ -62,7 +62,14 @@ def _load_json(path: Path) -> dict[str, Any]:
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(path, flags)
-        with os.fdopen(descriptor, "rb") as stream:
+        try:
+            stream = os.fdopen(descriptor, "rb")
+        except (OSError, ValueError):
+            # os.fdopen can fail after os.open has transferred ownership of a
+            # valid descriptor; close it explicitly on that exceptional path.
+            os.close(descriptor)
+            raise
+        with stream:
             # Check the descriptor's size before allocating the file buffer.
             # The post-read bound remains necessary because a file can grow
             # after this check; fstat also avoids a path-based TOCTOU window.
