@@ -9,10 +9,14 @@ const PUBLIC_WORKFLOW_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PUBLIC_WORKFLOW_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_TAG_DEREFERENCE_DEPTH = 3;
 const MAX_PUBLIC_REF_BYTES = 64 * 1024;
-// GitHub requires repository metadata read access for installation tokens. It
-// may therefore appear in a response even when a narrower capability did not
-// request it explicitly. No other inherited permission is accepted.
-const IMPLICIT_READ_PERMISSIONS = { metadata: "read" } as const;
+// GitHub requires repository metadata read access for installation tokens and
+// may include contents:read when a pull-request capability needs repository
+// data. These are the only known implicit grants accepted by the broker; an
+// unexpected read or any additional write permission remains a rejection.
+const IMPLICIT_READ_PERMISSIONS = {
+  metadata: "read",
+  contents: "read",
+} as const;
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -83,8 +87,9 @@ function normalizePermissionMap(value: unknown): Record<string, string> | null {
 
 /**
  * Require the response scope to equal the requested scope plus only GitHub's
- * mandatory metadata:read grant. This prevents a token with inherited write
- * capabilities from crossing the broker boundary.
+ * known implicit read grants. This prevents a token with inherited write
+ * capabilities from crossing the broker boundary while accepting legitimate
+ * repository-data permissions returned by GitHub.
  */
 function hasExactPermissions(
   granted: unknown,
@@ -107,21 +112,29 @@ function hasExactPermissions(
   ) {
     return false;
   }
-  const expected = Object.create(null) as Record<string, string>;
+  // Every requested permission must be granted at exactly its requested
+  // level. The intrinsic metadata grant is mandatory even when callers omit
+  // it from their request.
   for (const [name, level] of Object.entries(expectedRequested)) {
-    expected[name] = level;
+    if (actual[name] !== level) {
+      return false;
+    }
   }
-  // The metadata permission is intrinsic to GitHub repository installation
-  // tokens and is the sole tolerated extra grant for capability tokens.
-  if (!Object.hasOwn(expected, "metadata")) {
-    expected.metadata = IMPLICIT_READ_PERMISSIONS.metadata;
-  }
-  const expectedNames = Object.keys(expected);
-  const actualNames = Object.keys(actual);
-  if (expectedNames.length !== actualNames.length) {
+  if (
+    !Object.hasOwn(expectedRequested, "metadata") &&
+    actual.metadata !== IMPLICIT_READ_PERMISSIONS.metadata
+  ) {
     return false;
   }
-  return expectedNames.every((name) => actual[name] === expected[name]);
+  // GitHub may return a subset of known read-only repository grants in
+  // addition to the requested scope. Accept only those exact read levels;
+  // every other extra permission (especially a write grant) is rejected.
+  return Object.entries(actual).every(([name, level]) => {
+    if (Object.hasOwn(expectedRequested, name)) {
+      return true;
+    }
+    return IMPLICIT_READ_PERMISSIONS[name as keyof typeof IMPLICIT_READ_PERMISSIONS] === level;
+  });
 }
 
 function base64Url(value: Uint8Array): string {

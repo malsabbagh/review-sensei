@@ -174,14 +174,18 @@ describe("GitHubApi public workflow resolution", () => {
 });
 
 describe("GitHubApi capability issuance", () => {
-  it("accepts exactly the requested capability plus metadata read", async () => {
+  it("accepts the requested capability plus known implicit read grants", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({
       status: 201,
       data: {
         token: "ghs_scoped_token",
         expires_at: new Date(Date.now() + 60_000).toISOString(),
-        permissions: { pull_requests: "write", metadata: "read" },
+        permissions: {
+          pull_requests: "write",
+          metadata: "read",
+          contents: "read",
+        },
       },
     });
 
@@ -196,10 +200,31 @@ describe("GitHubApi capability issuance", () => {
     );
   });
 
+  it("does not require optional contents read when GitHub omits it", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { pull_requests: "write", metadata: "read" },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+    ).resolves.toBe("ghs_scoped_token");
+  });
+
   it.each([
     ["an inherited writable capability", { pull_requests: "write", contents: "write", metadata: "read" }],
     ["an unrecognized read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
     ["a missing mandatory metadata grant", { pull_requests: "write" }],
+    ["an unexpected writable implicit capability", {
+      pull_requests: "write",
+      metadata: "read",
+      contents: "write",
+    }],
   ])("rejects %s instead of issuing an over-scoped token", async (_name, permissions) => {
     const client = api();
     vi.spyOn(client, "request").mockResolvedValue({
