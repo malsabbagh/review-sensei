@@ -1,6 +1,6 @@
 # ADR 0030 - Gate App approvals on resolved review threads and exact-head review safety
 
-Status: Proposed
+Status: Superseded
 Date: 2026-09-07
 Last amended: 2026-09-14
 GitHub Issue: not configured
@@ -131,4 +131,4 @@ Negative or tradeoffs:
 - Related issue: not configured
 - Related PR: 102
 - Supersedes: [ADR 0027](0027-opt-in-app-approvals-for-clean-pull-request-reviews.md)
-- Superseded by: none
+- Superseded by: [ADR 0032](0032-blocking-finding-classification-for-approvals.md)

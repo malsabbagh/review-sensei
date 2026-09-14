@@ -45,10 +45,12 @@ requested JSON structure. Every inline comment must use the exact
 repository-relative path and new-file line number of an added or modified line
 in the diff. Do not target context or deleted lines. If a finding cannot be
 attached to a changed line, keep it in the summary and omit that inline comment.
-For each actionable inline finding, classify the independent dimensions when
-known: severity (`critical`, `high`, `medium`, or `low`), fix effort (`trivial`,
-`small`, `moderate`, `large`, or `unknown`), and the configured category id as
-the lens source. Do not combine these dimensions into one priority value.
+For each actionable inline finding, classify the independent dimensions: whether
+it is merge-blocking (`blocking`: true or false), severity (`critical`, `high`,
+`medium`, or `low`), fix effort (`trivial`, `small`, `moderate`, `large`, or
+`unknown`), and the configured category id as the lens source. A non-blocking
+finding is a follow-up and does not independently prevent approval. Do not
+combine these dimensions into one priority value.
 </review-output-correction>
 """.strip()
 
@@ -439,6 +441,7 @@ class ReviewService:
                 severity=value.get("severity"),
                 category=value.get("category"),
                 fix_effort=value.get("fix_effort"),
+                blocking=value.get("blocking"),
             )
         except (KeyError, ReviewInputError, TypeError) as exc:
             raise ReviewFormatError(f"comment {index} has an invalid shape") from exc

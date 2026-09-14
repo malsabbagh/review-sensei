@@ -204,14 +204,18 @@ same validated result.
 - `ReviewResult` is the publisher-facing, validated result.
 - `ReviewResult.to_dict()` produces a v1 `review-result` document validated by
   the packaged JSON Schema.
-- `ReviewComment.severity`, `ReviewComment.fix_effort`, and
-  `ReviewComment.category` are independent optional classification metadata.
-  Severity describes impact, fix effort describes remediation scope, and the
-  existing category id is the single source for the originating lens. The v1
-  contract remains permissive for legacy severity strings.
+- `ReviewComment.blocking`, `ReviewComment.severity`,
+  `ReviewComment.fix_effort`, and `ReviewComment.category` are independent
+  optional classification metadata. Explicit `blocking` controls approval;
+  absent values block only for case-insensitive critical/high severity; missing,
+  lower-severity, and legacy free-form values are non-blocking.
+  Severity describes impact,
+  fix effort describes remediation scope, and the existing category id is the
+  single source for the originating lens.
 - Provider-neutral presentation renders available classification labels on
-  inline comments and deterministic severity/lens/quick-win counts in the
-  summary. A wholly legacy result is rendered unchanged.
+  inline comments and deterministic blocking/severity/lens/quick-win counts in the
+  summary, using the same effective merge-impact classification as approval. A
+  wholly legacy result is rendered unchanged.
 - Classification labels are bounded printable provider text, and GitHub
   publication validates the formatted summary against `max_summary_bytes`,
   each formatted inline body against `max_comment_body_bytes`, and the
@@ -547,9 +551,10 @@ Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
 The existing automatic-review and GitHub-writes caller path can emit a
-deterministic approval: only a validated clean exact-head result whose final
+deterministic approval: only a validated exact-head result with no blocking
+findings whose final
 bounded GraphQL `reviewThreads` sweep finds no unresolved thread can emit
-`APPROVE`. Findings, unresolved threads, draft/closed/stale/fork targets,
+`APPROVE`. Blocking findings, unresolved threads, draft/closed/stale/fork targets,
 App-authored PRs, and conversation replies remain `COMMENT`; malformed or
 unavailable thread state fails closed before a write. The sweep asks only for
 `isResolved`, is capped at ten pages, and runs after marker reconciliation and

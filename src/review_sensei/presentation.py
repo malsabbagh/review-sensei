@@ -32,6 +32,7 @@ _LENS_ICONS = {
     "tests": "🧪",
 }
 _DEFAULT_ICON = "🔎"
+_BLOCKING_ICONS = {True: "🚫", False: "💬"}
 
 
 def humanize_lens(category: str) -> str:
@@ -66,6 +67,9 @@ def format_review_comment(comment: ReviewComment) -> str:
     """Render a validated comment with any available classification labels."""
 
     labels: list[str] = []
+    if comment.blocking is not None or comment.blocks_approval:
+        label = "Blocking" if comment.blocks_approval else "Non-blocking"
+        labels.append(f"{_BLOCKING_ICONS[comment.blocks_approval]} {label}")
     if comment.severity is not None:
         labels.append(
             f"{_metadata_icon(_SEVERITY_ICONS, comment.severity)} "
@@ -112,6 +116,7 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
         comment.severity is not None
         or comment.fix_effort is not None
         or comment.category is not None
+        or comment.blocking is not None
         for comment in comments
     ):
         return summary
@@ -129,6 +134,11 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
         and comment.fix_effort.lower() in _QUICK_WIN_EFFORTS
         for comment in comments
     )
+    blocking_counts: Counter[str] = Counter(
+        "Blocking" if comment.blocks_approval else "Non-blocking"
+        for comment in comments
+        if comment.blocking is not None or comment.blocks_approval
+    )
 
     lines = ["Review classification:"]
     severity_line = _count_lines(
@@ -138,6 +148,9 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
     )
     if severity_line:
         lines.append(severity_line)
+    blocking_line = _count_lines("Merge impact", blocking_counts)
+    if blocking_line:
+        lines.append(blocking_line)
     lens_line = _count_lines("Lens", lens_counts)
     if lens_line:
         lines.append(lens_line)

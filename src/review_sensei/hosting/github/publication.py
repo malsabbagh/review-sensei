@@ -13,7 +13,7 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
-from .approval import evaluate_auto_approval
+from .approval import evaluate_auto_approval, has_blocking_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -180,9 +180,10 @@ class ReviewPublisher:
             )
             # APPROVED is final for this head even if a nondeterministic rerun
             # later returns findings. COMMENTED is final only for another
-            # finding-bearing result; a clean result may be promoted below.
+            # blocking-finding result; a result with no blockers may be
+            # promoted below after the resolved-thread sweep.
             if "APPROVED" in published_states or (
-                result.comments and "COMMENTED" in published_states
+                has_blocking_findings(result) and "COMMENTED" in published_states
             ):
                 return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
@@ -247,7 +248,7 @@ class ReviewPublisher:
                 "formatted review exceeds the configured publication limit"
             ) from exc
         has_open_review_threads = False
-        if not result.comments and not write_preflight.app_authored:
+        if not has_blocking_findings(result) and not write_preflight.app_authored:
             has_open_review_threads = self._has_open_review_threads(
                 token=token,
                 repository=repository,
