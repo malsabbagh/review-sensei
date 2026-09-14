@@ -24,10 +24,10 @@ use full commit SHAs with same-line release comments. The public ReviewSensei
 reusable workflow is the deliberate exception: setup-v4 follows its protected
 `@v4` tag, while the broker verifies the tag's runtime commit. Dependabot updates
 GitHub Actions and pip tooling weekly from the repository root. Workflow
-permissions default to `contents: read`; only CodeQL receives
-`security-events: write`. Because this private repository does not have GitHub
-Code Scanning enabled, CodeQL retains its generated SARIF as a workflow
-artifact instead of attempting an unavailable upload.
+permissions default to `contents: read`. Because this private repository does
+not have GitHub Code Scanning enabled, CodeQL requests no `security-events:
+write` permission, retains its generated SARIF as a workflow artifact, and
+uses the deterministic local gate instead of attempting an unavailable upload.
 
 The repository variable `ENABLE_UBICLOUD_HOSTED` controls runner selection. When
 it is `true`, all Linux jobs use the `ubicloud-standard-2` runner and the

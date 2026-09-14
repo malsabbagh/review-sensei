@@ -370,26 +370,6 @@ export function previousProviderParityWorkflowTemplate(publicWorkflowTag: string
     .replace("  issues: write\n", "  issues: read\n");
 }
 
-/** Released setup-v4 caller with the removed approval toggle retained for migration. */
-export function legacyAutoApproveProviderParityWorkflowTemplate(
-  publicWorkflowTag: string,
-): string {
-  return previousProviderParityWorkflowTemplate(publicWorkflowTag).replace(
-    "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-    "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n" +
-      "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-  );
-}
-
-export function legacyAutoApproveHistoricalProviderParityWorkflowTemplate(
-  publicWorkflowTag: string,
-): string {
-  return legacyAutoApproveProviderParityWorkflowTemplate(publicWorkflowTag).replace(
-    "      operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}\n",
-    "      operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}\n",
-  );
-}
-
 function historicalProviderParityWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return previousProviderParityWorkflowTemplate(tag).replace(
@@ -482,8 +462,7 @@ function historicalV3UninstallWorkflowTemplate(): string {
   );
 }
 
-function configFile(version: number, includeAutoApprove = false): string {
-  const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
+function configFile(version: number): string {
   const packageVersion = version === 3 ? "0.1.0" : "0.1.1";
   return (
     `# ReviewSensei setup version: ${version}\n` +
@@ -496,7 +475,6 @@ function configFile(version: number, includeAutoApprove = false): string {
     `cloud_model: ${DEFAULT_CLOUD_MODEL}\n` +
     `version: ${packageVersion}\n` +
     "auto_review: false\n" +
-    autoApprove +
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +
@@ -537,27 +515,6 @@ export function buildTaggedV4SetupFiles(
       ),
     },
     { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
-  ];
-}
-
-/** Released setup-v4 output with the removed approval toggle retained for migration. */
-export function buildLegacyAutoApproveV4SetupFiles(
-  publicWorkflowTag: string,
-): readonly SetupFile[] {
-  const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  return [
-    {
-      path: SETUP_FILE_PATHS[0],
-      content: legacyAutoApproveProviderParityWorkflowTemplate(tag),
-    },
-    {
-      path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
-    },
-    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION, true) },
   ];
 }
 

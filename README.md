@@ -299,7 +299,7 @@ definition must be identical.
 Inline findings may also carry independent `blocking`, `severity`
 (`critical`, `high`, `medium`, or `low`), and `fix_effort` (`trivial`, `small`,
 `moderate`, `large`, or `unknown`) labels. `blocking` controls whether the
-finding prevents automatic approval; `false` identifies an optional follow-up.
+finding prevents approval; `false` identifies an optional follow-up.
 If it is omitted, only case-insensitive canonical `critical` and `high`
 severity values block approval. Missing, lower-severity, and legacy free-form
 severity values are non-blocking.

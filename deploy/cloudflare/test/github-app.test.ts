@@ -12,7 +12,6 @@ import {
   SETUP_FILE_PATHS,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
-  buildLegacyAutoApproveV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
 } from "../src/setup-content";
@@ -550,22 +549,6 @@ describe("setup repository reconciliation", () => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(
       buildHistoricalProviderParityV4SetupFiles(TAG).map(({ path, content }) => [path, content]),
-    );
-
-    expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
-    ]);
-    expect(
-      fake.requests.find(
-        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
-      )?.body,
-    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
-  });
-
-  it("migrates the released v4 caller with the removed approval toggle", async () => {
-    const fake = new FakeGitHub();
-    fake.files = Object.fromEntries(
-      buildLegacyAutoApproveV4SetupFiles(TAG).map(({ path, content }) => [path, content]),
     );
 
     expect(await serviceWith(fake).process(delivery())).toEqual([

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "policy": {
+    "fail_on_levels": ["warning", "error"],
+    "minimum_score": 2,
+    "exception_expiry_days": 30
+  },
+  "findings": []
+}

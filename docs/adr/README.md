@@ -35,12 +35,13 @@ Process: `docs/process/adr-process.md`
 | [0024](0024-tag-only-setup-v4-channel.md) | Proposed | Use the protected public `v4` tag as the sole setup-v4 workflow channel | #64 | Worker validates the tag; broker resolves it and checks the runtime SHA |
 | [0025](0025-cloud-local-feature-parity-and-conversation-reactions.md) | Proposed | Keep cloud and local feature-complete with ephemeral conversation reactions | #64 | One provider-neutral caller; symmetric review/reply operations |
 | [0026](0026-stable-reviewsensei-learning-pull-request-identity-and-reconciliation.md) | Proposed | Stable ReviewSensei learning pull-request identity and reconciliation | #97 | Stable learning-PR lifecycle, safe refresh, and proposal provenance |
-| [0027](0027-opt-in-app-approvals-for-clean-pull-request-reviews.md) | Superseded | Historical opt-in App approvals for clean pull-request reviews | #96 | Separate approval toggle superseded by ADR 0030 |
+| [0027](0027-opt-in-app-approvals-for-clean-pull-request-reviews.md) | Superseded | Historical App approvals for clean pull-request reviews | #96 | Clean-review approval policy superseded by ADR 0030 |
 | [0028](0028-bounded-review-output-recovery.md) | Proposed | Recover once from invalid provider structure and page GitHub history within response bounds | Not configured | Transactional provider retry and 20-item learning-PR discovery pages |
 | [0029](0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Not configured | Additive v1 classification metadata and deterministic publisher rendering |
 | [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | not configured | Superseded by ADR 0032. |
 | [0031](0031-npm-launcher-and-standalone-platform-packages.md) | Proposed | Thin npx launcher with five native standalone platform packages | #103 | Exact target selection, public-source provenance, protected npm publication, registry readback, and version-forward rollback |
 | [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; only critical/high severity blocks when the flag is absent, while resolved-thread safety remains. |
+| [0033](0033-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 
 ## Policy
 

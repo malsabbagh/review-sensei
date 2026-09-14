@@ -33,7 +33,7 @@ every finding: `true` means the finding must be resolved before merge and
 is absent, only case-insensitive `critical`/`high` severity values block.
 Missing, lower-severity, and legacy free-form severity values are non-blocking.
 
-Automatic approval requires no blocking findings and the existing bounded
+Approval requires no blocking findings and the existing bounded
 GitHub review-thread sweep to report every prior thread resolved. Non-blocking
 findings are published with their review and can accompany `APPROVE`; unresolved
 threads, App-authored pull requests, drafts, forks, closed/stale targets, and
@@ -87,7 +87,7 @@ an explicit boolean lets maintainers and providers state the intended outcome.
 
 ### Remove the unresolved-review-thread gate
 
-Rejected because it would allow automatic approval despite unresolved human or
+Rejected because it would allow approval despite unresolved human or
 earlier review feedback and weakens the existing publication-control boundary.
 
 ## Validation

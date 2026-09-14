@@ -268,8 +268,6 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn("github.event.comment.user.type != 'Bot'", workflow)
         self.assertIn("github.event.issue.pull_request", workflow)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", workflow)
-        self.assertNotIn("REVIEWSENSEI_AUTO_APPROVE", workflow)
-        self.assertNotIn("enable_auto_approve", workflow)
         self.assertIn(
             "operation: ${{ github.event_name == 'pull_request' && 'review' || "
             "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
@@ -286,7 +284,6 @@ class SetupPlanTests(unittest.TestCase):
         ]
         self.assertIn("qwen3.5:4b", config)
         self.assertIn("deepseek-v4-flash:cloud", config)
-        self.assertNotIn("auto_approve", config)
         uninstall = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-uninstall.yml"
         ]
@@ -641,39 +638,6 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             .replace(current_operation, historical_operation, 1)
             .replace("pull-requests: write", "pull-requests: read", 1)
             .replace("issues: write", "issues: read", 1)
-        )
-        transport = FileTransport(files=files)
-
-        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
-            delivery(),
-            installation_token="ghs_opaque",
-        )
-
-        self.assertEqual(results[0].status, "created")
-        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
-
-    def test_released_provider_parity_v4_setup_with_removed_approval_switch_is_migrated(
-        self,
-    ):
-        plan = SetupPlanBuilder().build("owner/repo")
-        files = {file.path: file.content for file in plan.files}
-        files[".github/workflows/review-sensei-review.yml"] = (
-            files[".github/workflows/review-sensei-review.yml"]
-            .replace(
-                "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-                "      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}\n"
-                "      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}\n",
-                1,
-            )
-            .replace("pull-requests: write", "pull-requests: read", 1)
-            .replace("issues: write", "issues: read", 1)
-        )
-        files[".github/review-sensei/config.yml"] = files[
-            ".github/review-sensei/config.yml"
-        ].replace(
-            "auto_review: false\n",
-            "auto_review: false\nauto_approve: false\n",
-            1,
         )
         transport = FileTransport(files=files)
 

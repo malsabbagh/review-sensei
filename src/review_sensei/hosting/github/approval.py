@@ -8,19 +8,19 @@ from ...models import ReviewResult
 
 
 @dataclass(frozen=True)
-class AutoApprovalDecision:
+class ApprovalDecision:
     """Explain whether a validated review may use GitHub's APPROVE event."""
 
     approved: bool
     blockers: tuple[str, ...] = ()
 
 
-def evaluate_auto_approval(
+def evaluate_approval(
     *,
     app_authored: bool,
     result: ReviewResult,
     has_open_review_threads: bool,
-) -> AutoApprovalDecision:
+) -> ApprovalDecision:
     """Apply the repository's conservative approval criteria.
 
     A finding blocks when it is explicitly classified as blocking. When the
@@ -37,7 +37,7 @@ def evaluate_auto_approval(
         blockers.append("blocking-findings-open")
     if has_open_review_threads:
         blockers.append("review-threads-open")
-    return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
+    return ApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 
 def has_blocking_findings(result: ReviewResult) -> bool:
@@ -47,7 +47,7 @@ def has_blocking_findings(result: ReviewResult) -> bool:
 
 
 __all__ = [
-    "AutoApprovalDecision",
-    "evaluate_auto_approval",
+    "ApprovalDecision",
+    "evaluate_approval",
     "has_blocking_findings",
 ]

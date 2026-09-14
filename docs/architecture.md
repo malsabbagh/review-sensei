@@ -79,9 +79,10 @@ The repository quality boundary is deterministic and provider-independent. The
 `quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
 coverage; the `schemas` job validates the three packaged Draft 2020-12
 contracts and immutable GitHub Action pins; the `package` job builds both
-distributions and verifies a wheel from outside the checkout; CodeQL is the only
-job granted `security-events: write`. All other workflow permissions default to
-`contents: read`, and the `required-checks` aggregate publishes the stable
+distributions and verifies a wheel from outside the checkout; CodeQL analyzes
+Python and JavaScript/TypeScript and its deterministic SARIF findings gate is
+the enforcement surface. All workflow permissions default to `contents: read`,
+and the `required-checks` aggregate publishes the stable
 `Required checks` status used by branch protection.
 
 The public JSON schemas are structural contracts only. They reject malformed
@@ -549,6 +550,15 @@ retaining different compute and egress boundaries. Cloud uses GitHub-hosted
 compute and Ollama Cloud; local uses the labelled self-hosted Ollama runner.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
+
+Before an enabled review reaches either provider, the reusable workflow runs a
+read-only authoritative pull-request preflight. It validates the repository
+numeric id, open/non-draft state, same-repository non-fork head, exact head
+SHA, base ref, and (when supplied) base SHA, then exports the API's canonical
+base SHA and a bounded standard-base64 title. The provider checks out that
+canonical base commit. Reply operations use a no-op preflight and cannot
+select a review step; unavailable GitHub metadata fails closed with an
+explicit error rather than allowing a stale or ambiguous review.
 
 The existing automatic-review and GitHub-writes caller path can emit a
 deterministic approval: only a validated exact-head result with no blocking
