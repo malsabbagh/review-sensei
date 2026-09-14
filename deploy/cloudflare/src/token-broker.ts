@@ -17,7 +17,7 @@ type Capability = keyof typeof CAPABILITIES;
 
 // Only review publication may receive contents:read as a GitHub implicit
 // grant. Reply capabilities are mutation-only and reject it if returned.
-const CONTENTS_READ_IMPLICIT_CAPABILITIES = new Set<Capability>(["review_publish"]);
+const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["review_publish"]);
 
 interface BrokerBody {
   oidc_token?: unknown;
@@ -150,7 +150,7 @@ export class TokenBroker {
       installationId,
       claims.repository,
       CAPABILITIES[requested],
-      CONTENTS_READ_IMPLICIT_CAPABILITIES.has(requested),
+      CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
     return { token, capability: requested };
   }

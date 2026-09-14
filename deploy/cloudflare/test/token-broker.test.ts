@@ -81,7 +81,7 @@ describe("token broker authorization", () => {
     ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
     ["issue_reply", "issue_reply", { pull_requests: "write" }, false],
     ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false],
-  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions, allowImplicitContentsRead) => {
+  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions, acceptReturnedContentsRead) => {
     const { broker, github } = harness();
     const result = await broker.exchange({ oidc_token: "signed-jwt", capability: requested });
 
@@ -97,7 +97,7 @@ describe("token broker authorization", () => {
       2468,
       "acme/widgets",
       permissions,
-      allowImplicitContentsRead,
+      acceptReturnedContentsRead,
     );
   });
 

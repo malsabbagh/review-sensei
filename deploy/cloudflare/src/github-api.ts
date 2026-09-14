@@ -52,7 +52,8 @@ function canonicalPermissionName(value: string): string | null {
     return null;
   }
   // GitHub's API uses `actions_variables` in some payloads while the
-  // permission map returned by the API has historically used `variables`.
+  // permission map has historically used `variables`. Accept either spelling
+  // alone, but reject responses containing both aliases as ambiguous.
   return normalized === "actions_variables" ? "variables" : normalized;
 }
 
@@ -90,7 +91,7 @@ function normalizePermissionMap(value: unknown): Record<string, string> | null {
 function hasExactPermissions(
   granted: unknown,
   requested: Record<string, string>,
-  allowImplicitContentsRead = false,
+  acceptReturnedContentsRead = false,
 ): boolean {
   const actual = normalizePermissionMap(granted);
   const expectedRequested = normalizePermissionMap(requested);
@@ -132,7 +133,7 @@ function hasExactPermissions(
     }
     return (
       (name === "metadata" && level === IMPLICIT_METADATA_PERMISSION) ||
-      (allowImplicitContentsRead && name === "contents" && level === "read")
+      (acceptReturnedContentsRead && name === "contents" && level === "read")
     );
   });
 }
@@ -598,7 +599,7 @@ export class GitHubApi {
     installationId: number,
     repository: string,
     permissions: Record<string, "read" | "write">,
-    allowImplicitContentsRead = false,
+    acceptReturnedContentsRead = false,
   ): Promise<string> {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
@@ -632,7 +633,7 @@ export class GitHubApi {
     ) {
       throw new Error("github_capability_response_invalid");
     }
-    if (!hasExactPermissions(granted, permissions, allowImplicitContentsRead)) {
+    if (!hasExactPermissions(granted, permissions, acceptReturnedContentsRead)) {
       throw new Error("github_capability_permissions_invalid");
     }
     return token;
