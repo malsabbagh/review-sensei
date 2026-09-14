@@ -484,6 +484,122 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIn("trusted-base-learnings", prompt)
         self.assertEqual(len(calls), 5)
 
+    def test_prepare_context_ignores_non_json_learning_files(self):
+        updated = "2026-08-19T00:00:00Z"
+        head = "b" * 40
+        source = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei explain this change",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "created_at": updated,
+            "in_reply_to_id": None,
+            "path": "src/app.py",
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+        }
+        responses = [
+            json_response(source),
+            json_response(pr_payload(head)),
+            json_response([source]),
+            json_response(
+                [
+                    {
+                        "type": "file",
+                        "path": ".github/review-sensei/learnings/README.md",
+                        "size": 712,
+                    }
+                ]
+            ),
+        ]
+        http, calls = make_http(responses)
+
+        prepared = ConversationPublisher(http=http).prepare_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at=updated,
+            expected_head_sha=head,
+            app_slug="review-sensei[bot]",
+            source_kind="inline",
+        )
+
+        self.assertIsInstance(prepared, PreparedConversation)
+        self.assertEqual(prepared.context.learnings, ())
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all("README.md" not in call[1] for call in calls))
+
+    def test_base_learnings_rejects_json_path_anomalies(self):
+        for path in (
+            ".github/review-sensei/other.json",
+            ".github/review-sensei/learnings-extra/file.json",
+            ".github/review-sensei/learnings-extra/file.md",
+            ".github/review-sensei/learnings/nested/bad.json",
+        ):
+            with self.subTest(path=path):
+                http, calls = make_http(
+                    json_response([{"type": "file", "path": path, "size": 1}])
+                )
+                with self.assertRaises(GitHubConversationError):
+                    ConversationPublisher(http=http)._load_base_learnings(
+                        token="token",
+                        repository="owner/repo",
+                        base_sha="a" * 40,
+                        changed_paths=("src/app.py",),
+                    )
+                self.assertEqual(len(calls), 1)
+
+    def test_base_learnings_counts_only_json_files(self):
+        directory = [
+            {
+                "type": "file",
+                "path": ".github/review-sensei/learnings/README.md",
+                "size": 712,
+            },
+            *[
+                {
+                    "type": "file",
+                    "path": f".github/review-sensei/learnings/rule-{index}.json",
+                    "size": 1,
+                }
+                for index in range(100)
+            ],
+        ]
+        encoded_files = []
+        for index in range(100):
+            learning = {
+                "id": f"python.error-contract-{index}",
+                "title": "Stable errors",
+                "rule": "Keep public errors stable.",
+                "scope": ["src/**"],
+                "status": "active",
+            }
+            encoded_files.append(
+                base64.b64encode((json.dumps(learning) + "\n").encode("utf-8")).decode(
+                    "ascii"
+                )
+            )
+        responses = [
+            json_response(directory),
+            *[
+                json_response({"content": encoded, "encoding": "base64"})
+                for encoded in encoded_files
+            ],
+        ]
+        http, calls = make_http(responses)
+
+        entries = ConversationPublisher(http=http)._load_base_learnings(
+            token="token",
+            repository="owner/repo",
+            base_sha="a" * 40,
+            changed_paths=("src/app.py",),
+        )
+
+        self.assertGreater(len(entries), 0)
+        self.assertEqual(len(calls), 101)
+
     def test_prepare_context_rejects_unauthorized_before_thread_fetch(self):
         http, calls = make_http(
             json_response(

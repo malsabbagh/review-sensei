@@ -651,7 +651,10 @@ class ConversationPublisher:
         base_sha: str,
         changed_paths: tuple[str, ...],
     ) -> tuple[LearningEntry, ...]:
-        directory = ".github/review-sensei/learnings"
+        directory = validate_repository_path(
+            ".github/review-sensei/learnings",
+            label="conversation learning directory",
+        )
         status, payload = self.http.request(
             "GET",
             self.http.repository_path(
@@ -665,15 +668,35 @@ class ConversationPublisher:
         if status < 200 or status >= 300 or not isinstance(payload, list):
             raise GitHubConversationError("conversation learning lookup failed")
         files = [item for item in payload if isinstance(item, dict)]
-        if len(files) > MAX_LEARNING_FILES:
-            raise GitHubConversationError("conversation contains too many learnings")
-        entries: list[LearningEntry] = []
-        for item in sorted(files, key=lambda value: str(value.get("path", ""))):
+        directory_parts = tuple(directory.split("/"))
+        learning_files: list[dict[str, Any]] = []
+        for item in files:
             path = item.get("path")
             if item.get("type") != "file" or not isinstance(path, str):
                 continue
             validate_repository_path(path, label="conversation learning path")
-            if not path.startswith(directory + "/") or not path.endswith(".json"):
+            path_parts = tuple(path.split("/"))
+            if path_parts[: len(directory_parts)] != directory_parts:
+                # Entries outside the configured directory are malformed Contents
+                # responses; fail closed instead of treating them as docs.
+                raise GitHubConversationError(
+                    "conversation learning path was outside configured directory"
+                )
+            relative_parts = path_parts[len(directory_parts) :]
+            if len(relative_parts) != 1:
+                raise GitHubConversationError("conversation learning path was invalid")
+            # Direct-child documentation is intentionally never fetched as learning content.
+            if not path.endswith(".json"):
+                continue
+            learning_files.append(item)
+        if len(learning_files) > MAX_LEARNING_FILES:
+            raise GitHubConversationError("conversation contains too many learnings")
+        entries: list[LearningEntry] = []
+        for item in sorted(
+            learning_files, key=lambda value: str(value.get("path", ""))
+        ):
+            path = item.get("path")
+            if not isinstance(path, str):
                 raise GitHubConversationError("conversation learning path was invalid")
             size = item.get("size")
             if isinstance(size, int) and size > MAX_LEARNING_FILE_BYTES:
