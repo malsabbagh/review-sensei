@@ -22,7 +22,7 @@
     }
   ],
   "tags": {
-    "immutable_pattern": "v[0-9]*.[0-9]*.[0-9]*",
+    "immutable_pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
     "movable_channels": ["v4"],
     "promotion_record": ".publication/publication-ledger.jsonl"
   }

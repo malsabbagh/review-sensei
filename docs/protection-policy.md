@@ -16,6 +16,11 @@ GitHub and retain the authoritative API response as evidence.
   replaced. `v4` is the sole movable operator-managed setup channel, and every
   promotion is recorded in `.publication/publication-ledger.jsonl`.
 
+The checked-in `tags.immutable_pattern` is an anchored regular expression for
+that semantic-version set. GitHub ruleset pattern syntax is configured
+separately by an administrator and must be translated conservatively, then
+verified with the readback and behavioral evidence described below.
+
 ## Read-only verification
 
 Validate the contract in any checkout:

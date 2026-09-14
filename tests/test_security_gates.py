@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -467,6 +468,15 @@ class ProtectionPolicyTests(unittest.TestCase):
         module = _load_script("check_protection_policy.py")
         policy = module.load_object(ROOT / ".github" / "protection-policy.json")
         self.assertEqual(module.validate_policy(policy), [])
+
+    def test_immutable_tag_pattern_is_anchored_semver_regex(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        pattern = re.compile(policy["tags"]["immutable_pattern"])
+        self.assertIsNotNone(pattern.fullmatch("v1.2.3"))
+        for tag in ("v1x2x3", "v1.2.3-extra", "prefix-v1.2.3", "v1alpha.2.3"):
+            with self.subTest(tag=tag):
+                self.assertIsNone(pattern.fullmatch(tag))
 
     def test_required_tag_policy_fields_cannot_drift(self):
         module = _load_script("check_protection_policy.py")

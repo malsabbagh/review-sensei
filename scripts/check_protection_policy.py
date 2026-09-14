@@ -15,6 +15,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+_IMMUTABLE_TAG_PATTERN = r"^v[0-9]+\.[0-9]+\.[0-9]+$"
+
 
 def load_object(path: Path) -> dict[str, Any]:
     try:
@@ -83,7 +85,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
                 errors.append("bypass actors must document a non-empty reason")
     tags = policy.get("tags")
     expected_tags = {
-        "immutable_pattern": "v[0-9]*.[0-9]*.[0-9]*",
+        "immutable_pattern": _IMMUTABLE_TAG_PATTERN,
         "movable_channels": ["v4"],
         "promotion_record": ".publication/publication-ledger.jsonl",
     }
