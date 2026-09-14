@@ -521,6 +521,38 @@ def _evaluate_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _doctor_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei doctor",
+        description="Run bounded, read-only installation diagnostics.",
+    )
+    parser.add_argument("--stages-dir", type=Path)
+    parser.add_argument("--categories-dir", type=Path)
+    parser.add_argument("--context-root", type=Path)
+    parser.add_argument(
+        "--network",
+        action="store_true",
+        help="Report optional network checks as unknown (never probes).",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei plan",
+        description="Preview a review execution plan without provider or GitHub calls.",
+    )
+    parser.add_argument("--diff", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--title")
+    parser.add_argument("--stage", action="append", default=[])
+    parser.add_argument("--provider-mode")
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
 def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .evaluation import (
         endpoint_scope,
@@ -829,6 +861,60 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
+    if args_list and args_list[0] == "doctor":
+        args = _doctor_parser().parse_args(args_list[1:])
+        try:
+            from .diagnostics import (
+                DOCTOR_ACTION_REQUIRED,
+                DOCTOR_UNKNOWN,
+                render_diagnostic,
+                run_doctor,
+            )
+
+            report = run_doctor(
+                stages_dir=args.stages_dir,
+                categories_dir=args.categories_dir,
+                context_root=args.context_root,
+                include_network=args.network,
+            )
+            sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
+            return (
+                DOCTOR_ACTION_REQUIRED
+                if report["status"] == "action"
+                else DOCTOR_UNKNOWN
+                if report["status"] == "unknown"
+                else 0
+            )
+        except (OSError, ValueError, ReviewSenseiError) as exc:
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            return 2
+    if args_list and args_list[0] == "plan":
+        args = _plan_parser().parse_args(args_list[1:])
+        try:
+            from .diagnostics import build_plan, render_diagnostic
+
+            diff = (
+                read_bounded_utf8(
+                    args.diff,
+                    maximum=DEFAULT_REVIEW_LIMITS.max_diff_bytes,
+                    label="diff",
+                )
+                if args.diff
+                else None
+            )
+            report = build_plan(
+                diff=diff,
+                repository=args.repository,
+                pull_request=args.pull_request,
+                title=args.title,
+                stages=args.stage,
+                provider_mode=args.provider_mode,
+            )
+            sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
+            return 0 if report["status"] == "ready" else 3
+        except (OSError, ValueError, ReviewSenseiError) as exc:
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            return 2
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
         if args.version:
