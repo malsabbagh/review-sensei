@@ -533,6 +533,7 @@ class ConversationPublisherTests(unittest.TestCase):
     def test_base_learnings_rejects_json_path_anomalies(self):
         for path in (
             ".github/review-sensei/other.json",
+            ".github/review-sensei/learnings-extra/file.json",
             ".github/review-sensei/learnings/nested/bad.json",
         ):
             with self.subTest(path=path):

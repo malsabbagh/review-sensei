@@ -665,7 +665,7 @@ class ConversationPublisher:
         if status < 200 or status >= 300 or not isinstance(payload, list):
             raise GitHubConversationError("conversation learning lookup failed")
         files = [item for item in payload if isinstance(item, dict)]
-        directory_prefix = directory + "/"
+        directory_parts = tuple(directory.split("/"))
         learning_files: list[dict[str, Any]] = []
         for item in files:
             path = item.get("path")
@@ -674,12 +674,15 @@ class ConversationPublisher:
             validate_repository_path(path, label="conversation learning path")
             if not path.endswith(".json"):
                 continue
-            relative_path = (
-                path[len(directory_prefix) :]
-                if path.startswith(directory_prefix)
-                else ""
-            )
-            if not relative_path or "/" in relative_path:
+            path_parts = tuple(path.split("/"))
+            if path_parts[: len(directory_parts)] != directory_parts:
+                # JSON entries outside the configured directory are malformed
+                # Contents responses; fail closed instead of treating them as docs.
+                raise GitHubConversationError(
+                    "conversation learning path was outside configured directory"
+                )
+            relative_parts = path_parts[len(directory_parts) :]
+            if len(relative_parts) != 1:
                 raise GitHubConversationError("conversation learning path was invalid")
             learning_files.append(item)
         if len(learning_files) > MAX_LEARNING_FILES:
