@@ -56,10 +56,16 @@ containing `/v1/`.
 | `concurrency-plan.schema.json` | Host-enforced concurrency policy |
 | `evaluation-corpus.schema.json` | Versioned synthetic evaluation corpus |
 | `evaluation-report.schema.json` | Privacy-safe evaluation result and metrics |
+| `promotion-record.schema.json` | Real-provider promotion evidence |
+| `recovery-artifact.schema.json` | Publication-only recovery artifact |
+| `run-outcome.schema.json` | Structured run outcome and diagnostics |
+| `verification-result.schema.json` | Candidate evidence verification result |
+| `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 
 The `$id` policy is fixed: the path after the package namespace must include
-`/v1/` for v1 documents. Schema identity is the `$id`; emitted v1 documents do
-not carry a `schema_version` field.
+`/v1/` for v1 documents. Schema identity is the `$id`. Legacy review-result
+documents do not carry `schema_version`; the newer operational contracts emit
+their explicit `schema_version` marker.
 
 The validation entry point is `review_sensei.schemas`:
 

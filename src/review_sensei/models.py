@@ -607,10 +607,9 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
-        # Keep the v1 wire shape byte-compatible for complete results while
-        # making non-complete artifacts explicit and machine-checkable.
-        if self.review_status != "complete":
-            value["review_status"] = self.review_status
+        # Completeness is always explicit so legacy artifacts cannot be
+        # interpreted as approval-eligible merely because the field is absent.
+        value["review_status"] = self.review_status
         return value
 
     @classmethod
@@ -624,7 +623,9 @@ class ReviewResult:
         provider = value.get("provider")
         model = value.get("model")
         proposals = value.get("learning_proposals", [])
-        review_status = value.get("review_status", "complete")
+        # Missing status is a legacy/incomplete artifact and must fail closed
+        # in publication/approval paths.
+        review_status = value.get("review_status", "incomplete")
         if not isinstance(summary, str):
             raise ReviewInputError("review result summary must be a string")
         if not isinstance(comments, list):

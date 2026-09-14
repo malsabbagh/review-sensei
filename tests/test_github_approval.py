@@ -235,6 +235,21 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("review-threads-incomplete",))
 
+    def test_legacy_result_without_status_fails_closed(self):
+        legacy = ReviewResult.from_dict(
+            {"summary": "Summary.", "comments": [], "provider": "fixture"}
+        )
+        self.assertEqual(legacy.review_status, "incomplete")
+        self.assertEqual(legacy.to_dict()["review_status"], "incomplete")
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=legacy,
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("review-incomplete",))
+
 
 if __name__ == "__main__":
     unittest.main()
