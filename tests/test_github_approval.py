@@ -160,7 +160,10 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             summary="Summary.",
             comments=(
                 ReviewComment(
-                    path="src/app.py", line=2, body="Unknown finding", severity="warning"
+                    path="src/app.py",
+                    line=2,
+                    body="Unknown finding",
+                    severity="warning",
                 ),
             ),
             provider="fixture",

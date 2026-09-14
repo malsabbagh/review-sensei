@@ -98,9 +98,7 @@ class ModelTests(unittest.TestCase):
         result = ReviewResult.from_dict(
             {
                 "summary": "Review complete.",
-                "comments": [
-                    {"path": "src/app.py", "line": 1, "body": "finding"}
-                ],
+                "comments": [{"path": "src/app.py", "line": 1, "body": "finding"}],
                 "provider": "fake",
             }
         )
