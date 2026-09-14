@@ -42,3 +42,6 @@ jobs:
           python scripts/check_protection_policy.py \
             --policy .github/protection-policy.json \
             --readback "$RUNNER_TEMP/reviewsensei-ruleset.json"
+      - name: Remove ruleset readback
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/reviewsensei-ruleset.json"

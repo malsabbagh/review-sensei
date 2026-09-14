@@ -244,7 +244,7 @@ def compare_readback(policy: dict[str, Any], readback: dict[str, Any]) -> list[s
                 if sorted(actual_contexts) != sorted(expected_checks):
                     errors.append(
                         "ruleset readback required status checks do not match policy: "
-                        + ", ".join(str(check) for check in expected_checks)
+                        + f"expected {sorted(expected_checks)!r}, got {sorted(actual_contexts)!r}"
                     )
 
     bypass = readback.get("bypass_actors", [])
