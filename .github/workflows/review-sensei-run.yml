@@ -104,12 +104,17 @@ on:
         required: false
 
 concurrency:
-  # Reviews are latest-wins per repository/PR/operation. Reply events use a
-  # source-event identity so they cannot cancel an unrelated review run.
-  # Legacy source identity (source_comment_id || inputs.head_sha) is retained
-  # only as documentation; review cancellation is now PR-scoped below.
-  group: reviewsensei-${{ inputs.operation == 'review' && format('pr-{0}-{1}', inputs.repository, inputs.pull_request_number) || format('event-{0}-{1}', inputs.repository, inputs.source_comment_id || github.run_id) }}
-  cancel-in-progress: ${{ inputs.operation == 'review' }}
+  # Use only host-provided identities in the group key.  In particular, do not
+  # interpolate the optional pull_request_number input: workflow-level
+  # concurrency is evaluated before any validation job can reject it. A
+  # pull_request event gets latest-wins cancellation per PR. Reply events
+  # (including pull_request_review_comment) always use their unique run id so
+  # one reply can never replace another reply for the same PR. Manual reviews
+  # have no host PR identity at workflow-concurrency time and fall back to the
+  # unique run id; provider-level concurrency below joins them by the
+  # authoritative PR number after preflight.
+  group: reviewsensei-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (github.event.pull_request.number || github.run_id) || github.run_id }}
+  cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}
 
 jobs:
   validate-provider-mode:
@@ -119,7 +124,17 @@ jobs:
       - name: Reject unsupported provider mode
         env:
           PROVIDER_MODE: ${{ inputs.provider_mode }}
+          OPERATION: ${{ inputs.operation }}
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          BASE_REF: ${{ inputs.base_ref }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_REF: ${{ inputs.head_ref }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           ENABLE_REVIEW: ${{ inputs.enable_review }}
+          ENABLE_AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           ENABLE_LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
           ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
           ENABLE_LEARNING_PRS: ${{ inputs.enable_learning_prs }}
@@ -134,7 +149,48 @@ jobs:
               exit 1
               ;;
           esac
-          for flag in ENABLE_REVIEW ENABLE_LEARNING_PROPOSALS ENABLE_GITHUB_WRITES ENABLE_LEARNING_PRS ENABLE_MENTION_REPLIES UPLOAD_ARTIFACTS; do
+          case "$OPERATION" in
+            review|reply) ;;
+            *) echo '::error::operation must be review or reply' >&2; exit 1 ;;
+          esac
+          if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo '::error::repository input is invalid' >&2
+            exit 1
+          fi
+          if [[ ! "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::repository id must be a positive decimal integer' >&2
+            exit 1
+          fi
+          if [[ -z "$BASE_REF" || "$BASE_REF" == -* || ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo '::error::base ref input is invalid' >&2
+            exit 1
+          fi
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::base sha input is invalid' >&2
+            exit 1
+          fi
+          if [[ -n "$HEAD_REPOSITORY" && ! "$HEAD_REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo '::error::head repository input is invalid' >&2
+            exit 1
+          fi
+          if [[ "$OPERATION" == review && "$ENABLE_REVIEW" == true ]]; then
+            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+              echo '::error::pull request number is required for review operations' >&2
+              exit 1
+            fi
+            if [[ -z "$HEAD_REF" || "$HEAD_REF" == -* || ! "$HEAD_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo '::error::head ref input is invalid' >&2
+              exit 1
+            fi
+            if [[ ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+              echo '::error::head sha is required for review operations' >&2
+              exit 1
+            fi
+          elif [[ "$OPERATION" == reply && "$ENABLE_GITHUB_WRITES" == true && "$ENABLE_MENTION_REPLIES" == true && ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::pull request number is required for reply operations' >&2
+            exit 1
+          fi
+          for flag in ENABLE_REVIEW ENABLE_AUTO_APPROVE ENABLE_LEARNING_PROPOSALS ENABLE_GITHUB_WRITES ENABLE_LEARNING_PRS ENABLE_MENTION_REPLIES UPLOAD_ARTIFACTS; do
             value="${!flag}"
             case "$value" in
               ''|true|false) ;;
@@ -144,9 +200,14 @@ jobs:
 
   authoritative-preflight:
     needs: validate-provider-mode
-    if: always()
+    # Validation is deliberately a dependency.  If the cheap input checks
+    # fail, do not make an unnecessary GitHub API request.  Reply operations
+    # still run this no-op job so the provider jobs can share one dependency.
+    if: needs.validate-provider-mode.result == 'success'
     outputs:
       pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
+      base_sha: ${{ steps.fetch-pr.outputs.base_sha }}
+      pull_request_number: ${{ steps.fetch-pr.outputs.pull_request_number }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -167,10 +228,11 @@ jobs:
           OPERATION: ${{ inputs.operation }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
+          ENABLE_REVIEW: ${{ inputs.enable_review }}
         run: |
           set -euo pipefail
-          if [[ "$OPERATION" != "review" ]]; then
-            echo 'authoritative PR preflight not required for reply operation'
+          if [[ "$OPERATION" != "review" || "$ENABLE_REVIEW" != "true" ]]; then
+            echo 'authoritative PR preflight not required for this operation'
             exit 0
           fi
           for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do
@@ -180,17 +242,50 @@ jobs:
             fi
           done
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
-          payload="$RUNNER_TEMP/review-sensei-pr.json"
-          gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$payload"
+          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
+          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::repository id must be a positive decimal integer' >&2; exit 1; }
+          [[ -n "$BASE_REF" && "$BASE_REF" != -* && "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo '::error::base ref identity is invalid' >&2; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::base sha identity is invalid' >&2
+            exit 1
+          fi
+          payload="$(mktemp "$RUNNER_TEMP/review-sensei-pr.XXXXXX")"
+          trap 'rm -f "$payload"' EXIT
+          umask 077
+          if ! gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$payload"; then
+            echo '::error::authoritative GitHub pull-request preflight was unavailable; refusing provider execution' >&2
+            exit 1
+          fi
           python - "$payload" <<'PY'
-          import base64, json, os, re, sys
+          import base64
+          import json
+          import os
+          import re
+          import sys
           path = sys.argv[1]
-          if os.path.getsize(path) > 512 * 1024:
+          flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+          try:
+              descriptor = os.open(path, flags)
+          except OSError as error:
+              raise SystemExit(f"pull request metadata cannot be opened safely: {error}")
+          with os.fdopen(descriptor, "rb") as stream:
+              raw = stream.read(512 * 1024 + 1)
+          if len(raw) > 512 * 1024:
               raise SystemExit("pull request metadata exceeds the configured response limit")
-          with open(path, encoding="utf-8") as stream:
-              data = json.load(stream)
+          try:
+              data = json.loads(raw.decode("utf-8"))
+          except (UnicodeDecodeError, json.JSONDecodeError) as error:
+              raise SystemExit(f"pull request metadata is not valid JSON: {error}")
           if not isinstance(data, dict) or data.get("state") != "open" or data.get("draft") is True:
               raise SystemExit("pull request is not eligible for review")
+          requested_number = os.environ.get("PULL_REQUEST", "")
+          if (
+              isinstance(data.get("number"), bool)
+              or not isinstance(data.get("number"), int)
+              or data.get("number") != int(requested_number)
+          ):
+              raise SystemExit("pull request number identity does not match")
           head = data.get("head")
           base = data.get("base")
           head_repo = head.get("repo") if isinstance(head, dict) else None
@@ -198,7 +293,10 @@ jobs:
           if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
               raise SystemExit("pull request identity metadata is unavailable")
           repository = os.environ.get("REPOSITORY", "")
-          if base_repo.get("full_name") != repository or base_repo.get("id") != int(os.environ.get("REPOSITORY_ID", "0")):
+          repository_id = os.environ.get("REPOSITORY_ID", "")
+          if not re.fullmatch(r"[1-9][0-9]*", repository_id):
+              raise SystemExit("repository id must be a positive decimal integer")
+          if base_repo.get("full_name") != repository or base_repo.get("id") != int(repository_id):
               raise SystemExit("pull request repository identity does not match")
           if head_repo.get("full_name") != repository or head_repo.get("fork") is not False:
               raise SystemExit("pull request head repository is not eligible")
@@ -219,19 +317,28 @@ jobs:
           title = data.get("title", "")
           if not isinstance(title, str) or len(title.encode("utf-8")) > 4096:
               raise SystemExit("pull request title is invalid")
-          encoded = base64.urlsafe_b64encode(title.encode("utf-8")).decode("ascii")
+          encoded = base64.b64encode(title.encode("utf-8")).decode("ascii")
+          if len(encoded) > 8192:
+              raise SystemExit("encoded pull request title exceeds the workflow output limit")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"pull_request_title_b64={encoded}\n")
+              output.write(f"base_sha={base['sha']}\n")
+              output.write(f"pull_request_number={data['number']}\n")
           PY
 
   cloud:
     needs: [validate-provider-mode, authoritative-preflight]
     # Compatibility marker for consumers that inspect the historical single
     # dependency spelling: needs: validate-provider-mode
-    if: (inputs.operation == 'reply' || inputs.enable_review == 'true') && (inputs.provider_mode == 'cloud' || (inputs.provider_mode == '' && inputs.mode == 'automatic'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (inputs.provider_mode == 'cloud' || (inputs.provider_mode == '' && inputs.mode == 'automatic'))
     concurrency:
-      group: reviewsensei-provider-${{ inputs.operation == 'review' && format('{0}-{1}-{2}-{3}', inputs.provider_mode || 'cloud', inputs.repository, inputs.pull_request_number, 'review') || format('reply-{0}', github.run_id) }}
-      cancel-in-progress: false
+      # All provider modes share this review group, so a newer cloud review
+      # cancels an older local review (and vice versa) for the same PR. Reply
+      # operations intentionally use the triggering run id and never cancel a
+      # sibling reply. The preflight output is authoritative for manual
+      # reviews; event PR metadata is only a host-provided fallback.
+      group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
+      cancel-in-progress: ${{ inputs.operation == 'review' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -242,7 +349,7 @@ jobs:
       - name: Check out trusted base only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.base_sha || inputs.base_ref }}
+          ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
           fetch-depth: 0
 
       - name: Resolve trusted base SHA
@@ -378,7 +485,15 @@ jobs:
             echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
             exit 1
           fi
-          TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"
+          if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
+            echo '::error::authoritative pull-request title output is invalid' >&2
+            exit 1
+          fi
+          TITLE=""
+          if [[ -n "$TITLE_B64" ]] && ! TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"; then
+            echo '::error::authoritative pull-request title output could not be decoded' >&2
+            exit 1
+          fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
@@ -455,10 +570,13 @@ jobs:
 
   local:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: (inputs.operation == 'reply' || inputs.enable_review == 'true') && (inputs.provider_mode == 'local' || (inputs.provider_mode == '' && inputs.mode == 'manual'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (inputs.provider_mode == 'local' || (inputs.provider_mode == '' && inputs.mode == 'manual'))
     concurrency:
-      group: reviewsensei-provider-${{ inputs.operation == 'review' && format('{0}-{1}-{2}-{3}', inputs.provider_mode || 'local', inputs.repository, inputs.pull_request_number, 'review') || format('reply-{0}', github.run_id) }}
-      cancel-in-progress: false
+      # Keep this key byte-for-byte equivalent to the cloud job. A newer
+      # review therefore cancels any older provider-mode review for the same
+      # PR, while each mention reply remains isolated to its triggering run.
+      group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
+      cancel-in-progress: ${{ inputs.operation == 'review' }}
     runs-on: [self-hosted, linux, x64, ollama]
     permissions:
       contents: read
@@ -469,7 +587,7 @@ jobs:
       - name: Check out trusted base only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.base_sha || inputs.base_ref }}
+          ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
           fetch-depth: 0
 
       - name: Resolve trusted base SHA
@@ -591,7 +709,15 @@ jobs:
             --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-          TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"
+          if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
+            echo '::error::authoritative pull-request title output is invalid' >&2
+            exit 1
+          fi
+          TITLE=""
+          if [[ -n "$TITLE_B64" ]] && ! TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"; then
+            echo '::error::authoritative pull-request title output could not be decoded' >&2
+            exit 1
+          fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi

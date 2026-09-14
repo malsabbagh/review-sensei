@@ -5,7 +5,12 @@ from review_sensei.models import ReviewComment, ReviewResult
 
 
 def clean_result() -> ReviewResult:
-    return ReviewResult(summary="Summary.", comments=(), provider="fixture")
+    return ReviewResult(
+        summary="Summary.",
+        comments=(),
+        provider="fixture",
+        review_status="complete",
+    )
 
 
 class AutoApprovalPolicyTests(unittest.TestCase):
@@ -44,6 +49,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 ),
             ),
             provider="fixture",
+            review_status="complete",
         )
         decision = evaluate_auto_approval(
             enabled=True,
@@ -206,6 +212,18 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         )
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("auto-approval-disabled",))
+
+    def test_non_boolean_approval_inputs_fail_closed(self):
+        decision = evaluate_auto_approval(
+            enabled="true",  # type: ignore[arg-type]
+            app_authored=0,  # type: ignore[arg-type]
+            result=clean_result(),
+            has_open_review_threads="false",  # type: ignore[arg-type]
+        )
+        self.assertFalse(decision.approved)
+        self.assertIn("auto-approval-enabled-invalid", decision.blockers)
+        self.assertIn("app-authored-flag-invalid", decision.blockers)
+        self.assertIn("review-threads-invalid", decision.blockers)
 
     def test_non_complete_results_cannot_be_approved(self):
         for status in ("partial", "incomplete", "summary-only"):

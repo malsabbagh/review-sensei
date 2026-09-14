@@ -32,20 +32,30 @@ def evaluate_auto_approval(
     """
 
     blockers: list[str] = []
+    if not isinstance(enabled, bool):
+        blockers.append("auto-approval-enabled-invalid")
+    if not isinstance(app_authored, bool):
+        blockers.append("app-authored-flag-invalid")
+    if has_open_review_threads is not None and not isinstance(
+        has_open_review_threads, bool
+    ):
+        blockers.append("review-threads-invalid")
+    if not isinstance(result, ReviewResult):
+        blockers.append("review-result-invalid")
     # Approval is an explicit, repository-controlled capability.  A missing
     # or false opt-in always selects COMMENT while retaining the same review
     # publication path and marker/idempotency guarantees.
     if enabled is not True:
         blockers.append("auto-approval-disabled")
-    if app_authored:
+    if app_authored is True:
         blockers.append("app-authored-pull-request")
-    if has_blocking_findings(result):
+    if isinstance(result, ReviewResult) and has_blocking_findings(result):
         blockers.append("blocking-findings-open")
     if has_open_review_threads is None:
         blockers.append("review-threads-incomplete")
-    elif has_open_review_threads:
+    elif has_open_review_threads is True:
         blockers.append("review-threads-open")
-    status = getattr(result, "review_status", "complete")
+    status = getattr(result, "review_status", "incomplete")
     if status in {"partial", "incomplete", "summary-only"}:
         blockers.append(f"review-{status}")
     elif status != "complete":

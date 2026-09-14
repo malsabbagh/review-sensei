@@ -210,11 +210,144 @@ class ActionPinPolicyTests(unittest.TestCase):
             2,
         )
         self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
-        self.assertIn("source_comment_id || inputs.head_sha", text)
+        self.assertIn(
+            "github.event.pull_request.number || github.run_id",
+            text,
+        )
+        # Concurrency keys are evaluated before validation jobs run, so they
+        # must not interpolate the caller-controlled PR number input.
+        group_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertTrue(group_lines)
+        for line in group_lines:
+            self.assertNotIn("inputs.pull_request_number", line)
         self.assertNotIn(
             '--base-ref "$BASE_REF" --head-ref "$HEAD_REF"'
             "\n            --head-repository",
             text,
+        )
+
+    def test_reusable_concurrency_is_pr_scoped_for_reviews_and_run_scoped_for_replies(
+        self,
+    ):
+        """Review cancellation and reply isolation must be explicit in YAML.
+
+        Workflow-level concurrency cannot consume the validated PR output, so
+        pull-request events use their host PR number there. The provider jobs
+        additionally join manual reviews by the authoritative preflight
+        number. Both provider jobs must use the same expression: provider mode
+        is an execution detail, not a concurrency partition.
+        """
+
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        group_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertEqual(len(group_lines), 3)
+
+        top_level, cloud, local = group_lines
+        review_selector = "inputs.operation == 'review'"
+        reply_selector = "inputs.operation == 'review' && ("
+        self.assertIn(review_selector, top_level)
+        self.assertIn(reply_selector, top_level)
+        self.assertIn("github.event.pull_request.number", top_level)
+        # A pull_request_review_comment reply must not fall back to the PR
+        # number; doing so would replace an earlier reply for that PR.
+        self.assertTrue(
+            top_level.endswith(
+                "${{ inputs.operation == 'review' && (github.event.pull_request.number || github.run_id) || github.run_id }}"
+            )
+        )
+
+        expected_provider_group = (
+            "group: reviewsensei-provider-${{ inputs.operation == 'review' && "
+            "'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == "
+            "'review' && (needs.authoritative-preflight.outputs.pull_request_number || "
+            "github.event.pull_request.number || github.run_id) || github.run_id }}"
+        )
+        self.assertEqual(cloud, expected_provider_group)
+        self.assertEqual(local, expected_provider_group)
+        self.assertNotIn("-cloud-", cloud)
+        self.assertNotIn("-local-", local)
+
+        cancel_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("cancel-in-progress:")
+        ]
+        # Exactly one cancellation policy per block: latest-wins applies to
+        # reviews, while replies always retain their unique run-id group.
+        self.assertEqual(
+            cancel_lines,
+            [
+                "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+            ],
+        )
+
+    def test_reusable_workflow_preflights_authoritative_identity_and_gates_operations(
+        self,
+    ):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("if: needs.validate-provider-mode.result == 'success'", text)
+        self.assertIn(
+            "base_sha: ${{ steps.fetch-pr.outputs.base_sha }}",
+            text,
+        )
+        self.assertIn(
+            "repository id must be a positive decimal integer",
+            text,
+        )
+        self.assertIn(
+            "authoritative GitHub pull-request preflight was unavailable; refusing provider execution",
+            text,
+        )
+        self.assertIn(
+            "encoded pull request title exceeds the workflow output limit",
+            text,
+        )
+        self.assertIn(
+            "authoritative pull-request title output could not be decoded",
+            text,
+        )
+        # Provider jobs are selected only for an enabled operation. A reply
+        # event cannot accidentally run the review CLI or consume a provider
+        # runner when mention replies are disabled.
+        expected_gate = (
+            "(inputs.operation == 'review' && inputs.enable_review == 'true') || "
+            "(inputs.operation == 'reply' && inputs.enable_github_writes == 'true' "
+            "&& inputs.enable_mention_replies == 'true')"
+        )
+        self.assertEqual(text.count(expected_gate), 2)
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
+            ),
+            2,
+        )
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'"
+            ),
+            2,
         )
 
     def test_reusable_workflow_prefers_pypi_with_sha_verified_github_fallback(self):
