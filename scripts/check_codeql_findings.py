@@ -182,9 +182,8 @@ def _metadata_languages(run: dict[str, Any], path: Path) -> tuple[str, ...]:
                 )
             evidence.append(language)
 
-    # Return all source evidence.  The rule IDs are evaluated separately after
-    # the result array has been validated because they are only a fallback for
-    # SARIF producers that omit the optional run metadata.
+    # Return only explicit run-level evidence. Rule IDs identify individual
+    # queries, not the analysis run, and therefore cannot establish coverage.
     return tuple(evidence)
 
 
@@ -209,13 +208,13 @@ def _run_language(run: dict[str, Any], path: Path) -> str:
             rule_languages.add(language)
     if len(rule_languages) > 1:
         raise ValueError(f"{path}: SARIF rule IDs identify multiple CodeQL languages")
-    if rule_languages:
-        evidence.extend(rule_languages)
     if not evidence:
         raise ValueError(f"{path}: SARIF report lacks trusted CodeQL language metadata")
     languages = set(evidence)
     if len(languages) != 1:
         raise ValueError(f"{path}: SARIF report has conflicting language metadata")
+    if rule_languages and rule_languages != languages:
+        raise ValueError(f"{path}: SARIF rule IDs conflict with language metadata")
     return next(iter(languages))
 
 

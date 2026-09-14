@@ -308,13 +308,12 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             self.assertTrue(ambiguous)
             self.assertTrue(any("conflicting" in violation for violation in ambiguous))
 
-    def test_rule_prefix_can_identify_nonempty_language_reports(self):
+    def test_rule_prefix_without_run_metadata_fails_closed(self):
         module = _load_script("check_codeql_findings.py")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             baseline = ROOT / "security" / "codeql-baseline.json"
-            # No optional run metadata; a CodeQL rule prefix is the documented
-            # fallback identity for a report that has findings.
+            # A query prefix identifies a finding family, not the analyzed run.
             self._sarif(
                 root,
                 name="report.sarif",
@@ -348,6 +347,38 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                     }
                 ],
             )
+            violations = module.evaluate(
+                root,
+                baseline,
+                expected_reports=1,
+                expected_languages=("python",),
+            )
+            self.assertTrue(violations)
+            self.assertTrue(any("metadata" in violation for violation in violations))
+
+    def test_category_metadata_establishes_language_without_properties(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = ROOT / "security" / "codeql-baseline.json"
+            self._sarif(
+                root,
+                name="category-only.sarif",
+                language=None,
+                runs=[
+                    {
+                        "tool": {
+                            "driver": {
+                                "name": "CodeQL",
+                                "organization": "GitHub",
+                                "rules": [],
+                            }
+                        },
+                        "automationDetails": {"id": "review-sensei/language:python"},
+                        "results": [],
+                    }
+                ],
+            )
             self.assertEqual(
                 module.evaluate(
                     root,
@@ -357,6 +388,54 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_rule_prefix_conflicting_with_explicit_metadata_fails_closed(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = ROOT / "security" / "codeql-baseline.json"
+            self._sarif(
+                root,
+                name="conflicting-rule.sarif",
+                language=None,
+                runs=[
+                    {
+                        "tool": {
+                            "driver": {
+                                "name": "CodeQL",
+                                "organization": "GitHub",
+                                "rules": [],
+                            }
+                        },
+                        "properties": {"language": "python"},
+                        "automationDetails": {"id": "/language:python"},
+                        "results": [
+                            {
+                                "ruleId": "js/test",
+                                "level": "none",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {
+                                                "uri": "src/example.py"
+                                            },
+                                            "region": {"startLine": 3},
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            )
+            violations = module.evaluate(
+                root,
+                baseline,
+                expected_reports=1,
+                expected_languages=("python",),
+            )
+            self.assertTrue(violations)
+            self.assertTrue(any("conflict" in violation for violation in violations))
 
     def test_expected_language_without_metadata_fails_closed(self):
         module = _load_script("check_codeql_findings.py")
