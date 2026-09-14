@@ -1,6 +1,8 @@
 import io
+import json
 import unittest
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 
 from review_sensei.hosting.github import (
     GitHubHttp,
@@ -108,6 +110,90 @@ class GitHubHttpTests(unittest.TestCase):
         with self.assertRaises(GitHubHTTPError):
             http.paginate(path="/repos/owner/repo/issues", token="t")
         self.assertEqual(len(calls), 10)
+
+    def test_paginate_retries_an_oversized_page_with_smaller_requests(self):
+        calls = []
+
+        def opener(request, timeout):
+            query = parse_qs(urlsplit(request.full_url).query)
+            page_size = int(query["per_page"][0])
+            page = int(query["page"][0])
+            calls.append((page_size, page))
+            if page_size > 10:
+                return FakeResponse(b"x" * (MAX_GITHUB_RESPONSE_BYTES + 1))
+            start = (page - 1) * page_size
+            body = json.dumps(
+                [{"id": value} for value in range(start, min(start + page_size, 25))]
+            ).encode("utf-8")
+            return FakeResponse(body)
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+
+        values = http.paginate(
+            path="/repos/owner/repo/pulls/1/comments",
+            token="t",
+            page_sizes=(20, 10, 5, 1),
+        )
+
+        self.assertEqual([value["id"] for value in values], list(range(25)))
+        self.assertEqual(calls, [(20, 1), (10, 1), (10, 2), (10, 3)])
+
+    def test_paginate_recomputes_the_page_after_a_later_size_fallback(self):
+        calls = []
+
+        def opener(request, timeout):
+            query = parse_qs(urlsplit(request.full_url).query)
+            page_size = int(query["per_page"][0])
+            page = int(query["page"][0])
+            calls.append((page_size, page))
+            if page_size == 20 or (page_size == 10 and page == 2):
+                return FakeResponse(b"x" * (MAX_GITHUB_RESPONSE_BYTES + 1))
+            start = (page - 1) * page_size
+            body = json.dumps(
+                [{"id": value} for value in range(start, min(start + page_size, 23))]
+            ).encode("utf-8")
+            return FakeResponse(body)
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+
+        values = http.paginate(
+            path="/repos/owner/repo/pulls/1/comments",
+            token="t",
+            page_sizes=(20, 10, 5, 1),
+        )
+
+        self.assertEqual([value["id"] for value in values], list(range(23)))
+        self.assertEqual(
+            calls,
+            [(20, 1), (10, 1), (10, 2), (5, 3), (5, 4), (5, 5)],
+        )
+
+    def test_paginate_resumes_after_a_full_larger_page(self):
+        calls = []
+
+        def opener(request, timeout):
+            query = parse_qs(urlsplit(request.full_url).query)
+            page_size = int(query["per_page"][0])
+            page = int(query["page"][0])
+            calls.append((page_size, page))
+            if page_size == 20 and page == 2:
+                return FakeResponse(b"x" * (MAX_GITHUB_RESPONSE_BYTES + 1))
+            start = (page - 1) * page_size
+            body = json.dumps(
+                [{"id": value} for value in range(start, min(start + page_size, 25))]
+            ).encode("utf-8")
+            return FakeResponse(body)
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+
+        values = http.paginate(
+            path="/repos/owner/repo/pulls/1/comments",
+            token="t",
+            page_sizes=(20, 10, 5, 1),
+        )
+
+        self.assertEqual([value["id"] for value in values], list(range(25)))
+        self.assertEqual(calls, [(20, 1), (20, 2), (10, 3)])
 
 
 if __name__ == "__main__":

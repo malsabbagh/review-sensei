@@ -10,6 +10,7 @@ from review_sensei.hosting.github import (
     GitHubConversationTransientError,
 )
 from review_sensei.hosting.github.conversation import (
+    CONVERSATION_COMMENT_PAGE_SIZES,
     PreparedConversation,
     authorized_human_comment,
     has_standalone_sensei_mention,
@@ -885,6 +886,10 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "already_replied")
         self.assertEqual(
             [call[0] for call in calls], ["GET", "GET", "GET", "POST", "GET"]
+        )
+        self.assertIn(
+            f"per_page={CONVERSATION_COMMENT_PAGE_SIZES[0]}&page=1",
+            calls[1][1],
         )
 
     def test_edited_source_skips_write(self):

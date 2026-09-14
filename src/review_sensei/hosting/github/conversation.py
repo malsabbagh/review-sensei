@@ -39,6 +39,7 @@ MAX_CONTEXT_PR_BODY_BYTES = 4 * 1024
 MAX_CONTEXT_DIFF_BYTES = 12 * 1024
 MAX_CONTEXT_FINDING_BYTES = 512
 MAX_CONTEXT_LEARNINGS_BYTES = 6 * 1024
+CONVERSATION_COMMENT_PAGE_SIZES = (20, 10, 5, 1)
 MENTION_PATTERN = re.compile(r"(?i)(?:^|\s)@sensei(?:$|\s|[.,!?])")
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
@@ -476,6 +477,7 @@ class ConversationPublisher:
             payload = self.http.paginate(
                 path=self.http.repository_path(repository, path),
                 token=token,
+                page_sizes=CONVERSATION_COMMENT_PAGE_SIZES,
             )
         except GitHubHTTPError as exc:
             raise GitHubConversationError("conversation context lookup failed") from exc
@@ -976,7 +978,11 @@ class ConversationPublisher:
         # A failed reconciliation is not evidence that no reply exists. Let
         # the bounded transport error propagate so publication fails closed.
         try:
-            payload = self.http.paginate(path=path, token=token)
+            payload = self.http.paginate(
+                path=path,
+                token=token,
+                page_sizes=CONVERSATION_COMMENT_PAGE_SIZES,
+            )
         except GitHubHTTPTransientError as exc:
             raise GitHubConversationTransientError(
                 "reply reconciliation failed temporarily"
