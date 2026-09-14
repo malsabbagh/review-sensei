@@ -67,9 +67,9 @@ def format_review_comment(comment: ReviewComment) -> str:
     """Render a validated comment with any available classification labels."""
 
     labels: list[str] = []
-    if comment.blocking is not None:
-        label = "Blocking" if comment.blocking else "Non-blocking"
-        labels.append(f"{_BLOCKING_ICONS[comment.blocking]} {label}")
+    if comment.blocking is not None or comment.blocks_approval:
+        label = "Blocking" if comment.blocks_approval else "Non-blocking"
+        labels.append(f"{_BLOCKING_ICONS[comment.blocks_approval]} {label}")
     if comment.severity is not None:
         labels.append(
             f"{_metadata_icon(_SEVERITY_ICONS, comment.severity)} "
@@ -135,9 +135,9 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
         for comment in comments
     )
     blocking_counts: Counter[str] = Counter(
-        "Blocking" if comment.blocking else "Non-blocking"
+        "Blocking" if comment.blocks_approval else "Non-blocking"
         for comment in comments
-        if comment.blocking is not None
+        if comment.blocking is not None or comment.blocks_approval
     )
 
     lines = ["Review classification:"]

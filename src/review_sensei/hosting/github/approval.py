@@ -6,8 +6,6 @@ from dataclasses import dataclass
 
 from ...models import ReviewResult
 
-_BLOCKING_SEVERITY_LEVELS = frozenset(("critical", "high"))
-
 
 @dataclass(frozen=True)
 class AutoApprovalDecision:
@@ -45,15 +43,7 @@ def evaluate_auto_approval(
 def has_blocking_findings(result: ReviewResult) -> bool:
     """Whether a validated result contains a finding that blocks approval."""
 
-    return any(
-        comment.blocking is True
-        or (
-            comment.blocking is None
-            and comment.severity is not None
-            and comment.severity.lower() in _BLOCKING_SEVERITY_LEVELS
-        )
-        for comment in result.comments
-    )
+    return any(comment.blocks_approval for comment in result.comments)
 
 
 __all__ = [

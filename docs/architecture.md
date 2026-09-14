@@ -214,7 +214,8 @@ same validated result.
   single source for the originating lens.
 - Provider-neutral presentation renders available classification labels on
   inline comments and deterministic blocking/severity/lens/quick-win counts in the
-  summary. A wholly legacy result is rendered unchanged.
+  summary, using the same effective merge-impact classification as approval. A
+  wholly legacy result is rendered unchanged.
 - Classification labels are bounded printable provider text, and GitHub
   publication validates the formatted summary against `max_summary_bytes`,
   each formatted inline body against `max_comment_body_bytes`, and the

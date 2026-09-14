@@ -435,7 +435,7 @@ resolved. Blocking findings, unresolved threads, and `@sensei` replies remain
 `COMMENT`. Draft, closed, stale, fork, or App-authored pull requests are never
 approved. A malformed, unauthorized, incomplete, or over-limit thread response
 fails closed before the write. The marker deduplicates each review state per
-exact head: a clean rerun may promote an earlier same-head `COMMENTED` review
+exact head: a no-blocker rerun may promote an earlier same-head `COMMENTED` review
 to one `APPROVED` review after all threads resolve, while repeated comments and
 approvals remain no-ops. Thread resolution alone does not trigger a workflow
 run. The generated caller may contain only the name-only secret mapping
@@ -444,6 +444,7 @@ handled by the App setup boundary.
 
 The approval decision is deterministic: explicit blocking findings or
 unclassified canonical `critical`/`high` severity block approval; open-thread
-safety remains independent. The policy exposes stable
+safety remains independent. Inline comments and review summaries render that
+same effective merge-impact classification. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.

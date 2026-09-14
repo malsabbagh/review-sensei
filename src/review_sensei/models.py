@@ -413,6 +413,22 @@ class ReviewComment:
     category: str | None = None
     fix_effort: str | None = None
 
+    @property
+    def blocks_approval(self) -> bool:
+        """Return the effective merge-impact classification for this finding.
+
+        An explicit classification is authoritative. The legacy fallback only
+        treats the canonical severe labels as blocking, preserving free-form
+        severity compatibility for callers that do not emit ``blocking``.
+        """
+
+        if self.blocking is not None:
+            return self.blocking
+        return self.severity is not None and self.severity.lower() in {
+            "critical",
+            "high",
+        }
+
     def __post_init__(self) -> None:
         validate_repository_path(self.path, label="comment path")
         if (

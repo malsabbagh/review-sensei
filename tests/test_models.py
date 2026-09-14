@@ -94,6 +94,18 @@ class ModelTests(unittest.TestCase):
             comment,
         )
 
+    def test_review_comment_computes_effective_blocking_for_legacy_severity(self):
+        self.assertTrue(
+            ReviewComment(
+                path="src/app.py", line=1, body="critical", severity="CRITICAL"
+            ).blocks_approval
+        )
+        self.assertFalse(
+            ReviewComment(
+                path="src/app.py", line=1, body="legacy", severity="warning"
+            ).blocks_approval
+        )
+
     def test_review_result_allows_an_unclassified_comment(self):
         result = ReviewResult.from_dict(
             {

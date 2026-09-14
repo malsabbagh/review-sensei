@@ -38,6 +38,18 @@ class ReviewPresentationTests(unittest.TestCase):
             "[💬 Non-blocking]\n\nConsider extracting this.",
         )
 
+    def test_inline_comment_marks_unflagged_severe_findings_as_blocking(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="Must fix before merge.",
+            severity="critical",
+        )
+        self.assertEqual(
+            format_review_comment(comment),
+            "[🚫 Blocking] [🔴 Severity: Critical]\n\nMust fix before merge.",
+        )
+
     def test_inline_comment_uses_known_icons_and_safe_fallbacks(self):
         comment = ReviewComment(
             path="src/app.py",
@@ -112,6 +124,7 @@ class ReviewPresentationTests(unittest.TestCase):
             "Summary.\n\n"
             "Review classification:\n"
             "- Severity: Critical (2), Medium (1)\n"
+            "- Merge impact: Blocking (2)\n"
             "- Lens: Architecture (1), Security (2)\n"
             "- Quick wins (trivial/small effort): 2",
         )

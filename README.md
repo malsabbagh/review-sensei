@@ -455,7 +455,7 @@ thread is resolved. Non-blocking findings are published as optional follow-ups
 and do not independently prevent approval. Any open thread, draft/closed/fork/stale PR,
 App-authored PR, or incomplete thread lookup keeps the event as `COMMENT` or
 fails closed; `@sensei` replies are always ordinary comments. Existing review
-markers deduplicate each review state per head. A fresh clean review run on the
+markers deduplicate each review state per head. A fresh no-blocker review run on the
 same exact head may promote an earlier `COMMENTED` review to `APPROVED` after
 the final thread sweep confirms that every thread is resolved; it never posts
 a duplicate comment or approval.
