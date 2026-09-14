@@ -494,6 +494,14 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 module._normalize_location("C%3A/workspace/file.py")
             )
         )
+        self.assertFalse(
+            module._is_safe_location(
+                module._normalize_location("src%2F..%2Foutside.py")
+            )
+        )
+        self.assertTrue(
+            module._is_safe_location(module._normalize_location("src%2Ffile.py"))
+        )
 
     def test_security_severity_promotes_reported_level(self):
         module = _load_script("check_codeql_findings.py")
