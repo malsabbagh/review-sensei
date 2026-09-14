@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/compatibility-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release", "compatible_worker_range", "provenance", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "release": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "compatible_worker_range": {"type": "string", "minLength": 1, "maxLength": 128},
+    "provenance": {"type": "string", "minLength": 1, "maxLength": 256},
+    "artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["workflow", "python", "npm", "schemas_version", "worker"],
+      "properties": {
+        "workflow": {"$ref": "#/$defs/artifact"},
+        "python": {"$ref": "#/$defs/artifact"},
+        "npm": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/artifact"}},
+        "schemas_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "worker": {"$ref": "#/$defs/artifact"}
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}
