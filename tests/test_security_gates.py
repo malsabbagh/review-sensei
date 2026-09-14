@@ -406,6 +406,16 @@ class CodeQLFindingsGateTests(unittest.TestCase):
         )
         self.assertFalse(module._is_safe_location("src/file.py\x7f"))
         self.assertFalse(module._is_safe_location("src/file.py\x85"))
+        self.assertFalse(module._is_safe_location("C:/workspace/file.py"))
+        self.assertFalse(module._is_safe_location(r"C:\\workspace\\file.py"))
+
+    def test_security_severity_promotes_reported_level(self):
+        module = _load_script("check_codeql_findings.py")
+        score, level = module._result_severity(
+            {"ruleId": "py/test", "level": "warning"},
+            {"py/test": {"properties": {"security-severity": "7.0"}}},
+        )
+        self.assertEqual((score, level), (3, "error"))
 
     def test_non_codeql_driver_is_rejected_even_without_language_filter(self):
         module = _load_script("check_codeql_findings.py")

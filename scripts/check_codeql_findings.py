@@ -39,6 +39,7 @@ _CODEQL_DRIVER_ORGANIZATION = "GitHub"
 _LANGUAGE_CATEGORY_RE = re.compile(
     r"(?:^|/)language:(?P<language>[a-z0-9-]+)(?:/|$)", re.IGNORECASE
 )
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\\\/]")
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _RULE_LANGUAGE_PREFIXES = {
     "py": "python",
@@ -314,6 +315,7 @@ def _is_safe_location(location: str) -> bool:
         and all(character.isprintable() for character in location)
         and not location.startswith("/")
         and "\\" not in location
+        and not _WINDOWS_DRIVE_RE.match(location)
         and all(segment not in {"", ".", ".."} for segment in location.split("/"))
     )
 
@@ -346,6 +348,7 @@ def _result_severity(
     # Security severity 7+ is high/critical even when CodeQL emits a warning.
     if security_score >= 7.0:
         score = max(score, _LEVELS["error"])
+        level = "error"
     return score, level
 
 

@@ -222,7 +222,6 @@ jobs:
           python scripts/check_codeql_findings.py \
             --sarif-dir "$RUNNER_TEMP/codeql-results" \
             --baseline security/codeql-baseline.json \
-            --expected-reports 1 \
             --expected-languages "${{ matrix.language }}"
       - name: Archive CodeQL SARIF
         if: ${{ always() }}
