@@ -116,7 +116,7 @@ against `review-result.schema.json`.
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`
 is a boolean that determines whether the finding prevents automatic approval;
-when omitted, only preferred `medium`/`low` values or no severity are
+when omitted, only case-insensitive preferred `medium`/`low` values or no severity are
 non-blocking; `critical`, `high`, and other nonempty values are blocking.
 `severity` uses the preferred `critical`, `high`, `medium`, or `low`
 values to describe likely impact; `fix_effort` uses `trivial`, `small`,

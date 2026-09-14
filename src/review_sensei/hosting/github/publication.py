@@ -180,9 +180,10 @@ class ReviewPublisher:
             )
             # APPROVED is final for this head even if a nondeterministic rerun
             # later returns findings. COMMENTED is final only for another
-            # finding-bearing result; a clean result may be promoted below.
+            # blocking-finding result; a result with no blockers may be
+            # promoted below after the resolved-thread sweep.
             if "APPROVED" in published_states or (
-                result.comments and "COMMENTED" in published_states
+                has_blocking_findings(result) and "COMMENTED" in published_states
             ):
                 return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:

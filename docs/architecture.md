@@ -207,7 +207,7 @@ same validated result.
 - `ReviewComment.blocking`, `ReviewComment.severity`,
   `ReviewComment.fix_effort`, and `ReviewComment.category` are independent
   optional classification metadata. Explicit `blocking` controls approval;
-  absent values are non-blocking only for medium/low or missing severity.
+  absent values are non-blocking only for case-insensitive medium/low or missing severity.
   Severity describes impact,
   fix effort describes remediation scope, and the existing category id is the
   single source for the originating lens.

@@ -300,9 +300,9 @@ Inline findings may also carry independent `blocking`, `severity`
 (`critical`, `high`, `medium`, or `low`), and `fix_effort` (`trivial`, `small`,
 `moderate`, `large`, or `unknown`) labels. `blocking` controls whether the
 finding prevents automatic approval; `false` identifies an optional follow-up.
-If it is omitted, only canonical `medium` and `low` severity (or no severity)
-is non-blocking; `critical`, `high`, and unrecognized nonempty severity values
-block approval.
+If it is omitted, only case-insensitive canonical `medium` and `low` severity
+(or no severity) is non-blocking; `critical`, `high`, and unrecognized nonempty
+severity values block approval.
 Severity describes likely impact, while fix effort describes remediation scope
 rather than a time estimate. The existing `category` id is the lens source and
 is shown as a human-readable lens label; no composite priority score or second

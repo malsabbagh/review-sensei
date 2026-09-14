@@ -681,6 +681,33 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["comments"], [])
 
+    def test_non_blocking_rerun_promotes_same_head_comment_after_threads_resolve(self):
+        head = "b" * 40
+        non_blocking = non_blocking_result()
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=non_blocking,
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="COMMENTED")]
+                ),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=({"isResolved": True},)),
+                json_response({"id": 6}, 200),
+            ],
+            result=non_blocking,
+        )
+
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+        self.assertEqual(body["comments"][0]["path"], "src/app.py")
+
     def test_clean_rerun_does_not_duplicate_comment_while_threads_are_open(self):
         head = "b" * 40
         marker = review_marker(
