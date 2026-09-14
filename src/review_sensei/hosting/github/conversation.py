@@ -665,16 +665,32 @@ class ConversationPublisher:
         if status < 200 or status >= 300 or not isinstance(payload, list):
             raise GitHubConversationError("conversation learning lookup failed")
         files = [item for item in payload if isinstance(item, dict)]
-        if len(files) > MAX_LEARNING_FILES:
-            raise GitHubConversationError("conversation contains too many learnings")
-        entries: list[LearningEntry] = []
-        for item in sorted(files, key=lambda value: str(value.get("path", ""))):
+        directory_prefix = directory + "/"
+        learning_files: list[dict[str, Any]] = []
+        for item in files:
             path = item.get("path")
             if item.get("type") != "file" or not isinstance(path, str):
                 continue
             validate_repository_path(path, label="conversation learning path")
-            if not path.startswith(directory + "/") or not path.endswith(".json"):
+            if not path.endswith(".json"):
                 continue
+            relative_path = (
+                path[len(directory_prefix) :]
+                if path.startswith(directory_prefix)
+                else ""
+            )
+            if not relative_path or "/" in relative_path:
+                raise GitHubConversationError("conversation learning path was invalid")
+            learning_files.append(item)
+        if len(learning_files) > MAX_LEARNING_FILES:
+            raise GitHubConversationError("conversation contains too many learnings")
+        entries: list[LearningEntry] = []
+        for item in sorted(
+            learning_files, key=lambda value: str(value.get("path", ""))
+        ):
+            path = item.get("path")
+            if not isinstance(path, str):
+                raise GitHubConversationError("conversation learning path was invalid")
             size = item.get("size")
             if isinstance(size, int) and size > MAX_LEARNING_FILE_BYTES:
                 raise GitHubConversationError(
