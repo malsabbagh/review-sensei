@@ -40,7 +40,7 @@ Process: `docs/process/adr-process.md`
 | [0029](0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Not configured | Additive v1 classification metadata and deterministic publisher rendering |
 | [0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | not configured | Superseded by ADR 0032. |
 | [0031](0031-npm-launcher-and-standalone-platform-packages.md) | Proposed | Thin npx launcher with five native standalone platform packages | #103 | Exact target selection, public-source provenance, protected npm publication, registry readback, and version-forward rollback |
-| [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; omitted values fall back to critical/high severity while resolved-thread safety remains. |
+| [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; only medium/low or missing severity is non-blocking while resolved-thread safety remains. |
 
 ## Policy
 

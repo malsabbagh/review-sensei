@@ -186,8 +186,8 @@ review and GitHub-writes path is active, the publisher emits `APPROVE` only for
 a validated exact-head result with no blocking findings and a complete, bounded
 GraphQL review-thread sweep showing every existing thread resolved. Any open
 thread or incomplete sweep remains a comment or fails closed. Explicit
-non-blocking follow-ups can accompany an approval; omitted flags fall back to
-critical/high severity.
+non-blocking follow-ups can accompany an approval; omitted flags are
+non-blocking only for medium/low or missing severity.
 
 The signed assertion must use issuer
 `https://token.actions.githubusercontent.com`, audience

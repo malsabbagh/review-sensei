@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from ...models import ReviewResult
 
-_SEVERE_FINDING_LEVELS = frozenset(("critical", "high"))
+_NON_BLOCKING_SEVERITY_LEVELS = frozenset(("medium", "low"))
 
 
 @dataclass(frozen=True)
@@ -26,9 +26,10 @@ def evaluate_auto_approval(
     """Apply the repository's conservative approval criteria.
 
     A finding blocks when it is explicitly classified as blocking. When the
-    optional classification is absent, only canonical critical/high severity is
-    blocking; other or missing severity is non-blocking. Unresolved GitHub
-    review threads remain an independent fail-closed gate.
+    optional classification is absent, only canonical medium/low severity or a
+    missing severity is non-blocking; unknown non-empty severity values fail
+    closed. Unresolved GitHub review threads remain an independent fail-closed
+    gate.
     """
 
     blockers: list[str] = []
@@ -49,7 +50,7 @@ def has_blocking_findings(result: ReviewResult) -> bool:
         or (
             comment.blocking is None
             and comment.severity is not None
-            and comment.severity.lower() in _SEVERE_FINDING_LEVELS
+            and comment.severity.lower() not in _NON_BLOCKING_SEVERITY_LEVELS
         )
         for comment in result.comments
     )

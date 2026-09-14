@@ -112,8 +112,8 @@ does not duplicate the comment or approval. GitHub Actions does not start a run
 when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
 the current exact PR head and base) or push a new head. Classification metadata
 (blocking, severity, fix effort, and lens) controls the approval boundary:
-explicit `false` does not prevent approval, while an omitted flag falls back to
-critical/high severity. See
+explicit `false` does not prevent approval, while an omitted flag is
+non-blocking only for `medium`, `low`, or missing severity. See
 [ADR 0032](adr/0032-blocking-finding-classification-for-approvals.md)
 for the full criteria and rollback procedure.
 

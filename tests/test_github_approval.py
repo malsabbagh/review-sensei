@@ -137,6 +137,44 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertTrue(decision.approved)
         self.assertEqual(decision.blockers, ())
 
+    def test_unclassified_findings_without_severity_do_not_prevent_approval(self):
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(
+                ReviewComment(path="src/app.py", line=2, body="Follow-up finding"),
+            ),
+            provider="fixture",
+        )
+
+        decision = evaluate_auto_approval(
+            app_authored=False,
+            result=result,
+            has_open_review_threads=False,
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.blockers, ())
+
+    def test_unclassified_unknown_severity_findings_prevent_approval(self):
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py", line=2, body="Unknown finding", severity="warning"
+                ),
+            ),
+            provider="fixture",
+        )
+
+        decision = evaluate_auto_approval(
+            app_authored=False,
+            result=result,
+            has_open_review_threads=False,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("blocking-findings-open",))
+
     def test_app_authored_pull_requests_cannot_be_approved(self):
         decision = evaluate_auto_approval(
             app_authored=True,

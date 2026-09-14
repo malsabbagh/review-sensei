@@ -116,8 +116,9 @@ against `review-result.schema.json`.
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`
 is a boolean that determines whether the finding prevents automatic approval;
-when omitted, only the preferred `critical` and `high` severity values are
-blocking. `severity` uses the preferred `critical`, `high`, `medium`, or `low`
+when omitted, only preferred `medium`/`low` values or no severity are
+non-blocking; `critical`, `high`, and other nonempty values are blocking.
+`severity` uses the preferred `critical`, `high`, `medium`, or `low`
 values to describe likely impact; `fix_effort` uses `trivial`, `small`,
 `moderate`, `large`, or `unknown` to describe remediation scope; and `category`
 remains the configured lens id that produced the finding.
@@ -442,7 +443,7 @@ run. The generated caller may contain only the name-only secret mapping
 handled by the App setup boundary.
 
 The approval decision is deterministic: explicit blocking findings, or
-unclassified critical/high findings, block approval and open-thread safety
+unclassified severity other than `medium`/`low`, block approval and open-thread safety
 remains independent. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.

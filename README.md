@@ -300,7 +300,9 @@ Inline findings may also carry independent `blocking`, `severity`
 (`critical`, `high`, `medium`, or `low`), and `fix_effort` (`trivial`, `small`,
 `moderate`, `large`, or `unknown`) labels. `blocking` controls whether the
 finding prevents automatic approval; `false` identifies an optional follow-up.
-If it is omitted, only `critical` and `high` severity findings block approval.
+If it is omitted, only canonical `medium` and `low` severity (or no severity)
+is non-blocking; `critical`, `high`, and unrecognized nonempty severity values
+block approval.
 Severity describes likely impact, while fix effort describes remediation scope
 rather than a time estimate. The existing `category` id is the lens source and
 is shown as a human-readable lens label; no composite priority score or second
@@ -459,7 +461,7 @@ the final thread sweep confirms that every thread is resolved; it never posts
 a duplicate comment or approval.
 
 The approval policy is deliberately conservative: an explicit blocking label,
-or unclassified critical/high severity, blocks approval; unresolved threads
+or an unclassified severity other than `medium`/`low`, blocks approval; unresolved threads
 also remain blocking. Resolving a thread does not itself start a GitHub Actions run, so rerun
 the review workflow (or push a new head) after the final resolution. See
 [ADR 0032](docs/adr/0032-blocking-finding-classification-for-approvals.md)
