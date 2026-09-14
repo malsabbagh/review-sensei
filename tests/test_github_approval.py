@@ -75,9 +75,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 ),
             ),
             provider="fixture",
+            review_status="complete",
         )
 
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -95,9 +97,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 ),
             ),
             provider="fixture",
+            review_status="complete",
         )
 
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -120,9 +124,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                         ),
                     ),
                     provider="fixture",
+                    review_status="complete",
                 )
 
                 decision = evaluate_auto_approval(
+                    enabled=True,
                     app_authored=False,
                     result=result,
                     has_open_review_threads=False,
@@ -140,9 +146,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 ),
             ),
             provider="fixture",
+            review_status="complete",
         )
 
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -158,9 +166,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                 ReviewComment(path="src/app.py", line=2, body="Follow-up finding"),
             ),
             provider="fixture",
+            review_status="complete",
         )
 
         decision = evaluate_auto_approval(
+            enabled=True,
             app_authored=False,
             result=result,
             has_open_review_threads=False,
@@ -183,9 +193,11 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                         ),
                     ),
                     provider="fixture",
+                    review_status="complete",
                 )
 
                 decision = evaluate_auto_approval(
+                    enabled=True,
                     app_authored=False,
                     result=result,
                     has_open_review_threads=False,

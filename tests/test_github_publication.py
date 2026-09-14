@@ -72,6 +72,7 @@ def non_blocking_result():
             ),
         ),
         provider="ollama",
+        review_status="complete",
     )
 
 
@@ -278,6 +279,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=non_blocking_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
 
         self.assertEqual(outcome.status, "published")
@@ -701,6 +703,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response({"id": 6}, 200),
             ],
             result=clean_result(),
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -728,6 +731,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response({"id": 6}, 200),
             ],
             result=non_blocking,
+            auto_approve=True,
         )
 
         self.assertEqual(outcome.status, "published")
@@ -753,6 +757,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 graphql_review_threads_response(nodes=({"isResolved": False},)),
             ],
             result=clean_result(),
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
@@ -805,6 +810,7 @@ class ReviewPublisherTests(unittest.TestCase):
                     json_response([prior_comment]),
                 ],
                 result=clean_result(),
+                auto_approve=True,
             )
 
     def test_matching_review_with_unknown_state_fails_closed(self):
