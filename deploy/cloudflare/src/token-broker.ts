@@ -19,6 +19,8 @@ type Capability = keyof typeof CAPABILITIES;
 // pull-request write scope so the token can read repository data for the
 // review. This is a narrow acceptance rule for GitHub's returned scope, not a
 // broker request for an additional permission; reply capabilities reject it.
+// This policy overlay is keyed by Capability (the keys of CAPABILITIES above),
+// so a new capability must explicitly opt in here before it can accept it.
 const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["review_publish"]);
 
 interface BrokerBody {

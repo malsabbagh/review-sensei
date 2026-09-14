@@ -367,6 +367,32 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_installation_permissions_invalid");
   });
 
+  it("requires GitHub's mandatory metadata grant on installation-token responses", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_setup_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          contents: "write",
+          pull_requests: "write",
+          variables: "write",
+          workflows: "write",
+        },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", {
+        contents: "write",
+        pull_requests: "write",
+        variables: "write",
+        workflows: "write",
+      }),
+    ).rejects.toThrow("github_installation_permissions_invalid");
+  });
+
   it("fails closed when GitHub returns both aliases for one permission", async () => {
     const client = api();
     vi.spyOn(client, "request").mockResolvedValue({
