@@ -11,6 +11,119 @@ from .schemas import validate_public_document
 
 _SHA = re.compile(r"^[a-f0-9]{64}$")
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+_RANGE_VERSION = re.compile(
+    r"^(0|[1-9][0-9]*|[xX*])"
+    r"(?:\.(0|[1-9][0-9]*|[xX*]))?"
+    r"(?:\.(0|[1-9][0-9]*|[xX*]))?$"
+)
+_RANGE_TOKEN = re.compile(r"^(<=|>=|==|=|<|>|\^|~)?\s*(.+)$")
+_OPERATORS = frozenset({"<=", ">=", "==", "=", "<", ">", "^", "~"})
+
+
+def _version_parts(value: str) -> tuple[int, int, int]:
+    """Parse a bounded numeric semantic version for range comparisons."""
+
+    match = _RANGE_VERSION.fullmatch(value.strip())
+    if match is None or any(part in {"x", "X", "*"} for part in match.groups() if part):
+        raise ValueError("version must contain three numeric components")
+    parts = [int(part) if part is not None else 0 for part in match.groups()]
+    if len(value.strip().split(".")) != 3:
+        raise ValueError("version must contain three numeric components")
+    return parts[0], parts[1], parts[2]
+
+
+def _constraint_parts(token: str) -> list[tuple[str, tuple[int, int, int]]]:
+    match = _RANGE_TOKEN.fullmatch(token)
+    if match is None:
+        raise ValueError("range constraint is malformed")
+    operator = match.group(1) or "="
+    version_match = _RANGE_VERSION.fullmatch(match.group(2))
+    if version_match is None:
+        raise ValueError("range version is malformed")
+    components = version_match.groups()
+    wildcard_at = next(
+        (index for index, part in enumerate(components) if part in {"x", "X", "*"}),
+        None,
+    )
+    if wildcard_at is not None:
+        if operator != "=":
+            raise ValueError("wildcard range constraints require equality")
+        if wildcard_at == 0:
+            return []
+        lower: tuple[int, int, int] = (
+            int(components[0]) if components[0] not in {None, "x", "X", "*"} else 0,
+            int(components[1]) if components[1] not in {None, "x", "X", "*"} else 0,
+            int(components[2]) if components[2] not in {None, "x", "X", "*"} else 0,
+        )
+        upper_values = list(lower)
+        upper_values[wildcard_at - 1] += 1
+        for index in range(wildcard_at, 3):
+            upper_values[index] = 0
+        upper: tuple[int, int, int] = (
+            upper_values[0],
+            upper_values[1],
+            upper_values[2],
+        )
+        return [(">=", lower), ("<", upper)]
+    base: tuple[int, int, int] = (
+        int(components[0]) if components[0] is not None else 0,
+        int(components[1]) if components[1] is not None else 0,
+        int(components[2]) if components[2] is not None else 0,
+    )
+    if operator == "^":
+        if base[0] > 0:
+            upper = (base[0] + 1, 0, 0)
+        elif base[1] > 0:
+            upper = (0, base[1] + 1, 0)
+        else:
+            upper = (0, 0, base[2] + 1)
+        return [(">=", base), ("<", upper)]
+    if operator == "~":
+        return [(">=", base), ("<", (base[0], base[1] + 1, 0))]
+    return [(operator, base)]
+
+
+def _range_contains(version: str, expression: str) -> bool:
+    """Return whether a strict semantic version is admitted by a bounded range."""
+
+    if (
+        not isinstance(expression, str)
+        or not expression.strip()
+        or len(expression) > 128
+    ):
+        raise ValueError("compatible worker range is malformed")
+    candidate = _version_parts(version)
+    alternatives = [part.strip() for part in expression.split("||")]
+    if any(not part for part in alternatives):
+        raise ValueError("range alternative is empty")
+    for alternative in alternatives:
+        expanded: list[tuple[str, tuple[int, int, int]]] = []
+        tokens = [token for token in re.split(r"\s*,\s*|\s+", alternative) if token]
+        if not tokens:
+            raise ValueError("range must contain a constraint")
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in _OPERATORS:
+                if index + 1 >= len(tokens):
+                    raise ValueError("range constraint is incomplete")
+                token += tokens[index + 1]
+                index += 1
+            expanded.extend(_constraint_parts(token))
+            index += 1
+        if all(
+            {
+                "=": candidate == bound,
+                "==": candidate == bound,
+                ">": candidate > bound,
+                ">=": candidate >= bound,
+                "<": candidate < bound,
+                "<=": candidate <= bound,
+            }[operator]
+            for operator, bound in expanded
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -57,6 +170,16 @@ class CompatibilityManifest:
             or not self.compatible_worker_range.strip()
         ):
             raise ReviewInputError("compatible worker range is required")
+        try:
+            contains_worker = _range_contains(
+                self.worker.version, self.compatible_worker_range
+            )
+        except ValueError as exc:
+            raise ReviewInputError("compatible worker range is malformed") from exc
+        if not contains_worker:
+            raise ReviewInputError(
+                "compatible worker range does not include the declared worker version"
+            )
         if not isinstance(self.provenance, str) or not self.provenance.strip():
             raise ReviewInputError("manifest provenance is required")
         if (

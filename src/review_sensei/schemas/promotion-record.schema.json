@@ -15,7 +15,7 @@
     "observed_revision": {"type": "string", "minLength": 1, "maxLength": 256},
     "run_count": {"type": "integer", "minimum": 1},
     "evaluated_at": {"type": "string", "minLength": 1, "maxLength": 64},
-    "reproducibility": {"type": "object", "maxProperties": 32},
+    "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32},
     "status": {"enum": ["supported", "insufficient", "unsupported"]},
     "rollback_decision": {"enum": ["revert-to-baseline", "hold", "none"]}
   }

@@ -44,10 +44,13 @@ def _is_fixture_alias(value: str) -> bool:
         "fixture",
         "fixture-provider",
         "fixture-v1",
+        "fixtureprovider",
         "stub",
         "stub-provider",
+        "stubprovider",
         "fake",
         "fake-provider",
+        "fakeprovider",
     }
 
 
@@ -103,6 +106,10 @@ class PromotionRecord:
         if self.status == "supported" and self.run_count < 3:
             raise ReviewInputError(
                 "supported promotion evidence requires at least three runs"
+            )
+        if self.status == "supported" and not self.reproducibility:
+            raise ReviewInputError(
+                "supported promotion evidence requires reproducibility settings"
             )
         if self.status == "supported" and _is_fixture_alias(self.provider):
             raise ReviewInputError("fixture-only evidence cannot support promotion")
@@ -616,15 +623,18 @@ def run_case(
                 label="expected result",
             )
         )
-        # Pre-status fixtures remain valid as complete deterministic outputs;
-        # this compatibility applies only to evaluation, never publication.
+        # Pre-status fixtures remain valid as complete deterministic outputs.
+        # Evaluation accepts both the legacy fixture shape and the additive
+        # explicit ``complete`` status, while publication keeps its
+        # fail-closed parser strict for artifacts missing a status.
         actual_document = result.to_dict()
-        if isinstance(expected_document, dict) and "review_status" not in expected_document:
-            # Do not mutate the parsed fixture.  A legacy fixture is accepted
-            # only when the current evaluated result explicitly proves a
-            # complete run; publication remains fail-closed for missing status.
-            expected_document = dict(expected_document)
-            expected_document["review_status"] = "complete"
+        if isinstance(expected_document, dict):
+            if expected_document.get("review_status") == "complete":
+                expected_document = dict(expected_document)
+                expected_document.pop("review_status")
+            if actual_document.get("review_status") == "complete":
+                actual_document = dict(actual_document)
+                actual_document.pop("review_status")
         status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(
         comment.line > 0 and comment.path for comment in result.comments
