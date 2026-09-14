@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
@@ -13,6 +14,8 @@ from .models import LearningEntry
 DEFAULT_LEARNING_DIRECTORY = Path(".github/review-sensei/learnings")
 MAX_LEARNING_FILES = 100
 MAX_LEARNING_FILE_BYTES = 64 * 1024
+MAX_SCOPE_WITNESSES = 256
+_GLOB_TOKEN = re.compile(r"\*|\?|\[[^\]]*\]")
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,63 @@ class LearningFeedback:
     def __post_init__(self) -> None:
         if self.outcome not in {"useful", "incorrect", "obsolete", "unverified"}:
             raise LearningLoadError("learning feedback outcome is invalid")
+
+
+def _glob_witnesses(patterns: Iterable[str]) -> tuple[str, ...]:
+    """Generate a small, bounded set of concrete paths for glob intersection."""
+
+    pattern_values = tuple(patterns)
+    literal_segments = {
+        segment
+        for pattern in pattern_values
+        for segment in pattern.split("/")
+        if segment and not _GLOB_TOKEN.search(segment) and segment != "**"
+    }
+    replacements = tuple(dict.fromkeys(("x", "foo", "bar", *literal_segments)))[:8]
+    witnesses: set[str] = set()
+    for pattern in pattern_values:
+        segment_options: list[tuple[str, ...]] = []
+        for segment in pattern.split("/"):
+            if segment == "**":
+                segment_options.append(("", *replacements))
+                continue
+            if not _GLOB_TOKEN.search(segment):
+                segment_options.append((segment,))
+                continue
+            variants = {segment}
+            for token_match in _GLOB_TOKEN.finditer(segment):
+                next_variants: set[str] = set()
+                for variant in variants:
+                    start, end = token_match.span()
+                    for replacement in replacements:
+                        next_variants.add(variant[:start] + replacement + variant[end:])
+                variants = next_variants
+            segment_options.append(tuple(sorted(variants)))
+        candidates = {""}
+        for options in segment_options:
+            candidates = {
+                "/".join(part for part in (prefix, option) if part)
+                for prefix in candidates
+                for option in options
+            }
+            if len(candidates) > MAX_SCOPE_WITNESSES:
+                candidates = set(sorted(candidates)[:MAX_SCOPE_WITNESSES])
+        witnesses.update(candidates)
+        if len(witnesses) > MAX_SCOPE_WITNESSES:
+            witnesses = set(sorted(witnesses)[:MAX_SCOPE_WITNESSES])
+    return tuple(sorted(witnesses))
+
+
+def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    """Check glob scopes using concrete witnesses, never pattern-string matches."""
+
+    patterns = (*left, *right)
+    for candidate in _glob_witnesses(patterns):
+        if any(fnmatchcase(candidate, left_pattern) for left_pattern in left) and any(
+            fnmatchcase(candidate, right_pattern) for right_pattern in right
+        ):
+            return True
+    return False
 
 
 class LearningStore:
@@ -131,29 +191,46 @@ class LearningStore:
                     left.category and right.category and left.category != right.category
                 ):
                     continue
-                overlap = any(
-                    fnmatchcase(pattern, candidate) or fnmatchcase(candidate, pattern)
-                    for pattern in left.scope
-                    for candidate in right.scope
-                )
-                if overlap:
+                if _scopes_overlap(left.scope, right.scope):
                     diagnostics.append(
                         LearningDiagnostic("conflict", left.id, (right.id,))
                     )
 
-        # Detect supersession cycles without recursion limits.
+        # Detect supersession cycles with linear-time color-state traversal;
+        # retaining every trail would revisit exponentially many paths.
         graph = {entry.id: tuple(entry.supersedes) for entry in self.all_entries}
+        color: dict[str, int] = {}
         for start in sorted(graph):
-            stack: list[tuple[str, tuple[str, ...]]] = [(start, (start,))]
+            if color.get(start, 0):
+                continue
+            color[start] = 1
+            path = [start]
+            positions = {start: 0}
+            stack: list[tuple[str, int]] = [(start, 0)]
             while stack:
-                current, trail = stack.pop()
-                for target in graph.get(current, ()):
-                    if target == start:
-                        diagnostics.append(
-                            LearningDiagnostic("supersession-cycle", start, trail)
-                        )
-                    elif target in graph and target not in trail:
-                        stack.append((target, trail + (target,)))
+                current, offset = stack[-1]
+                targets = graph.get(current, ())
+                if offset >= len(targets):
+                    stack.pop()
+                    color[current] = 2
+                    positions.pop(current, None)
+                    path.pop()
+                    continue
+                target = targets[offset]
+                stack[-1] = (current, offset + 1)
+                if target not in graph:
+                    continue
+                state = color.get(target, 0)
+                if state == 0:
+                    color[target] = 1
+                    positions[target] = len(path)
+                    path.append(target)
+                    stack.append((target, 0))
+                elif state == 1 and target in positions:
+                    cycle = tuple(path[positions[target] :]) + (target,)
+                    diagnostics.append(
+                        LearningDiagnostic("supersession-cycle", target, cycle)
+                    )
         # Stable de-duplication and a bounded diagnostic surface.
         unique = {
             (item.code, item.entry_id, item.related_ids): item for item in diagnostics

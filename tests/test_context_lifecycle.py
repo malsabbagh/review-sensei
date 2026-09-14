@@ -241,6 +241,46 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertTrue(any(item.code == "stale" for item in diagnostics))
         self.assertTrue(any(item.code == "conflict" for item in diagnostics))
 
+    def test_learning_diagnostics_detect_glob_scope_intersection(self):
+        store = LearningStore(
+            (
+                LearningEntry(
+                    id="python-rule",
+                    title="Python rule",
+                    rule="Use rule A",
+                    scope=("src/**/*.py",),
+                ),
+                LearningEntry(
+                    id="foo-rule",
+                    title="Foo rule",
+                    rule="Use rule B",
+                    scope=("src/foo/**",),
+                ),
+            )
+        )
+        diagnostics = store.diagnostics()
+        self.assertTrue(any(item.code == "conflict" for item in diagnostics))
+
+    def test_learning_diagnostics_detect_supersession_cycles(self):
+        store = LearningStore(
+            (
+                LearningEntry(
+                    id="one",
+                    title="One",
+                    rule="Rule one",
+                    supersedes=("two",),
+                ),
+                LearningEntry(
+                    id="two",
+                    title="Two",
+                    rule="Rule two",
+                    supersedes=("one",),
+                ),
+            )
+        )
+        diagnostics = store.diagnostics()
+        self.assertTrue(any(item.code == "supersession-cycle" for item in diagnostics))
+
 
 if __name__ == "__main__":
     unittest.main()

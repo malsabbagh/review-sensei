@@ -568,12 +568,12 @@ class ReviewResult:
     # that only contains a partial or summary pass can never be mistaken for a
     # complete review eligible for an approval event.  The review service marks
     # its validated aggregate explicitly as ``complete``.
+    review_status: str = "incomplete"
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     # Directly constructed results are not proof that every configured stage
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
     # are also classified as incomplete.
-    review_status: str = "incomplete"
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):

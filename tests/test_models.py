@@ -491,6 +491,12 @@ class ModelTests(unittest.TestCase):
         )
         self.assertEqual(result.comments, (first, distinct))
 
+    def test_review_result_preserves_legacy_positional_status_before_limits(self):
+        limits = ReviewLimits(max_summary_bytes=16)
+        result = ReviewResult("ok", (), "fake", None, (), "complete", limits)
+        self.assertEqual(result.review_status, "complete")
+        self.assertIs(result.limits, limits)
+
     def test_result_custom_limits_reject_every_output_dimension(self):
         base = dict(summary="summary", comments=(), provider="fake")
         with self.assertRaises(ReviewInputError):
