@@ -18,6 +18,7 @@ from .errors import (
 
 MAX_GITHUB_RESPONSE_BYTES = 512 * 1024
 MAX_PAGINATION_PAGES = 10
+MAX_PAGINATION_ITEMS = MAX_PAGINATION_PAGES * 100
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 
 Opener = Callable[..., Any]
@@ -158,21 +159,59 @@ class GitHubHttp:
         *,
         path: str,
         token: str,
+        page_sizes: tuple[int, ...] = (100,),
     ) -> list[Any]:
-        """Return at most ``MAX_PAGINATION_PAGES`` pages of a paginated list."""
+        """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
+
+        Callers that handle large, untrusted list entries may provide descending
+        page sizes. If a page exceeds the response budget, the same item offset
+        is retried with the next smaller size.
+        """
+
+        if not page_sizes or any(
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or page_size < 1
+            or page_size > 100
+            for page_size in page_sizes
+        ):
+            raise GitHubHTTPError("GitHub pagination page sizes were invalid")
+        if any(
+            current <= following or current % following
+            for current, following in zip(page_sizes, page_sizes[1:])
+        ):
+            raise GitHubHTTPError("GitHub pagination page sizes were invalid")
 
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
-        for page in range(1, MAX_PAGINATION_PAGES + 1):
-            current = f"{path}{separator}per_page=100&page={page}"
-            status, body = self.request("GET", current, token=token)
+        page_size_index = 0
+        while len(collected) < MAX_PAGINATION_ITEMS:
+            page_size = page_sizes[page_size_index]
+            if len(collected) % page_size:
+                raise GitHubHTTPError("GitHub pagination offset was invalid")
+            page = len(collected) // page_size + 1
+            current = f"{path}{separator}per_page={page_size}&page={page}"
+            try:
+                status, body = self.request("GET", current, token=token)
+            except GitHubHTTPResponseTooLargeError:
+                if page_size_index + 1 >= len(page_sizes):
+                    raise
+                next_page_size = page_sizes[page_size_index + 1]
+                if len(collected) % next_page_size:
+                    raise GitHubHTTPError("GitHub pagination offset was invalid")
+                page_size_index += 1
+                continue
             if status == 404:
                 raise GitHubHTTPError("GitHub pagination target was not found")
             if status < 200 or status >= 300:
                 raise GitHubHTTPError("GitHub pagination request was rejected")
             if not isinstance(body, list):
                 raise GitHubHTTPError("GitHub pagination response was invalid")
+            if len(body) > page_size:
+                raise GitHubHTTPError(
+                    "GitHub pagination page exceeded its requested size"
+                )
             collected.extend(body)
-            if len(body) < 100:
+            if len(body) < page_size:
                 return collected
         raise GitHubHTTPError("GitHub pagination exceeded configured page limit")
