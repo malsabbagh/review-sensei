@@ -1,12 +1,25 @@
 import json
+import shutil
 import tempfile
 import unittest
 from itertools import repeat
 from pathlib import Path
+from unittest.mock import patch
 
-from review_sensei.diagnostics import build_plan, run_doctor
+from review_sensei.diagnostics import (
+    DiagnosticCheck,
+    build_plan,
+    render_diagnostic,
+    run_doctor,
+)
 from review_sensei.errors import ReviewInputError
-from review_sensei.patches import PatchSuggestion, create_patch_suggestion
+from review_sensei.patches import (
+    MAX_PATCH_FILES,
+    MAX_PATCH_METADATA_BYTES,
+    MAX_PATCH_METADATA_ITEMS,
+    PatchSuggestion,
+    create_patch_suggestion,
+)
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -54,6 +67,116 @@ class DiagnosticsTests(unittest.TestCase):
                 check for check in report["checks"] if check["name"] == "stages"
             )
             self.assertEqual(stages_check["status"], "action")
+
+    def test_doctor_reports_configured_directory_states_and_provider_errors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "missing"
+            empty_stages = root / "empty-stages"
+            empty_categories = root / "empty-categories"
+            empty_stages.mkdir()
+            empty_categories.mkdir()
+            with patch.dict("os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "invalid"}):
+                report = run_doctor(
+                    stages_dir=missing,
+                    categories_dir=missing,
+                    context_root=missing,
+                    include_network=True,
+                )
+            self.assertEqual(report["status"], "action")
+            self.assertTrue(
+                any(check["name"] == "provider-mode" for check in report["checks"])
+            )
+            empty_report = run_doctor(
+                stages_dir=empty_stages, categories_dir=empty_categories
+            )
+            self.assertTrue(
+                all(
+                    check["status"] == "action"
+                    for check in empty_report["checks"]
+                    if check["name"] in {"stages", "categories"}
+                )
+            )
+
+    def test_doctor_validates_configured_packaged_shapes(self):
+        source_root = Path(__file__).parents[1] / "src" / "review_sensei"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            categories_dir = root / "categories"
+            stages_dir = root / "stages"
+            context_dir = root / "context"
+            categories_dir.mkdir()
+            stages_dir.mkdir()
+            context_dir.mkdir()
+            for path in (source_root / "default_categories").glob("*.json"):
+                shutil.copyfile(path, categories_dir / path.name)
+            shutil.copyfile(
+                source_root / "default_stages" / "01-default-review.json",
+                stages_dir / "01-default-review.json",
+            )
+            report = run_doctor(
+                stages_dir=stages_dir,
+                categories_dir=categories_dir,
+                context_root=context_dir,
+            )
+            self.assertEqual(report["status"], "unknown")
+            self.assertTrue(
+                all(
+                    check["status"] == "pass"
+                    for check in report["checks"]
+                    if check["name"] in {"stages", "categories", "context"}
+                )
+            )
+            (categories_dir / "broken.json").write_text("{}", encoding="utf-8")
+            broken = run_doctor(categories_dir=categories_dir)
+            category_check = next(
+                check for check in broken["checks"] if check["name"] == "categories"
+            )
+            self.assertEqual(category_check["status"], "action")
+
+    def test_plan_rejects_invalid_identity_and_provider_inputs(self):
+        with self.assertRaises(ReviewInputError):
+            build_plan(repository=1)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            build_plan(repository=" ")
+        with self.assertRaises(ReviewInputError):
+            build_plan(repository="x" * 513)
+        for value in (True, 0, "1"):
+            with self.subTest(value=value), self.assertRaises(ReviewInputError):
+                build_plan(pull_request=value)  # type: ignore[arg-type]
+        for value in (1, " "):
+            with self.subTest(value=value), self.assertRaises(ReviewInputError):
+                build_plan(title=value)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            build_plan(title="x" * 4097)
+        with self.assertRaises(ReviewInputError):
+            build_plan(stages=None)  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            build_plan(stages=("",))
+        with self.assertRaises(ReviewInputError):
+            build_plan(stages=("same", "same"))
+        with self.assertRaises(ReviewInputError):
+            build_plan(provider_mode="invalid")
+        with patch.dict("os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "invalid"}):
+            with self.assertRaises(ReviewInputError):
+                build_plan()
+
+    def test_render_diagnostic_supports_json_and_all_human_fields(self):
+        check = DiagnosticCheck("sample", "pass", "ok")
+        document = {
+            "status": "pass",
+            "version": None,
+            "checks": [check.to_dict()],
+            "provider_mode": "local",
+            "stages": ["one"],
+            "operations": {"provider_calls": 0, "github_writes": 0},
+        }
+        rendered = render_diagnostic(document)
+        self.assertIn("status: pass", rendered)
+        self.assertIn("version: unknown", rendered)
+        self.assertIn("operations: provider_calls=0", rendered)
+        self.assertEqual(render_diagnostic(document, as_json=True)[0], "{")
+        self.assertIn("unknown", render_diagnostic({}))
 
 
 class PatchSuggestionTests(unittest.TestCase):
@@ -211,6 +334,137 @@ class PatchSuggestionTests(unittest.TestCase):
                 affected_paths=("src/other.py",),
                 snapshot_modes=(("src/other.py", "100644"),),
             )
+
+    def test_patch_helper_iterables_and_metadata_fail_closed(self):
+        finding = {"id": "finding-1", "status": "confirmed"}
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                finding,
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=1,  # type: ignore[arg-type]
+                snapshot_modes=self.SNAPSHOT_MODES,
+            )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                finding,
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=(1,),  # type: ignore[tuple-item]
+                snapshot_modes=self.SNAPSHOT_MODES,
+            )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                finding,
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=(),
+                snapshot_modes=self.SNAPSHOT_MODES,
+            )
+        for label in ("assumptions", "validation"):
+            with self.subTest(label=label), self.assertRaises(ReviewInputError):
+                create_patch_suggestion(
+                    finding,
+                    patch=DIFF,
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    allowed_paths=("src/app.py",),
+                    snapshot_modes=self.SNAPSHOT_MODES,
+                    **{label: 1},  # type: ignore[arg-type]
+                )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                finding,
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=("src/app.py",),
+                snapshot_modes=self.SNAPSHOT_MODES,
+                assumptions=("x" * (MAX_PATCH_METADATA_BYTES + 1),),
+            )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                finding,
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=("src/app.py",),
+                snapshot_modes=self.SNAPSHOT_MODES,
+                assumptions=repeat("x", MAX_PATCH_METADATA_ITEMS + 1),
+            )
+
+    def test_patch_snapshot_mode_and_constructor_boundaries(self):
+        finding = {"id": "finding-1", "status": "confirmed"}
+        common = {
+            "patch": DIFF,
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "allowed_paths": ("src/app.py",),
+        }
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                **common, snapshot_modes={"src/app.py": "bad"}, finding=finding
+            )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                **common, snapshot_modes={1: "100644"}, finding=finding
+            )  # type: ignore[dict-item]
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                **common, snapshot_modes={"src/app.py": "120000"}, finding=finding
+            )
+        too_many_modes = {
+            f"src/{index}.py": "100644" for index in range(MAX_PATCH_FILES + 1)
+        }
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                **common, snapshot_modes=too_many_modes, finding=finding
+            )
+
+        valid = create_patch_suggestion(
+            finding,
+            patch=DIFF,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            allowed_paths=("src/app.py",),
+            snapshot_modes=self.SNAPSHOT_MODES,
+        )
+        variants = (
+            {"finding_id": "", "base_sha": valid.base_sha},
+            {"finding_id": valid.finding_id, "base_sha": "bad"},
+            {"finding_id": valid.finding_id, "patch": ""},
+            {"finding_id": valid.finding_id, "affected_paths": ()},
+            {
+                "finding_id": valid.finding_id,
+                "affected_paths": ("src/app.py", "src/app.py"),
+            },
+            {"finding_id": valid.finding_id, "snapshot_modes": ()},
+            {
+                "finding_id": valid.finding_id,
+                "snapshot_modes": (
+                    ("src/app.py", "100644"),
+                    ("src/other.py", "100644"),
+                ),
+            },
+            {"finding_id": valid.finding_id, "assumptions": (1,)},
+            {"finding_id": valid.finding_id, "validation": ("",)},
+            {"finding_id": valid.finding_id, "accepted": True},
+        )
+        for changes in variants:
+            values = {
+                "finding_id": valid.finding_id,
+                "base_sha": valid.base_sha,
+                "head_sha": valid.head_sha,
+                "patch": valid.patch,
+                "affected_paths": valid.affected_paths,
+                "snapshot_modes": valid.snapshot_modes,
+            }
+            values.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ReviewInputError):
+                PatchSuggestion(**values)
 
 
 if __name__ == "__main__":
