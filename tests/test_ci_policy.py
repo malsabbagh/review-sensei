@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -431,7 +432,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             workflow_text, "local job received an invalid provider mode"
         )
         block = block.split("python - <<'PY'\n", 1)[1]
-        block = re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0]
+        block = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0])
         environment = {
             "MODE": "manual",
             "OPERATION": "reply",
@@ -471,7 +472,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             workflow_text, "pull request title exceeds the 256-byte limit"
         )
         script = block.split("python - \"$payload\" <<'PY'\n", 1)[1]
-        script = re.split(r"\n\s*PY\s*\n?$", script, maxsplit=1)[0]
+        script = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", script, maxsplit=1)[0])
         metadata = {
             "state": "open",
             "draft": False,
