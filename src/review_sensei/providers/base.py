@@ -25,7 +25,9 @@ def validate_provider_contract(provider: object) -> ReviewProvider:
     It does not invoke the provider or inspect credentials.
     """
 
-    if not isinstance(provider, ReviewProvider):
+    if not isinstance(provider, ReviewProvider) or not callable(
+        getattr(provider, "complete", None)
+    ):
         raise TypeError("provider must expose name, model, and complete(request)")
     name = provider.name
     if not isinstance(name, str) or not name.strip():
