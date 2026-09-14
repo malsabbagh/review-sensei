@@ -651,7 +651,10 @@ class ConversationPublisher:
         base_sha: str,
         changed_paths: tuple[str, ...],
     ) -> tuple[LearningEntry, ...]:
-        directory = ".github/review-sensei/learnings"
+        directory = validate_repository_path(
+            ".github/review-sensei/learnings",
+            label="conversation learning directory",
+        )
         status, payload = self.http.request(
             "GET",
             self.http.repository_path(
