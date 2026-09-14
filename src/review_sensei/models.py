@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Mapping, cast
 
 from .errors import ReviewInputError
@@ -251,6 +252,12 @@ class LearningEntry:
     category: str | None = None
     source: str | None = None
     status: str = "active"
+    owner: str | None = None
+    provenance: str | None = None
+    reviewed_at: str | None = None
+    expires_at: str | None = None
+    supersedes: tuple[str, ...] = ()
+    superseded_by: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not _LEARNING_ID.fullmatch(self.id):
@@ -268,21 +275,71 @@ class LearningEntry:
             ("rationale", self.rationale),
             ("category", self.category),
             ("source", self.source),
+            ("owner", self.owner),
+            ("provenance", self.provenance),
+            ("reviewed_at", self.reviewed_at),
+            ("expires_at", self.expires_at),
+            ("superseded_by", self.superseded_by),
         )
         for optional_label, optional_content in optional_values:
             _optional_learning_text(optional_label, optional_content)
-        if self.status not in {"active", "retired"}:
+        if self.status not in {"active", "retired", "superseded"}:
             raise ReviewInputError("learning status must be active or retired")
+        if self.superseded_by == self.id:
+            raise ReviewInputError("learning superseded_by cannot reference itself")
+        if not isinstance(self.supersedes, tuple) or any(
+            not isinstance(identifier, str) or not _LEARNING_ID.fullmatch(identifier)
+            for identifier in self.supersedes
+        ):
+            raise ReviewInputError("learning supersedes must contain safe identifiers")
+        if len(self.supersedes) != len(set(self.supersedes)):
+            raise ReviewInputError("learning supersedes must be unique")
+        for label, timestamp in (
+            ("reviewed_at", self.reviewed_at),
+            ("expires_at", self.expires_at),
+        ):
+            if timestamp is not None:
+                try:
+                    datetime.fromisoformat(cast(str, timestamp).replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ReviewInputError(
+                        f"learning {label} must be ISO-8601"
+                    ) from exc
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "LearningEntry":
         if not isinstance(value, Mapping):
             raise ReviewInputError("learning entry must be a JSON object")
+        allowed = {
+            "id",
+            "title",
+            "rule",
+            "scope",
+            "rationale",
+            "category",
+            "source",
+            "status",
+            "owner",
+            "provenance",
+            "reviewed_at",
+            "expires_at",
+            "supersedes",
+            "superseded_by",
+        }
+        if any(key not in allowed for key in value):
+            raise ReviewInputError("learning entry contains an unsupported field")
         raw_scope = value.get("scope", ["*"])
         if not isinstance(raw_scope, list) or not all(
             isinstance(pattern, str) for pattern in raw_scope
         ):
             raise ReviewInputError("learning scope must be a JSON array of strings")
+        raw_supersedes = value.get("supersedes", [])
+        if not isinstance(raw_supersedes, list) or not all(
+            isinstance(identifier, str) for identifier in raw_supersedes
+        ):
+            raise ReviewInputError(
+                "learning supersedes must be a JSON array of strings"
+            )
         return cls(
             id=cast(str, value["id"]),
             title=cast(str, value["title"]),
@@ -292,6 +349,12 @@ class LearningEntry:
             category=cast(str | None, value.get("category")),
             source=cast(str | None, value.get("source")),
             status=cast(str, value.get("status", "active")),
+            owner=cast(str | None, value.get("owner")),
+            provenance=cast(str | None, value.get("provenance")),
+            reviewed_at=cast(str | None, value.get("reviewed_at")),
+            expires_at=cast(str | None, value.get("expires_at")),
+            supersedes=tuple(raw_supersedes),
+            superseded_by=cast(str | None, value.get("superseded_by")),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -306,9 +369,16 @@ class LearningEntry:
             ("rationale", self.rationale),
             ("category", self.category),
             ("source", self.source),
+            ("owner", self.owner),
+            ("provenance", self.provenance),
+            ("reviewed_at", self.reviewed_at),
+            ("expires_at", self.expires_at),
+            ("superseded_by", self.superseded_by),
         ):
             if content is not None:
                 value[label] = content
+        if self.supersedes:
+            value["supersedes"] = list(self.supersedes)
         return value
 
     def to_prompt_dict(self) -> dict[str, object]:
@@ -498,12 +568,12 @@ class ReviewResult:
     # that only contains a partial or summary pass can never be mistaken for a
     # complete review eligible for an approval event.  The review service marks
     # its validated aggregate explicitly as ``complete``.
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     # Directly constructed results are not proof that every configured stage
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
     # are also classified as incomplete.
     review_status: str = "incomplete"
-    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):
@@ -611,8 +681,10 @@ class ReviewResult:
                 proposal.to_dict() for proposal in self.learning_proposals
             ],
         }
-        # Completeness is always explicit so legacy artifacts cannot be
-        # interpreted as approval-eligible merely because the field is absent.
+        # Explicit status is part of the operational v1 artifact.  Legacy
+        # complete fixtures are normalized by evaluation, while publication
+        # can distinguish an omitted legacy status (parsed as incomplete) from
+        # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
         return value
 

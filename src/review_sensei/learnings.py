@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Iterable
@@ -11,6 +13,30 @@ from .models import LearningEntry
 DEFAULT_LEARNING_DIRECTORY = Path(".github/review-sensei/learnings")
 MAX_LEARNING_FILES = 100
 MAX_LEARNING_FILE_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class LearningDiagnostic:
+    """Advisory lifecycle signal; diagnostics never mutate approved entries."""
+
+    code: str
+    entry_id: str
+    related_ids: tuple[str, ...] = ()
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class LearningFeedback:
+    """Opt-in, non-authoritative finding feedback for evaluation."""
+
+    learning_id: str
+    finding_id: str
+    outcome: str
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in {"useful", "incorrect", "obsolete", "unverified"}:
+            raise LearningLoadError("learning feedback outcome is invalid")
 
 
 class LearningStore:
@@ -24,7 +50,8 @@ class LearningStore:
         identifiers = [entry.id for entry in normalized]
         if len(identifiers) != len(set(identifiers)):
             raise LearningLoadError("repository learnings contain duplicate ids")
-        self.entries = normalized
+        self.all_entries = normalized
+        self.entries = tuple(entry for entry in normalized if entry.status == "active")
 
     def for_paths(
         self,
@@ -38,7 +65,7 @@ class LearningStore:
         selected = tuple(
             entry
             for entry in self.entries
-            if entry.status == "active"
+            if entry.superseded_by is None
             and (
                 (not changed_paths and "*" in entry.scope)
                 or any(
@@ -53,6 +80,85 @@ class LearningStore:
                 "too many repository learnings apply to this review"
             )
         return selected
+
+    def diagnostics(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_after: timedelta = timedelta(days=365),
+    ) -> tuple[LearningDiagnostic, ...]:
+        """Return deterministic, bounded advisory diagnostics for maintainers."""
+
+        instant = now or datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        diagnostics: list[LearningDiagnostic] = []
+        by_id = {entry.id: entry for entry in self.all_entries}
+        for entry in self.all_entries:
+            if entry.superseded_by and entry.superseded_by not in by_id:
+                diagnostics.append(
+                    LearningDiagnostic(
+                        "missing-superseder", entry.id, (entry.superseded_by,)
+                    )
+                )
+            if entry.expires_at:
+                expires = datetime.fromisoformat(
+                    entry.expires_at.replace("Z", "+00:00")
+                )
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires <= instant:
+                    diagnostics.append(
+                        LearningDiagnostic("stale", entry.id, detail="expired")
+                    )
+            elif entry.reviewed_at:
+                reviewed = datetime.fromisoformat(
+                    entry.reviewed_at.replace("Z", "+00:00")
+                )
+                if reviewed.tzinfo is None:
+                    reviewed = reviewed.replace(tzinfo=timezone.utc)
+                if reviewed + stale_after <= instant:
+                    diagnostics.append(
+                        LearningDiagnostic(
+                            "stale", entry.id, detail="review date exceeded"
+                        )
+                    )
+
+        # Overlapping scopes with materially different rules are advisory conflicts.
+        for index, left in enumerate(self.all_entries):
+            for right in self.all_entries[index + 1 :]:
+                if left.rule == right.rule or (
+                    left.category and right.category and left.category != right.category
+                ):
+                    continue
+                overlap = any(
+                    fnmatchcase(pattern, candidate) or fnmatchcase(candidate, pattern)
+                    for pattern in left.scope
+                    for candidate in right.scope
+                )
+                if overlap:
+                    diagnostics.append(
+                        LearningDiagnostic("conflict", left.id, (right.id,))
+                    )
+
+        # Detect supersession cycles without recursion limits.
+        graph = {entry.id: tuple(entry.supersedes) for entry in self.all_entries}
+        for start in sorted(graph):
+            stack: list[tuple[str, tuple[str, ...]]] = [(start, (start,))]
+            while stack:
+                current, trail = stack.pop()
+                for target in graph.get(current, ()):
+                    if target == start:
+                        diagnostics.append(
+                            LearningDiagnostic("supersession-cycle", start, trail)
+                        )
+                    elif target in graph and target not in trail:
+                        stack.append((target, trail + (target,)))
+        # Stable de-duplication and a bounded diagnostic surface.
+        unique = {
+            (item.code, item.entry_id, item.related_ids): item for item in diagnostics
+        }
+        return tuple(unique[key] for key in sorted(unique)[:MAX_LEARNING_FILES])
 
 
 def load_repository_learnings(
@@ -104,8 +210,7 @@ def load_repository_learnings(
             entry = LearningEntry.from_dict(value)
         except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
             raise LearningLoadError(f"invalid learning file: {path.name}") from exc
-        if entry.status == "active":
-            entries.append(entry)
+        entries.append(entry)
     try:
         return LearningStore(entries)
     except (LearningLoadError, ReviewInputError) as exc:
