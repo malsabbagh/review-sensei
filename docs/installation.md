@@ -104,10 +104,14 @@ incomplete/error response, or any stale/fork/closed target keeps the event as
 `COMMENT` or fails closed before writing. All `@sensei` replies remain ordinary
 comments.
 
-The existing per-head marker still deduplicates writes, so resolving a thread
-does not retroactively approve an already-published review; a fresh head must
-receive a new clean review. Classification metadata (severity, fix effort, and
-lens) is displayed for triage but cannot weaken this approval boundary. See
+The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
+After every thread is resolved, a fresh clean workflow run on the same exact
+head can promote the earlier ReviewSensei comment to one formal approval. It
+does not duplicate the comment or approval. GitHub Actions does not start a run
+when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
+the current exact PR head and base) or push a new head. Classification metadata
+(severity, fix effort, and lens) is displayed for triage but cannot weaken this
+approval boundary. See
 [ADR 0030](adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
 for the full criteria and rollback procedure.
 

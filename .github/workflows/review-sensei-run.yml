@@ -252,7 +252,7 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
 
-      - name: Publish validated review through the broker
+      - name: Publish or promote validated review through the broker
         if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
@@ -446,7 +446,7 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" --output review.json
 
-      - name: Publish trusted local review and learnings
+      - name: Publish or promote trusted local review and learnings
         if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
