@@ -495,7 +495,10 @@ def run_case(
         )
         # Pre-status fixtures remain valid as complete deterministic outputs;
         # this compatibility applies only to evaluation, never publication.
-        if isinstance(expected_document, dict) and "review_status" not in expected_document:
+        if (
+            isinstance(expected_document, dict)
+            and "review_status" not in expected_document
+        ):
             expected_document["review_status"] = "complete"
         status = "passed" if expected_document == result.to_dict() else "failed"
     location_valid = all(
