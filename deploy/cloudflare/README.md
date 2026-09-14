@@ -255,7 +255,9 @@ receive an unrequested `contents: read` because GitHub can return it to allow
 repository-data access while publishing a review. The broker never requests
 that permission, and `inline_reply`, `issue_reply`, and `learning_write`
 reject it if it is returned. This is a narrow compatibility exception, not an
-additional capability grant.
+additional capability grant. GitHub's historical `variables` and
+`actions_variables` spellings are accepted individually, but a response
+containing both is rejected as ambiguous rather than silently selecting one.
 
 ## Rollback and operations
 
