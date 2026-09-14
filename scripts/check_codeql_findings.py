@@ -39,6 +39,7 @@ _CODEQL_DRIVER_ORGANIZATION = "GitHub"
 _LANGUAGE_CATEGORY_RE = re.compile(
     r"(?:^|/)language:(?P<language>[a-z0-9-]+)(?:/|$)", re.IGNORECASE
 )
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _RULE_LANGUAGE_PREFIXES = {
     "py": "python",
     "python": "python",
@@ -275,9 +276,14 @@ def _normalize_location(uri: str) -> str:
     """Normalize a SARIF/baseline artifact location to a repository path."""
 
     value = unquote(uri.strip())
-    parsed = urlsplit(value)
-    if parsed.scheme and parsed.path:
-        value = parsed.path
+    # A repository filename may legitimately contain a colon (for example
+    # ``docs/file:example.md``).  Only strip a URI scheme when the URI has the
+    # unambiguous ``scheme://`` form; ``urlsplit`` alone would misclassify such
+    # filenames as schemes and silently rewrite their identity.
+    if _URI_SCHEME_RE.match(value):
+        parsed = urlsplit(value)
+        if parsed.path:
+            value = parsed.path
     value = value.removeprefix("./")
     # Baseline entries may carry the historical ``path:line`` spelling.  Keep
     # only the artifact identity so partial fingerprints can survive line
@@ -305,7 +311,7 @@ def _is_safe_location(location: str) -> bool:
     return bool(
         location
         and len(location) <= 1024
-        and all(ord(character) >= 0x20 for character in location)
+        and all(character.isprintable() for character in location)
         and not location.startswith("/")
         and "\\" not in location
         and all(segment not in {"", ".", ".."} for segment in location.split("/"))
@@ -439,8 +445,7 @@ def collect_findings(
             driver = run["tool"].get("driver")
             if not isinstance(driver, dict):
                 raise ValueError(f"{path}: SARIF tool.driver is incomplete")
-            if languages:
-                _validate_driver(driver, path)
+            _validate_driver(driver, path)
             rules = driver.get("rules", [])
             rule_map = {
                 str(rule.get("id")): rule
@@ -544,6 +549,12 @@ def evaluate(
         return ["baseline policy.minimum_score must be an integer"]
     if minimum_score < 0 or minimum_score > max(_LEVELS.values()):
         return ["baseline policy.minimum_score must be between 0 and 3"]
+    least_fail_score = min(_LEVELS[level] for level in fail_levels)
+    if minimum_score > least_fail_score:
+        return [
+            "baseline policy.minimum_score must not exceed the least severe "
+            "baseline policy.fail_on_levels entry"
+        ]
     accepted = policy.get("findings", [])
     if not isinstance(accepted, list):
         return ["baseline findings must be an array"]

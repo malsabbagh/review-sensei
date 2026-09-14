@@ -394,6 +394,53 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 )
             )
 
+    def test_location_normalization_preserves_colons_and_rejects_controls(self):
+        module = _load_script("check_codeql_findings.py")
+        self.assertEqual(
+            module._normalize_location("src/file:example.py"),
+            "src/file:example.py",
+        )
+        self.assertEqual(
+            module._normalize_location("file:///etc/passwd"),
+            "/etc/passwd",
+        )
+        self.assertFalse(module._is_safe_location("src/file.py\x7f"))
+        self.assertFalse(module._is_safe_location("src/file.py\x85"))
+
+    def test_non_codeql_driver_is_rejected_even_without_language_filter(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = ROOT / "security" / "codeql-baseline.json"
+            self._sarif(root, driver_name="semgrep", organization="Semgrep")
+            violations = module.evaluate(root, baseline, expected_reports=1)
+            self.assertTrue(violations)
+            self.assertTrue(any("CodeQL producer" in violation for violation in violations))
+
+    def test_minimum_score_cannot_hide_declared_fail_level(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "policy": {
+                            "fail_on_levels": ["warning"],
+                            "minimum_score": 3,
+                            "exception_expiry_days": 30,
+                        },
+                        "findings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._sarif(root)
+            violations = module.evaluate(root, baseline, expected_reports=1)
+            self.assertTrue(violations)
+            self.assertTrue(any("must not exceed" in violation for violation in violations))
+
 
 class ProtectionPolicyTests(unittest.TestCase):
     def test_checked_in_policy_is_valid(self):
