@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -59,25 +60,33 @@ _RULE_LANGUAGE_PREFIXES = {
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    descriptor: int | None = None
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(path, flags)
-        try:
-            stream = os.fdopen(descriptor, "rb")
-        except (OSError, ValueError):
-            # os.fdopen can fail after os.open has transferred ownership of a
-            # valid descriptor; close it explicitly on that exceptional path.
-            os.close(descriptor)
-            raise
-        with stream:
-            # Check the descriptor's size before allocating the file buffer.
-            # The post-read bound remains necessary because a file can grow
-            # after this check; fstat also avoids a path-based TOCTOU window.
-            if os.fstat(stream.fileno()).st_size > MAX_SARIF_FILE_BYTES:
-                raise ValueError(f"SARIF file {path} exceeds the configured size limit")
-            raw = stream.read(MAX_SARIF_FILE_BYTES + 1)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"SARIF file {path} must be a regular file")
+        # Check the descriptor's size before allocating the file buffer.  The
+        # post-read bound remains necessary because a file can grow after this
+        # check; all reads use this already-open descriptor, so pathname swaps
+        # cannot redirect the bytes that are parsed.
+        if metadata.st_size > MAX_SARIF_FILE_BYTES:
+            raise ValueError(f"SARIF file {path} exceeds the configured size limit")
+        chunks: list[bytes] = []
+        remaining = MAX_SARIF_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"unable to read JSON file {path}: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if len(raw) > MAX_SARIF_FILE_BYTES:
         raise ValueError(f"SARIF file {path} exceeds the configured size limit")
     try:
@@ -420,11 +429,7 @@ def _sarif_paths(sarif_dir: Path) -> list[Path]:
         )
         for name in sorted(filenames):
             path = Path(directory) / name
-            if (
-                path.suffix.lower() != ".sarif"
-                or path.is_symlink()
-                or not path.is_file()
-            ):
+            if path.suffix.lower() != ".sarif":
                 continue
             paths.append(path)
             if len(paths) > MAX_SARIF_FILES:

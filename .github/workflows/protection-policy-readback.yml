@@ -20,6 +20,30 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Validate ruleset read credential scope
+        env:
+          GH_TOKEN: ${{ secrets.REVIEWSENSEI_RULESET_READ_TOKEN }}
+          RULESET_ID: ${{ inputs.ruleset_id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "Configure the REVIEWSENSEI_RULESET_READ_TOKEN secret before running readback" >&2
+            exit 1
+          fi
+          if [[ ! "$RULESET_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ruleset_id must be a positive integer" >&2
+            exit 1
+          fi
+          response="$RUNNER_TEMP/reviewsensei-token-check"
+          gh api --include \
+            "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
+            > "$response"
+          scopes="$(awk -F': ' 'tolower($1) == "x-oauth-scopes" {print tolower($2)}' "$response" | tr -d '\r')"
+          if [[ "$scopes" == *"repo"* || "$scopes" == *"admin:"* || "$scopes" == *"workflow"* || "$scopes" == *"delete_repo"* ]]; then
+            echo "REVIEWSENSEI_RULESET_READ_TOKEN exposes broad classic OAuth scopes: $scopes" >&2
+            exit 1
+          fi
+          rm -f "$response"
       - name: Capture active ruleset readback
         env:
           GH_TOKEN: ${{ secrets.REVIEWSENSEI_RULESET_READ_TOKEN }}
@@ -44,4 +68,4 @@ jobs:
             --readback "$RUNNER_TEMP/reviewsensei-ruleset.json"
       - name: Remove ruleset readback
         if: ${{ always() }}
-        run: rm -f "$RUNNER_TEMP/reviewsensei-ruleset.json"
+        run: rm -f "$RUNNER_TEMP/reviewsensei-ruleset.json" "$RUNNER_TEMP/reviewsensei-token-check"
