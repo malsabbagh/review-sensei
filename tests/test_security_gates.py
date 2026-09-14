@@ -415,7 +415,9 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             self._sarif(root, driver_name="semgrep", organization="Semgrep")
             violations = module.evaluate(root, baseline, expected_reports=1)
             self.assertTrue(violations)
-            self.assertTrue(any("CodeQL producer" in violation for violation in violations))
+            self.assertTrue(
+                any("CodeQL producer" in violation for violation in violations)
+            )
 
     def test_minimum_score_cannot_hide_declared_fail_level(self):
         module = _load_script("check_codeql_findings.py")
@@ -439,7 +441,9 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             self._sarif(root)
             violations = module.evaluate(root, baseline, expected_reports=1)
             self.assertTrue(violations)
-            self.assertTrue(any("must not exceed" in violation for violation in violations))
+            self.assertTrue(
+                any("must not exceed" in violation for violation in violations)
+            )
 
 
 class ProtectionPolicyTests(unittest.TestCase):
