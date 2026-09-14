@@ -60,7 +60,7 @@ _RULE_LANGUAGE_PREFIXES = {
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as stream:
             # Check the descriptor's size before allocating the file buffer.
