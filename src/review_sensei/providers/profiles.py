@@ -1,0 +1,109 @@
+"""Deterministic, named provider profiles.
+
+Profiles are configuration presets, not failover routes.  Selecting one chooses
+exactly one provider endpoint and model; callers must provide a credential when
+the profile requires one.  No environment lookup happens in this module.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from ..errors import ProviderError
+
+EndpointScope = Literal["local", "remote"]
+
+
+@dataclass(frozen=True)
+class ProviderProfile:
+    """A bounded provider preset with explicit endpoint/credential policy."""
+
+    name: str
+    provider: str
+    model: str
+    base_url: str
+    endpoint_scope: EndpointScope
+    timeout_seconds: float
+    max_output_tokens: int
+    api_key_env: str | None = None
+    requires_api_key: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or not self.provider.strip() or not self.model.strip():
+            raise ValueError("provider profile identifiers must be non-empty")
+        if not self.base_url.strip():
+            raise ValueError("provider profile base_url must be non-empty")
+        if self.timeout_seconds <= 0:
+            raise ValueError("provider profile timeout_seconds must be positive")
+        if isinstance(self.max_output_tokens, bool) or self.max_output_tokens < 1:
+            raise ValueError("provider profile max_output_tokens must be positive")
+        if self.requires_api_key and not self.api_key_env:
+            raise ValueError("credentialed provider profiles require api_key_env")
+        if self.endpoint_scope == "remote" and not self.base_url.lower().startswith(
+            "https://"
+        ):
+            raise ValueError("remote provider profiles require an HTTPS endpoint")
+
+
+PROVIDER_PROFILES: dict[str, ProviderProfile] = {
+    "local-private": ProviderProfile(
+        name="local-private",
+        provider="ollama",
+        model="qwen3.5:4b",
+        base_url="http://127.0.0.1:11434/api",
+        endpoint_scope="local",
+        timeout_seconds=900,
+        max_output_tokens=4096,
+    ),
+    "fast-triage": ProviderProfile(
+        name="fast-triage",
+        provider="openai-compatible",
+        model="gpt-4o-mini",
+        base_url="https://api.openai.com/v1",
+        endpoint_scope="remote",
+        timeout_seconds=120,
+        max_output_tokens=2048,
+        api_key_env="OPENAI_API_KEY",
+        requires_api_key=True,
+    ),
+    "deep-verification": ProviderProfile(
+        name="deep-verification",
+        provider="ollama",
+        model="deepseek-v4-flash:cloud",
+        base_url="https://ollama.com/api",
+        endpoint_scope="remote",
+        timeout_seconds=900,
+        max_output_tokens=8192,
+        api_key_env="OLLAMA_API_KEY",
+        requires_api_key=True,
+    ),
+}
+
+_ALIASES = {
+    "local": "local-private",
+    "private": "local-private",
+    "local/private": "local-private",
+}
+
+
+def get_provider_profile(name: str) -> ProviderProfile:
+    """Return a canonical profile, rejecting unknown names before any call."""
+
+    if not isinstance(name, str) or not name.strip():
+        raise ProviderError("provider profile must be a non-empty name")
+    key = name.strip().lower()
+    key = _ALIASES.get(key, key)
+    try:
+        return PROVIDER_PROFILES[key]
+    except KeyError as exc:
+        available = ", ".join(sorted(PROVIDER_PROFILES))
+        raise ProviderError(
+            f"Unknown provider profile '{name}'. Available profiles: {available}"
+        ) from exc
+
+
+def profile_names() -> tuple[str, ...]:
+    """Return canonical profile names in deterministic order."""
+
+    return tuple(sorted(PROVIDER_PROFILES))
