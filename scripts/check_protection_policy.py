@@ -82,8 +82,17 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             if not isinstance(reason, str) or not reason.strip():
                 errors.append("bypass actors must document a non-empty reason")
     tags = policy.get("tags")
-    if not isinstance(tags, dict) or tags.get("movable_channels") != ["v4"]:
-        errors.append("policy must protect immutable tags and declare only v4 movable")
+    expected_tags = {
+        "immutable_pattern": "v[0-9]*.[0-9]*.[0-9]*",
+        "movable_channels": ["v4"],
+        "promotion_record": ".publication/publication-ledger.jsonl",
+    }
+    if not isinstance(tags, dict):
+        errors.append("policy tags must be an object")
+    else:
+        for key, expected in expected_tags.items():
+            if tags.get(key) != expected:
+                errors.append(f"tags.{key} must be {expected!r}")
     return errors
 
 

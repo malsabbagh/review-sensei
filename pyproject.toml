@@ -72,9 +72,7 @@ source = ["review_sensei"]
 [tool.coverage.report]
 precision = 2
 show_missing = true
-# The contract expansion adds operator-only adapters and defensive branches
-# covered by focused integration checks rather than the unit suite.
-fail_under = 75
+fail_under = 80
 
 [tool.pytest.ini_options]
 addopts = "-q"

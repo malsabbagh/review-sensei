@@ -401,6 +401,20 @@ class ProtectionPolicyTests(unittest.TestCase):
         policy = module.load_object(ROOT / ".github" / "protection-policy.json")
         self.assertEqual(module.validate_policy(policy), [])
 
+    def test_required_tag_policy_fields_cannot_drift(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        for field, value in (
+            ("immutable_pattern", "v[0-9]*"),
+            ("movable_channels", []),
+            ("promotion_record", ""),
+        ):
+            with self.subTest(field=field):
+                drifted = json.loads(json.dumps(policy))
+                drifted["tags"][field] = value
+                errors = module.validate_policy(drifted)
+                self.assertTrue(any(f"tags.{field}" in error for error in errors))
+
     def test_drifted_readback_is_rejected(self):
         module = _load_script("check_protection_policy.py")
         policy = module.load_object(ROOT / ".github" / "protection-policy.json")
