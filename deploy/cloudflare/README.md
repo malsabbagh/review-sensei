@@ -255,9 +255,11 @@ receive an unrequested `contents: read` because GitHub can return it to allow
 repository-data access while publishing a review. The broker never requests
 that permission, and `inline_reply`, `issue_reply`, and `learning_write`
 reject it if it is returned. This is a narrow compatibility exception, not an
-additional capability grant. GitHub's historical `variables` and
-`actions_variables` spellings are accepted individually, but a response
-containing both is rejected as ambiguous rather than silently selecting one.
+additional capability grant. GitHub's `variables` and `actions_variables`
+spellings represent the same requested Variables scope and are accepted only
+when that scope was requested; a response containing both is rejected as
+ambiguous rather than silently selecting one. No capability requests Variables,
+so this compatibility rule cannot add authority to a capability token.
 Any unknown returned permission, unexpected level, or requested-level mismatch
 also fails closed: the broker issues a token only after GitHub's returned map
 matches the approved capability contract exactly. This can temporarily reject

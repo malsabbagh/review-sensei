@@ -416,6 +416,28 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_installation_permissions_invalid");
   });
 
+  it("accepts GitHub's single Variables alias only as the requested Variables scope", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_setup_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          metadata: "read",
+          actions_variables: "write",
+        },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", {
+        metadata: "read",
+        actions_variables: "write",
+      }),
+    ).resolves.toMatchObject({ permissions: { metadata: "read", variables: "write" } });
+  });
+
   it("validates repository identity before requesting an installation token", async () => {
     const client = api();
     const request = vi.spyOn(client, "request");
