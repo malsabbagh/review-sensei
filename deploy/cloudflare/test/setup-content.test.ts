@@ -4,6 +4,7 @@ import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowTag,
@@ -67,6 +68,11 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'");
     expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'");
     expect(workflow).not.toContain("default: main");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).not.toContain("auto_approve");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("learning_proposals: false");
+    expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
+      "learning_proposals",
+    );
     expect(workflow).toBe(
       readFileSync(
         new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),

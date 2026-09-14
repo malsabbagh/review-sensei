@@ -479,7 +479,11 @@ function historicalV3UninstallWorkflowTemplate(): string {
   );
 }
 
-function configFile(version: number, includeAutoApprove = false): string {
+function configFile(
+  version: number,
+  includeAutoApprove = false,
+  includeLearningProposals = false,
+): string {
   const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
   const packageVersion = version === 3 ? "0.1.0" : "0.1.1";
   return (
@@ -494,7 +498,7 @@ function configFile(version: number, includeAutoApprove = false): string {
     `version: ${packageVersion}\n` +
     "auto_review: false\n" +
     autoApprove +
-    "learning_proposals: false\n" +
+    (includeLearningProposals ? "learning_proposals: false\n" : "") +
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +
@@ -534,7 +538,10 @@ export function buildTaggedV4SetupFiles(
         "# ReviewSensei setup version: 4",
       ),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
+    {
+      path: SETUP_FILE_PATHS[2],
+      content: configFile(SETUP_VERSION, false, true),
+    },
   ];
 }
 
