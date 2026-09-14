@@ -218,6 +218,7 @@ jobs:
           output: ${{ runner.temp }}/codeql-results
           category: review-sensei/language:${{ matrix.language }}
       - name: Enforce reviewed CodeQL findings baseline
+        if: ${{ success() }}
         run: |
           python scripts/check_codeql_findings.py \
             --sarif-dir "$RUNNER_TEMP/codeql-results" \

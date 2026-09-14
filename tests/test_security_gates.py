@@ -582,6 +582,9 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             module._normalize_location("file:///etc/passwd"),
             "/etc/passwd",
         )
+        self.assertFalse(
+            module._is_safe_location(module._normalize_location("docs://foo/bar"))
+        )
         self.assertFalse(module._is_safe_location("src/file.py\x7f"))
         self.assertFalse(module._is_safe_location("src/file.py\x85"))
         self.assertFalse(module._is_safe_location("C:/workspace/file.py"))
@@ -597,10 +600,14 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 module._normalize_location("src%2F..%2Foutside.py")
             )
         )
-        self.assertFalse(
-            module._is_safe_location(
-                module._normalize_location("src%252F..%252Foutside.py")
-            )
+        with self.assertRaises(ValueError):
+            module._normalize_location("src%252F..%252Foutside.py")
+        self.assertEqual(
+            module._normalize_location("src%252Ffile.py"),
+            "src%2Ffile.py",
+        )
+        self.assertTrue(
+            module._is_safe_location(module._normalize_location("src%252Ffile.py"))
         )
         deeply_encoded = "src/../outside.py"
         for _ in range(9):
@@ -618,6 +625,11 @@ class CodeQLFindingsGateTests(unittest.TestCase):
             {"py/test": {"properties": {"security-severity": "7.0"}}},
         )
         self.assertEqual((score, level), (3, "error"))
+        with self.assertRaises(ValueError):
+            module._result_severity(
+                {"ruleId": "py/test", "level": "warning"},
+                {"py/test": {"properties": {"security-severity": True}}},
+            )
 
     def test_non_codeql_driver_is_rejected_even_without_language_filter(self):
         module = _load_script("check_codeql_findings.py")

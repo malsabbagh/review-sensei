@@ -40,7 +40,7 @@ _LANGUAGE_CATEGORY_RE = re.compile(
     r"(?:^|/)language:(?P<language>[a-z0-9-]+)(?:/|$)", re.IGNORECASE
 )
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_URI_SCHEME_RE = re.compile(r"^(?:file|https?)://", re.IGNORECASE)
 _BASELINE_KEYS = {"version", "policy", "findings"}
 _BASELINE_POLICY_KEYS = {"fail_on_levels", "minimum_score", "exception_expiry_days"}
 _RULE_LANGUAGE_PREFIXES = {
@@ -281,26 +281,43 @@ def finding_fingerprint(result: dict[str, Any]) -> str:
 def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
     """Normalize a SARIF/baseline artifact location to a repository path."""
 
-    value = uri.strip()
-    # SARIF URIs can be nested-encoded (for example ``%252e%252e``). Decode
-    # repeatedly so traversal checks see the actual path, while bounding the
-    # work performed on attacker-controlled input.
+    # Decode one URI layer for the canonical identity. A literal ``%2F`` in a
+    # repository filename is represented as ``%252F`` and must remain literal;
+    # repeatedly decoding the returned identity would silently change it.
+    value = unquote(uri.strip())
+
+    def strip_scheme(candidate: str) -> str:
+        if _URI_SCHEME_RE.match(candidate):
+            parsed = urlsplit(candidate)
+            if parsed.path:
+                return parsed.path
+        return candidate
+
+    value = strip_scheme(value)
+    # Also inspect additional encoding layers for hidden traversal. Keep this
+    # security-only candidate separate from the returned identity, and bound
+    # the work performed on attacker-controlled input.
+    candidate = value
     for _ in range(8):
-        decoded = unquote(value)
-        if decoded == value:
+        decoded = strip_scheme(unquote(candidate))
+        if decoded == candidate:
             break
-        value = decoded
+        # Reuse the same canonical path checks as the caller without changing
+        # the identity used for baseline matching.
+        if (
+            not decoded
+            or len(decoded) > 1024
+            or not all(character.isprintable() for character in decoded)
+            or decoded.startswith("/")
+            or "\\" in decoded
+            or _WINDOWS_DRIVE_RE.match(decoded)
+            or any(segment in {"", ".", ".."} for segment in decoded.split("/"))
+        ):
+            raise ValueError("SARIF URI contains an unsafe encoded path")
+        candidate = decoded
     else:
-        if unquote(value) != value:
+        if unquote(candidate) != candidate:
             raise ValueError("SARIF URI is too deeply percent-encoded")
-    # A repository filename may legitimately contain a colon (for example
-    # ``docs/file:example.md``).  Only strip a URI scheme when the URI has the
-    # unambiguous ``scheme://`` form; ``urlsplit`` alone would misclassify such
-    # filenames as schemes and silently rewrite their identity.
-    if _URI_SCHEME_RE.match(value):
-        parsed = urlsplit(value)
-        if parsed.path:
-            value = parsed.path
     value = value.removeprefix("./")
     if strip_line_suffix:
         # Baseline entries may carry the historical ``path:line`` spelling.
@@ -354,15 +371,13 @@ def _result_severity(
     security = (
         properties.get("security-severity") if isinstance(properties, dict) else None
     )
+    if isinstance(security, bool):
+        raise ValueError("SARIF security-severity must be numeric")
     try:
         security_score = float(security) if security is not None else 0.0
     except (TypeError, ValueError) as exc:
         raise ValueError("SARIF security-severity must be numeric") from exc
-    if (
-        isinstance(security, bool)
-        or not math.isfinite(security_score)
-        or not 0 <= security_score <= 10
-    ):
+    if not math.isfinite(security_score) or not 0 <= security_score <= 10:
         raise ValueError("SARIF security-severity must be finite and between 0 and 10")
     # Security severity 7+ is high/critical even when CodeQL emits a warning.
     if security_score >= 7.0:
