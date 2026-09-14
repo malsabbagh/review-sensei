@@ -174,6 +174,138 @@ describe("GitHubApi public workflow resolution", () => {
 });
 
 describe("GitHubApi capability issuance", () => {
+  it("accepts contents read only when the capability opts in", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "write",
+          metadata: "read",
+          contents: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }, true),
+    ).resolves.toBe("ghs_scoped_token");
+    expect(request).toHaveBeenCalledWith(
+      "POST",
+      "/app/installations/2468/access_tokens",
+      "app-jwt",
+      { repositories: ["widgets"], permissions: { pull_requests: "write" } },
+    );
+  });
+
+  it("does not require optional contents read when GitHub omits it", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { pull_requests: "write", metadata: "read" },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+    ).resolves.toBe("ghs_scoped_token");
+  });
+
+  it("rejects implicit contents read for a capability that did not opt in", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "write",
+          metadata: "read",
+          contents: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
+  it("rejects a missing metadata grant when metadata was requested explicitly", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { pull_requests: "write" },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", {
+        pull_requests: "write",
+        metadata: "read",
+      }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
+  it("rejects a downgraded requested contents grant even when returned contents read is accepted", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "write",
+          contents: "read",
+          metadata: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(
+        2468,
+        "acme/widgets",
+        { pull_requests: "write", contents: "write" },
+        true,
+      ),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
+  it.each([
+    ["an inherited writable capability", { pull_requests: "write", contents: "write", metadata: "read" }],
+    ["an unrecognized read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
+    ["a hyphenated lookalike permission", { "pull-requests": "write", metadata: "read" }],
+    ["a missing mandatory metadata grant", { pull_requests: "write" }],
+    ["an unexpected writable implicit capability", {
+      pull_requests: "write",
+      metadata: "read",
+      contents: "write",
+    }],
+  ])("rejects %s instead of issuing an over-scoped token", async (_name, permissions) => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions,
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
   it("uses an installation token for private repository metadata", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({
@@ -217,5 +349,102 @@ describe("GitHubApi capability issuance", () => {
     await expect(
       client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }),
     ).rejects.toThrow("github_capability_response_invalid");
+  });
+
+  it("rejects malformed or over-scoped installation-token permissions", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_metadata_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { metadata: "read", contents: "write" },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", { metadata: "read" }),
+    ).rejects.toThrow("github_installation_permissions_invalid");
+  });
+
+  it("requires GitHub's mandatory metadata grant on installation-token responses", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_setup_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          contents: "write",
+          pull_requests: "write",
+          variables: "write",
+          workflows: "write",
+        },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", {
+        contents: "write",
+        pull_requests: "write",
+        variables: "write",
+        workflows: "write",
+      }),
+    ).rejects.toThrow("github_installation_permissions_invalid");
+  });
+
+  it("fails closed when GitHub returns both aliases for one permission", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_metadata_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          metadata: "read",
+          variables: "read",
+          actions_variables: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", {
+        metadata: "read",
+        variables: "read",
+      }),
+    ).rejects.toThrow("github_installation_permissions_invalid");
+  });
+
+  it("accepts the controlled setup Variables alias only as the requested Variables scope", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_setup_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          metadata: "read",
+          actions_variables: "write",
+        },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", {
+        metadata: "read",
+        actions_variables: "write",
+      }),
+    ).resolves.toMatchObject({ permissions: { metadata: "read", variables: "write" } });
+  });
+
+  it("validates repository identity before requesting an installation token", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets/other", { pull_requests: "write" }),
+    ).rejects.toThrow("github_repository_invalid");
+    expect(request).not.toHaveBeenCalled();
   });
 });

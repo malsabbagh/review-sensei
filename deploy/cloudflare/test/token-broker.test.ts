@@ -76,12 +76,12 @@ beforeEach(() => {
 
 describe("token broker authorization", () => {
   it.each([
-    [undefined, "review_publish", { pull_requests: "write" }],
-    ["review_publish", "review_publish", { pull_requests: "write" }],
-    ["inline_reply", "inline_reply", { pull_requests: "write" }],
-    ["issue_reply", "issue_reply", { pull_requests: "write" }],
-    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }],
-  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions) => {
+    [undefined, "review_publish", { pull_requests: "write" }, true],
+    ["review_publish", "review_publish", { pull_requests: "write" }, true],
+    ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
+    ["issue_reply", "issue_reply", { pull_requests: "write" }, false],
+    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false],
+  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions, acceptReturnedContentsRead) => {
     const { broker, github } = harness();
     const result = await broker.exchange({ oidc_token: "signed-jwt", capability: requested });
 
@@ -93,7 +93,12 @@ describe("token broker authorization", () => {
       "acme/widgets",
       "ghs_metadata_token",
     );
-    expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", permissions);
+    expect(github.capabilityToken).toHaveBeenCalledWith(
+      2468,
+      "acme/widgets",
+      permissions,
+      acceptReturnedContentsRead,
+    );
   });
 
   it.each([
@@ -109,6 +114,17 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(message);
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
+
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])(
+    "rejects inherited capability name %s",
+    async (inheritedCapability) => {
+      const { broker, github } = harness();
+      await expect(
+        broker.exchange({ oidc_token: "signed-jwt", capability: inheritedCapability }),
+      ).rejects.toThrow("broker_capability_invalid");
+      expect(github.capabilityToken).not.toHaveBeenCalled();
+    },
+  );
 
   it("resolves the configured tag before authorizing the runtime SHA", async () => {
     const { broker, github } = harness();

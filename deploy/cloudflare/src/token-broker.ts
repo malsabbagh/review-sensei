@@ -15,6 +15,14 @@ const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
 
 type Capability = keyof typeof CAPABILITIES;
 
+// GitHub may return contents:read alongside review publication's requested
+// pull-request write scope so the token can read repository data for the
+// review. This is a narrow acceptance rule for GitHub's returned scope, not a
+// broker request for an additional permission; reply capabilities reject it.
+// This policy overlay is keyed by Capability (the keys of CAPABILITIES above),
+// so a new capability must explicitly opt in here before it can accept it.
+const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["review_publish"]);
+
 interface BrokerBody {
   oidc_token?: unknown;
   capability?: unknown;
@@ -28,7 +36,10 @@ function capability(value: unknown): Capability {
   if (value === undefined) {
     return "review_publish";
   }
-  if (typeof value !== "string" || !(value in CAPABILITIES)) {
+  // `in` also accepts names inherited from Object.prototype (for example
+  // `constructor` and `toString`).  Capability names are a closed protocol;
+  // never let a prototype property become a broker capability.
+  if (typeof value !== "string" || !Object.hasOwn(CAPABILITIES, value)) {
     throw new Error("broker_capability_invalid");
   }
   return value as Capability;
@@ -143,6 +154,7 @@ export class TokenBroker {
       installationId,
       claims.repository,
       CAPABILITIES[requested],
+      CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
     return { token, capability: requested };
   }

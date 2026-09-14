@@ -248,6 +248,33 @@ identify GitHub API or App failures. A code such as
 `github_capability_issue_failed_422` preserves only GitHub's HTTP status; raw
 tokens, claims, response bodies, and exception text are never logged or returned.
 
+Capability and setup installation tokens require the returned permission map to
+exactly match the requested map plus GitHub's mandatory `metadata: read`;
+responses that omit metadata fail closed. `review_publish` alone may also
+receive an unrequested `contents: read` because GitHub can return it to allow
+repository-data access while publishing a review. The broker never requests
+that permission, and `inline_reply`, `issue_reply`, and `learning_write`
+reject it if it is returned. This is a narrow compatibility exception, not an
+additional capability grant. GitHub's `variables` and `actions_variables`
+spellings represent the same requested Variables scope. The setup-token request
+uses the documented `actions_variables` field and normalizes it only to compare
+that controlled request with GitHub's returned `variables` map; capability
+maps use canonical permission names only. A response containing both aliases is
+rejected as ambiguous rather than silently selecting one, so this compatibility
+seam cannot add authority to a capability token.
+Any unknown returned permission, unexpected level, or requested-level mismatch
+also fails closed: the broker issues a token only after GitHub's returned map
+matches the approved capability contract exactly. This can temporarily reject
+an exchange while an App permission change is still reconciling; accept the
+updated installation permissions and retry from a fresh workflow run rather
+than accepting a downgraded or newly introduced permission automatically.
+
+When GitHub introduces a documented implicit permission or a new capability
+needs one, treat it as a broker-policy change: confirm the GitHub behavior,
+assess the capability's minimum scope, add a capability-specific explicit
+opt-in with accept/reject regression tests, and update this contract. Do not
+broaden the generic adapter to tolerate unrecognized read or `none` grants.
+
 ## Rollback and operations
 
 Deploy from a known Git commit. To roll back, redeploy the previous Worker

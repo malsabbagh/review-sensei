@@ -9,6 +9,21 @@ const PUBLIC_WORKFLOW_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PUBLIC_WORKFLOW_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_TAG_DEREFERENCE_DEPTH = 3;
 const MAX_PUBLIC_REF_BYTES = 64 * 1024;
+// GitHub always grants repository metadata read access to installation tokens.
+// A capability can separately opt in to accepting contents:read only when its
+// broker policy documents that GitHub may add the grant implicitly.
+const IMPLICIT_METADATA_PERMISSION = "read";
+const RETURNED_CONTENTS_READ_PERMISSION = "read";
+const KNOWN_PERMISSION_NAMES = new Set([
+  "contents",
+  "metadata",
+  "pull_requests",
+  "variables",
+  "workflows",
+]);
+const PERMISSION_NAME_ALIASES: Readonly<Record<string, string>> = {
+  actions_variables: "variables",
+};
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -40,6 +55,105 @@ function publicWorkflowTag(value: string): string {
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function canonicalPermissionName(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(normalized)) {
+    return null;
+  }
+  // GitHub's API uses `actions_variables` in some payloads while the
+  // permission map has historically used `variables`. Accept either spelling
+  // alone, but reject responses containing both aliases as ambiguous. Every
+  // other name must be an explicitly supported canonical permission so a
+  // future GitHub permission cannot silently normalize into this boundary.
+  const canonical = PERMISSION_NAME_ALIASES[normalized] ?? normalized;
+  return KNOWN_PERMISSION_NAMES.has(canonical) ? canonical : null;
+}
+
+/**
+ * Normalize and validate a GitHub permission map. Own enumerable keys only
+ * are considered, so inherited properties can never grant authority.
+ */
+function normalizePermissionMap(value: unknown): Record<string, string> | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const normalized = Object.create(null) as Record<string, string>;
+  for (const [rawName, rawLevel] of Object.entries(value)) {
+    const name = canonicalPermissionName(rawName);
+    const level = typeof rawLevel === "string" ? rawLevel.trim().toLowerCase() : null;
+    if (name === null || (level !== "read" && level !== "write" && level !== "none")) {
+      return null;
+    }
+    // Reject aliases which collapse to one canonical name rather than
+    // silently allowing the last property to win.
+    if (Object.hasOwn(normalized, name)) {
+      return null;
+    }
+    normalized[name] = level;
+  }
+  return normalized;
+}
+
+/**
+ * Require the response scope to equal the requested scope plus only GitHub's
+ * known implicit read grants. This prevents a token with inherited write
+ * capabilities from crossing the broker boundary while accepting legitimate
+ * repository-data permissions returned by GitHub.
+ */
+function hasExactPermissions(
+  granted: unknown,
+  requested: Record<string, string>,
+  acceptReturnedContentsRead = false,
+): boolean {
+  const actual = normalizePermissionMap(granted);
+  const expectedRequested = normalizePermissionMap(requested);
+  if (actual === null || expectedRequested === null || Object.keys(expectedRequested).length === 0) {
+    return false;
+  }
+  // Requests made by this adapter are always positive read/write grants. In
+  // particular, metadata is an implicit read-only permission and must never
+  // be elevated by a caller-controlled map.
+  if (
+    Object.entries(expectedRequested).some(
+      ([name, level]) =>
+        (level !== "read" && level !== "write") ||
+        (name === "metadata" && level !== "read"),
+    )
+  ) {
+    return false;
+  }
+  // Every requested permission must be granted at exactly its requested
+  // level. The intrinsic metadata grant is mandatory even when callers omit
+  // it from their request.
+  for (const [name, level] of Object.entries(expectedRequested)) {
+    if (actual[name] !== level) {
+      return false;
+    }
+  }
+  if (
+    !Object.hasOwn(expectedRequested, "metadata") &&
+    actual.metadata !== IMPLICIT_METADATA_PERMISSION
+  ) {
+    return false;
+  }
+  // Apart from mandatory metadata, the broker accepts contents:read only for
+  // capabilities that explicitly opt in. Requested contents grants were
+  // already required at their exact level above, so this exception applies
+  // only when contents was omitted from the requested scope. Every other
+  // extra permission, especially any write grant, is rejected.
+  return Object.entries(actual).every(([name, level]) => {
+    if (Object.hasOwn(expectedRequested, name)) {
+      return true;
+    }
+    return (
+      (name === "metadata" && level === IMPLICIT_METADATA_PERMISSION) ||
+      (acceptReturnedContentsRead &&
+        name === "contents" &&
+        level === RETURNED_CONTENTS_READ_PERMISSION)
+    );
+  });
 }
 
 function base64Url(value: Uint8Array): string {
@@ -503,10 +617,14 @@ export class GitHubApi {
     installationId: number,
     repository: string,
     permissions: Record<string, "read" | "write">,
+    acceptReturnedContentsRead = false,
   ): Promise<string> {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
     }
+    // Validate the full owner/repository slug before deriving the repository
+    // name used in the installation-token request.
+    repositoryPath(repository);
     const [, name] = repository.split("/");
     const response = await this.request(
       "POST",
@@ -533,10 +651,8 @@ export class GitHubApi {
     ) {
       throw new Error("github_capability_response_invalid");
     }
-    for (const [name, level] of Object.entries(permissions)) {
-      if (granted[name] !== level) {
-        throw new Error("github_capability_permissions_invalid");
-      }
+    if (!hasExactPermissions(granted, permissions, acceptReturnedContentsRead)) {
+      throw new Error("github_capability_permissions_invalid");
     }
     return token;
   }
@@ -549,6 +665,7 @@ export class GitHubApi {
     if (!Number.isSafeInteger(installationId) || installationId <= 0) {
       throw new Error("github_installation_invalid");
     }
+    repositoryPath(repository);
     const [, name] = repository.split("/");
     const response = await this.request(
       "POST",
@@ -570,6 +687,9 @@ export class GitHubApi {
       Date.parse(expiresAt) <= Date.now()
     ) {
       throw new Error("github_installation_token_invalid");
+    }
+    if (!hasExactPermissions(rawPermissions, permissions)) {
+      throw new Error("github_installation_permissions_invalid");
     }
     const normalized: Record<string, string> = {};
     if (isObject(rawPermissions)) {
