@@ -18,7 +18,11 @@ from typing import Any, Iterable
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
-from .stages import load_review_categories_from_dir, load_stages_from_dir
+from .stages import (
+    MAX_STAGE_FILES,
+    load_review_categories_from_dir,
+    load_stages_from_dir,
+)
 from .validation import DEFAULT_REVIEW_LIMITS
 
 DOCTOR_OK = 0
@@ -35,6 +39,23 @@ class DiagnosticCheck:
 
     def to_dict(self) -> dict[str, str]:
         return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+def _bounded_stage_names(values: Iterable[str]) -> tuple[str, ...]:
+    """Read stage names without materializing an unbounded iterable."""
+
+    if isinstance(values, (str, bytes)):
+        raise ReviewInputError("stages must be an iterable of stage names")
+    try:
+        iterator = iter(values)
+    except (TypeError, AttributeError) as exc:
+        raise ReviewInputError("stages must be an iterable of stage names") from exc
+    result: list[str] = []
+    for index, stage in enumerate(iterator, start=1):
+        if index > MAX_STAGE_FILES:
+            raise ReviewInputError("stages has too many entries")
+        result.append(stage)
+    return tuple(result)
 
 
 def _package_version() -> str | None:
@@ -141,7 +162,7 @@ def run_doctor(
                     catalog = (
                         load_review_categories_from_dir(categories_dir)
                         if categories_dir is not None
-                        else packaged_category_catalog or DEFAULT_CATEGORY_CATALOG
+                        else None
                     )
                     load_stages_from_dir(configured, category_catalog=catalog)
             except (OSError, ReviewSenseiError) as exc:
@@ -232,9 +253,13 @@ def build_plan(
             "supplied": True,
             "status": "ready",
             "files": len(analysis.changed_paths),
-            "changed_lines": len(analysis.changed_lines),
+            "changed_lines": sum(
+                len(lines) for lines in analysis.changed_lines.values()
+            ),
         }
-    selected_stages = tuple(stages) or tuple(stage.name for stage in DEFAULT_STAGES)
+    selected_stages = _bounded_stage_names(stages) or tuple(
+        stage.name for stage in DEFAULT_STAGES
+    )
     if any(
         not isinstance(stage, str) or not stage.strip() for stage in selected_stages
     ):

@@ -25,19 +25,27 @@ _SYMLINK_MODE_LINE = re.compile(
     r"^(?:(?:old|new)(?: file)? mode|deleted file mode) 120000$"
 )
 _GIT_MODE = re.compile(r"^[0-7]{6}$")
+_BINARY_FILES_MARKER = re.compile(r"^Binary files .+ and .+ differ$")
 
 
 def _reject_unsupported_patch_content(patch: str) -> None:
     """Reject patch features that cannot be safely represented here."""
 
-    if "GIT binary patch" in patch or "Binary files" in patch:
-        raise ReviewInputError("binary patches are not supported")
-    if any(
-        _SYMLINK_MODE_LINE.fullmatch(line.rstrip("\r"))
-        or (line.startswith("index ") and line.split()[-1:] == ["120000"])
-        for line in patch.splitlines()
-    ):
-        raise ReviewInputError("symlink patches are not supported")
+    # Binary markers are Git structure, not arbitrary text.  Restrict the
+    # check to complete unprefixed marker lines so a source or documentation
+    # hunk containing the phrase ``Binary files`` or ``GIT binary patch`` is
+    # still a valid textual suggestion.
+    for line in patch.splitlines():
+        structural_line = line.rstrip("\r")
+        if structural_line == "GIT binary patch" or _BINARY_FILES_MARKER.fullmatch(
+            structural_line
+        ):
+            raise ReviewInputError("binary patches are not supported")
+        if _SYMLINK_MODE_LINE.fullmatch(structural_line) or (
+            structural_line.startswith("index ")
+            and structural_line.split()[-1:] == ["120000"]
+        ):
+            raise ReviewInputError("symlink patches are not supported")
 
 
 def _normalize_git_mode(value: object) -> str:
@@ -180,6 +188,12 @@ class PatchSuggestion:
             raise ReviewInputError("patch affected paths must be unique")
         for path in self.affected_paths:
             validate_repository_path(path, label="patch affected path")
+        analysis = analyze_diff(self.patch, limits=DEFAULT_REVIEW_LIMITS)
+        actual_paths = set(analysis.changed_paths)
+        if actual_paths != set(self.affected_paths):
+            raise ReviewInputError(
+                "patch affected paths must match the paths changed by the patch"
+            )
         if not isinstance(self.snapshot_modes, tuple) or not self.snapshot_modes:
             raise ReviewInputError(
                 "patch requires trusted regular-file snapshot mode provenance"

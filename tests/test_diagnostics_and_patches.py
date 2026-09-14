@@ -1,9 +1,12 @@
+import json
+import tempfile
 import unittest
 from itertools import repeat
+from pathlib import Path
 
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.errors import ReviewInputError
-from review_sensei.patches import create_patch_suggestion
+from review_sensei.patches import PatchSuggestion, create_patch_suggestion
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -26,6 +29,31 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["status"], "ready")
         self.assertEqual(report["operations"]["provider_calls"], 0)
         self.assertEqual(report["operations"]["github_writes"], 0)
+
+    def test_plan_counts_changed_lines_and_bounds_stage_iterables(self):
+        diff = DIFF.replace("+1,2", "+1,3").replace("+change", "+change\n+another")
+        report = build_plan(diff=diff, stages=("review",))
+        self.assertEqual(report["diff"]["changed_lines"], 2)
+        with self.assertRaisesRegex(ReviewInputError, "too many"):
+            build_plan(stages=repeat("review"))
+
+    def test_doctor_matches_runner_when_stages_need_missing_catalog(self):
+        stage = {
+            "name": "Configured",
+            "category_ids": ["correctness"],
+            "outputs": ["summary"],
+            "prompt_template": "Review {diff}",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            stages_dir = Path(temporary)
+            (stages_dir / "configured.json").write_text(
+                json.dumps(stage), encoding="utf-8"
+            )
+            report = run_doctor(stages_dir=stages_dir)
+            stages_check = next(
+                check for check in report["checks"] if check["name"] == "stages"
+            )
+            self.assertEqual(stages_check["status"], "action")
 
 
 class PatchSuggestionTests(unittest.TestCase):
@@ -159,6 +187,30 @@ class PatchSuggestionTests(unittest.TestCase):
                         head_sha="b" * 40,
                         allowed_paths=("src/app.py",),
                     )
+
+    def test_textual_binary_phrases_are_not_treated_as_binary_markers(self):
+        textual = DIFF.replace("+change", "+Binary files is a documentation phrase")
+        textual = textual.replace(" keep", " GIT binary patch is documented here")
+        suggestion = create_patch_suggestion(
+            {"id": "finding-1", "status": "confirmed"},
+            patch=textual,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            allowed_paths=("src/app.py",),
+            snapshot_modes=self.SNAPSHOT_MODES,
+        )
+        self.assertEqual(suggestion.affected_paths, ("src/app.py",))
+
+    def test_direct_patch_suggestions_must_declare_exact_changed_paths(self):
+        with self.assertRaisesRegex(ReviewInputError, "match the paths changed"):
+            PatchSuggestion(
+                finding_id="finding-1",
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                patch=DIFF,
+                affected_paths=("src/other.py",),
+                snapshot_modes=(("src/other.py", "100644"),),
+            )
 
 
 if __name__ == "__main__":
