@@ -100,6 +100,16 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 len(module.evaluate(root, baseline, expected_reports=2)), 1
             )
 
+    def test_default_baseline_flags_warning_finding(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = ROOT / "security" / "codeql-baseline.json"
+            self._sarif(root, level="warning")
+            violations = module.evaluate(root, baseline, expected_reports=1)
+            self.assertEqual(len(violations), 1)
+            self.assertIn("warning finding", violations[0])
+
     def test_missing_or_malformed_report_fails_closed(self):
         module = _load_script("check_codeql_findings.py")
         with tempfile.TemporaryDirectory() as temporary:
@@ -578,6 +588,37 @@ class ProtectionPolicyTests(unittest.TestCase):
                 drifted["tags"][field] = value
                 errors = module.validate_policy(drifted)
                 self.assertTrue(any(f"tags.{field}" in error for error in errors))
+
+    def test_bypass_actor_count_and_ruleset_target_are_bounded(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        for value in (None, 0, 2, True):
+            with self.subTest(max_bypass_actors=value):
+                drifted = json.loads(json.dumps(policy))
+                if value is None:
+                    del drifted["max_bypass_actors"]
+                else:
+                    drifted["max_bypass_actors"] = value
+                errors = module.validate_policy(drifted)
+                self.assertTrue(any("max_bypass_actors" in error for error in errors))
+
+        drifted = json.loads(json.dumps(policy))
+        drifted["bypass_actors"].append(
+            {
+                "name": "second actor",
+                "actor_id": 6,
+                "actor_type": "RepositoryRole",
+                "reason": "test",
+                "bypass_mode": "pull_request",
+            }
+        )
+        errors = module.validate_policy(drifted)
+        self.assertTrue(any("must not exceed" in error for error in errors))
+
+        drifted = json.loads(json.dumps(policy))
+        del drifted["ruleset"]["target"]
+        errors = module.validate_policy(drifted)
+        self.assertTrue(any("ruleset.target" in error for error in errors))
 
     def test_drifted_readback_is_rejected(self):
         module = _load_script("check_protection_policy.py")

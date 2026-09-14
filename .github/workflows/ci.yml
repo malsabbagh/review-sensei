@@ -229,7 +229,7 @@ jobs:
         with:
           name: codeql-sarif-${{ matrix.language }}
           path: ${{ runner.temp }}/codeql-results
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   required-checks:
     name: Required checks

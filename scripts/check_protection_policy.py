@@ -38,6 +38,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
     if not isinstance(ruleset, dict):
         return [*errors, "policy ruleset must be an object"]
     required = {
+        "target": "branch",
         "require_pull_request": True,
         "required_approving_reviews": 1,
         "require_code_owner_review": True,
@@ -51,10 +52,20 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             errors.append(f"ruleset.{key} must be {expected!r}")
     if ruleset.get("required_status_checks") != ["Required checks"]:
         errors.append("ruleset.required_status_checks must contain Required checks")
+    max_bypass_actors = policy.get("max_bypass_actors")
+    if (
+        isinstance(max_bypass_actors, bool)
+        or not isinstance(max_bypass_actors, int)
+        or max_bypass_actors != 1
+    ):
+        errors.append("policy.max_bypass_actors must be 1")
+        max_bypass_actors = None
     actors = policy.get("bypass_actors")
     if not isinstance(actors, list) or not actors:
         errors.append("policy must declare a narrow bypass actor")
     else:
+        if max_bypass_actors is not None and len(actors) > max_bypass_actors:
+            errors.append("policy.bypass_actors must not exceed max_bypass_actors")
         seen_names: set[str] = set()
         for actor in actors:
             if not isinstance(actor, dict):

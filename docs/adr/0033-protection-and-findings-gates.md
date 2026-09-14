@@ -26,8 +26,10 @@ job.
 ## Rationale and limits
 
 The baseline is intentionally empty and exceptions expire after 30 days; any
-addition is a reviewed change. Requiring two SARIF reports prevents a missing
-language analysis from appearing as zero findings. A read-only policy check in
-CI validates the contract but cannot prove GitHub's live ruleset; maintainers
-must capture and compare the authoritative API response and run disposable
-behavioral tests before applying settings.
+addition is a reviewed change. Each CodeQL matrix job requires exactly one
+metadata-labelled report for its language, and the aggregate required check
+requires both language jobs to pass, preventing a missing analysis from
+appearing as zero findings. A read-only policy check in CI validates the
+contract but cannot prove GitHub's live ruleset; maintainers must capture and
+compare the authoritative API response and run disposable behavioral tests
+before applying settings.

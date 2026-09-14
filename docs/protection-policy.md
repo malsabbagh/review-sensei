@@ -10,8 +10,11 @@ GitHub and retain the authoritative API response as evidence.
 - `main` requires pull requests, one approval, code-owner review, stale-review
   dismissal, conversation resolution, latest-push approval, and the `Required
   checks` status with strict/up-to-date semantics.
-- Bypass is limited to a named maintainer for pull-request recovery. Do not add
-  a blanket `always` bypass or a bot bypass; record any recovery use.
+- Bypass is limited to one configured named maintainer actor for pull-request
+  recovery (`max_bypass_actors: 1`). This is one policy entry, not necessarily
+  one human principal; replace and revalidate the actor identity before copying
+  the repository-specific contract. Do not add a blanket `always` bypass or a
+  bot bypass; record any recovery use.
 - Immutable semantic version tags (`vMAJOR.MINOR.PATCH`) cannot be deleted or
   replaced. `v4` is the sole movable operator-managed setup channel, and every
   promotion is recorded in `.publication/publication-ledger.jsonl`.

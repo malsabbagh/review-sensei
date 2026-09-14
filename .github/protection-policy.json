@@ -12,6 +12,7 @@
     "required_status_checks": ["Required checks"],
     "strict_required_status_checks": true
   },
+  "max_bypass_actors": 1,
   "bypass_actors": [
     {
       "name": "repository maintainer",
