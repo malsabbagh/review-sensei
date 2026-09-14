@@ -163,9 +163,10 @@ class GitHubHttp:
     ) -> list[Any]:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
-        Callers that handle large, untrusted list entries may provide descending
-        page sizes. If a page exceeds the response budget, the same item offset
-        is retried with the next smaller size.
+        Callers that handle large, untrusted list entries may provide strictly
+        descending page sizes where each smaller size evenly divides the prior
+        size. If a page exceeds the response budget, the same item offset is
+        retried with the next smaller size.
         """
 
         if not page_sizes or any(
@@ -175,12 +176,16 @@ class GitHubHttp:
             or page_size > 100
             for page_size in page_sizes
         ):
-            raise GitHubHTTPError("GitHub pagination page sizes were invalid")
+            raise GitHubHTTPError(
+                "GitHub pagination page sizes must be integers from 1 through 100"
+            )
         if any(
             current <= following or current % following
             for current, following in zip(page_sizes, page_sizes[1:])
         ):
-            raise GitHubHTTPError("GitHub pagination page sizes were invalid")
+            raise GitHubHTTPError(
+                "GitHub pagination page sizes must descend and divide evenly"
+            )
 
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"

@@ -886,6 +886,7 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in calls], ["GET", "GET", "GET", "POST", "GET"]
         )
+        self.assertIn("per_page=20&page=1", calls[1][1])
 
     def test_edited_source_skips_write(self):
         http, calls = make_http(

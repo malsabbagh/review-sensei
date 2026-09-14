@@ -978,7 +978,11 @@ class ConversationPublisher:
         # A failed reconciliation is not evidence that no reply exists. Let
         # the bounded transport error propagate so publication fails closed.
         try:
-            payload = self.http.paginate(path=path, token=token)
+            payload = self.http.paginate(
+                path=path,
+                token=token,
+                page_sizes=CONVERSATION_COMMENT_PAGE_SIZES,
+            )
         except GitHubHTTPTransientError as exc:
             raise GitHubConversationTransientError(
                 "reply reconciliation failed temporarily"
