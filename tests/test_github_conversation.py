@@ -529,6 +529,7 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIsInstance(prepared, PreparedConversation)
         self.assertEqual(prepared.context.learnings, ())
         self.assertEqual(len(calls), 4)
+        self.assertTrue(all("README.md" not in call[1] for call in calls))
 
     def test_base_learnings_rejects_json_path_anomalies(self):
         for path in (

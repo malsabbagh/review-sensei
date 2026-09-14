@@ -685,6 +685,7 @@ class ConversationPublisher:
             relative_parts = path_parts[len(directory_parts) :]
             if len(relative_parts) != 1:
                 raise GitHubConversationError("conversation learning path was invalid")
+            # Direct-child documentation is intentionally never fetched as learning content.
             if not path.endswith(".json"):
                 continue
             learning_files.append(item)
