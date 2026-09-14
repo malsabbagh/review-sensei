@@ -602,7 +602,7 @@ class ReviewResult:
             raise ReviewInputError("review result exceeds the configured size limit")
 
     def to_dict(self) -> dict[str, object]:
-        value = {
+        value: dict[str, object] = {
             "summary": self.summary,
             "comments": [comment.to_dict() for comment in self.comments],
             "provider": self.provider,
