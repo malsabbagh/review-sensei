@@ -73,6 +73,12 @@ class OllamaProvider:
                 for character in api_key
             ):
                 raise ValueError("Ollama API key must not contain control characters")
+            try:
+                api_key.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "Ollama API key must contain only ASCII characters"
+                ) from exc
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key

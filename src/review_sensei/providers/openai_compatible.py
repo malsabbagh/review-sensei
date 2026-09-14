@@ -87,6 +87,12 @@ class OpenAICompatibleProvider:
             raise ValueError(
                 "OpenAI-compatible API key contains a forbidden control character"
             )
+        try:
+            api_key.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "OpenAI-compatible API key must contain only ASCII characters"
+            ) from exc
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))

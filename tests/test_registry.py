@@ -18,6 +18,12 @@ class FakeProvider:
         return ProviderResponse("{}", self.name, self.model)
 
 
+class InvalidProvider:
+    name = "invalid"
+    model = "invalid-model"
+    complete = 1
+
+
 class ProviderRegistryTests(unittest.TestCase):
     def test_custom_provider_can_be_registered_without_changing_review_service(self):
         registry = ProviderRegistry()
@@ -26,6 +32,13 @@ class ProviderRegistryTests(unittest.TestCase):
         provider = registry.create(ProviderSettings(name="FAKE"))
 
         self.assertIsInstance(provider, FakeProvider)
+
+    def test_registry_rejects_non_callable_completion_boundary(self):
+        registry = ProviderRegistry()
+        registry.register("invalid", lambda settings: InvalidProvider())
+
+        with self.assertRaisesRegex(TypeError, "complete"):
+            registry.create(ProviderSettings(name="invalid"))
 
     def test_unknown_provider_fails_with_available_names(self):
         registry = ProviderRegistry()

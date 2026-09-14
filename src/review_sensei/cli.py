@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from .context import RepositoryContextStore, build_review_context_selection
@@ -17,11 +18,17 @@ from .service import ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
 
+# The parser intentionally narrows the namespace type after argparse parsing;
+# the generic overload on argparse.ArgumentParser is broader than this seam.
+# mypy: disable-error-code=override
+
 DEFAULT_PROVIDER_MODE = "local"
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
 DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/api"
 DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 def _provider_mode() -> str:
@@ -50,6 +57,46 @@ def _default_ollama_model() -> str:
     return os.getenv("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL)
 
 
+def _option_present(arguments: list[str], option: str) -> bool:
+    return any(value == option or value.startswith(f"{option}=") for value in arguments)
+
+
+def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> None:
+    """Resolve endpoint, model, credential, and timeout defaults by adapter."""
+
+    provider = str(getattr(args, "provider", "ollama")).strip().lower()
+    if provider == "openai-compatible":
+        if not _option_present(arguments, "--base-url"):
+            args.base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+        if not _option_present(arguments, "--model"):
+            args.model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+        if not _option_present(arguments, "--api-key-env"):
+            args.api_key_env = "OPENAI_API_KEY"
+        if not _option_present(arguments, "--timeout-seconds"):
+            args.timeout_seconds = _positive_float(
+                os.getenv("OPENAI_TIMEOUT_SECONDS", "120")
+            )
+    elif provider == "fixture":
+        if not _option_present(arguments, "--model"):
+            args.model = "fixture-v1"
+        if not _option_present(arguments, "--api-key-env"):
+            args.api_key_env = None
+
+
+class _ProviderArgumentParser(argparse.ArgumentParser):
+    """Argument parser that applies adapter-specific defaults after parsing."""
+
+    def parse_args(
+        self,
+        args: Iterable[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        raw_arguments = list(args) if args is not None else sys.argv[1:]
+        parsed = super().parse_args(args, namespace)
+        _apply_provider_defaults(parsed, raw_arguments)
+        return parsed
+
+
 def _package_version() -> str:
     try:
         return importlib.metadata.version("review-sensei")
@@ -68,7 +115,7 @@ def _positive_float(value: str) -> float:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProviderArgumentParser(
         prog="review-sensei",
         description="Run a provider-neutral AI review against a unified diff.",
     )
@@ -149,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _prepare_diff_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProviderArgumentParser(
         prog="review-sensei prepare-diff",
         description="Validate refs and prepare a bounded unified diff.",
     )
@@ -171,7 +218,7 @@ def _prepare_diff_parser() -> argparse.ArgumentParser:
 
 
 def _evaluate_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProviderArgumentParser(
         prog="review-sensei evaluate",
         description="Run a provider-neutral evaluation against a versioned corpus.",
     )
@@ -260,7 +307,7 @@ def _run_evaluate(args: argparse.Namespace) -> int:
 
 
 def _github_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProviderArgumentParser(
         prog="review-sensei github",
         description="Run GitHub publication seams with write opt-ins.",
     )
@@ -557,7 +604,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.diff:
             raise ReviewInputError("--diff is required")
-        if args.provider == "fixture":
+        provider_name = str(args.provider).strip().lower()
+        if provider_name == "fixture":
             if not args.fixture_response:
                 raise ReviewInputError("--provider fixture requires --fixture-response")
             api_key = None
@@ -602,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         provider = default_registry().create(
             ProviderSettings(
-                name=args.provider,
+                name=provider_name,
                 model=args.model,
                 base_url=args.base_url,
                 api_key=api_key,
