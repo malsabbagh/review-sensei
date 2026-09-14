@@ -43,6 +43,8 @@ def finding_fingerprint(result: dict[str, Any]) -> str:
         "uri": artifact.get("uri", "") if isinstance(artifact, dict) else "",
         "line": region.get("startLine", 0) if isinstance(region, dict) else 0,
     }
+    if not payload["rule"] and not payload["uri"]:
+        raise ValueError("SARIF finding must include a rule or artifact location")
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -165,6 +167,13 @@ def evaluate(
             return [
                 "each baseline finding requires fingerprint, rule, location, rationale, owner, and expires_on"
             ]
+        from datetime import date
+
+        try:
+            if date.fromisoformat(item["expires_on"]) < date.today():
+                continue
+        except ValueError:
+            return ["baseline finding expires_on must be ISO-8601 date"]
         accepted_ids.add(item["fingerprint"])
     try:
         findings = collect_findings(sarif_dir, expected_reports=expected_reports)
