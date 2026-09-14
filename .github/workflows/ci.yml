@@ -223,9 +223,6 @@ jobs:
           python scripts/check_codeql_findings.py \
             --sarif-dir "$RUNNER_TEMP/codeql-results" \
             --baseline security/codeql-baseline.json \
-            # CodeQL may emit multiple SARIF files (or an empty result set);
-            # the gate enforces coverage from trusted run metadata instead of
-            # assuming a one-file-per-language layout.
             --expected-reports 0 \
             --expected-languages "${{ matrix.language }}"
       - name: Archive CodeQL SARIF

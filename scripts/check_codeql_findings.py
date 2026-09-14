@@ -520,9 +520,8 @@ def collect_findings(
             # from each run's trusted metadata; filenames are only checked for
             # contradictions when they are recognizable.
             stem_language = _canonical_language(path.stem)
-            if (
-                stem_language in _CODEQL_LANGUAGES
-                and any(language != stem_language for language in report_languages)
+            if stem_language in _CODEQL_LANGUAGES and any(
+                language != stem_language for language in report_languages
             ):
                 raise ValueError(
                     f"{path}: filename language conflicts with SARIF metadata"
