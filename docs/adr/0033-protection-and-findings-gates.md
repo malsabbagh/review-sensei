@@ -17,7 +17,11 @@ scanning upload is not an available enforcement surface for this repository,
 CodeQL writes SARIF to an artifact and `scripts/check_codeql_findings.py` is the
 deterministic gate. Warning/error findings fail unless their stable fingerprint
 is listed in the reviewed baseline with a rule, location, rationale, owner, and
-expiry. The required-checks aggregate includes this gate through the CodeQL job.
+expiry. SARIF report collection is deterministic, bounded, and does not follow
+symlinks; malformed or non-finite severity values and malformed
+`partialFingerprints` fail closed. Expiry on the current date is treated as
+expired. The required-checks aggregate includes this gate through the CodeQL
+job.
 
 ## Rationale and limits
 

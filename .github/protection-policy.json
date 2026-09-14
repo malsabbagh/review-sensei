@@ -15,6 +15,8 @@
   "bypass_actors": [
     {
       "name": "repository maintainer",
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
       "reason": "Break-glass recovery only; record every use",
       "bypass_mode": "pull_request"
     }

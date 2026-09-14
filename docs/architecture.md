@@ -551,6 +551,15 @@ compute and Ollama Cloud; local uses the labelled self-hosted Ollama runner.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
+Before an enabled review reaches either provider, the reusable workflow runs a
+read-only authoritative pull-request preflight. It validates the repository
+numeric id, open/non-draft state, same-repository non-fork head, exact head
+SHA, base ref, and (when supplied) base SHA, then exports the API's canonical
+base SHA and a bounded standard-base64 title. The provider checks out that
+canonical base commit. Reply operations use a no-op preflight and cannot
+select a review step; unavailable GitHub metadata fails closed with an
+explicit error rather than allowing a stale or ambiguous review.
+
 The existing automatic-review and GitHub-writes caller path can emit a
 deterministic approval: only a validated exact-head result with no blocking
 findings whose final

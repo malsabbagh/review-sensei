@@ -36,11 +36,13 @@ python scripts/check_protection_policy.py \
   --readback /tmp/reviewsensei-ruleset.json
 ```
 
-The check fails closed when the response is malformed, `Required checks` is
-missing, or any bypass actor has `bypass_mode: always`. A passing local check is
-configuration evidence only; it is not a behavioral merge test. Use a
-disposable fork or repository for failing-check and unauthorized-tag tests, and
-never mutate production tags or rulesets during validation.
+The check fails closed when the response is malformed, the target branch or
+pull-request/status-check parameters drift, `Required checks` is missing, or a
+bypass actor is missing, unexpected, or has `bypass_mode: always` (or another
+unsupported mode). A passing local check is configuration evidence only; it is
+not a behavioral merge test. Use a disposable fork or repository for
+failing-check and unauthorized-tag tests, and never mutate production tags or
+rulesets during validation.
 
 ## Maintainer actions still required
 
