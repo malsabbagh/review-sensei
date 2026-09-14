@@ -41,6 +41,8 @@ _LANGUAGE_CATEGORY_RE = re.compile(
 )
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_BASELINE_KEYS = {"version", "policy", "findings"}
+_BASELINE_POLICY_KEYS = {"fail_on_levels", "minimum_score", "exception_expiry_days"}
 _RULE_LANGUAGE_PREFIXES = {
     "py": "python",
     "python": "python",
@@ -520,11 +522,26 @@ def evaluate(
         policy = _load_json(baseline_path)
     except ValueError as exc:
         return [str(exc)]
+    unknown_baseline_keys = sorted(
+        str(key) for key in policy if key not in _BASELINE_KEYS
+    )
+    if unknown_baseline_keys:
+        return [
+            "baseline contains unknown field(s): " + ", ".join(unknown_baseline_keys)
+        ]
     if policy.get("version") != 1:
         return ["baseline version must be 1"]
     settings = policy.get("policy")
     if not isinstance(settings, dict):
         return ["baseline policy must be an object"]
+    unknown_policy_keys = sorted(
+        str(key) for key in settings if key not in _BASELINE_POLICY_KEYS
+    )
+    if unknown_policy_keys:
+        return [
+            "baseline policy contains unknown field(s): "
+            + ", ".join(unknown_policy_keys)
+        ]
     fail_levels = settings.get("fail_on_levels")
     if (
         not isinstance(fail_levels, list)

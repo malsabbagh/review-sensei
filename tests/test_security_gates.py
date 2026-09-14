@@ -564,6 +564,33 @@ class CodeQLFindingsGateTests(unittest.TestCase):
                 any("must not exceed" in violation for violation in violations)
             )
 
+    def test_baseline_rejects_unknown_policy_fields(self):
+        module = _load_script("check_codeql_findings.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline = root / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "policy": {
+                            "fail_on_levels": ["warning"],
+                            "minimum_score": 2,
+                            "exception_expiry_days": 30,
+                            "fail_on_levelz": ["error"],
+                        },
+                        "findings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self._sarif(root)
+            violations = module.evaluate(root, baseline, expected_reports=1)
+            self.assertTrue(violations)
+            self.assertTrue(
+                any("unknown field" in violation for violation in violations)
+            )
+
 
 class ProtectionPolicyTests(unittest.TestCase):
     def test_checked_in_policy_is_valid(self):
