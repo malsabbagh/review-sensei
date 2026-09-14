@@ -258,6 +258,18 @@ reject it if it is returned. This is a narrow compatibility exception, not an
 additional capability grant. GitHub's historical `variables` and
 `actions_variables` spellings are accepted individually, but a response
 containing both is rejected as ambiguous rather than silently selecting one.
+Any unknown returned permission, unexpected level, or requested-level mismatch
+also fails closed: the broker issues a token only after GitHub's returned map
+matches the approved capability contract exactly. This can temporarily reject
+an exchange while an App permission change is still reconciling; accept the
+updated installation permissions and retry from a fresh workflow run rather
+than accepting a downgraded or newly introduced permission automatically.
+
+When GitHub introduces a documented implicit permission or a new capability
+needs one, treat it as a broker-policy change: confirm the GitHub behavior,
+assess the capability's minimum scope, add a capability-specific explicit
+opt-in with accept/reject regression tests, and update this contract. Do not
+broaden the generic adapter to tolerate unrecognized read or `none` grants.
 
 ## Rollback and operations
 
