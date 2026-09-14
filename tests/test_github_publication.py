@@ -655,6 +655,13 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
+        self.assertEqual(calls[3][1], "https://api.github.test/graphql")
+        self.assertFalse(
+            any(
+                method == "POST" and url.endswith("/pulls/2/reviews")
+                for method, url, _ in calls
+            )
+        )
 
     def test_finding_rerun_does_not_duplicate_same_head_comment(self):
         head = "b" * 40

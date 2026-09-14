@@ -164,9 +164,9 @@ class ReviewPublisher:
         )
         if preflight.result is not None:
             return preflight.result
-        # Reconcile before POST so retries never create a duplicate event. A
-        # same-head COMMENTED review may still be promoted once to APPROVED
-        # after a clean rerun and a fresh resolved-thread sweep. Any
+        # Reconcile before POST so retries never duplicate the same event
+        # state. A same-head COMMENTED review may still be promoted once to
+        # APPROVED after a clean rerun and a fresh resolved-thread sweep. Any
         # pagination/transport failure is an uncertainty and therefore fails
         # closed instead of being treated as "no marker".
         try:
@@ -178,6 +178,9 @@ class ReviewPublisher:
                 marker=identity_marker,
                 app_slug=app_slug,
             )
+            # APPROVED is final for this head even if a nondeterministic rerun
+            # later returns findings. COMMENTED is final only for another
+            # finding-bearing result; a clean result may be promoted below.
             if "APPROVED" in published_states or (
                 result.comments and "COMMENTED" in published_states
             ):
