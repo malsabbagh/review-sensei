@@ -534,6 +534,7 @@ class ConversationPublisherTests(unittest.TestCase):
         for path in (
             ".github/review-sensei/other.json",
             ".github/review-sensei/learnings-extra/file.json",
+            ".github/review-sensei/learnings-extra/file.md",
             ".github/review-sensei/learnings/nested/bad.json",
         ):
             with self.subTest(path=path):

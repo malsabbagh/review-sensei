@@ -675,18 +675,18 @@ class ConversationPublisher:
             if item.get("type") != "file" or not isinstance(path, str):
                 continue
             validate_repository_path(path, label="conversation learning path")
-            if not path.endswith(".json"):
-                continue
             path_parts = tuple(path.split("/"))
             if path_parts[: len(directory_parts)] != directory_parts:
-                # JSON entries outside the configured directory are malformed
-                # Contents responses; fail closed instead of treating them as docs.
+                # Entries outside the configured directory are malformed Contents
+                # responses; fail closed instead of treating them as docs.
                 raise GitHubConversationError(
                     "conversation learning path was outside configured directory"
                 )
             relative_parts = path_parts[len(directory_parts) :]
             if len(relative_parts) != 1:
                 raise GitHubConversationError("conversation learning path was invalid")
+            if not path.endswith(".json"):
+                continue
             learning_files.append(item)
         if len(learning_files) > MAX_LEARNING_FILES:
             raise GitHubConversationError("conversation contains too many learnings")
