@@ -68,6 +68,10 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             OpenAICompatibleProvider(api_key=api_key)
         self.assertNotIn(api_key, str(raised.exception))
 
+    def test_api_key_rejects_non_ascii_values(self):
+        with self.assertRaisesRegex(ValueError, "only ASCII"):
+            OpenAICompatibleProvider(api_key="secret-é")
+
     def test_sends_bounded_chat_completion_request(self):
         captured = {}
 

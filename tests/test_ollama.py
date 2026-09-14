@@ -101,6 +101,10 @@ class OllamaProviderTests(unittest.TestCase):
                 ):
                     OllamaProvider(api_key=api_key)
 
+    def test_api_key_rejects_non_ascii_values(self):
+        with self.assertRaisesRegex(ValueError, "only ASCII"):
+            OllamaProvider(api_key="secret-é")
+
     def test_transport_errors_do_not_echo_api_key(self):
         secret = "private-secret"
 
