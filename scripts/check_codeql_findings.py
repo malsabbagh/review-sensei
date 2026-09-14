@@ -32,6 +32,7 @@ MAX_SARIF_SCAN_ENTRIES = 4096
 MAX_FINDINGS = 4096
 MAX_SARIF_FILE_BYTES = 8 * 1024 * 1024
 MAX_METADATA_TEXT = 512
+MAX_URI_DECODE_LAYERS = 8
 
 # CodeQL's SARIF output does not have a required top-level language field.  The
 # action nevertheless emits an analysis category in ``automationDetails.id``
@@ -323,10 +324,15 @@ def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
     # security-only candidate separate from the returned identity, and bound
     # the work performed on attacker-controlled input.
     candidate = value
-    for _ in range(8):
+    for depth in range(MAX_URI_DECODE_LAYERS + 1):
         decoded = strip_scheme(unquote(candidate))
         if decoded == candidate:
             break
+        if depth == MAX_URI_DECODE_LAYERS:
+            # The candidate would require one more decoding pass than the
+            # bounded security walk permits. Never accept the still-encoded
+            # value as a repository identity.
+            raise ValueError("SARIF URI is too deeply percent-encoded")
         # Reuse the same canonical path checks as the caller without changing
         # the identity used for baseline matching.
         if (
@@ -340,9 +346,6 @@ def _normalize_location(uri: str, *, strip_line_suffix: bool = True) -> str:
         ):
             raise ValueError("SARIF URI contains an unsafe encoded path")
         candidate = decoded
-    else:
-        if unquote(candidate) != candidate:
-            raise ValueError("SARIF URI is too deeply percent-encoded")
     value = value.removeprefix("./")
     if strip_line_suffix:
         # Baseline entries may carry the historical ``path:line`` spelling.

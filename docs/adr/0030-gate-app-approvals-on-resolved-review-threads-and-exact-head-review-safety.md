@@ -43,6 +43,9 @@ In scope:
 - A bounded GraphQL review-thread resolution sweep immediately before an
   eligible approval event.
 - A provider-independent approval decision seam with stable blocker reasons.
+- Approval is enabled by default whenever the existing review-publication
+  capability is explicitly enabled; that invocation gate controls whether a
+  review runs, not whether a clean review may be approved.
 - Tests, public documentation, and the proposed ADR for the approval criteria.
 
 Out of scope:
