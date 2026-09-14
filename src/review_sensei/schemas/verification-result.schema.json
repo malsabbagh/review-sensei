@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/verification-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "disposition", "reasons", "evidence_valid", "actionable"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "disposition": {"enum": ["confirmed", "rejected", "insufficient-evidence"]},
+    "reasons": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 256}},
+    "evidence_valid": {"type": "boolean"},
+    "actionable": {"type": "boolean"}
+  }
+}

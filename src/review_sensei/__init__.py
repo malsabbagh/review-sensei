@@ -24,6 +24,7 @@ from .models import (
     ReviewRequest,
     ReviewResult,
 )
+from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from .release_manifest import (
     Artifact,
     CompatibilityManifest,
@@ -39,6 +40,13 @@ from .stages import (
     load_stages_from_dir,
 )
 from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
+from .verifier import (
+    CandidateFinding,
+    EvidenceReference,
+    VerificationResult,
+    verify_candidate,
+    verify_candidates,
+)
 
 __all__ = [
     "ConcurrencyGroup",
@@ -71,6 +79,14 @@ __all__ = [
     "ReviewRequest",
     "ReviewResult",
     "ReviewService",
+    "RecoveryArtifact",
+    "ResourceBudget",
+    "RunOutcome",
+    "CandidateFinding",
+    "EvidenceReference",
+    "VerificationResult",
+    "verify_candidate",
+    "verify_candidates",
     "DEFAULT_REVIEW_LIMITS",
     "Stage",
     "build_review_context_selection",

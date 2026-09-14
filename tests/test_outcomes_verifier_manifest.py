@@ -1,0 +1,151 @@
+import hashlib
+import json
+import unittest
+from datetime import datetime, timedelta, timezone
+
+from review_sensei.errors import ReviewInputError
+from review_sensei.evaluation import PromotionRecord
+from review_sensei.outcomes import RecoveryArtifact, RunOutcome
+from review_sensei.release_manifest import validate_compatibility_manifest
+from review_sensei.verifier import (
+    CandidateFinding,
+    EvidenceReference,
+    verify_candidate,
+)
+
+SHA = "a" * 64
+
+
+class ContractsTests(unittest.TestCase):
+    def test_fixture_promotion_is_rejected(self):
+        with self.assertRaises(ReviewInputError):
+            PromotionRecord(
+                SHA, SHA, SHA, SHA, "fixture", "fixture-v1", "r1", 3, "2026-01-01", {}
+            )
+
+    def test_run_outcome_round_trip(self):
+        value = RunOutcome("skipped_policy", diagnostic="policy").to_dict()
+        self.assertEqual(value["status"], "skipped_policy")
+
+    def test_recovery_artifact_rejects_tampering_and_identity_mismatch(self):
+        artifact = RecoveryArtifact.create(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            result={"summary": "ok"},
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+        artifact.validate(
+            repository="acme/repo", pull_request_number=1, base_sha=SHA, head_sha=SHA
+        )
+        with self.assertRaises(ReviewInputError):
+            artifact.validate(
+                repository="other/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+            )
+
+    def test_evidence_verifier_requires_exact_snapshot(self):
+        text = "line one\nline two\n"
+        snapshot = {"src/app.py": text}
+        snapshot_sha = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        candidate = CandidateFinding(
+            "bug",
+            "when called",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, snapshot_sha, "line two"),),
+            "causes failure",
+        )
+        self.assertEqual(
+            verify_candidate(
+                candidate, snapshot, snapshot_sha256=snapshot_sha
+            ).disposition,
+            "confirmed",
+        )
+        bad = EvidenceReference("src/app.py", 2, "b" * 64, "line two")
+        bad_candidate = CandidateFinding(
+            "bug", "when called", "src/app.py", (bad,), "causes failure"
+        )
+        self.assertEqual(
+            verify_candidate(
+                bad_candidate, snapshot, snapshot_sha256=snapshot_sha
+            ).disposition,
+            "rejected",
+        )
+
+    def test_candidate_parser_rejects_non_string_fields_and_assumptions(self):
+        evidence = {
+            "path": "src/app.py",
+            "line": 1,
+            "snapshot_sha256": SHA,
+        }
+        base = {
+            "claim": "bug",
+            "triggering_conditions": "when called",
+            "impacted_path": "src/app.py",
+            "evidence": [evidence],
+            "severity_rationale": "causes failure",
+        }
+        for field in (
+            "claim",
+            "triggering_conditions",
+            "impacted_path",
+            "severity_rationale",
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                CandidateFinding.from_dict({**base, field: 1})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding.from_dict({**base, "assumptions": ["ok", 1]})
+        with self.assertRaises(ReviewInputError):
+            CandidateFinding(
+                "bug",
+                "when called",
+                "src/app.py",
+                (EvidenceReference("src/app.py", 1, SHA),),
+                "causes failure",
+                ("",),
+            )
+
+    def test_evidence_verifier_rejects_noncanonical_snapshot_values(self):
+        with self.assertRaises(ReviewInputError):
+            verify_candidate(
+                CandidateFinding(
+                    "bug",
+                    "when called",
+                    "src/app.py",
+                    (EvidenceReference("src/app.py", 1, SHA),),
+                    "causes failure",
+                ),
+                {"src/app.py": 1},  # type: ignore[dict-item]
+                snapshot_sha256=SHA,
+            )
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", 1, 1)  # type: ignore[arg-type]
+
+    def test_manifest_rejects_mismatched_release_versions(self):
+        artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}
+        value = {
+            "schema_version": "1.0",
+            "release": "1.0.0",
+            "compatible_worker_range": ">=1",
+            "provenance": "signed",
+            "artifacts": {
+                "workflow": artifact,
+                "python": artifact,
+                "npm": [artifact],
+                "schemas_version": "1.0",
+                "worker": {**artifact, "version": "2.0.0"},
+            },
+        }
+        with self.assertRaises(ReviewInputError):
+            validate_compatibility_manifest(value)
+
+
+if __name__ == "__main__":
+    unittest.main()
