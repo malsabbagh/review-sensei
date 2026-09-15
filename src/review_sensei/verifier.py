@@ -8,6 +8,10 @@ Snapshot bounds intentionally reuse ``ReviewLimits`` diff ceilings
 (``max_diff_files`` and ``max_diff_bytes``) so verification stays aligned with
 the same hard profile used to admit review inputs.  Embedders may tighten
 limits by passing a lower ``ReviewLimits`` profile to the verifier helpers.
+
+Public documents in this module use ``schema_version: "1.0"``, matching the
+existing v1 schema family identified by ``$id`` URLs under ``/schemas/v1/``.
+Evidence excerpts are single-line substrings matched against one reviewed line.
 """
 
 from __future__ import annotations
@@ -30,10 +34,17 @@ from .validation import (
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DISPOSITIONS = frozenset({"confirmed", "rejected", "insufficient-evidence"})
 _EVIDENCE_FIELDS = frozenset({"path", "line", "snapshot_sha256", "excerpt"})
+PUBLIC_SCHEMA_VERSION = "1.0"
 
 
 @dataclass(frozen=True)
 class EvidenceReference:
+    """One bounded line reference into the reviewed snapshot.
+
+    ``excerpt``, when present, must be a single-line substring of the referenced
+    line.  Multi-line excerpts are rejected at construction time.
+    """
+
     path: str
     line: int
     snapshot_sha256: str
@@ -52,9 +63,13 @@ class EvidenceReference:
         ):
             raise ReviewInputError("evidence snapshot_sha256 must be a SHA-256 digest")
         if self.excerpt is not None and (
-            not isinstance(self.excerpt, str) or len(self.excerpt) > 512
+            not isinstance(self.excerpt, str)
+            or not self.excerpt
+            or len(self.excerpt) > 512
+            or "\n" in self.excerpt
+            or "\r" in self.excerpt
         ):
-            raise ReviewInputError("evidence excerpt is too long")
+            raise ReviewInputError("evidence excerpt must be a single line")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -159,9 +174,6 @@ class CandidateFinding:
                 f"candidate finding is missing field '{field}'"
             ) from exc
         except TypeError as exc:
-            message = str(exc)
-            if message.startswith(("candidate ", "evidence ")):
-                raise ReviewInputError(message) from exc
             raise ReviewInputError("candidate finding is malformed") from exc
         except ValueError as exc:
             raise ReviewInputError("candidate finding is malformed") from exc
@@ -180,7 +192,7 @@ class VerificationResult:
 
     def to_dict(self) -> dict[str, object]:
         value = {
-            "schema_version": "1.0",
+            "schema_version": PUBLIC_SCHEMA_VERSION,
             "disposition": self.disposition,
             "reasons": list(self.reasons),
             "evidence_valid": self.evidence_valid,
@@ -319,7 +331,11 @@ def verify_candidates(
     snapshot_sha256: str,
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> tuple[VerificationResult, ...]:
-    """Verify candidates independently, de-duplicating identical claims."""
+    """Verify candidates independently, de-duplicating identical claims.
+
+    Snapshot bounds and digest work happen once per batch; each candidate then
+    reuses the validated snapshot mapping for evidence checks.
+    """
     if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
     digest = _snapshot_digest(snapshot, limits=limits)

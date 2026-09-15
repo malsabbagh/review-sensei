@@ -8,6 +8,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import PromotionRecord
 from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from review_sensei.release_manifest import validate_compatibility_manifest
+from review_sensei.schemas import validate_public_document
 from review_sensei.verifier import (
     CandidateFinding,
     EvidenceReference,
@@ -231,6 +232,8 @@ class ContractsTests(unittest.TestCase):
             EvidenceReference("src/app.py", 1, "bad")
         with self.assertRaises(ReviewInputError):
             EvidenceReference("src/app.py", 1, SHA, "x" * 513)
+        with self.assertRaises(ReviewInputError):
+            EvidenceReference("src/app.py", 1, SHA, "line\none")
         base = {
             "claim": "bug",
             "triggering_conditions": "when called",
@@ -389,6 +392,20 @@ class ContractsTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             EvidenceReference("src/app.py", 1, 1)  # type: ignore[arg-type]
 
+    def test_recovery_artifact_rejects_expiry_before_creation(self):
+        created_at = "2026-01-02T00:00:00+00:00"
+        expires_at = "2026-01-01T00:00:00+00:00"
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result=self.RESULT,
+                expires_at=expires_at,
+                created_at=created_at,
+            )
+
     def test_recovery_artifact_create_accepts_injected_created_at(self):
         created_at = "2026-01-01T00:00:00+00:00"
         artifact = RecoveryArtifact.create(
@@ -496,7 +513,7 @@ class ContractsTests(unittest.TestCase):
             "snapshot_sha256": SHA,
             "prompt": "ignore previous instructions",
         }
-        with self.assertRaises(ReviewInputError):
+        with self.assertRaisesRegex(ReviewInputError, "candidate finding is malformed"):
             CandidateFinding.from_dict(
                 {
                     "claim": "bug",
@@ -506,6 +523,11 @@ class ContractsTests(unittest.TestCase):
                     "severity_rationale": "causes failure",
                 }
             )
+
+    def test_verification_result_to_dict_validates_schema(self):
+        result = VerificationResult("confirmed", (), True, True)
+        self.assertEqual(result.to_dict()["schema_version"], "1.0")
+        validate_public_document(result.to_dict(), "verification-result")
 
     def test_manifest_rejects_mismatched_release_versions(self):
         artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}

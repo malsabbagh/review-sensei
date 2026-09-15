@@ -36,6 +36,7 @@ MAX_RECOVERY_RESULT_DEPTH = 32
 MAX_STAGE_SUMMARY_ENTRIES = 64
 MAX_STAGE_SUMMARY_KEY_LENGTH = 128
 MAX_STAGE_SUMMARY_VALUE_LENGTH = 128
+PUBLIC_SCHEMA_VERSION = "1.0"
 
 
 def _digest(value: str) -> str:
@@ -82,6 +83,13 @@ def _validate_stage_summary(stage_summary: Mapping[str, str]) -> None:
             or not value.isprintable()
         ):
             raise ReviewInputError("run outcome stage_summary value is invalid")
+
+
+def _validate_recovery_window(*, created_at: str, expires_at: str) -> None:
+    created = _parse_aware_datetime(created_at, label="recovery artifact created_at")
+    expiry = _parse_aware_datetime(expires_at, label="recovery artifact expires_at")
+    if expiry <= created:
+        raise ReviewInputError("recovery artifact expires_at must be after created_at")
 
 
 def _validate_recovery_identity(
@@ -167,9 +175,10 @@ class ResourceBudget:
     """Declarative wire contract for one run's resource ceilings.
 
     Embedders publish these bounds alongside ``RunOutcome`` so callers can
-    reason about budget exhaustion consistently.  Enforcement inside
-    ``ReviewService`` is intentionally deferred to later integration slices;
-    this type remains the authoritative public shape for run budgets.
+    reason about budget exhaustion consistently.  Planned enforcement lives in
+    ``ReviewService``'s provider-call loop (tracked with the outcomes/evidence
+    contract slices in issues #36 and #37); this PR publishes the wire shape
+    only and does not wire runtime enforcement yet.
     """
 
     max_provider_calls: int = 8
@@ -235,7 +244,7 @@ class RunOutcome:
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "schema_version": "1.0",
+            "schema_version": PUBLIC_SCHEMA_VERSION,
             "status": self.status,
             "repository": self.repository,
             "pull_request_number": self.pull_request_number,
@@ -281,8 +290,9 @@ class RecoveryArtifact:
             r"^[a-f0-9]{64}$", self.result_sha256
         ):
             raise ReviewInputError("recovery artifact result_sha256 is invalid")
-        _parse_aware_datetime(self.created_at, label="recovery artifact created_at")
-        _parse_aware_datetime(self.expires_at, label="recovery artifact expires_at")
+        _validate_recovery_window(
+            created_at=self.created_at, expires_at=self.expires_at
+        )
 
     @classmethod
     def create(
@@ -310,6 +320,7 @@ class RecoveryArtifact:
             created = _aware_now(now).replace(microsecond=0).isoformat()
         else:
             created = created_at
+        _validate_recovery_window(created_at=created, expires_at=expires_at)
         canonical = _canonical_recovery_result(result)
         return cls(
             repository,
@@ -350,8 +361,9 @@ class RecoveryArtifact:
             raise ReviewInputError("recovery artifact has expired")
 
     def to_dict(self) -> dict[str, object]:
+        _canonical_recovery_result(self.result)
         value = {
-            "schema_version": "1.0",
+            "schema_version": PUBLIC_SCHEMA_VERSION,
             "repository": self.repository,
             "pull_request_number": self.pull_request_number,
             "base_sha": self.base_sha,
