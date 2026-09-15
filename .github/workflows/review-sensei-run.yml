@@ -581,6 +581,16 @@ jobs:
               ;;
           esac
 
+      - name: Verify mention reply completed
+        if: >-
+          always() && inputs.operation == 'reply' &&
+          inputs.enable_github_writes == 'true' &&
+          inputs.enable_mention_replies == 'true' &&
+          steps.reply.outcome != 'success'
+        run: |
+          echo '::error::mention reply step did not complete successfully' >&2
+          exit 1
+
       - name: Prepare bounded trusted-base diff after AI resolution
         if: steps.reply.outputs.resolved == 'true'
         env:
@@ -630,8 +640,6 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          ENABLE_REVIEW: 'true'
-          LEARNING_PRS: 'false'
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           review_args=(--enable-review)
@@ -888,6 +896,16 @@ jobs:
               ;;
           esac
 
+      - name: Verify mention reply completed
+        if: >-
+          always() && inputs.operation == 'reply' &&
+          inputs.enable_github_writes == 'true' &&
+          inputs.enable_mention_replies == 'true' &&
+          steps.reply.outcome != 'success'
+        run: |
+          echo '::error::mention reply step did not complete successfully' >&2
+          exit 1
+
       - name: Prepare bounded trusted-base diff after AI resolution
         if: steps.reply.outputs.resolved == 'true'
         env:
@@ -933,8 +951,6 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          ENABLE_REVIEW: 'true'
-          LEARNING_PRS: 'false'
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           review_args=(--enable-review)
