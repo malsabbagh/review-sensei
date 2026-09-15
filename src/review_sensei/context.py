@@ -193,9 +193,14 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
             file_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
         except OSError:
             return None
-        with os.fdopen(file_fd, "rb") as stream:
-            file_fd = None
-            return stream.read(max_bytes)
+        try:
+            if os.fstat(file_fd).st_size > max_bytes - 1:
+                return None
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = None
+                return stream.read(max_bytes)
+        except OSError:
+            return None
     finally:
         if file_fd is not None:
             try:
@@ -443,6 +448,11 @@ class SourceContextSelection:
 
 
 def _git_blob_sha(content: str) -> str:
+    """Return the Git blob object id (SHA-1) for provenance interop.
+
+    Integrity for excerpts is carried separately by ``SourceContextExcerpt.sha256``.
+    """
+
     payload = content.encode("utf-8")
     return hashlib.sha1(f"blob {len(payload)}\0".encode() + payload).hexdigest()
 
@@ -838,7 +848,12 @@ class SymbolAwareContextSelector:
         for directory in directories:
             for name in names:
                 candidate = directory / name
-                if not candidate.exists() and not candidate.is_symlink():
+                try:
+                    if candidate.is_symlink():
+                        continue
+                    if not candidate.is_file():
+                        continue
+                except OSError:
                     continue
                 relative = self._relative_path(candidate)
                 if relative is not None:
@@ -862,6 +877,9 @@ class SymbolAwareContextSelector:
                     break
                 inspected_changed_paths += 1
                 if isinstance(path, str) and path:
+                    if len(changed_values) >= MAX_PENDING_SOURCE_CONTEXT_CANDIDATES:
+                        changed_overflow = True
+                        break
                     changed_values.add(path)
         except TypeError as exc:
             raise ContextLoadError("changed source paths must be iterable") from exc
@@ -1052,6 +1070,42 @@ class ReviewContextCacheKey:
     stage_digest: str
     context_digest: str
     learning_digest: str
+
+    def __post_init__(self) -> None:
+        try:
+            validate_bounded_text(
+                self.repository,
+                256,
+                label="cache repository",
+                allow_empty=False,
+            )
+        except ReviewInputError as exc:
+            raise ContextLoadError("cache repository is invalid") from exc
+        if (
+            isinstance(self.pull_request, bool)
+            or not isinstance(self.pull_request, int)
+            or self.pull_request < 1
+        ):
+            raise ContextLoadError("cache pull request must be a positive integer")
+        for label, value in (("base_sha", self.base_sha), ("head_sha", self.head_sha)):
+            if not isinstance(value, str) or not _SHA1.fullmatch(value):
+                raise ContextLoadError(f"cache {label} must be a commit SHA")
+        for label, value in (
+            ("engine", self.engine),
+            ("model", self.model),
+            ("profile", self.profile),
+        ):
+            try:
+                validate_bounded_text(value, 256, label=f"cache {label}", allow_empty=False)
+            except ReviewInputError as exc:
+                raise ContextLoadError(f"cache {label} is invalid") from exc
+        for label, value in (
+            ("stage_digest", self.stage_digest),
+            ("context_digest", self.context_digest),
+            ("learning_digest", self.learning_digest),
+        ):
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ContextLoadError(f"cache {label} must be a SHA-256 digest")
 
     def digest(self) -> str:
         payload = json.dumps(self.__dict__, sort_keys=True, separators=(",", ":"))

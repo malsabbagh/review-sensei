@@ -251,11 +251,14 @@ class ContextLifecycleTests(unittest.TestCase):
 
     def test_cache_is_keyed_by_snapshot_and_bounded(self):
         cache = ReviewContextCache(max_entries=1)
+        digest_a = "a" * 64
+        digest_b = "b" * 64
+        digest_c = "c" * 64
         first = ReviewContextCacheKey(
-            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l"
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", digest_a, digest_b, digest_c
         )
         second = ReviewContextCacheKey(
-            "o/r", 2, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l"
+            "o/r", 2, "a" * 40, "b" * 40, "e", "m", "p", digest_a, digest_b, digest_c
         )
         cache.put(first, ("first",))
         cache.put(second, ("second",))

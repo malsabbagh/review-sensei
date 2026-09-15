@@ -99,7 +99,11 @@ def _glob_witnesses(patterns: Iterable[str]) -> tuple[str, ...]:
 
 
 def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
-    """Check glob scopes using concrete witnesses, never pattern-string matches."""
+    """Check glob scopes using bounded concrete witnesses.
+
+    This is a conservative, advisory heuristic: it may miss rare overlaps and
+    should never be treated as an exact glob-intersection proof.
+    """
 
     patterns = (*left, *right)
     for candidate in _glob_witnesses(patterns):
