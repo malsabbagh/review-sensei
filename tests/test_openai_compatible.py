@@ -1,14 +1,20 @@
 import json
 import os
+import ssl
 import tempfile
 import unittest
 from http.client import RemoteDisconnected
 from unittest.mock import patch
 from urllib.error import URLError
 
+import certifi
+
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest
-from review_sensei.providers.openai_compatible import OpenAICompatibleProvider
+from review_sensei.providers.openai_compatible import (
+    OpenAICompatibleProvider,
+    is_allowlisted_openai_compatible_endpoint,
+)
 
 
 class _Response:
@@ -229,9 +235,39 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             missing = os.path.join(directory, "missing.pem")
             with patch.dict(os.environ, {"SSL_CERT_FILE": missing}):
-                with self.assertRaisesRegex(ProviderError, "SSL_CERT_FILE") as raised:
+                with self.assertRaisesRegex(
+                    ProviderError, "SSL_CERT_FILE is missing"
+                ) as raised:
                     OpenAICompatibleProvider(api_key="secret")
             self.assertNotIn(missing, str(raised.exception))
+
+    def test_ssl_context_uses_certifi_when_ssl_cert_file_is_unset(self):
+        dummy = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "review_sensei.providers.openai_compatible.ssl.create_default_context",
+                return_value=dummy,
+            ) as create:
+                OpenAICompatibleProvider(
+                    api_key="secret",
+                    opener=lambda request, timeout: _Response(
+                        b'{"choices":[{"message":{"content":"ok"}}]}'
+                    ),
+                )
+        create.assert_called_once_with(cafile=certifi.where())
+
+    def test_allowlisted_endpoint_helper_rejects_custom_hosts(self):
+        self.assertTrue(
+            is_allowlisted_openai_compatible_endpoint("https://api.openai.com/v1")
+        )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint("https://attacker.example/v1")
+        )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint(
+                "https://api.openai.com/v1?redirect=https://attacker.example"
+            )
+        )
 
 
 if __name__ == "__main__":

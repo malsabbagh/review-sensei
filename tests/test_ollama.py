@@ -117,6 +117,19 @@ class OllamaProviderTests(unittest.TestCase):
             )
         self.assertNotIn(secret, str(raised.exception))
 
+    def test_transport_errors_do_not_echo_api_key_casefold(self):
+        secret = "Private-Secret"
+
+        def opener(request, timeout):
+            raise ProviderError(f"transport failed for {secret.lower()}")
+
+        with self.assertRaisesRegex(ProviderError, "Ollama request failed") as raised:
+            OllamaProvider(api_key=secret, opener=opener).complete(
+                ProviderRequest(prompt="review")
+            )
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(secret.lower(), str(raised.exception))
+
     def test_sends_non_streaming_json_review_request(self):
         captured = {}
         raw_response = FakeResponse(

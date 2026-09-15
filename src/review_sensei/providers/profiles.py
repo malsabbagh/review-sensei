@@ -34,6 +34,10 @@ class ProviderProfile:
             raise ValueError("provider profile identifiers must be non-empty")
         if not self.base_url.strip():
             raise ValueError("provider profile base_url must be non-empty")
+        if self.endpoint_scope not in ("local", "remote"):
+            raise ValueError(
+                "provider profile endpoint_scope must be 'local' or 'remote'"
+            )
         if self.timeout_seconds <= 0:
             raise ValueError("provider profile timeout_seconds must be positive")
         if isinstance(self.max_output_tokens, bool) or self.max_output_tokens < 1:

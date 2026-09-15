@@ -14,6 +14,7 @@ from .errors import ReviewInputError, ReviewSenseiError
 from .learnings import DEFAULT_LEARNING_DIRECTORY, load_repository_learnings
 from .models import LearningEntry, ReviewRequest
 from .providers import ProviderSettings, default_registry
+from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .service import ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
@@ -61,26 +62,84 @@ def _option_present(arguments: list[str], option: str) -> bool:
     return any(value == option or value.startswith(f"{option}=") for value in arguments)
 
 
+def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
+    if hasattr(args, name):
+        setattr(args, name, value)
+
+
 def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> None:
     """Resolve endpoint, model, credential, and timeout defaults by adapter."""
 
-    provider = str(getattr(args, "provider", "ollama")).strip().lower()
+    if not hasattr(args, "provider"):
+        return
+    provider = str(args.provider).strip().lower()
     if provider == "openai-compatible":
         if not _option_present(arguments, "--base-url"):
-            args.base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+            _assign_if_present(
+                args, "base_url", os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+            )
         if not _option_present(arguments, "--model"):
-            args.model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+            _assign_if_present(
+                args, "model", os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+            )
         if not _option_present(arguments, "--api-key-env"):
-            args.api_key_env = "OPENAI_API_KEY"
+            _assign_if_present(args, "api_key_env", "OPENAI_API_KEY")
         if not _option_present(arguments, "--timeout-seconds"):
-            args.timeout_seconds = _positive_float(
-                os.getenv("OPENAI_TIMEOUT_SECONDS", "120")
+            _assign_if_present(
+                args,
+                "timeout_seconds",
+                _positive_float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
             )
     elif provider == "fixture":
         if not _option_present(arguments, "--model"):
-            args.model = "fixture-v1"
+            _assign_if_present(args, "model", "fixture-v1")
         if not _option_present(arguments, "--api-key-env"):
-            args.api_key_env = None
+            _assign_if_present(args, "api_key_env", None)
+
+
+def _add_allow_custom_endpoint_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--allow-custom-endpoint",
+        action="store_true",
+        help=(
+            "Allow an openai-compatible base URL outside api.openai.com; "
+            "required for OPENAI_BASE_URL or --base-url that is not allowlisted"
+        ),
+    )
+
+
+def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
+    """Reject non-allowlisted OpenAI endpoints at the CLI boundary."""
+
+    provider = str(getattr(args, "provider", "")).strip().lower()
+    if provider != "openai-compatible":
+        return
+    if bool(getattr(args, "allow_custom_endpoint", False)):
+        return
+    base_url = str(getattr(args, "base_url", "") or "")
+    if not is_allowlisted_openai_compatible_endpoint(base_url):
+        raise ReviewInputError(
+            "openai-compatible endpoint is not allowlisted; pass "
+            "--allow-custom-endpoint only for an explicitly trusted service"
+        )
+
+
+def _provider_settings_from_args(
+    args: argparse.Namespace,
+    *,
+    api_key: str | None,
+    fixture_response: Path | None = None,
+) -> ProviderSettings:
+    _require_allowlisted_openai_endpoint(args)
+    return ProviderSettings(
+        name=str(args.provider).strip().lower(),
+        model=args.model,
+        base_url=args.base_url,
+        api_key=api_key,
+        fixture_response=fixture_response,
+        timeout_seconds=args.timeout_seconds,
+        allow_custom_endpoint=bool(getattr(args, "allow_custom_endpoint", False)),
+    )
 
 
 class _ProviderArgumentParser(argparse.ArgumentParser):
@@ -144,6 +203,7 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_float,
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
+    _add_allow_custom_endpoint_argument(parser)
     parser.add_argument("--repository")
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--title")
@@ -196,7 +256,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _prepare_diff_parser() -> argparse.ArgumentParser:
-    parser = _ProviderArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="review-sensei prepare-diff",
         description="Validate refs and prepare a bounded unified diff.",
     )
@@ -241,6 +301,7 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         type=_positive_float,
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
+    _add_allow_custom_endpoint_argument(parser)
     parser.add_argument("--provider-version")
     parser.add_argument(
         "--allow-live-model",
@@ -283,12 +344,9 @@ def _run_evaluate(args: argparse.Namespace) -> int:
             )
         corpus = load_corpus(args.corpus)
         provider = default_registry().create(
-            ProviderSettings(
-                name=args.provider,
-                model=args.model,
-                base_url=args.base_url,
+            _provider_settings_from_args(
+                args,
                 api_key=os.getenv(args.api_key_env),
-                timeout_seconds=args.timeout_seconds,
             )
         )
         report = evaluate_live(
@@ -385,6 +443,7 @@ def _github_parser() -> argparse.ArgumentParser:
         type=_positive_float,
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
+    _add_allow_custom_endpoint_argument(reply)
     reply.add_argument(
         "--allow-write",
         action="store_true",
@@ -501,12 +560,9 @@ def _run_github(args: argparse.Namespace) -> int:
                 f"GitHub read token environment variable {args.github_token_env} is unavailable"
             )
         provider = default_registry().create(
-            ProviderSettings(
-                name=args.provider,
-                model=args.model,
-                base_url=args.base_url,
+            _provider_settings_from_args(
+                args,
                 api_key=os.getenv(args.api_key_env),
-                timeout_seconds=args.timeout_seconds,
             )
         )
         reply_outcome = application.generate_and_publish_reply(
@@ -649,13 +705,10 @@ def main(argv: list[str] | None = None) -> int:
                 category_catalog=category_catalog,
             )
         provider = default_registry().create(
-            ProviderSettings(
-                name=provider_name,
-                model=args.model,
-                base_url=args.base_url,
+            _provider_settings_from_args(
+                args,
                 api_key=api_key,
                 fixture_response=args.fixture_response,
-                timeout_seconds=args.timeout_seconds,
             )
         )
 

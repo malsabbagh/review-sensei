@@ -190,7 +190,11 @@ class OllamaProvider:
             # token supplied by the caller.  The built-in redirect error is
             # already generic, but this guard preserves that property for
             # custom openers too.
-            if self.api_key and self.api_key in str(exc):
+            rendered = str(exc)
+            if self.api_key and (
+                self.api_key in rendered
+                or self.api_key.casefold() in rendered.casefold()
+            ):
                 raise ProviderError("Ollama request failed") from exc
             raise
         except (TimeoutError, URLError) as exc:
