@@ -3,6 +3,7 @@ import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
@@ -77,8 +78,7 @@ class ContractsTests(unittest.TestCase):
             ResourceBudget(max_prompt_bytes=5_000_000)
         with self.assertRaises(ReviewInputError):
             ResourceBudget(
-                max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
-                + 1
+                max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes + 1
             )
         ResourceBudget(
             max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
@@ -100,6 +100,10 @@ class ContractsTests(unittest.TestCase):
             RunOutcome("reviewed", head_sha="bad")
         with self.assertRaises(ReviewInputError):
             RunOutcome("reviewed", diagnostic="x" * 513)
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", repository="")
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", pull_request_number=0)
 
     def test_recovery_artifact_serialization_and_fail_closed_expiry(self):
         artifact = self._artifact()
@@ -180,22 +184,24 @@ class ContractsTests(unittest.TestCase):
                     datetime.now(timezone.utc) + timedelta(hours=1)
                 ).isoformat(),
             )
-        oversized = {
-            "summary": "x" * (2_097_152 + 1),
-            "comments": [],
-            "provider": "fixture",
-        }
-        with self.assertRaises(ReviewInputError):
-            RecoveryArtifact.create(
-                repository="acme/repo",
-                pull_request_number=1,
-                base_sha=SHA,
-                head_sha=SHA,
-                result=oversized,
-                expires_at=(
-                    datetime.now(timezone.utc) + timedelta(hours=1)
-                ).isoformat(),
-            )
+        with patch("review_sensei.outcomes.MAX_RECOVERY_RESULT_BYTES", 64):
+            with self.assertRaisesRegex(
+                ReviewInputError, "exceeds the configured size limit"
+            ):
+                RecoveryArtifact.create(
+                    repository="acme/repo",
+                    pull_request_number=1,
+                    base_sha=SHA,
+                    head_sha=SHA,
+                    result={
+                        "summary": "x" * 128,
+                        "comments": [],
+                        "provider": "fixture",
+                    },
+                    expires_at=(
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).isoformat(),
+                )
 
     def test_recovery_artifact_rejects_oversized_nested_keys(self):
         with self.assertRaises(ReviewInputError):
@@ -257,6 +263,19 @@ class ContractsTests(unittest.TestCase):
         self.assertEqual(
             verify_candidate(
                 bad_candidate, snapshot, snapshot_sha256=snapshot_sha
+            ).disposition,
+            "rejected",
+        )
+        out_of_bounds = CandidateFinding(
+            "bug",
+            "when called",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 99, snapshot_sha, "line two"),),
+            "causes failure",
+        )
+        self.assertEqual(
+            verify_candidate(
+                out_of_bounds, snapshot, snapshot_sha256=snapshot_sha
             ).disposition,
             "rejected",
         )
@@ -469,6 +488,32 @@ class ContractsTests(unittest.TestCase):
             now=fixed_now,
         )
         self.assertEqual(artifact.created_at, "2026-01-01T12:00:00+00:00")
+
+    def test_recovery_artifact_create_normalizes_non_utc_now(self):
+        eastern = timezone(timedelta(hours=-5))
+        artifact = RecoveryArtifact.create(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            result=self.RESULT,
+            expires_at="2026-01-01T18:00:00+00:00",
+            now=datetime(2026, 1, 1, 12, 0, tzinfo=eastern),
+        )
+        self.assertEqual(artifact.created_at, "2026-01-01T17:00:00+00:00")
+
+    def test_recovery_artifact_rejects_invalid_window_at_construction(self):
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result=self.RESULT,
+                created_at="2026-01-02T00:00:00+00:00",
+                expires_at="2026-01-01T00:00:00+00:00",
+                result_sha256=SHA,
+            )
 
     def test_recovery_artifact_rejects_invalid_identity_at_create(self):
         with self.assertRaises(ReviewInputError):

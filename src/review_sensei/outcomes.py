@@ -37,6 +37,11 @@ MAX_RECOVERY_RESULT_KEY_LENGTH = 256
 MAX_STAGE_SUMMARY_ENTRIES = 64
 MAX_STAGE_SUMMARY_KEY_LENGTH = 128
 MAX_STAGE_SUMMARY_VALUE_LENGTH = 128
+DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS = 8
+DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS = 2
+DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS = 120_000
+DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES = 1_048_576
+DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES = 1_048_576
 PUBLIC_SCHEMA_VERSION = "1.0"
 
 
@@ -50,7 +55,7 @@ def _aware_now(now: datetime | None = None) -> datetime:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() is None:
         return current.replace(tzinfo=timezone.utc)
-    return current
+    return current.astimezone(timezone.utc)
 
 
 def _parse_aware_datetime(value: str, *, label: str) -> datetime:
@@ -201,17 +206,17 @@ class ResourceBudget:
     separately by ``ReviewLimits.max_result_bytes``.
     """
 
-    max_provider_calls: int = 8
-    max_retry_attempts: int = 2
-    timeout_ms: int = 120_000
-    max_prompt_bytes: int = 1_048_576
-    max_output_bytes: int = 1_048_576
+    max_provider_calls: int = DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS
+    max_retry_attempts: int = DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS
+    timeout_ms: int = DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS
+    max_prompt_bytes: int = DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES
+    max_output_bytes: int = DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
         ceilings = {
-            "max_provider_calls": 8,
-            "max_retry_attempts": 2,
-            "timeout_ms": 120_000,
+            "max_provider_calls": DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            "max_retry_attempts": DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
+            "timeout_ms": DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
             "max_prompt_bytes": DEFAULT_REVIEW_LIMITS.max_prompt_bytes,
             "max_output_bytes": DEFAULT_REVIEW_LIMITS.max_provider_response_bytes,
         }
@@ -227,9 +232,10 @@ class ResourceBudget:
 class RunOutcome:
     """Bounded run summary for one review attempt.
 
-    ``stage_summary`` keys and values must be printable strings at runtime.
-    The public JSON schema enforces structural bounds only; runtime validation
-    in ``__post_init__`` is authoritative for character content.
+    ``stage_summary`` keys and values must be printable Unicode strings
+    (``str.isprintable()``) at runtime.  The public JSON schema enforces
+    structural bounds only; runtime validation in ``__post_init__`` is
+    authoritative for character content.
     """
 
     status: str
@@ -248,6 +254,18 @@ class RunOutcome:
     def __post_init__(self) -> None:
         if self.status not in RUN_STATUSES:
             raise ReviewInputError("run outcome status is unsupported")
+        if self.repository is not None and (
+            not isinstance(self.repository, str)
+            or not self.repository.strip()
+            or len(self.repository) > 256
+        ):
+            raise ReviewInputError("run outcome repository is invalid")
+        if self.pull_request_number is not None and (
+            isinstance(self.pull_request_number, bool)
+            or not isinstance(self.pull_request_number, int)
+            or self.pull_request_number < 1
+        ):
+            raise ReviewInputError("run outcome pull_request_number is invalid")
         for name in (
             "provider_calls",
             "retry_attempts",

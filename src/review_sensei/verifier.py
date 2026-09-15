@@ -6,8 +6,10 @@ are actionable before a publisher is allowed to consider them.
 
 Snapshot bounds intentionally reuse ``ReviewLimits`` diff ceilings
 (``max_diff_files`` and ``max_diff_bytes``) so verification stays aligned with
-the same hard profile used to admit review inputs.  Embedders may tighten
-limits by passing a lower ``ReviewLimits`` profile to the verifier helpers.
+the same bounded reviewed-input profile used to admit review inputs.  The
+snapshot is the reviewed source mapping passed into verification, not an
+unbounded repository checkout.  Embedders may tighten limits by passing a lower
+``ReviewLimits`` profile to the verifier helpers.
 
 Public documents in this module use ``schema_version: "1.0"``, matching the
 existing v1 schema family identified by ``$id`` URLs under ``/schemas/v1/``.
@@ -351,6 +353,11 @@ def verify_candidates(
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> tuple[VerificationResult, ...]:
     """Verify candidates independently, de-duplicating identical claims.
+
+    De-duplication keys on ``(impacted_path, claim, evidence_digest)`` so the
+    same logical finding with distinct evidence remains distinct.  Actionable
+    checks require bounded non-empty claim, triggering conditions, and path;
+    semantic quality gates belong upstream of this verifier.
 
     Snapshot bounds and digest work happen once per batch; each candidate then
     reuses the validated snapshot mapping for evidence checks.

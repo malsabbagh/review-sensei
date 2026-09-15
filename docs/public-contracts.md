@@ -115,6 +115,14 @@ These imports are public and stable within a major version:
 - `review_sensei.ReviewConcurrencyPlan`
 - `review_sensei.ConcurrencyGroup`
 - `review_sensei.ReviewService`
+- `review_sensei.RunOutcome`
+- `review_sensei.ResourceBudget`
+- `review_sensei.RecoveryArtifact`
+- `review_sensei.CandidateFinding`
+- `review_sensei.EvidenceReference`
+- `review_sensei.VerificationResult`
+- `review_sensei.verify_candidate`
+- `review_sensei.verify_candidates`
 - `review_sensei.load_repository_learnings`
 - `review_sensei.load_review_categories_from_dir`
 - `review_sensei.load_stages_from_dir`
