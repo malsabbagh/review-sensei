@@ -62,6 +62,11 @@ containing `/v1/`.
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 
+Compatibility-manifest worker ranges support bounded numeric, caret, tilde, and
+wildcard forms. An unqualified `x` or `*` is intentionally an explicit
+all-non-negative-semver range; releases that need a compatibility gate should
+prefer a bounded range.
+
 The `$id` policy is fixed: the path after the package namespace must include
 `/v1/` for v1 documents. Schema identity is the `$id`. Legacy review-result
 documents do not carry `schema_version`; the newer operational contracts emit

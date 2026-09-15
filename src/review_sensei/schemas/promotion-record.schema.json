@@ -13,10 +13,10 @@
     "provider": {"type": "string", "minLength": 1, "maxLength": 128},
     "model": {"type": "string", "minLength": 1, "maxLength": 256},
     "observed_revision": {"type": "string", "minLength": 1, "maxLength": 256},
-    "run_count": {"type": "integer", "minimum": 1},
+    "run_count": {"type": "integer", "minimum": 1, "description": "At least one observed run is required for every status; supported promotions require at least three."},
     "evaluated_at": {"type": "string", "minLength": 1, "maxLength": 64},
-    "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32},
-    "status": {"enum": ["supported", "insufficient", "unsupported"]},
+    "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32, "description": "Reproducibility settings are required for every status."},
+    "status": {"enum": ["supported", "insufficient", "unsupported"], "description": "Only supported with at least three runs can authorize promotion."},
     "rollback_decision": {"enum": ["revert-to-baseline", "hold", "none"]}
   }
 }

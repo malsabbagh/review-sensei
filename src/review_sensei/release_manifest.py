@@ -28,10 +28,10 @@ def _version_parts(value: str) -> tuple[int, int, int]:
     normalized = value.strip()
     match = _RANGE_VERSION.fullmatch(normalized)
     if match is None or any(part in {"x", "X", "*"} for part in match.groups() if part):
-        raise ValueError("version must contain three numeric components")
+        raise ValueError("version must contain exactly three numeric components")
     parts = [int(part) if part is not None else 0 for part in match.groups()]
     if len(normalized.split(".")) != 3:
-        raise ValueError("version must contain three numeric components")
+        raise ValueError("version must contain exactly three numeric components")
     return parts[0], parts[1], parts[2]
 
 
@@ -56,6 +56,7 @@ def _constraint_parts(token: str) -> list[tuple[str, tuple[int, int, int]]]:
         ):
             raise ValueError("wildcard range constraints must end at the wildcard")
         if wildcard_at == 0:
+            # An unqualified x/* intentionally means every non-negative semver.
             return [(">=", (0, 0, 0))]
         lower: tuple[int, int, int] = (
             int(components[0]) if components[0] not in {None, "x", "X", "*"} else 0,
@@ -166,6 +167,7 @@ class Artifact:
             or not isinstance(self.version, str)
             or not self.version.strip()
             or len(self.version) > 128
+            or not _VERSION.fullmatch(self.version)
             or not isinstance(self.sha256, str)
             or not _SHA.fullmatch(self.sha256)
         ):
@@ -214,6 +216,8 @@ class CompatibilityManifest:
             or any(not isinstance(artifact, Artifact) for artifact in self.npm)
         ):
             raise ReviewInputError("npm artifacts must be a non-empty tuple")
+        if len({artifact.name for artifact in self.npm}) != len(self.npm):
+            raise ReviewInputError("npm artifact names must be unique")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "CompatibilityManifest":

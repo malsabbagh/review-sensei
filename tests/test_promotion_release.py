@@ -2,7 +2,11 @@ import unittest
 from collections import UserDict
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.evaluation import PromotionRecord, _is_fixture_alias
+from review_sensei.evaluation import (
+    PromotionRecord,
+    _is_fixture_alias,
+    validate_promotion_record,
+)
 from review_sensei.release_manifest import (
     _constraint_parts,
     _range_contains,
@@ -60,6 +64,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
             )
 
     def test_mapping_reproducibility_is_copied_safely(self) -> None:
+        source = UserDict({"seed": "fixed"})
         record = PromotionRecord(
             SHA,
             SHA,
@@ -70,8 +75,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
             "r1",
             3,
             "2026-01-01",
-            UserDict({"seed": "fixed"}),
+            source,
         )
+        source["seed"] = "mutated"
         self.assertEqual(record.to_dict()["reproducibility"], {"seed": "fixed"})
 
     def test_invalid_reproducibility_shape_fails_with_review_input_error(self) -> None:
@@ -156,6 +162,61 @@ class PromotionAndReleaseTests(unittest.TestCase):
     def test_fixture_alias_matching_is_exact_after_normalization(self) -> None:
         self.assertTrue(_is_fixture_alias("Fixture Provider"))
         self.assertFalse(_is_fixture_alias("fixture-provider-extra"))
+
+    def test_document_validation_rejects_supported_fixture_provider(self) -> None:
+        value = {
+            "schema_version": "1.0",
+            "engine_digest": SHA,
+            "prompt_digest": SHA,
+            "configuration_digest": SHA,
+            "corpus_digest": SHA,
+            "provider": "fixture",
+            "model": "fixture-v1",
+            "observed_revision": "r1",
+            "run_count": 3,
+            "evaluated_at": "2026-01-01",
+            "reproducibility": {"seed": "fixed"},
+            "status": "supported",
+            "rollback_decision": "revert-to-baseline",
+        }
+        with self.assertRaises(ReviewInputError):
+            validate_promotion_record(value)
+
+    def test_manifest_rejects_duplicate_npm_artifact_names(self) -> None:
+        artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}
+        value = {
+            "schema_version": "1.0",
+            "release": "1.0.0",
+            "compatible_worker_range": ">=1.0.0",
+            "provenance": "signed",
+            "artifacts": {
+                "workflow": artifact,
+                "python": artifact,
+                "npm": [artifact, {**artifact, "sha256": "b" * 64}],
+                "schemas_version": "1.0",
+                "worker": artifact,
+            },
+        }
+        with self.assertRaises(ReviewInputError):
+            validate_compatibility_manifest(value)
+
+    def test_manifest_rejects_non_semver_artifact_version(self) -> None:
+        artifact = {"name": "x", "version": "release", "sha256": SHA}
+        value = {
+            "schema_version": "1.0",
+            "release": "1.0.0",
+            "compatible_worker_range": ">=1.0.0",
+            "provenance": "signed",
+            "artifacts": {
+                "workflow": artifact,
+                "python": artifact,
+                "npm": [artifact],
+                "schemas_version": "1.0",
+                "worker": artifact,
+            },
+        }
+        with self.assertRaises(ReviewInputError):
+            validate_compatibility_manifest(value)
 
     def test_worker_version_parser_rejects_wildcards_and_partial_versions(self) -> None:
         for version in ("x", "1.x", "1.2"):
