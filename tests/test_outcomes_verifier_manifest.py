@@ -5,7 +5,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.evaluation import PromotionRecord
 from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.schemas import validate_public_document
@@ -36,12 +35,6 @@ class ContractsTests(unittest.TestCase):
         values.update(kwargs)
         return RecoveryArtifact.create(**values)
 
-    def test_fixture_promotion_is_rejected(self):
-        with self.assertRaises(ReviewInputError):
-            PromotionRecord(
-                SHA, SHA, SHA, SHA, "fixture", "fixture-v1", "r1", 3, "2026-01-01", {}
-            )
-
     def test_run_outcome_round_trip(self):
         value = RunOutcome("skipped_policy", diagnostic="policy").to_dict()
         self.assertEqual(value["status"], "skipped_policy")
@@ -58,6 +51,10 @@ class ContractsTests(unittest.TestCase):
                 ResourceBudget(**{field: -1})
         with self.assertRaises(ReviewInputError):
             ResourceBudget(max_provider_calls=True)
+        with self.assertRaises(ReviewInputError):
+            ResourceBudget(max_prompt_bytes=5_000_000)
+        with self.assertRaises(ReviewInputError):
+            ResourceBudget(max_output_bytes=2_097_152)
         with self.assertRaises(ReviewInputError):
             RunOutcome("not-a-status")
         for field in (

@@ -207,6 +207,12 @@ def _check_snapshot_bounds(
     *,
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> None:
+    """Bound snapshot size using the public diff profile.
+
+    ``max_diff_bytes`` applies to the aggregate UTF-8 size of all paths and
+    contents.  Each individual file is also capped at the same byte ceiling as
+    a fail-fast guard so no single path can exceed the public diff limit alone.
+    """
     if not isinstance(snapshot, Mapping):
         raise ReviewInputError("snapshot must be a mapping")
     if len(snapshot) > limits.max_diff_files:
@@ -219,10 +225,14 @@ def _check_snapshot_bounds(
         path_bytes = utf8_size(path, label="snapshot path")
         content_bytes = utf8_size(content, label="snapshot content")
         if content_bytes > limits.max_diff_bytes:
-            raise ReviewInputError("snapshot file exceeds the configured byte limit")
+            raise ReviewInputError(
+                "snapshot file exceeds the configured per-file byte limit"
+            )
         total_bytes += path_bytes + content_bytes
         if total_bytes > limits.max_diff_bytes:
-            raise ReviewInputError("snapshot exceeds the configured byte limit")
+            raise ReviewInputError(
+                "snapshot exceeds the configured aggregate byte limit"
+            )
 
 
 def _canonical_snapshot_bytes(snapshot: Mapping[str, str]) -> bytes:

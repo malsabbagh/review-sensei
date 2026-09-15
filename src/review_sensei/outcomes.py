@@ -140,7 +140,13 @@ def _json_value_depth(value: object, *, limit: int = MAX_RECOVERY_RESULT_DEPTH) 
 
 
 def _canonical_recovery_result(result: Mapping[str, object]) -> str:
-    """Validate and serialize a retained review result before hashing it."""
+    """Validate and serialize a complete review result before hashing it.
+
+    Recovery artifacts intentionally retain only publisher-validated
+    ``review-result`` documents.  Partial or interrupted provider output must
+    be normalized upstream before persistence; this helper does not accept a
+    looser envelope.
+    """
 
     if not isinstance(result, Mapping):
         raise ReviewInputError("recovery artifact result must be an object")
@@ -179,6 +185,9 @@ class ResourceBudget:
     ``ReviewService``'s provider-call loop (tracked with the outcomes/evidence
     contract slices in issues #36 and #37); this PR publishes the wire shape
     only and does not wire runtime enforcement yet.
+
+    Defaults are public downward-only ceilings.  Prompt and response byte limits
+    must not exceed the corresponding ``ReviewLimits`` profile.
     """
 
     max_provider_calls: int = 8
@@ -188,16 +197,19 @@ class ResourceBudget:
     max_output_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
-        for name in (
-            "max_provider_calls",
-            "max_retry_attempts",
-            "timeout_ms",
-            "max_prompt_bytes",
-            "max_output_bytes",
-        ):
+        ceilings = {
+            "max_provider_calls": 8,
+            "max_retry_attempts": 2,
+            "timeout_ms": 120_000,
+            "max_prompt_bytes": DEFAULT_REVIEW_LIMITS.max_prompt_bytes,
+            "max_output_bytes": DEFAULT_REVIEW_LIMITS.max_provider_response_bytes,
+        }
+        for name, ceiling in ceilings.items():
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewInputError(f"{name} must be a non-negative integer")
+            if value > ceiling:
+                raise ReviewInputError(f"{name} exceeds the public ceiling")
 
 
 @dataclass(frozen=True)
@@ -264,7 +276,12 @@ class RunOutcome:
 
 @dataclass(frozen=True)
 class RecoveryArtifact:
-    """Identity-bound, opt-in artifact for publication-only recovery."""
+    """Identity-bound, opt-in artifact for publication-only recovery.
+
+    The embedded ``result`` must already be a complete, schema-valid
+    ``review-result`` document.  Partial run payloads belong in ``RunOutcome``,
+    not in a recovery artifact.
+    """
 
     repository: str
     pull_request_number: int
