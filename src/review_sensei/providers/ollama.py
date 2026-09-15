@@ -21,6 +21,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
+from .transport import read_bounded_body
 
 MAX_API_KEY_BYTES = 4_096
 
@@ -33,7 +34,12 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class OllamaProvider:
-    """Ollama ``/api/generate`` adapter for local or hosted Ollama servers."""
+    """Ollama ``/api/generate`` adapter for local or hosted Ollama servers.
+
+    Production callers use the default ``urlopen`` transport, which is always
+    wrapped with redirect rejection before any credentialed request is sent.
+    Injected openers exist only as an explicit test seam.
+    """
 
     name = "ollama"
     model: str | None
@@ -174,15 +180,11 @@ class OllamaProvider:
             else:
                 response_ctx = self._call_custom_opener(http_request)
             with response_ctx as response:
-                read_limit = request.max_response_bytes + 1
-                body = bytearray()
-                while len(body) <= request.max_response_bytes:
-                    chunk = response.read(read_limit - len(body))
-                    if not chunk:
-                        break
-                    if not isinstance(chunk, (bytes, bytearray)):
-                        raise ProviderError("Ollama returned an invalid response body")
-                    body.extend(chunk)
+                body = read_bounded_body(
+                    response,
+                    request.max_response_bytes,
+                    label="Ollama response",
+                )
         except HTTPError as exc:
             raise ProviderError(f"Ollama request failed with HTTP {exc.code}") from exc
         except ProviderError as exc:
@@ -208,8 +210,6 @@ class OllamaProvider:
         except TypeError as exc:
             raise ProviderError("Ollama request failed") from exc
 
-        if len(body) > request.max_response_bytes:
-            raise ProviderError("Ollama response exceeded the configured size limit")
         try:
             body_text = body.decode("utf-8", errors="strict")
         except UnicodeDecodeError as exc:

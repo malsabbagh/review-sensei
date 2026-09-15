@@ -36,6 +36,17 @@ class MissingNameProvider:
         return ProviderResponse("{}", "missing", self.model)
 
 
+class BrokenNameProvider:
+    @property
+    def name(self) -> str:
+        raise RuntimeError("boom")
+
+    model = "broken-model"
+
+    def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse("{}", "broken", self.model)
+
+
 class ProviderRegistryTests(unittest.TestCase):
     def test_custom_provider_can_be_registered_without_changing_review_service(self):
         registry = ProviderRegistry()
@@ -58,6 +69,13 @@ class ProviderRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "name, model, and complete"):
             registry.create(ProviderSettings(name="missing-name"))
+
+    def test_registry_rejects_provider_when_name_property_raises(self):
+        registry = ProviderRegistry()
+        registry.register("broken-name", lambda settings: BrokenNameProvider())
+
+        with self.assertRaisesRegex(ProviderError, "name could not be read"):
+            registry.create(ProviderSettings(name="broken-name"))
 
     def test_unknown_provider_fails_with_available_names(self):
         registry = ProviderRegistry()

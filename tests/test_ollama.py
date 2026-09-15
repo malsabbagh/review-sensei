@@ -194,9 +194,8 @@ class OllamaProviderTests(unittest.TestCase):
         provider = OllamaProvider(
             opener=lambda request, timeout: UnsizedOnlyResponse(b"{}")
         )
-        with self.assertRaises(ProviderError) as raised:
+        with self.assertRaisesRegex(ProviderError, "body could not be read"):
             provider.complete(ProviderRequest(prompt="private prompt"))
-        self.assertEqual(str(raised.exception), "Ollama request failed")
 
     def test_effective_constructor_model_respects_request_model_limit_before_open(self):
         opened = []
@@ -276,9 +275,7 @@ class OllamaProviderTests(unittest.TestCase):
                     limits=limits,
                 )
             )
-        self.assertEqual(
-            str(raised.exception), "Ollama response exceeded the configured size limit"
-        )
+        self.assertIn("exceeded the configured size limit", str(raised.exception))
 
     def test_oversize_invalid_utf8_and_malformed_envelope_are_sanitized(self):
         marker = "PRIVATE_RESPONSE_MARKER"

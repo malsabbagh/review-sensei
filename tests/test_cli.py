@@ -325,7 +325,9 @@ class CliTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(status, 1)
-        self.assertIn("OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue())
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
 
     def test_openai_timeout_prefers_reviewsensei_environment_variable(self):
         with patch.dict(
@@ -338,6 +340,36 @@ class CliTests(unittest.TestCase):
         ):
             args = _parser().parse_args(["--provider", "openai-compatible"])
         self.assertEqual(args.timeout_seconds, 45.0)
+
+    def test_github_reply_rejects_invalid_openai_timeout_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "github",
+                        "reply",
+                        "--generate",
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "1",
+                        "--source-comment-id",
+                        "2",
+                        "--source-updated-at",
+                        "2026-01-01T00:00:00Z",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
+
+    def test_cli_option_set_ignores_empty_space_separated_values(self):
+        self.assertFalse(_cli_option_set(["--model", ""], "--model"))
+        self.assertFalse(_cli_option_set(["--model"], "--model"))
 
     def test_profile_fast_triage_omits_conflicting_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
