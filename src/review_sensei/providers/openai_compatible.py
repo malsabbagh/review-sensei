@@ -308,7 +308,7 @@ class OpenAICompatibleProvider:
         return f"{self.base_url}/chat/completions"
 
     def _call_custom_opener(self, http_request: Request) -> Any:
-        """Invoke an injected opener, falling back when kwargs are unsupported."""
+        """Invoke an injected opener with the verified TLS context."""
 
         opener = getattr(self._opener, "open", self._opener)
         try:
@@ -317,16 +317,10 @@ class OpenAICompatibleProvider:
                 timeout=self.timeout_seconds,
                 context=self._ssl_context,
             )
-        except TypeError:
-            try:
-                return opener(http_request, timeout=self.timeout_seconds)
-            except TypeError:
-                try:
-                    return opener(http_request)
-                except TypeError as exc:
-                    raise ProviderError(
-                        "OpenAI-compatible opener could not be called"
-                    ) from exc
+        except TypeError as exc:
+            raise ProviderError(
+                "OpenAI-compatible opener must accept timeout and context kwargs"
+            ) from exc
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         model = (request.model if self.allow_model_override else None) or self.model

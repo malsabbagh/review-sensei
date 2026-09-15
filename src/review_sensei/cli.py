@@ -84,6 +84,7 @@ def _explicit_cli_options(
     )
     explicit: set[str] = set()
     index = 0
+    prior_option_unsatisfied = False
     while index < len(arguments):
         token = arguments[index]
         matched_option: str | None = None
@@ -97,6 +98,7 @@ def _explicit_cli_options(
             if token.startswith(prefix):
                 if token[len(prefix) :]:
                     explicit.add(option)
+                prior_option_unsatisfied = False
                 index += 1
                 matched_option = ""
                 break
@@ -108,16 +110,21 @@ def _explicit_cli_options(
         assert matched_action is not None
         if matched_action.nargs == 0:
             explicit.add(matched_option)
+            prior_option_unsatisfied = False
             index += 1
             continue
         if index + 1 >= len(arguments):
+            prior_option_unsatisfied = True
             index += 1
             continue
         next_token = arguments[index + 1]
         if _is_registered_option_token(next_token, option_actions):
+            prior_option_unsatisfied = True
             index += 1
             continue
-        explicit.add(matched_option)
+        if not prior_option_unsatisfied:
+            explicit.add(matched_option)
+        prior_option_unsatisfied = False
         index += 2
     return explicit
 

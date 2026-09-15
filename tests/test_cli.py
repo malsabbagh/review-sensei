@@ -387,14 +387,22 @@ class CliTests(unittest.TestCase):
         argv = ["--model", "--looks-like-flag"]
         explicit = _explicit_cli_options(_parser(), argv)
         self.assertIn("--model", explicit)
-        args = _parser().parse_args(argv)
+        equals_argv = ["--model=--looks-like-flag"]
+        self.assertEqual(_explicit_cli_options(_parser(), equals_argv), {"--model"})
+        args = _parser().parse_args(equals_argv)
         self.assertEqual(args.model, "--looks-like-flag")
 
     def test_explicit_cli_options_ignore_option_tokens_without_values(self):
         argv = ["--model", "--provider", "ollama"]
         explicit = _explicit_cli_options(_parser(), argv)
         self.assertNotIn("--model", explicit)
-        self.assertIn("--provider", explicit)
+        self.assertNotIn("--provider", explicit)
+
+    def test_explicit_cli_options_ignore_chained_option_tokens(self):
+        argv = ["--provider", "--model", "ollama"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertNotIn("--provider", explicit)
+        self.assertNotIn("--model", explicit)
 
     def test_profile_missing_api_key_env_is_rejected_at_cli_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
