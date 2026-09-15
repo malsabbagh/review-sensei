@@ -613,15 +613,16 @@ class ReviewPublisher:
             if "APPROVED" in published_states:
                 return PublicationResult(status="already_published")
             if "COMMENTED" in published_states:
-                self.finalizer.finalize(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    app_slug=app_slug,
-                    enabled=auto_approve,
-                    known_blocking_finding=has_blocking_findings(result),
-                )
+                if not preflight.app_authored:
+                    self.finalizer.finalize(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        enabled=auto_approve,
+                        known_blocking_finding=has_blocking_findings(result),
+                    )
                 return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
@@ -715,15 +716,16 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self.finalizer.finalize(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    app_slug=app_slug,
-                    enabled=auto_approve,
-                    known_blocking_finding=has_blocking_findings(result),
-                )
+                if not write_preflight.app_authored:
+                    self.finalizer.finalize(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        enabled=auto_approve,
+                        known_blocking_finding=has_blocking_findings(result),
+                    )
                 return PublicationResult(status="already_published")
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily"
@@ -757,15 +759,16 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self.finalizer.finalize(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    app_slug=app_slug,
-                    enabled=auto_approve,
-                    known_blocking_finding=has_blocking_findings(result),
-                )
+                if not write_preflight.app_authored:
+                    self.finalizer.finalize(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        enabled=auto_approve,
+                        known_blocking_finding=has_blocking_findings(result),
+                    )
                 return PublicationResult(status="already_published")
             raise GitHubPublicationError("review publication was rejected")
         if status == 409 or status == 429 or status >= 500:
@@ -778,15 +781,16 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self.finalizer.finalize(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    app_slug=app_slug,
-                    enabled=auto_approve,
-                    known_blocking_finding=has_blocking_findings(result),
-                )
+                if not write_preflight.app_authored:
+                    self.finalizer.finalize(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        enabled=auto_approve,
+                        known_blocking_finding=has_blocking_findings(result),
+                    )
                 return PublicationResult(status="already_published")
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily"

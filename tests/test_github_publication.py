@@ -1004,6 +1004,36 @@ class ReviewPublisherTests(unittest.TestCase):
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
 
+    def test_app_authored_reconciled_comment_never_finalizes(self):
+        """A retry must preserve the App-authored PR approval exclusion."""
+
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=clean_result(),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head, author="reviewsensei[bot]")),
+                json_response(
+                    [
+                        published_review(
+                            marker=marker,
+                            head_sha=head,
+                            state="COMMENTED",
+                        )
+                    ]
+                ),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+
+        self.assertEqual(outcome.status, "already_published")
+        self.assertEqual([call[0] for call in calls], ["GET", "GET"])
+
     def test_head_is_rechecked_after_marker_pagination_before_write(self):
         head = "b" * 40
         outcome, calls = self.publish(
