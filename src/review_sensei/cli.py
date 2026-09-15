@@ -92,15 +92,24 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
         return
     if provider_name != selected.provider:
         raise ReviewInputError(
-            f"profile '{profile_name}' requires --provider {selected.provider}"
+            f"profile '{profile_name}' requires --provider {selected.provider}; "
+            f"the current default is {provider_name!r} from --provider or "
+            "REVIEWSENSEI_PROVIDER"
         )
 
 
 def _openai_timeout_default() -> float:
     configured = os.getenv("REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS")
+    source = "REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS"
     if configured is None:
         configured = os.getenv("OPENAI_TIMEOUT_SECONDS", "120")
-    return _positive_float(configured)
+        source = "OPENAI_TIMEOUT_SECONDS"
+    try:
+        return _positive_float(configured)
+    except argparse.ArgumentTypeError as exc:
+        raise ReviewInputError(
+            f"{source} must be a positive number"
+        ) from exc
 
 
 def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
@@ -759,7 +768,11 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
-    args = _parser().parse_args(args_list)
+    try:
+        args = _parser().parse_args(args_list)
+    except ReviewInputError as exc:
+        print(f"review-sensei: {exc}", file=sys.stderr)
+        return 1
     try:
         if args.version:
             print(_package_version())
