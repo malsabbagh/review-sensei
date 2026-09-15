@@ -65,6 +65,40 @@ def _normalize_git_mode(value: object) -> str:
     return value
 
 
+def _finding_scope_paths(finding: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the canonical path scope declared by a confirmed finding."""
+
+    raw_paths = finding.get("affected_paths", finding.get("paths"))
+    if raw_paths is None:
+        single = finding.get("path")
+        if single is None:
+            raise ReviewInputError(
+                "verified finding must declare affected repository paths"
+            )
+        raw_paths = (single,)
+    if isinstance(raw_paths, (str, bytes)):
+        raise ReviewInputError("finding path scope must be an iterable of paths")
+    try:
+        iterator = iter(raw_paths)
+    except (TypeError, AttributeError) as exc:
+        raise ReviewInputError(
+            "finding path scope must be an iterable of paths"
+        ) from exc
+    scoped: dict[str, None] = {}
+    for index, path in enumerate(iterator, start=1):
+        if index > MAX_PATCH_FILES:
+            raise ReviewInputError("finding path scope has too many entries")
+        if not isinstance(path, str):
+            raise ReviewInputError("finding path scope entries must be strings")
+        validate_repository_path(path, label="finding path")
+        scoped.setdefault(path, None)
+    if not scoped:
+        raise ReviewInputError(
+            "verified finding must declare affected repository paths"
+        )
+    return tuple(scoped)
+
+
 def _bounded_allowed_paths(values: Iterable[str]) -> tuple[str, ...]:
     """Read allowed paths once while bounding both unique and total inputs."""
 
@@ -292,15 +326,21 @@ def create_patch_suggestion(
         raise ReviewInputError("patch allowed_paths must be an iterable of paths")
     if isinstance(assumptions, (str, bytes)) or isinstance(validation, (str, bytes)):
         raise ReviewInputError("patch metadata must be iterables of strings")
-    allowed = _bounded_allowed_paths(allowed_paths)
-    analysis = analyze_diff(patch, limits=DEFAULT_REVIEW_LIMITS)
-    changed = set(analysis.changed_paths)
-    if not changed.issubset(set(allowed)):
+    finding_scope = set(_finding_scope_paths(finding))
+    allowed = set(_bounded_allowed_paths(allowed_paths))
+    if allowed != finding_scope:
         raise ReviewInputError(
-            "patch touches a path outside the validated finding scope"
+            "patch allowed_paths must exactly match the finding path scope"
         )
-    if any(path.startswith("/") or ".." in path.split("/") for path in changed):
-        raise ReviewInputError("patch contains an unsafe path")
+    analysis = analyze_diff(patch, limits=DEFAULT_REVIEW_LIMITS)
+    changed: set[str] = set()
+    for path in analysis.changed_paths:
+        validate_repository_path(path, label="patch changed path")
+        changed.add(path)
+    if changed != allowed:
+        raise ReviewInputError(
+            "patch changed paths must exactly match the validated finding scope"
+        )
     _reject_unsupported_patch_content(patch)
     mode_values = _bounded_snapshot_modes(snapshot_modes, changed_paths=changed)
     assumption_values = _bounded_metadata(assumptions, label="assumptions")

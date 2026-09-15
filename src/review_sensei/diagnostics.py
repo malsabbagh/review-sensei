@@ -132,6 +132,24 @@ def run_doctor(
         checks.append(
             DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)")
         )
+    configured_category_catalog = None
+    configured_categories_error: str | None = None
+    if categories_dir is not None:
+        if categories_dir.is_symlink() or not categories_dir.is_dir():
+            configured_categories_error = "configured directory is unavailable"
+        elif not any(
+            path.is_file() and not path.is_symlink()
+            for path in categories_dir.iterdir()
+        ):
+            configured_categories_error = "configured directory is empty"
+        else:
+            try:
+                configured_category_catalog = load_review_categories_from_dir(
+                    categories_dir
+                )
+            except (OSError, ReviewSenseiError) as exc:
+                configured_categories_error = str(exc)
+
     for label, configured, expected in (
         ("stages", stages_dir, "stages"),
         ("categories", categories_dir, "categories"),
@@ -139,6 +157,27 @@ def run_doctor(
         if configured is None:
             checks.append(
                 DiagnosticCheck(label, "pass", f"packaged default {expected} selected")
+            )
+        elif label == "categories" and configured_categories_error is not None:
+            checks.append(
+                DiagnosticCheck(
+                    label,
+                    "action",
+                    (
+                        "configured directory is unavailable"
+                        if configured_categories_error
+                        == "configured directory is unavailable"
+                        else (
+                            "configured directory is empty"
+                            if configured_categories_error
+                            == "configured directory is empty"
+                            else (
+                                "configured directory failed validation: "
+                                f"{configured_categories_error}"
+                            )
+                        )
+                    ),
+                )
             )
         elif configured.is_symlink() or not configured.is_dir():
             checks.append(
@@ -154,17 +193,15 @@ def run_doctor(
             configuration_error: str | None = None
             try:
                 if label == "categories":
-                    configured_catalog = load_review_categories_from_dir(configured)
-                    # Keep this local variable alive for parity with stage loading
-                    # below; the loader itself is the validation oracle.
-                    del configured_catalog
+                    if configured_categories_error is not None:
+                        configuration_error = configured_categories_error
+                    else:
+                        assert configured_category_catalog is not None
                 else:
-                    catalog = (
-                        load_review_categories_from_dir(categories_dir)
-                        if categories_dir is not None
-                        else None
+                    load_stages_from_dir(
+                        configured,
+                        category_catalog=configured_category_catalog,
                     )
-                    load_stages_from_dir(configured, category_catalog=catalog)
             except (OSError, ReviewSenseiError) as exc:
                 configuration_error = str(exc)
             checks.append(
