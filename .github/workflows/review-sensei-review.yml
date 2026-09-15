@@ -129,7 +129,7 @@ jobs:
           pull_json="$RUNNER_TEMP/review-sensei-pull.json"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             printf '%s' '${{ toJson(github.event.pull_request) }}' > "$pull_json"
-            PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+            PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
               --event pull_request \
               --pull-json "$pull_json" \
               --auto-review "$AUTO_REVIEW"
@@ -137,13 +137,13 @@ jobs:
           fi
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
-            PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+            PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
               --event workflow_dispatch \
               --pull-json "$pull_json"
             exit 0
           fi
           gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
-          PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+          PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
             --event "$EVENT_NAME" \
             --comment-body "$COMMENT_BODY" \
             --pull-json "$pull_json" \
