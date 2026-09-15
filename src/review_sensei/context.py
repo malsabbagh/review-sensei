@@ -157,11 +157,24 @@ def _has_symlink_component(root: Path, path: Path) -> bool:
     return False
 
 
+def _opened_path_within_root(root: Path, descriptor: int) -> bool:
+    """Verify an opened descriptor still resolves inside ``root`` on Linux."""
+
+    if not os.path.exists("/proc/self/fd"):
+        # Non-Linux platforms rely on the root-relative O_NOFOLLOW openat walk.
+        return True
+    proc_entry = f"/proc/self/fd/{descriptor}"
+    try:
+        resolved = Path(os.readlink(proc_entry)).resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | None:
     """Read a repository file without following symlinks outside ``root``."""
 
-    if _has_symlink_component(root, path):
-        return None
     try:
         relative = path.relative_to(root)
     except ValueError:
@@ -172,6 +185,7 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     file_flags = os.O_RDONLY | nofollow
+    # Every path component is opened without following symlinks.
     directory_flags = os.O_RDONLY | directory_flag | nofollow
     try:
         root_fd = os.open(root, os.O_RDONLY | directory_flag)
@@ -188,12 +202,17 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
                 next_fd = os.open(part, directory_flags, dir_fd=current_fd)
             except OSError:
                 return None
+            if not _opened_path_within_root(root, next_fd):
+                os.close(next_fd)
+                return None
             if current_fd != root_fd:
                 intermediate_fds.append(current_fd)
             current_fd = next_fd
         try:
             file_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
         except OSError:
+            return None
+        if not _opened_path_within_root(root, file_fd):
             return None
         try:
             if os.fstat(file_fd).st_size > max_bytes - 1:
