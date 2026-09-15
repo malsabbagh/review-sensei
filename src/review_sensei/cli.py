@@ -176,13 +176,24 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
                 f"--provider {provider_name} does not match profile "
                 f"'{selected.name}' (requires {selected.provider})"
             )
-        return
-    if provider_name != selected.provider:
+    elif provider_name != selected.provider:
         raise ReviewInputError(
             f"profile '{selected.name}' requires --provider {selected.provider}; "
             f"the current default is {provider_name!r} from --provider or "
             "REVIEWSENSEI_PROVIDER"
         )
+    if _cli_option_set(argv, "--api-key-env", explicit=explicit):
+        actual = getattr(args, "api_key_env", None)
+        expected = selected.api_key_env
+        if expected is None:
+            raise ReviewInputError(
+                f"--api-key-env cannot be combined with profile '{selected.name}'"
+            )
+        if actual != expected:
+            raise ReviewInputError(
+                f"--api-key-env {actual} does not match profile "
+                f"'{selected.name}' (requires {expected})"
+            )
 
 
 def _openai_timeout_default() -> float:
@@ -266,18 +277,7 @@ def _resolve_api_key(
     profile_name = getattr(args, "profile", None)
     if profile_name:
         profile = get_provider_profile(profile_name)
-        if not profile.requires_api_key:
-            return None
-        if _cli_option_set(
-            argv, "--api-key-env", explicit=getattr(args, "_explicit_cli_options", None)
-        ):
-            api_key = os.getenv(args.api_key_env)
-            if not api_key:
-                raise ReviewInputError(
-                    f"environment variable {args.api_key_env} is unavailable"
-                )
-            return api_key
-        if not profile.api_key_env:
+        if not profile.requires_api_key or not profile.api_key_env:
             return None
         api_key = os.getenv(profile.api_key_env)
         if not api_key:

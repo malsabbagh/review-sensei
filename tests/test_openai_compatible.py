@@ -48,6 +48,17 @@ class _ReadTypeErrorResponse(_Response):
         raise TypeError("bad response reader")
 
 
+class _EnterTypeErrorResponse:
+    def __enter__(self):
+        raise TypeError("credential=secret-token")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def read(self, size: int):
+        return b"{}"
+
+
 class OpenAICompatibleProviderTests(unittest.TestCase):
     def test_requires_explicit_api_key(self):
         with self.assertRaisesRegex(ValueError, "requires an API key"):
@@ -191,6 +202,18 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ProviderError, "response body could not be read"):
             provider.complete(ProviderRequest(prompt="private"))
+
+    def test_context_manager_type_error_is_sanitized(self):
+        provider = OpenAICompatibleProvider(
+            api_key="secret",
+            opener=lambda request, timeout, context: _EnterTypeErrorResponse(),
+        )
+        with self.assertRaisesRegex(
+            ProviderError, "response could not be opened"
+        ) as raised:
+            provider.complete(ProviderRequest(prompt="private"))
+        self.assertNotIn("secret-token", str(raised.exception))
+        self.assertNotIn("credential=", str(raised.exception))
 
     def test_custom_opener_without_context_manager_is_sanitized(self):
         class ResponseWithoutContextManager:

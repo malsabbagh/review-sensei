@@ -445,6 +445,83 @@ class CliTests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_profile_rejects_mismatched_api_key_env(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                    "--provider",
+                    "openai-compatible",
+                    "--api-key-env",
+                    "OLLAMA_API_KEY",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--api-key-env OLLAMA_API_KEY does not match profile 'fast-triage' "
+            "(requires OPENAI_API_KEY)",
+            stderr.getvalue(),
+        )
+
+    def test_local_profile_rejects_api_key_env(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "local-private",
+                    "--provider",
+                    "ollama",
+                    "--api-key-env",
+                    "OLLAMA_API_KEY",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--api-key-env cannot be combined with profile 'local-private'",
+            stderr.getvalue(),
+        )
+
+    def test_profile_accepts_matching_explicit_api_key_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--provider",
+                            "openai-compatible",
+                            "--api-key-env",
+                            "OPENAI_API_KEY",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "openai-secret")
+
     def test_github_parser_exposes_allow_custom_endpoint_on_review(self):
         args = _github_parser().parse_args(
             [

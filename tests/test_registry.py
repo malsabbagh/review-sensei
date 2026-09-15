@@ -47,6 +47,27 @@ class BrokenNameProvider:
         return ProviderResponse("{}", "broken", self.model)
 
 
+class BrokenCompleteProvider:
+    name = "broken-complete"
+    model = "broken-model"
+
+    @property
+    def complete(self):
+        raise RuntimeError("boom")
+
+
+class PropertyCompleteProvider:
+    name = "property-complete"
+    model = "property-model"
+
+    @property
+    def complete(self):
+        def _complete(request: ProviderRequest) -> ProviderResponse:
+            return ProviderResponse("{}", self.name, self.model)
+
+        return _complete
+
+
 class ProviderRegistryTests(unittest.TestCase):
     def test_custom_provider_can_be_registered_without_changing_review_service(self):
         registry = ProviderRegistry()
@@ -76,6 +97,22 @@ class ProviderRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "name could not be read"):
             registry.create(ProviderSettings(name="broken-name"))
+
+    def test_registry_rejects_provider_when_complete_property_raises(self):
+        registry = ProviderRegistry()
+        registry.register("broken-complete", lambda settings: BrokenCompleteProvider())
+
+        with self.assertRaisesRegex(ProviderError, "complete could not be read"):
+            registry.create(ProviderSettings(name="broken-complete"))
+
+    def test_registry_accepts_complete_property_that_returns_callable(self):
+        registry = ProviderRegistry()
+        registry.register(
+            "property-complete", lambda settings: PropertyCompleteProvider()
+        )
+
+        provider = registry.create(ProviderSettings(name="property-complete"))
+        self.assertEqual(provider.name, "property-complete")
 
     def test_unknown_provider_fails_with_available_names(self):
         registry = ProviderRegistry()

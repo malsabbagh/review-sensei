@@ -10,11 +10,12 @@ def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:
 
     body = bytearray()
     while True:
-        # Read one byte beyond the ceiling so an exact-limit response can be
-        # accepted while an oversized response fails closed.  Check the chunk
-        # length before extending the buffer because some injected responses
-        # ignore the requested size.
-        requested = maximum - len(body) + 1
+        remaining = maximum - len(body)
+        # Probe one extra byte so an exact-limit body is accepted and any
+        # overflow, including a 1-byte overage, fails closed before the extra
+        # byte is kept.  Check the chunk against *remaining* before extending
+        # because some injected responses ignore the requested size.
+        requested = remaining + 1
         try:
             chunk = response.read(requested)
         except TypeError as exc:
@@ -23,7 +24,7 @@ def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:
             break
         if not isinstance(chunk, (bytes, bytearray)):
             raise ProviderError(f"{label} body is invalid")
-        if len(chunk) > requested or len(body) + len(chunk) > maximum:
+        if len(chunk) > remaining:
             raise ProviderError(f"{label} exceeded the configured size limit")
         body.extend(chunk)
     return body

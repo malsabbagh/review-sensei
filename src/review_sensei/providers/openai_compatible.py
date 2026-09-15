@@ -357,21 +357,19 @@ class OpenAICompatibleProvider:
 
         try:
             if self._opener is urlopen:
-                with self._safe_opener.open(
+                response_ctx = self._safe_opener.open(
                     http_request, timeout=self.timeout_seconds
-                ) as response:
-                    body = read_bounded_body(
-                        response,
-                        request.max_response_bytes,
-                        label="OpenAI-compatible response",
-                    )
+                )
             else:
-                with self._call_custom_opener(http_request) as response:
-                    body = read_bounded_body(
-                        response,
-                        request.max_response_bytes,
-                        label="OpenAI-compatible response",
-                    )
+                response_ctx = self._call_custom_opener(http_request)
+            with response_ctx as response:
+                body = read_bounded_body(
+                    response,
+                    request.max_response_bytes,
+                    label="OpenAI-compatible response",
+                )
+        except ProviderError:
+            raise
         except HTTPError as exc:
             transient = exc.code == 429 or 500 <= exc.code < 600
             raise ProviderError(
@@ -396,9 +394,9 @@ class OpenAICompatibleProvider:
                 ) from exc
             raise ProviderError("OpenAI-compatible request failed") from exc
         except TypeError as exc:
-            # Context-manager protocol only. Opener invocation TypeErrors are
-            # normalized in ``_call_custom_opener``; reader TypeErrors are
-            # normalized in ``read_bounded_body``.
+            # Context-manager protocol and builtin opener TypeErrors only.
+            # Custom opener TypeErrors are normalized in ``_call_custom_opener``;
+            # reader TypeErrors are normalized in ``read_bounded_body``.
             raise ProviderError(
                 "OpenAI-compatible response could not be opened"
             ) from exc
