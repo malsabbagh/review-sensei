@@ -578,9 +578,18 @@ Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the
 source comment, the provider receives the already-bounded thread/diff/findings/
 learnings context, and a `finally` cleanup removes the reaction after reply
-publication or another terminal outcome. Reply markers still provide
-idempotency, so a retry can reconcile an already-published response without
-creating a duplicate.
+publication or another terminal outcome. The validated reply may also carry an
+explicit `resolve` decision. Only a ReviewSensei-authored inline root can be
+resolved; the publisher rechecks the exact head, performs a bounded GraphQL
+root-to-thread lookup, and confirms an idempotent `resolveReviewThread` result.
+Issue comments, human roots, stale heads, and malformed or unavailable thread
+responses remain unresolved. Reply markers still provide idempotency, so a
+retry can reconcile an already-published response and finish a pending
+resolution without creating a duplicate. The reusable workflow records the
+resolution result and, only after a successful AI resolution, performs one
+fresh provider review and publication pass on the same exact head; this avoids
+requiring a synthetic commit or an Actions-dispatch capability while preserving
+the normal approval gates.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

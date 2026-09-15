@@ -964,9 +964,15 @@ class ConversationContext:
 
 @dataclass(frozen=True)
 class ConversationReply:
-    """Validated provider-produced reply body safe for GitHub publication."""
+    """Validated provider-produced reply and thread-resolution decision.
+
+    ``resolve`` is deliberately opt-in: an omitted or false value keeps the
+    review thread open.  Only the GitHub adapter can act on the decision after
+    it revalidates the exact-head, ReviewSensei-owned thread.
+    """
 
     body: str
+    resolve: bool = False
 
     def __post_init__(self) -> None:
         validate_bounded_text(
@@ -975,22 +981,27 @@ class ConversationReply:
             label="conversation reply",
             allow_empty=False,
         )
+        if not isinstance(self.resolve, bool):
+            raise ReviewInputError("conversation reply resolve must be a boolean")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "ConversationReply":
         if not isinstance(value, Mapping):
             raise ReviewInputError("conversation reply must be a JSON object")
-        if set(value.keys()) != {"body"}:
+        if set(value.keys()) - {"body", "resolve"}:
             raise ReviewInputError(
-                "conversation reply must contain only a strict body field"
+                "conversation reply must contain only body and resolve fields"
             )
         body = value.get("body")
         if not isinstance(body, str):
             raise ReviewInputError("conversation reply body must be a string")
-        return cls(body=body)
+        resolve = value.get("resolve", False)
+        if not isinstance(resolve, bool):
+            raise ReviewInputError("conversation reply resolve must be a boolean")
+        return cls(body=body, resolve=resolve)
 
-    def to_dict(self) -> dict[str, str]:
-        return {"body": self.body}
+    def to_dict(self) -> dict[str, object]:
+        return {"body": self.body, "resolve": self.resolve}
 
 
 @dataclass(frozen=True)

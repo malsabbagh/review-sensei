@@ -52,7 +52,8 @@ Out of scope:
 
 - GitHub App permissions, setup variables, credentials, providers, or branch
   protection changes.
-- Automatically resolving, dismissing, or muting any review thread.
+- Resolving threads as part of the approval-policy decision; AI-driven
+  ReviewSensei-root resolution is specified separately in [ADR 0034](0034-ai-decided-review-thread-resolution.md).
 - Changing the existing exact-head preflight, markers, or review-state
   reconciliation.
 

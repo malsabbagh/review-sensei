@@ -728,12 +728,13 @@ class ConversationPublisherTests(unittest.TestCase):
             source_comment_id=10,
             source_updated_at=updated,
             head_sha=head,
-            reply=ConversationReply.from_dict({"body": "Thanks."}),
+            reply=ConversationReply.from_dict({"body": "Thanks.", "resolve": True}),
             app_slug="review-sensei[bot]",
             root_comment_id=10,
             source_kind="issue",
         )
         self.assertEqual(outcome.status, "replied")
+        self.assertFalse(outcome.resolved)
         self.assertTrue(calls[-1][1].endswith("/repos/owner/repo/issues/1/comments"))
 
     def test_invalid_reply_inputs_fail_before_github_request(self):
@@ -807,6 +808,370 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIn("<!-- reviewsensei:reply:v1", post_body["body"])
         self.assertEqual(set(post_body), {"body"})
         self.assertTrue(calls[-1][1].endswith("/pulls/1/comments/10/replies"))
+
+    def test_ai_resolution_resolves_review_sensei_inline_thread(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        responses = [
+            json_response(
+                {
+                    "id": 11,
+                    "pull_request_url": INLINE_URL,
+                    "body": "@sensei addressed this",
+                    "user": {"login": "alice", "type": "User"},
+                    "author_association": "MEMBER",
+                    "updated_at": updated,
+                    "in_reply_to_id": 10,
+                    "path": "src/app.py",
+                    "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+                }
+            ),
+            json_response(
+                {
+                    "id": 10,
+                    "pull_request_url": INLINE_URL,
+                    "body": "The original finding",
+                    "user": {"login": "review-sensei[bot]", "type": "Bot"},
+                    "author_association": "OWNER",
+                    "in_reply_to_id": None,
+                }
+            ),
+            json_response([]),
+            json_response(pr_payload(head)),
+            json_response({"id": 12}, 201),
+            json_response(pr_payload(head)),
+            json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "PRRT_thread",
+                                            "isResolved": False,
+                                            "comments": {"nodes": [{"databaseId": 10}]},
+                                        }
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            json_response(pr_payload(head)),
+            json_response(
+                {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {
+                                "id": "PRRT_thread",
+                                "isResolved": True,
+                            }
+                        }
+                    }
+                }
+            ),
+        ]
+        http, calls = make_http(responses)
+        outcome = ConversationPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=11,
+            source_updated_at=updated,
+            head_sha=head,
+            reply=ConversationReply.from_dict(
+                {"body": "Confirmed—the fix is complete.", "resolve": True}
+            ),
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+        )
+        self.assertEqual(outcome.status, "replied_and_resolved")
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.comment_id, 12)
+        self.assertEqual(
+            [call[0] for call in calls],
+            [
+                "GET",
+                "GET",
+                "GET",
+                "GET",
+                "POST",
+                "GET",
+                "POST",
+                "GET",
+                "POST",
+            ],
+        )
+        mutation = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(mutation["operationName"], "ResolveReviewThread")
+        self.assertEqual(mutation["variables"], {"input": {"threadId": "PRRT_thread"}})
+
+    def test_ai_resolution_does_not_resolve_human_root_thread(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        responses = [
+            json_response(
+                {
+                    "id": 10,
+                    "pull_request_url": INLINE_URL,
+                    "body": "@sensei addressed this",
+                    "user": {"login": "alice", "type": "User"},
+                    "author_association": "MEMBER",
+                    "updated_at": updated,
+                    "in_reply_to_id": None,
+                    "path": "src/app.py",
+                    "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+                }
+            ),
+            json_response([]),
+            json_response(pr_payload(head)),
+            json_response({"id": 12}, 201),
+        ]
+        http, calls = make_http(responses)
+        outcome = ConversationPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at=updated,
+            head_sha=head,
+            reply=ConversationReply.from_dict({"body": "Thanks.", "resolve": True}),
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+        )
+        self.assertEqual(outcome.status, "replied")
+        self.assertFalse(outcome.resolved)
+        self.assertEqual(len(calls), 4)
+
+    def test_ai_resolution_retries_an_existing_reply_idempotently(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        marker = reply_marker(
+            source_comment_id=11,
+            source_updated_digest=__import__("hashlib")
+            .sha256(updated.encode("utf-8"))
+            .hexdigest(),
+            pull_request=1,
+            head_sha=head,
+        )
+        source = {
+            "id": 11,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei addressed this",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "in_reply_to_id": 10,
+        }
+        root = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "Original finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "in_reply_to_id": None,
+        }
+        responses = [
+            json_response(source),
+            json_response(root),
+            json_response(
+                [{"id": 12, "body": marker, "user": {"login": "review-sensei[bot]"}}]
+            ),
+            json_response(pr_payload(head)),
+            json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "PRRT_thread",
+                                            "isResolved": True,
+                                            "comments": {"nodes": [{"databaseId": 10}]},
+                                        }
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        ]
+        http, calls = make_http(responses)
+        outcome = ConversationPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=11,
+            source_updated_at=updated,
+            head_sha=head,
+            reply=ConversationReply.from_dict(
+                {"body": "Confirmed—the fix is complete.", "resolve": True}
+            ),
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+        )
+        self.assertEqual(outcome.status, "already_replied_and_resolved")
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.comment_id, 12)
+        self.assertEqual(
+            [call[0] for call in calls], ["GET", "GET", "GET", "GET", "POST"]
+        )
+
+    def test_ai_resolution_fails_closed_when_head_changes_before_mutation(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        root = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "Original finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "in_reply_to_id": None,
+        }
+        source = {
+            "id": 11,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei addressed this",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "in_reply_to_id": 10,
+            "path": "src/app.py",
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+        }
+        responses = [
+            json_response(source),
+            json_response(root),
+            json_response([]),
+            json_response(pr_payload(head)),
+            json_response({"id": 12}, 201),
+            json_response(pr_payload("c" * 40)),
+        ]
+        http, calls = make_http(responses)
+        with self.assertRaises(GitHubConversationError):
+            ConversationPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=11,
+                source_updated_at=updated,
+                head_sha=head,
+                reply=ConversationReply.from_dict(
+                    {"body": "Confirmed—the fix is complete.", "resolve": True}
+                ),
+                app_slug="review-sensei[bot]",
+                root_comment_id=10,
+            )
+        self.assertEqual(
+            [call[0] for call in calls], ["GET", "GET", "GET", "GET", "POST", "GET"]
+        )
+        self.assertFalse(any(call[1].endswith("/graphql") for call in calls))
+
+    def test_ai_resolution_fails_closed_on_malformed_thread_lookup(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        root = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "Original finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "in_reply_to_id": None,
+        }
+        source = {
+            "id": 11,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei addressed this",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "in_reply_to_id": 10,
+            "path": "src/app.py",
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+        }
+        responses = [
+            json_response(source),
+            json_response(root),
+            json_response([]),
+            json_response(pr_payload(head)),
+            json_response({"id": 12}, 201),
+            json_response(pr_payload(head)),
+            json_response({"data": {}}),
+        ]
+        http, calls = make_http(responses)
+        with self.assertRaises(GitHubConversationError):
+            ConversationPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=11,
+                source_updated_at=updated,
+                head_sha=head,
+                reply=ConversationReply.from_dict(
+                    {"body": "Confirmed—the fix is complete.", "resolve": True}
+                ),
+                app_slug="review-sensei[bot]",
+                root_comment_id=10,
+            )
+        self.assertEqual(calls[-1][1], "https://api.github.test/graphql")
+        self.assertEqual(len(calls), 7)
+
+    def test_ai_resolution_maps_thread_lookup_transport_failure(self):
+        head = "b" * 40
+        updated = "2026-08-19T00:00:00Z"
+        root = {
+            "id": 10,
+            "pull_request_url": INLINE_URL,
+            "body": "Original finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "in_reply_to_id": None,
+        }
+        source = {
+            "id": 11,
+            "pull_request_url": INLINE_URL,
+            "body": "@sensei addressed this",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "MEMBER",
+            "updated_at": updated,
+            "in_reply_to_id": 10,
+            "path": "src/app.py",
+            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+        }
+        responses = [
+            json_response(source),
+            json_response(root),
+            json_response([]),
+            json_response(pr_payload(head)),
+            json_response({"id": 12}, 201),
+            json_response(pr_payload(head)),
+            URLError("timed out"),
+        ]
+        http, calls = make_http(responses)
+        with self.assertRaises(GitHubConversationTransientError):
+            ConversationPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=11,
+                source_updated_at=updated,
+                head_sha=head,
+                reply=ConversationReply.from_dict(
+                    {"body": "Confirmed—the fix is complete.", "resolve": True}
+                ),
+                app_slug="review-sensei[bot]",
+                root_comment_id=10,
+            )
+        self.assertEqual(calls[-1][1], "https://api.github.test/graphql")
+        self.assertEqual(len(calls), 7)
 
     def test_reconciliation_pagination_failure_fails_closed_before_post(self):
         updated = "2026-08-19T00:00:00Z"

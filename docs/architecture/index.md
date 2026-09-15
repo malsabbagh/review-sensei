@@ -87,6 +87,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0029`](../adr/0029-finding-classification-and-lens-presentation.md) | Proposed | Independent severity, fix effort, and lens-aware finding presentation | Additive v1 classification metadata and deterministic publisher rendering |
 | [`0032`](../adr/0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | Explicit blocking controls approval; absent flags block only for critical/high severity, with resolved-thread safety |
 | [`0030`](../adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | Bounded GraphQL thread sweep; clean reruns can promote same-head comments |
+| [`0034`](../adr/0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | Typed `resolve` decision, exact-head/App-root GraphQL guards, and one fresh same-head review pass after successful resolution |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

@@ -120,11 +120,13 @@ event as `COMMENT` or fails closed before writing. All `@sensei` replies remain
 ordinary comments.
 
 The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
-After every thread is resolved, a fresh workflow run with no blocking findings on the same exact
-head can promote the earlier ReviewSensei comment to one formal approval. It
-does not duplicate the comment or approval. GitHub Actions does not start a run
-when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
-the current exact PR head and base) or push a new head. Classification metadata
+After every thread is resolved, a fresh workflow run with no blocking findings
+on the same exact head can promote the earlier ReviewSensei comment to one
+formal approval. An AI reply that returns `resolve: true` starts that bounded
+same-head pass in the same provider job; a maintainer resolving a thread
+manually still needs to rerun **ReviewSensei review** (supplying the current
+exact PR head and base) or push a new head because GitHub Actions does not start
+a run for thread resolution alone. Classification metadata
 (blocking, severity, fix effort, and lens) controls the approval boundary:
 explicit `false` does not prevent approval, while an omitted flag is
 blocking only for case-insensitive `critical` or `high` severity; missing,
@@ -164,8 +166,14 @@ reply operations run on `[self-hosted, linux, x64, ollama]`. Both modes support
 automatic review, manual review, validated review publication, learning draft
 PRs, optional artifacts, and authorized `@sensei` conversations. An authorized
 mention receives 👀 while the response is being generated, and the reaction is
-removed after the reply or another terminal outcome. Add another standalone
-`@sensei` mention in the same thread to continue the bounded conversation.
+removed after the reply or another terminal outcome. The provider may include
+`resolve: true` in its validated reply when the current exact-head context
+shows that a ReviewSensei-authored inline finding is fully addressed; the
+publisher then resolves only that thread through a bounded GraphQL mutation.
+Issue comments and human-authored roots remain open. Add another standalone
+`@sensei` mention in the same thread to continue the bounded conversation. A
+successful AI resolution automatically causes one fresh same-head review pass;
+approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
 The generated caller may contain the literal name-only mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read the value

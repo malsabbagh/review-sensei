@@ -45,7 +45,13 @@ class ConversationContractTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             ConversationReply.from_dict({"body": ""})
         reply = ConversationReply.from_dict({"body": "ok"})
-        self.assertEqual(reply.to_dict(), {"body": "ok"})
+        self.assertFalse(reply.resolve)
+        self.assertEqual(reply.to_dict(), {"body": "ok", "resolve": False})
+        self.assertTrue(
+            ConversationReply.from_dict({"body": "ok", "resolve": True}).resolve
+        )
+        with self.assertRaises(ReviewInputError):
+            ConversationReply.from_dict({"body": "ok", "resolve": "yes"})
 
     def test_conversation_context_is_bounded_and_rejects_oversized_messages(self):
         message = ConversationMessage(
@@ -76,7 +82,9 @@ class ConversationContractTests(unittest.TestCase):
             )
         )
         self.assertEqual(reply.body, "Thanks for the details.")
+        self.assertFalse(reply.resolve)
         self.assertIn("untrusted input", provider.requests[0].prompt)
+        self.assertIn("resolve", provider.requests[0].prompt)
 
     def test_conversation_prompt_labels_all_repository_context_as_data(self):
         provider = FakeProvider('{"body":"Use the exact-head context."}')

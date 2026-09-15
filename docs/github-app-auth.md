@@ -212,4 +212,8 @@ The broker accepts `pull_request`, `workflow_dispatch`, `issue_comment`, and
 `pull_request_review_comment` only, on either `github-hosted` or `self-hosted`
 runner environments. The inline and issue reply capabilities also create and
 delete the App's temporary `eyes` reaction on the corresponding source comment;
-both remain limited to `pull_requests: write`.
+both remain limited to `pull_requests: write`. An AI reply may explicitly mark
+an addressed ReviewSensei-owned inline thread for resolution; the same
+`inline_reply` capability performs the bounded GraphQL resolution mutation
+after exact-head revalidation. Human roots and issue comments are never
+resolved by this path.

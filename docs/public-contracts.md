@@ -427,6 +427,15 @@ from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
 validated before marker append; source update time, exact head, root-thread
 identity, PR state, and fork state are reread before publication. The inline
 reply marker binds source comment, updated-time digest, PR, and head.
+The provider may return an optional boolean `resolve` decision. Missing or
+false keeps the thread open; true is honored only for an inline thread whose
+root comment is authored by the ReviewSensei App. The publisher maps that root
+comment to GitHub's GraphQL review-thread id, rechecks the exact head, and then
+performs an idempotent `resolveReviewThread` mutation. Issue-only comments,
+human-authored roots, stale heads, ambiguous mappings, and malformed or failed
+GraphQL responses never resolve a thread. A successful resolution is reported
+as `replied_and_resolved`; the reply marker still permits a later retry to
+complete a resolution that followed an already-published reply.
 Generated review and comment-event execution supports both provider modes.
 Cloud operations use GitHub-hosted compute and send bounded review or
 conversation context to Ollama Cloud; local operations use the labelled
@@ -434,7 +443,11 @@ self-hosted runner and configured local Ollama service. After authorization and
 before provider execution, ReviewSensei adds an App-authored `eyes` reaction to
 the source comment. It removes that reaction after reply publication or another
 terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
-idempotent conversation turn over the current thread and exact PR head.
+idempotent conversation turn over the current thread and exact PR head. When a
+reply returns `resolve: true` and the resolution mutation succeeds, the same
+provider job performs one fresh exact-head review and publication pass; a clean
+pass can promote the same-head `COMMENTED` review to `APPROVED`, while new
+findings or any remaining open thread keep the result as `COMMENT`.
 
 All setup-v4 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
 Automatic approval defaults to `true` and can be disabled with

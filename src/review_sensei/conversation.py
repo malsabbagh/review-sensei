@@ -120,7 +120,12 @@ class ConversationService:
             lines.append(f"author={message.author}")
             lines.append(message.body)
         lines.append("</untrusted-thread>")
-        lines.append(
-            "Return one JSON object with a single key body containing Markdown."
+        lines.extend(
+            (
+                "Return one JSON object with keys body and resolve.",
+                "body must contain the concise Markdown reply.",
+                "Set resolve to true only when the current exact-head diff and bounded thread context demonstrate that the ReviewSensei finding is fully addressed; otherwise set resolve to false.",
+                "Never resolve a human-authored concern, an issue-only comment, or an ambiguous/stale finding. Missing resolve is treated as false.",
+            )
         )
         return "\n".join(lines)
