@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
 from .errors import ReviewInputError
 
@@ -24,10 +25,29 @@ def load_schema(name: str) -> dict[str, object]:
     return value
 
 
+def _build_schema_registry() -> Registry:
+    registry: Registry = Registry()
+    for path in sorted(SCHEMA_DIR.glob("*.schema.json")):
+        contents = json.loads(path.read_text(encoding="utf-8"))
+        resource = Resource.from_contents(contents)
+        schema_id = resource.id()
+        if not isinstance(schema_id, str):
+            raise ReviewInputError(f"schema '{path.name}' is missing an $id")
+        registry = registry.with_resource(schema_id, resource)
+    return registry
+
+
+_SCHEMA_REGISTRY = _build_schema_registry()
+
+
+def _schema_registry() -> Registry:
+    return _SCHEMA_REGISTRY
+
+
 def _validator(schema_name: str) -> Draft202012Validator:
     schema = load_schema(schema_name)
     try:
-        return Draft202012Validator(schema)
+        return Draft202012Validator(schema, registry=_schema_registry())
     except Exception as exc:
         raise ReviewInputError(
             f"schema '{schema_name}' is not a valid JSON Schema"
