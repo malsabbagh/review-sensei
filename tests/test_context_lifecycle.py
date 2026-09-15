@@ -1,7 +1,8 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from review_sensei.context import (
     ContextSnapshot,
@@ -149,6 +150,23 @@ class ContextLifecycleTests(unittest.TestCase):
             self.assertEqual(dict(result.outcomes)["link.py"], "unsupported")
             self.assertFalse(result.complete)
 
+    def test_context_reader_rejects_parent_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            outside = Path(temporary) / "outside"
+            root = Path(temporary) / "root"
+            outside.mkdir()
+            root.mkdir()
+            (outside / "secret.py").write_text("SECRET = 1\n")
+            try:
+                (root / "link").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable on this platform")
+            if not hasattr(os, "O_DIRECTORY"):
+                self.skipTest("root-relative open requires O_DIRECTORY")
+            result = SymbolAwareContextSelector(root).select(("link/secret.py",))
+            self.assertEqual(dict(result.outcomes)["link/secret.py"], "unsupported")
+            self.assertFalse(result.complete)
+
     def test_context_input_iterables_are_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,6 +220,12 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(one, two)
         self.assertEqual(
+            stable_finding_fingerprint(
+                path=PurePosixPath("src/a.py"), symbol="run", defect_kind="Race"
+            ),
+            one,
+        )
+        self.assertEqual(
             reconcile_finding_lifecycle(None, one).state,
             "new",
         )
@@ -212,13 +236,29 @@ class ContextLifecycleTests(unittest.TestCase):
             "still-present",
         )
 
+    def test_reconcile_never_marks_fixed_when_review_is_incomplete(self):
+        previous = stable_finding_fingerprint(path="src/a.py", symbol="run")
+        current = stable_finding_fingerprint(path="src/a.py", symbol="run", evidence="x")
+        result = reconcile_finding_lifecycle(
+            FindingLifecycle(previous, "still-present"),
+            current,
+            evidence_confirmed=True,
+            review_complete=False,
+        )
+        self.assertEqual(result.state, "uncertain")
+
     def test_cache_is_keyed_by_snapshot_and_bounded(self):
         cache = ReviewContextCache(max_entries=1)
-        key = ReviewContextCacheKey(
+        first = ReviewContextCacheKey(
             "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l"
         )
-        cache.put(key, ("metadata",))
-        self.assertEqual(cache.get(key), ("metadata",))
+        second = ReviewContextCacheKey(
+            "o/r", 2, "a" * 40, "b" * 40, "e", "m", "p", "s", "c", "l"
+        )
+        cache.put(first, ("first",))
+        cache.put(second, ("second",))
+        self.assertIsNone(cache.get(first))
+        self.assertEqual(cache.get(second), ("second",))
 
     def test_learning_diagnostics_report_conflict_and_expiry(self):
         store = LearningStore(
@@ -240,6 +280,28 @@ class ContextLifecycleTests(unittest.TestCase):
         diagnostics = store.diagnostics(now=datetime(2025, 1, 1, tzinfo=timezone.utc))
         self.assertTrue(any(item.code == "stale" for item in diagnostics))
         self.assertTrue(any(item.code == "conflict" for item in diagnostics))
+
+    def test_learning_diagnostics_skip_conflicts_across_categories(self):
+        store = LearningStore(
+            (
+                LearningEntry(
+                    id="python-rule",
+                    title="Python rule",
+                    rule="Use rule A",
+                    scope=("src/**",),
+                    category="python",
+                ),
+                LearningEntry(
+                    id="docs-rule",
+                    title="Docs rule",
+                    rule="Use rule B",
+                    scope=("src/**",),
+                    category="docs",
+                ),
+            )
+        )
+        diagnostics = store.diagnostics()
+        self.assertFalse(any(item.code == "conflict" for item in diagnostics))
 
     def test_learning_diagnostics_detect_glob_scope_intersection(self):
         store = LearningStore(

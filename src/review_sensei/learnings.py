@@ -71,6 +71,8 @@ def _glob_witnesses(patterns: Iterable[str]) -> tuple[str, ...]:
                     for replacement in replacements:
                         next_variants.add(variant[:start] + replacement + variant[end:])
                 variants = next_variants
+                if len(variants) > MAX_SCOPE_WITNESSES:
+                    variants = set(sorted(variants)[:MAX_SCOPE_WITNESSES])
             segment_options.append(tuple(sorted(variants)))
         candidates = {""}
         for options in segment_options:
@@ -187,9 +189,14 @@ class LearningStore:
         # Overlapping scopes with materially different rules are advisory conflicts.
         for index, left in enumerate(self.all_entries):
             for right in self.all_entries[index + 1 :]:
-                if left.rule == right.rule or (
-                    left.category and right.category and left.category != right.category
+                if left.rule == right.rule:
+                    continue
+                if (
+                    left.category
+                    and right.category
+                    and left.category != right.category
                 ):
+                    # Different categories may coexist on overlapping scopes.
                     continue
                 if _scopes_overlap(left.scope, right.scope):
                     diagnostics.append(

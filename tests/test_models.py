@@ -183,6 +183,23 @@ class ModelTests(unittest.TestCase):
                 scope=(" src/**",),
             )
 
+    def test_learning_entry_requires_superseded_by_for_superseded_status(self):
+        with self.assertRaises(ReviewInputError):
+            LearningEntry(
+                id="old-rule",
+                title="Old rule",
+                rule="Retired by a newer entry.",
+                status="superseded",
+            )
+        with self.assertRaises(ReviewInputError):
+            LearningEntry(
+                id="old-rule",
+                title="Old rule",
+                rule="Retired by a newer entry.",
+                status="superseded",
+                superseded_by="Bad Identifier",
+            )
+
     def test_learning_proposal_serializes_without_unapproved_source_metadata(self):
         proposal = LearningProposal(
             title="Preserve adapter boundaries",

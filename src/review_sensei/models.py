@@ -284,7 +284,17 @@ class LearningEntry:
         for optional_label, optional_content in optional_values:
             _optional_learning_text(optional_label, optional_content)
         if self.status not in {"active", "retired", "superseded"}:
-            raise ReviewInputError("learning status must be active or retired")
+            raise ReviewInputError(
+                "learning status must be active, retired, or superseded"
+            )
+        if self.status == "superseded" and not self.superseded_by:
+            raise ReviewInputError("learning superseded status requires superseded_by")
+        if self.superseded_by is not None and not _LEARNING_ID.fullmatch(
+            self.superseded_by
+        ):
+            raise ReviewInputError(
+                "learning superseded_by must be a lowercase repository-safe identifier"
+            )
         if self.superseded_by == self.id:
             raise ReviewInputError("learning superseded_by cannot reference itself")
         if not isinstance(self.supersedes, tuple) or any(

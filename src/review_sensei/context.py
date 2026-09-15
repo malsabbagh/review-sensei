@@ -6,7 +6,7 @@ import json
 import os
 import re
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
@@ -153,6 +153,64 @@ def _has_symlink_component(root: Path, path: Path) -> bool:
         if current.is_symlink():
             return True
     return False
+
+
+def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | None:
+    """Read a repository file without following symlinks outside ``root``."""
+
+    if _has_symlink_component(root, path):
+        return None
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    file_flags = os.O_RDONLY | nofollow
+    directory_flags = os.O_RDONLY | directory_flag | nofollow
+    try:
+        root_fd = os.open(root, os.O_RDONLY | directory_flag)
+    except OSError:
+        return None
+
+    intermediate_fds: list[int] = []
+    file_fd: int | None = None
+    try:
+        current_fd = root_fd
+        parts = relative.parts
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            except OSError:
+                return None
+            if current_fd != root_fd:
+                intermediate_fds.append(current_fd)
+            current_fd = next_fd
+        try:
+            file_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+        except OSError:
+            return None
+        with os.fdopen(file_fd, "rb") as stream:
+            file_fd = None
+            return stream.read(max_bytes)
+    finally:
+        if file_fd is not None:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for fd in intermediate_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 class RepositoryContextStore:
@@ -452,8 +510,6 @@ class SymbolAwareContextSelector:
         return any(_matches(path, pattern) for pattern in self.allowed_paths)
 
     def _read(self, path: Path) -> str | None:
-        if _has_symlink_component(self.store.root, path):
-            return None
         if _is_secret_like(path) or path.suffix.lower() not in {
             ".py",
             ".pyi",
@@ -467,21 +523,16 @@ class SymbolAwareContextSelector:
             path.relative_to(self.store.root)
         except ValueError:
             return None
-        descriptor: int | None = None
         try:
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path, flags)
-            with os.fdopen(descriptor, "rb") as stream:
-                descriptor = None
-                raw = stream.read(MAX_CONTEXT_FILE_BYTES + 1)
+            raw = _read_file_under_root(
+                self.store.root,
+                path,
+                max_bytes=MAX_CONTEXT_FILE_BYTES + 1,
+            )
         except (OSError, UnicodeError, ValueError):
             return None
-        finally:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        if raw is None:
+            return None
         if len(raw) > MAX_CONTEXT_FILE_BYTES:
             return None
         try:
@@ -930,9 +981,17 @@ def stable_finding_fingerprint(
 ) -> str:
     """Hash stable concern identity, excluding line numbers and prose wording."""
 
+    if isinstance(path, PurePosixPath):
+        normalized_path = path.as_posix()
+    elif path is None:
+        normalized_path = ""
+    elif isinstance(path, str):
+        normalized_path = PurePosixPath(path).as_posix()
+    else:
+        raise ContextLoadError("finding fingerprint path must be a string")
     parts = {
         "evidence_id": evidence_id or "",
-        "path": PurePosixPath(path or "").as_posix(),
+        "path": normalized_path,
         "symbol": " ".join((symbol or "").split()),
         "defect_kind": " ".join((defect_kind or "").lower().split()),
         "evidence": " ".join((evidence or "").split()),
@@ -1004,19 +1063,25 @@ class ReviewContextCache:
         if max_entries < 1:
             raise ContextLoadError("context cache max_entries must be positive")
         self._max_entries = max_entries
-        self._values: dict[str, tuple[object, ...]] = {}
+        self._values: OrderedDict[str, tuple[object, ...]] = OrderedDict()
         self._lock = threading.RLock()
 
     def get(self, key: ReviewContextCacheKey) -> tuple[object, ...] | None:
         with self._lock:
-            return self._values.get(key.digest())
+            digest = key.digest()
+            value = self._values.get(digest)
+            if value is not None:
+                self._values.move_to_end(digest)
+            return value
 
     def put(self, key: ReviewContextCacheKey, metadata: Iterable[object]) -> None:
         value = tuple(metadata)
         with self._lock:
-            self._values[key.digest()] = value
+            digest = key.digest()
+            self._values[digest] = value
+            self._values.move_to_end(digest)
             while len(self._values) > self._max_entries:
-                self._values.pop(next(iter(self._values)))
+                self._values.popitem(last=False)
 
     def invalidate(self, key: ReviewContextCacheKey) -> None:
         with self._lock:
