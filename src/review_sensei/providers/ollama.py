@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import (
+    HTTPHandler,
     HTTPRedirectHandler,
     HTTPSHandler,
     Request,
@@ -87,7 +88,6 @@ class OllamaProvider:
         self.allow_model_override = allow_model_override
         self._opener = opener
         self._ssl_context: ssl.SSLContext | None = None
-        self._safe_opener: Any | None = None
         if self.base_url.lower().startswith("https://"):
             # Standalone PyInstaller bundles do not inherit a usable system
             # CA path on every supported host. Prefer an explicit operator
@@ -100,11 +100,29 @@ class OllamaProvider:
                 raise ProviderError(
                     "Ollama TLS trust store could not be loaded"
                 ) from exc
-        if self._opener is urlopen:
+        self._safe_opener: Any | None = None
+        if opener is urlopen:
             handlers: list[Any] = [_NoRedirect()]
             if self._ssl_context is not None:
                 handlers.append(HTTPSHandler(context=self._ssl_context))
+            else:
+                handlers.append(HTTPHandler())
             self._safe_opener = build_opener(*handlers)
+
+    def _call_custom_opener(self, http_request: Request) -> Any:
+        """Invoke an injected opener, falling back when kwargs are unsupported."""
+
+        opener = getattr(self._opener, "open", self._opener)
+        try:
+            kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
+            if self._ssl_context is not None:
+                kwargs["context"] = self._ssl_context
+            return opener(http_request, **kwargs)
+        except TypeError:
+            try:
+                return opener(http_request, timeout=self.timeout_seconds)
+            except TypeError:
+                return opener(http_request)
 
     @property
     def endpoint(self) -> str:
@@ -149,40 +167,22 @@ class OllamaProvider:
 
         try:
             if self._opener is urlopen:
-                # The built-in transport must reject redirects.  urllib's
-                # default opener follows 301/302/303 responses and may replay
-                # Authorization headers to a different origin.
                 assert self._safe_opener is not None
-                with self._safe_opener.open(
+                response_ctx = self._safe_opener.open(
                     http_request, timeout=self.timeout_seconds
-                ) as response:
-                    read_limit = request.max_response_bytes + 1
-                    body = bytearray()
-                    while len(body) <= request.max_response_bytes:
-                        chunk = response.read(read_limit - len(body))
-                        if not chunk:
-                            break
-                        if not isinstance(chunk, (bytes, bytearray)):
-                            raise ProviderError(
-                                "Ollama returned an invalid response body"
-                            )
-                        body.extend(chunk)
+                )
             else:
-                open_kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
-                if self._ssl_context is not None:
-                    open_kwargs["context"] = self._ssl_context
-                with self._opener(http_request, **open_kwargs) as response:
-                    read_limit = request.max_response_bytes + 1
-                    body = bytearray()
-                    while len(body) <= request.max_response_bytes:
-                        chunk = response.read(read_limit - len(body))
-                        if not chunk:
-                            break
-                        if not isinstance(chunk, (bytes, bytearray)):
-                            raise ProviderError(
-                                "Ollama returned an invalid response body"
-                            )
-                        body.extend(chunk)
+                response_ctx = self._call_custom_opener(http_request)
+            with response_ctx as response:
+                read_limit = request.max_response_bytes + 1
+                body = bytearray()
+                while len(body) <= request.max_response_bytes:
+                    chunk = response.read(read_limit - len(body))
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        raise ProviderError("Ollama returned an invalid response body")
+                    body.extend(chunk)
         except HTTPError as exc:
             raise ProviderError(f"Ollama request failed with HTTP {exc.code}") from exc
         except ProviderError as exc:

@@ -312,6 +312,21 @@ class CliTests(unittest.TestCase):
         )
         self.assertTrue(_cli_option_set(["--model=gpt-4o"], "--model"))
 
+    def test_openai_timeout_rejects_invalid_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        "review.patch",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn("OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue())
+
     def test_openai_timeout_prefers_reviewsensei_environment_variable(self):
         with patch.dict(
             "os.environ",

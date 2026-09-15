@@ -39,6 +39,7 @@ from ..validation import validate_bounded_text
 # unbounded request header, and reject all Unicode control/format/surrogate
 # code points before constructing ``Authorization``.
 MAX_API_KEY_BYTES = 4_096
+MAX_CA_BUNDLE_BYTES = 1_048_576
 ALLOWLISTED_OPENAI_HOSTNAME = "api.openai.com"
 
 
@@ -63,7 +64,7 @@ def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
     return (
         hostname == ALLOWLISTED_OPENAI_HOSTNAME
         and (port is None or port == 443)
-        and path == "/v1"
+        and (path == "/v1" or path.startswith("/v1/"))
     )
 
 
@@ -158,7 +159,8 @@ class OpenAICompatibleProvider:
             raise ValueError("OpenAI-compatible endpoint host is invalid") from exc
         path = parsed.path.rstrip("/") or "/"
         if not allow_custom_endpoint and (
-            hostname != "api.openai.com" or path != "/v1"
+            hostname != "api.openai.com"
+            or not (path == "/v1" or path.startswith("/v1/"))
         ):
             raise ValueError(
                 "OpenAI-compatible endpoint is not allowlisted; pass "
@@ -213,7 +215,11 @@ class OpenAICompatibleProvider:
                     )
                 with os.fdopen(fd, "rb") as handle:
                     fd = -1
-                    contents = handle.read()
+                    contents = handle.read(MAX_CA_BUNDLE_BYTES + 1)
+                if len(contents) > MAX_CA_BUNDLE_BYTES:
+                    raise ProviderError(
+                        "configured SSL_CERT_FILE exceeds the configured size limit"
+                    )
             finally:
                 if fd >= 0:
                     os.close(fd)
