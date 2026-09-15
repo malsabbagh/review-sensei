@@ -151,22 +151,33 @@ jobs:
               --auto-review "$AUTO_REVIEW"
             exit 0
           fi
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "::error::trusted trigger resolver is missing from the default branch"
-            exit 1
-          fi
-          python - "$pull_json" "$AUTO_REVIEW" <<'PY'
+          python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY" <<'PY'
           import json
           import os
           import re
           import sys
           from pathlib import Path
 
-          sha = re.compile(r"^[a-f0-9]{40}$")
+          sha_full = re.compile(r"^[a-f0-9]{40}$")
+          sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
+          rescan = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
+          commit_sha = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           auto_review = sys.argv[2]
-          enable_review = "true" if auto_review == "true" else "false"
+          event_name = sys.argv[3]
+          comment_body = sys.argv[4] if len(sys.argv) > 4 else ""
+
+          def valid_ref(value):
+              return (
+                  isinstance(value, str)
+                  and ref.fullmatch(value) is not None
+                  and ".." not in value
+                  and not value.startswith("/")
+                  and not value.endswith("/")
+                  and "//" not in value
+              )
+
           head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
           base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
           number = pull.get("number")
@@ -181,24 +192,76 @@ jobs:
               or not isinstance(number, int)
               or number < 1
               or not isinstance(head_sha, str)
-              or sha.fullmatch(head_sha) is None
-              or not isinstance(head_ref, str)
-              or ref.fullmatch(head_ref) is None
+              or sha_full.fullmatch(head_sha) is None
+              or not valid_ref(head_ref)
               or not isinstance(base_sha, str)
-              or sha.fullmatch(base_sha) is None
-              or not isinstance(base_ref, str)
-              or ref.fullmatch(base_ref) is None
+              or sha_full.fullmatch(base_sha) is None
+              or not valid_ref(base_ref)
           ):
-              raise SystemExit("pull request identity metadata is invalid")
+              print("::error::pull request identity metadata is invalid", file=sys.stderr)
+              raise SystemExit(1)
+
+          def choose_head(requested):
+              if not requested:
+                  return head_sha
+              requested = requested.casefold()
+              if sha_full.fullmatch(requested):
+                  if requested != head_sha:
+                      print(
+                          "::error::requested head sha does not match the pull request head",
+                          file=sys.stderr,
+                      )
+                      raise SystemExit(1)
+                  return requested
+              if head_sha.startswith(requested):
+                  return head_sha
+              print(
+                  "::error::requested commit does not match the pull request head",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          operation = "review"
+          enable_review = "true" if auto_review == "true" else "false"
+          resolved_head = head_sha
+          if event_name == "pull_request":
+              pass
+          elif event_name == "workflow_dispatch":
+              enable_review = "true"
+          elif event_name == "pull_request_review_comment":
+              operation = "reply"
+              enable_review = "false"
+          elif event_name == "issue_comment":
+              wants_rescan = (
+                  isinstance(comment_body, str)
+                  and "@sensei" in comment_body
+                  and rescan.search(comment_body) is not None
+              )
+              if wants_rescan:
+                  enable_review = "true"
+                  match = commit_sha.search(comment_body)
+                  token = match.group(1).casefold() if match is not None else None
+                  if token is not None and not (
+                      sha_full.fullmatch(token) or sha_prefix.fullmatch(token)
+                  ):
+                      token = None
+                  resolved_head = choose_head(token)
+              else:
+                  operation = "reply"
+                  enable_review = "false"
+          else:
+              print("::error::unsupported event", file=sys.stderr)
+              raise SystemExit(1)
           output = os.environ.get("GITHUB_OUTPUT")
           if not output:
-              raise SystemExit("GITHUB_OUTPUT is unavailable")
+              print("::error::GITHUB_OUTPUT is unavailable", file=sys.stderr)
+              raise SystemExit(1)
           delimiter = "RS_PULL_REQUEST_TITLE"
           while delimiter in title.split("\n"):
               delimiter += "_EOF"
           with open(output, "a", encoding="utf-8") as handle:
-              handle.write("operation=review\n")
-              handle.write(f"head_sha={head_sha}\n")
+              handle.write(f"operation={operation}\n")
+              handle.write(f"head_sha={resolved_head}\n")
               handle.write(f"head_ref={head_ref}\n")
               handle.write(f"base_ref={base_ref}\n")
               handle.write(f"base_sha={base_sha}\n")

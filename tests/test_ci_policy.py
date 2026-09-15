@@ -185,6 +185,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("contains(github.event.comment.body, '@sensei')", text)
         self.assertIn('while delimiter in title.split("\\n"):', text)
         self.assertIn(
+            'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY"',
+            text,
+        )
+        self.assertIn('event_name == "pull_request_review_comment"', text)
+        self.assertNotIn(
             "trusted trigger resolver is missing from the default branch", text
         )
 
