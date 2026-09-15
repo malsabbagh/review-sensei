@@ -103,6 +103,10 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertEqual(resolution.enable_review, "true")
         self.assertEqual(resolution.pull_request_number, "7")
 
+    def test_resolve_pull_request_event_normalizes_enable_review(self):
+        resolution = resolve_pull_request_event(_pull(), auto_review="TRUE")
+        self.assertEqual(resolution.enable_review, "false")
+
     def test_resolve_requires_pull_request_number(self):
         pull = _pull()
         pull["number"] = 0

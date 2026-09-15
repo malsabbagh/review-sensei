@@ -178,6 +178,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("PYTHONPATH=src python src/", text)
+        self.assertIn(
+            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
+            text,
+        )
+        self.assertIn("contains(github.event.comment.body, '@sensei')", text)
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (

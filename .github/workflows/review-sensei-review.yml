@@ -165,6 +165,7 @@ jobs:
           sha = re.compile(r"^[a-f0-9]{40}$")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           auto_review = sys.argv[2]
+          enable_review = "true" if auto_review == "true" else "false"
           head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
           base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
           number = pull.get("number")
@@ -200,7 +201,7 @@ jobs:
               handle.write(f"pull_request_number={number}\n")
               handle.write("pull_request_title<<RS_PULL_REQUEST_TITLE\n")
               handle.write(f"{title}\nRS_PULL_REQUEST_TITLE\n")
-              handle.write(f"enable_review={auto_review}\n")
+              handle.write(f"enable_review={enable_review}\n")
           PY
 
   review-or-reply:
@@ -248,7 +249,7 @@ jobs:
       pull_request_title: ${{ needs.resolve-trigger.outputs.pull_request_title || inputs.pull_request_title || github.event.pull_request.title }}
       stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
       categories_dir: ${{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
-      enable_review: ${{ needs.resolve-trigger.outputs.enable_review || (github.event_name == 'workflow_dispatch' && 'true') || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}
       enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}
       enable_learning_proposals: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}

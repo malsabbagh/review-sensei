@@ -127,7 +127,7 @@ def _resolution_from_pull(
         base_sha=base_sha,
         pull_request_number=_pull_request_number(pull),
         pull_request_title=title,
-        enable_review=enable_review,
+        enable_review="true" if enable_review == "true" else "false",
     )
 
 
