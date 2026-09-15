@@ -357,6 +357,10 @@ class ContractsTests(unittest.TestCase):
         ):
             with self.subTest(field=field), self.assertRaises(ReviewInputError):
                 CandidateFinding.from_dict({**base, field: 1})
+        with self.assertRaisesRegex(
+            ReviewInputError, "candidate finding is missing field 'claim'"
+        ):
+            CandidateFinding.from_dict({k: v for k, v in base.items() if k != "claim"})
         with self.assertRaises(ReviewInputError):
             CandidateFinding.from_dict({**base, "assumptions": ["ok", 1]})
         with self.assertRaises(ReviewInputError):
@@ -429,6 +433,10 @@ class ContractsTests(unittest.TestCase):
             RunOutcome("reviewed", stage_summary={"ok": "x" * 129})
         with self.assertRaises(ReviewInputError):
             RunOutcome("reviewed", stage_summary={"ok": 1})  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", stage_summary={"ok\x07": "stage"})
+        with self.assertRaises(ReviewInputError):
+            RunOutcome("reviewed", stage_summary={"stage": "ok\x07"})
 
     def test_verifier_rejects_oversized_snapshot(self):
         snapshot = {"src/app.py": "x" * (1_048_576 + 1)}
@@ -444,6 +452,14 @@ class ContractsTests(unittest.TestCase):
                 snapshot,
                 snapshot_sha256=SHA,
             )
+
+    def test_verifier_rejects_oversized_single_snapshot_file_before_digest(self):
+        snapshot = {
+            "src/small.py": "ok",
+            "src/huge.py": "x" * (1_048_576 + 1),
+        }
+        with self.assertRaises(ReviewInputError):
+            verify_candidates([], snapshot, snapshot_sha256=SHA)
 
     def test_verifier_allows_distinct_candidates_with_different_evidence(self):
         text = "line one\nline two\n"

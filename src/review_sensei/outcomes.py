@@ -42,6 +42,15 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _aware_now(now: datetime | None = None) -> datetime:
+    """Return an aware UTC timestamp, normalizing naive inputs when provided."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return current.replace(tzinfo=timezone.utc)
+    return current
+
+
 def _parse_aware_datetime(value: str, *, label: str) -> datetime:
     normalized = value.replace("Z", "+00:00").replace("z", "+00:00")
     try:
@@ -63,12 +72,14 @@ def _validate_stage_summary(stage_summary: Mapping[str, str]) -> None:
             not isinstance(key, str)
             or not key
             or len(key) > MAX_STAGE_SUMMARY_KEY_LENGTH
+            or not key.isprintable()
         ):
             raise ReviewInputError("run outcome stage_summary key is invalid")
         if (
             not isinstance(value, str)
             or not value
             or len(value) > MAX_STAGE_SUMMARY_VALUE_LENGTH
+            or not value.isprintable()
         ):
             raise ReviewInputError("run outcome stage_summary value is invalid")
 
@@ -153,7 +164,13 @@ def _canonical_recovery_result(result: Mapping[str, object]) -> str:
 
 @dataclass(frozen=True)
 class ResourceBudget:
-    """Hard upper bounds for one run; zero means no work is admitted."""
+    """Declarative wire contract for one run's resource ceilings.
+
+    Embedders publish these bounds alongside ``RunOutcome`` so callers can
+    reason about budget exhaustion consistently.  Enforcement inside
+    ``ReviewService`` is intentionally deferred to later integration slices;
+    this type remains the authoritative public shape for run budgets.
+    """
 
     max_provider_calls: int = 8
     max_retry_attempts: int = 2
@@ -290,10 +307,7 @@ class RecoveryArtifact:
             _parse_aware_datetime(created_at, label="recovery artifact created_at")
         _parse_aware_datetime(expires_at, label="recovery artifact expires_at")
         if created_at is None:
-            current = now or datetime.now(timezone.utc)
-            if current.tzinfo is None or current.utcoffset() is None:
-                current = current.replace(tzinfo=timezone.utc)
-            created = current.replace(microsecond=0).isoformat()
+            created = _aware_now(now).replace(microsecond=0).isoformat()
         else:
             created = created_at
         canonical = _canonical_recovery_result(result)
@@ -332,10 +346,7 @@ class RecoveryArtifact:
         expiry = _parse_aware_datetime(
             self.expires_at, label="recovery artifact expiry"
         )
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None or current.utcoffset() is None:
-            current = current.replace(tzinfo=timezone.utc)
-        if expiry <= current:
+        if expiry <= _aware_now(now):
             raise ReviewInputError("recovery artifact has expired")
 
     def to_dict(self) -> dict[str, object]:

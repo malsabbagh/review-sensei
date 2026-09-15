@@ -3,6 +3,11 @@
 This pass never asks a model to adjudicate itself.  It verifies that bounded
 evidence references exist in the exact snapshot reviewed and that candidates
 are actionable before a publisher is allowed to consider them.
+
+Snapshot bounds intentionally reuse ``ReviewLimits`` diff ceilings
+(``max_diff_files`` and ``max_diff_bytes``) so verification stays aligned with
+the same hard profile used to admit review inputs.  Embedders may tighten
+limits by passing a lower ``ReviewLimits`` profile to the verifier helpers.
 """
 
 from __future__ import annotations
@@ -116,8 +121,12 @@ class CandidateFinding:
                 "severity_rationale",
             )
             for field in required_fields:
-                if not isinstance(value.get(field), str):
+                if field not in value:
+                    raise KeyError(field)
+                if not isinstance(value[field], str):
                     raise TypeError(f"candidate {field} must be a string")
+            if "evidence" not in value:
+                raise KeyError("evidence")
             raw_evidence = value["evidence"]
             if not isinstance(raw_evidence, (list, tuple)):
                 raise TypeError("evidence must be iterable")
@@ -144,7 +153,17 @@ class CandidateFinding:
                 value["severity_rationale"],  # type: ignore[arg-type]
                 assumptions,
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except KeyError as exc:
+            field = exc.args[0]
+            raise ReviewInputError(
+                f"candidate finding is missing field '{field}'"
+            ) from exc
+        except TypeError as exc:
+            message = str(exc)
+            if message.startswith(("candidate ", "evidence ")):
+                raise ReviewInputError(message) from exc
+            raise ReviewInputError("candidate finding is malformed") from exc
+        except ValueError as exc:
             raise ReviewInputError("candidate finding is malformed") from exc
 
 
@@ -171,11 +190,11 @@ class VerificationResult:
         return value
 
 
-def _validate_snapshot(
+def _check_snapshot_bounds(
     snapshot: Mapping[str, str],
     *,
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
-) -> bytes:
+) -> None:
     if not isinstance(snapshot, Mapping):
         raise ReviewInputError("snapshot must be a mapping")
     if len(snapshot) > limits.max_diff_files:
@@ -185,10 +204,16 @@ def _validate_snapshot(
         if not isinstance(path, str) or not isinstance(content, str):
             raise ReviewInputError("snapshot paths and contents must be strings")
         validate_repository_path(path, label="snapshot path")
-        total_bytes += utf8_size(path, label="snapshot path")
-        total_bytes += utf8_size(content, label="snapshot content")
+        path_bytes = utf8_size(path, label="snapshot path")
+        content_bytes = utf8_size(content, label="snapshot content")
+        if content_bytes > limits.max_diff_bytes:
+            raise ReviewInputError("snapshot file exceeds the configured byte limit")
+        total_bytes += path_bytes + content_bytes
         if total_bytes > limits.max_diff_bytes:
             raise ReviewInputError("snapshot exceeds the configured byte limit")
+
+
+def _canonical_snapshot_bytes(snapshot: Mapping[str, str]) -> bytes:
     return json.dumps(
         dict(sorted(snapshot.items())),
         sort_keys=True,
@@ -197,8 +222,13 @@ def _validate_snapshot(
     ).encode("utf-8")
 
 
-def _snapshot_digest(snapshot: Mapping[str, str]) -> str:
-    return hashlib.sha256(_validate_snapshot(snapshot)).hexdigest()
+def _snapshot_digest(
+    snapshot: Mapping[str, str],
+    *,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> str:
+    _check_snapshot_bounds(snapshot, limits=limits)
+    return hashlib.sha256(_canonical_snapshot_bytes(snapshot)).hexdigest()
 
 
 def _candidate_dedup_key(candidate: CandidateFinding) -> tuple[str, str, str]:
@@ -260,7 +290,11 @@ def _verify_candidate_evidence(
 
 
 def verify_candidate(
-    candidate: CandidateFinding, snapshot: Mapping[str, str], *, snapshot_sha256: str
+    candidate: CandidateFinding,
+    snapshot: Mapping[str, str],
+    *,
+    snapshot_sha256: str,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> VerificationResult:
     """Verify evidence paths/lines and excerpts against a reviewed snapshot.
 
@@ -271,7 +305,7 @@ def verify_candidate(
         raise ReviewInputError("candidate must be a CandidateFinding")
     if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
-    if _snapshot_digest(snapshot) != snapshot_sha256:
+    if _snapshot_digest(snapshot, limits=limits) != snapshot_sha256:
         raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
     return _verify_candidate_evidence(
         candidate, snapshot, snapshot_sha256=snapshot_sha256
@@ -283,11 +317,12 @@ def verify_candidates(
     snapshot: Mapping[str, str],
     *,
     snapshot_sha256: str,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> tuple[VerificationResult, ...]:
     """Verify candidates independently, de-duplicating identical claims."""
     if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
-    digest = _snapshot_digest(snapshot)
+    digest = _snapshot_digest(snapshot, limits=limits)
     if digest != snapshot_sha256:
         raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
     seen: set[tuple[str, str, str]] = set()
