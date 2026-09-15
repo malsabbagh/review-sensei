@@ -169,6 +169,19 @@ class ContractsTests(unittest.TestCase):
                 ).isoformat(),
             )
 
+    def test_recovery_artifact_rejects_oversized_nested_keys(self):
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result={"x" * 257: "ok", "comments": [], "provider": "fixture"},
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+            )
+
     def test_recovery_artifact_rejects_timezone_less_expiry(self):
         artifact = self._artifact()
         with self.assertRaises(ReviewInputError):
@@ -472,6 +485,12 @@ class ContractsTests(unittest.TestCase):
             "src/small.py": "ok",
             "src/huge.py": "x" * (1_048_576 + 1),
         }
+        with self.assertRaises(ReviewInputError):
+            verify_candidates([], snapshot, snapshot_sha256=SHA)
+
+    def test_verifier_rejects_per_file_path_plus_content_over_limit(self):
+        long_path = "src/" + ("a" * 1020) + ".py"
+        snapshot = {long_path: "x" * 1000}
         with self.assertRaises(ReviewInputError):
             verify_candidates([], snapshot, snapshot_sha256=SHA)
 

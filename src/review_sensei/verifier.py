@@ -41,8 +41,9 @@ PUBLIC_SCHEMA_VERSION = "1.0"
 class EvidenceReference:
     """One bounded line reference into the reviewed snapshot.
 
-    ``excerpt``, when present, must be a single-line substring of the referenced
-    line.  Multi-line excerpts are rejected at construction time.
+    ``excerpt``, when present, must be a single-line string at construction time.
+    Whether it is a substring of the referenced snapshot line is validated only
+    during ``verify_candidate`` / ``verify_candidates``, not here.
     """
 
     path: str
@@ -224,7 +225,7 @@ def _check_snapshot_bounds(
         validate_repository_path(path, label="snapshot path")
         path_bytes = utf8_size(path, label="snapshot path")
         content_bytes = utf8_size(content, label="snapshot content")
-        if content_bytes > limits.max_diff_bytes:
+        if path_bytes + content_bytes > limits.max_diff_bytes:
             raise ReviewInputError(
                 "snapshot file exceeds the configured per-file byte limit"
             )
@@ -268,12 +269,12 @@ def _verify_candidate_evidence(
     candidate: CandidateFinding,
     snapshot: Mapping[str, str],
     *,
-    snapshot_sha256: str,
+    reviewed_snapshot_sha256: str,
 ) -> VerificationResult:
     reasons: list[str] = []
     evidence_valid = True
     for reference in candidate.evidence:
-        if reference.snapshot_sha256 != snapshot_sha256:
+        if reference.snapshot_sha256 != reviewed_snapshot_sha256:
             evidence_valid = False
             reasons.append("evidence snapshot does not match reviewed snapshot")
             continue
@@ -327,10 +328,11 @@ def verify_candidate(
         raise ReviewInputError("candidate must be a CandidateFinding")
     if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
         raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
-    if _snapshot_digest(snapshot, limits=limits) != snapshot_sha256:
+    reviewed_digest = _snapshot_digest(snapshot, limits=limits)
+    if reviewed_digest != snapshot_sha256:
         raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
     return _verify_candidate_evidence(
-        candidate, snapshot, snapshot_sha256=snapshot_sha256
+        candidate, snapshot, reviewed_snapshot_sha256=reviewed_digest
     )
 
 
@@ -365,7 +367,7 @@ def verify_candidates(
         seen.add(key)
         results.append(
             _verify_candidate_evidence(
-                candidate, snapshot, snapshot_sha256=snapshot_sha256
+                candidate, snapshot, reviewed_snapshot_sha256=digest
             )
         )
     return tuple(results)

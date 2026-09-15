@@ -33,6 +33,7 @@ RUN_STATUSES = frozenset(
 _SNAPSHOT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 MAX_RECOVERY_RESULT_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
 MAX_RECOVERY_RESULT_DEPTH = 32
+MAX_RECOVERY_RESULT_KEY_LENGTH = 256
 MAX_STAGE_SUMMARY_ENTRIES = 64
 MAX_STAGE_SUMMARY_KEY_LENGTH = 128
 MAX_STAGE_SUMMARY_VALUE_LENGTH = 128
@@ -125,9 +126,16 @@ def _json_value_depth(value: object, *, limit: int = MAX_RECOVERY_RESULT_DEPTH) 
             )
         if not value:
             return 1
-        return 1 + max(
-            _json_value_depth(item, limit=limit - 1) for item in value.values()
-        )
+        child_depths: list[int] = []
+        for key, item in value.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key) > MAX_RECOVERY_RESULT_KEY_LENGTH
+            ):
+                raise ReviewInputError("recovery artifact result key is invalid")
+            child_depths.append(_json_value_depth(item, limit=limit - 1))
+        return 1 + max(child_depths)
     if isinstance(value, (list, tuple)):
         if limit <= 0:
             raise ReviewInputError(
@@ -152,7 +160,6 @@ def _canonical_recovery_result(result: Mapping[str, object]) -> str:
         raise ReviewInputError("recovery artifact result must be an object")
     document = dict(result)
     _json_value_depth(document)
-    validate_public_document(document, "review-result")
     try:
         canonical = json.dumps(
             document,
@@ -173,6 +180,7 @@ def _canonical_recovery_result(result: Mapping[str, object]) -> str:
         raise ReviewInputError(
             "recovery artifact result exceeds the configured size limit"
         )
+    validate_public_document(document, "review-result")
     return canonical
 
 
