@@ -431,12 +431,10 @@ the source comment. It removes that reaction after reply publication or another
 terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
 idempotent conversation turn over the current thread and exact PR head.
 
-All setup-v4 switches (`REVIEWSENSEI_AUTO_REVIEW`,
-`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
-`REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`) default to
-`false`. Automatic approval is independently opt-in and remains disabled unless
-`REVIEWSENSEI_AUTO_APPROVE=true`. When automatic review, GitHub writes, and that
-approval opt-in are enabled, `APPROVE` is emitted only when the validated result
+All setup-v4 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
+Automatic approval defaults to `true` and can be disabled with
+`REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
+enabled, `APPROVE` is emitted only when the validated result
 is marked `complete`, has no blocking findings, and a bounded GraphQL
 `reviewThreads` sweep confirms that every existing review thread is resolved.
 Non-blocking findings may be published as follow-up comments alongside an

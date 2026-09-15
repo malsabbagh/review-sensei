@@ -181,9 +181,9 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
 The `review_publish` capability covers both `COMMENT` and `APPROVE` events; no
-additional App permission or secret is required. Automatic approval is a
-separate opt-in (`REVIEWSENSEI_AUTO_APPROVE=true`). When enabled alongside the
-automatic review and GitHub-writes path, the publisher emits `APPROVE` only for
+additional App permission or secret is required. Automatic approval is enabled
+by default and may be disabled with `REVIEWSENSEI_AUTO_APPROVE=false`. Alongside
+the automatic review and GitHub-writes path, the publisher emits `APPROVE` only for
 a validated exact-head result marked `complete`, with no blocking findings and
 a complete, bounded GraphQL review-thread sweep showing every existing thread
 resolved. Explicit non-blocking follow-ups can accompany an approval; any open

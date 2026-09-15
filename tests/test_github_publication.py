@@ -349,7 +349,7 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         self.assertEqual(len(calls), 3)
 
-    def test_clean_review_uses_approve_event(self):
+    def test_clean_review_uses_approve_event_by_default(self):
         head = "b" * 40
         http, calls = make_http(
             [
@@ -371,7 +371,6 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
-            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))

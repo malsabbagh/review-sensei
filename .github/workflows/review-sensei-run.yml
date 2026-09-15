@@ -77,7 +77,7 @@ on:
         type: string
       enable_auto_approve:
         required: false
-        default: 'false'
+        default: 'true'
         type: string
       enable_learning_proposals:
         required: false
@@ -533,6 +533,8 @@ jobs:
           fi
           if [[ "$AUTO_APPROVE" == "true" ]]; then
             review_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            review_args+=(--no-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
@@ -765,6 +767,8 @@ jobs:
           fi
           if [[ "$AUTO_APPROVE" == "true" ]]; then
             review_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            review_args+=(--no-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \

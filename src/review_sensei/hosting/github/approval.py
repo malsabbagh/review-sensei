@@ -17,7 +17,7 @@ class AutoApprovalDecision:
 
 def evaluate_auto_approval(
     *,
-    enabled: bool = False,
+    enabled: bool = True,
     app_authored: bool,
     result: ReviewResult,
     has_open_review_threads: bool | None = None,
@@ -42,9 +42,9 @@ def evaluate_auto_approval(
         blockers.append("review-threads-invalid")
     if not isinstance(result, ReviewResult):
         blockers.append("review-result-invalid")
-    # Approval is an explicit, repository-controlled capability.  A missing
-    # or false opt-in always selects COMMENT while retaining the same review
-    # publication path and marker/idempotency guarantees.
+    # Approval remains the compatible default. A repository may explicitly
+    # disable it while retaining the same review-publication and
+    # marker/idempotency guarantees.
     if enabled is not True:
         blockers.append("auto-approval-disabled")
     if app_authored is True:

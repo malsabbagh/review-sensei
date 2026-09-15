@@ -15,6 +15,7 @@ from review_sensei.hosting.github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
+from review_sensei.hosting.github.setup import SETUP_VARIABLES
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
@@ -270,6 +271,11 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", workflow)
         self.assertIn("REVIEWSENSEI_AUTO_APPROVE", workflow)
         self.assertIn("enable_auto_approve", workflow)
+        self.assertIn(
+            "enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}",
+            workflow,
+        )
+        self.assertIn(("REVIEWSENSEI_AUTO_APPROVE", "true"), SETUP_VARIABLES)
         self.assertIn(
             "operation: ${{ github.event_name == 'pull_request' && 'review' || "
             "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "

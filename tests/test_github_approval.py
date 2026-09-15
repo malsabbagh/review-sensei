@@ -216,14 +216,14 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("app-authored-pull-request",))
 
-    def test_opt_in_is_required_and_reports_stable_blocker(self):
+    def test_approval_is_enabled_by_default(self):
         decision = evaluate_auto_approval(
             app_authored=False,
             result=clean_result(),
             has_open_review_threads=False,
         )
-        self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("auto-approval-disabled",))
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.blockers, ())
 
     def test_non_boolean_approval_inputs_fail_closed(self):
         decision = evaluate_auto_approval(

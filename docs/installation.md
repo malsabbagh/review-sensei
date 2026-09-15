@@ -108,8 +108,8 @@ comments and a validated summary. Enable `REVIEWSENSEI_LEARNING_PRS` separately 
 learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
-satisfy branch-protection approvals automatically only when the separate
-`REVIEWSENSEI_AUTO_APPROVE=true` opt-in is set. Before choosing `APPROVE`, the
+satisfy branch-protection approvals automatically by default. Set
+`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Before choosing `APPROVE`, the
 publisher requires a validated exact-head result marked `complete`, with no
 blocking findings, a same-repository non-draft PR, and a final bounded
 GraphQL sweep showing that all existing review threads are resolved.

@@ -122,7 +122,7 @@ class ReviewPublisher:
         result: ReviewResult,
         diff: str,
         app_slug: str,
-        auto_approve: bool = False,
+        auto_approve: bool = True,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")

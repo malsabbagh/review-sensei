@@ -53,7 +53,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.1.1"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
-    ("REVIEWSENSEI_AUTO_APPROVE", "false"),
+    ("REVIEWSENSEI_AUTO_APPROVE", "true"),
     ("REVIEWSENSEI_LEARNING_PROPOSALS", "false"),
     ("REVIEWSENSEI_GITHUB_WRITES", "false"),
     ("REVIEWSENSEI_LEARNING_PRS", "false"),
@@ -690,7 +690,7 @@ jobs:
       stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
       categories_dir: ${{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
       enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
-      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}
+      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}
       enable_learning_proposals: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
       enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}

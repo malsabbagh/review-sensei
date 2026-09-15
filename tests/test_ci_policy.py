@@ -194,8 +194,13 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("provider_mode:", text)
         self.assertIn("enable_auto_approve:", text)
+        self.assertIn(
+            "enable_auto_approve:\n        required: false\n        default: 'true'",
+            text,
+        )
         self.assertIn("AUTO_APPROVE", text)
         self.assertIn("--enable-auto-approve", text)
+        self.assertIn("--no-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("validate-provider-mode:", text)

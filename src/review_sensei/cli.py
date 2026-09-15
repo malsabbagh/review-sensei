@@ -289,8 +289,16 @@ def _github_parser() -> argparse.ArgumentParser:
     )
     review.add_argument(
         "--enable-auto-approve",
+        dest="enable_auto_approve",
         action="store_true",
-        help="Opt into APPROVE publication after complete-review checks.",
+        default=True,
+        help="Approve eligible complete reviews (the default).",
+    )
+    review.add_argument(
+        "--no-auto-approve",
+        dest="enable_auto_approve",
+        action="store_false",
+        help="Publish COMMENT rather than APPROVE after review checks.",
     )
     review.add_argument(
         "--enable-learning-prs",
