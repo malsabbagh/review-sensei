@@ -62,15 +62,17 @@ def _default_ollama_model() -> str:
 def _cli_option_set(arguments: list[str], option: str) -> bool:
     """Return True when *option* was explicitly passed on the command line."""
 
-    if option in arguments or any(
-        value.startswith(f"{option}=") for value in arguments
-    ):
+    if any(value.startswith(f"{option}=") for value in arguments):
         return True
     try:
         index = arguments.index(option)
     except ValueError:
         return False
-    return index + 1 < len(arguments) and not arguments[index + 1].startswith("-")
+    return bool(
+        index + 1 < len(arguments)
+        and arguments[index + 1]
+        and not arguments[index + 1].startswith("-")
+    )
 
 
 def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> None:
@@ -83,16 +85,18 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
     provider_name = str(args.provider).strip().lower()
     if _cli_option_set(argv, "--provider"):
         if provider_name == "fixture":
-            raise ReviewInputError("--provider fixture cannot be combined with --profile")
+            raise ReviewInputError(
+                "--provider fixture cannot be combined with --profile"
+            )
         if provider_name != selected.provider:
             raise ReviewInputError(
                 f"--provider {provider_name} does not match profile "
-                f"'{profile_name}' (requires {selected.provider})"
+                f"'{selected.name}' (requires {selected.provider})"
             )
         return
     if provider_name != selected.provider:
         raise ReviewInputError(
-            f"profile '{profile_name}' requires --provider {selected.provider}; "
+            f"profile '{selected.name}' requires --provider {selected.provider}; "
             f"the current default is {provider_name!r} from --provider or "
             "REVIEWSENSEI_PROVIDER"
         )
@@ -107,9 +111,7 @@ def _openai_timeout_default() -> float:
     try:
         return _positive_float(configured)
     except argparse.ArgumentTypeError as exc:
-        raise ReviewInputError(
-            f"{source} must be a positive number"
-        ) from exc
+        raise ReviewInputError(f"{source} must be a positive number") from exc
 
 
 def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
@@ -761,9 +763,9 @@ def main(argv: list[str] | None = None) -> int:
     if args_list and args_list[0] == "github":
         github_argv = args_list[1:]
         args = _github_parser().parse_args(github_argv)
-        if getattr(args, "command", None) == "reply":
-            _apply_provider_defaults(args, github_argv)
         try:
+            if getattr(args, "command", None) == "reply":
+                _apply_provider_defaults(args, github_argv)
             return _run_github(args, argv=github_argv)
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)

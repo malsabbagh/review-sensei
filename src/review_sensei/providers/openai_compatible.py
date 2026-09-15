@@ -33,6 +33,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
+from .transport import read_bounded_body
 
 # Provider credentials are untrusted configuration input.  Keep a generous
 # but finite ceiling so a malformed environment value cannot become an
@@ -208,14 +209,20 @@ class OpenAICompatibleProvider:
             raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
         try:
             try:
-                file_stat = os.fstat(fd)
-                if not stat.S_ISREG(file_stat.st_mode):
+                file_stat_before = os.fstat(fd)
+                if not stat.S_ISREG(file_stat_before.st_mode):
                     raise ProviderError(
                         "configured SSL_CERT_FILE is not a regular file"
                     )
                 with os.fdopen(fd, "rb") as handle:
                     fd = -1
                     contents = handle.read(MAX_CA_BUNDLE_BYTES + 1)
+                    file_stat_after = os.fstat(handle.fileno())
+                if (
+                    file_stat_before.st_dev != file_stat_after.st_dev
+                    or file_stat_before.st_ino != file_stat_after.st_ino
+                ):
+                    raise ProviderError("configured SSL_CERT_FILE changed during read")
                 if len(contents) > MAX_CA_BUNDLE_BYTES:
                     raise ProviderError(
                         "configured SSL_CERT_FILE exceeds the configured size limit"
@@ -240,19 +247,7 @@ class OpenAICompatibleProvider:
 
         configured = os.getenv("SSL_CERT_FILE")
         if configured:
-            try:
-                cert_path = Path(configured)
-                if not cert_path.exists():
-                    raise ProviderError("configured SSL_CERT_FILE is missing")
-            except OSError as exc:
-                if exc.errno == errno.ENOENT:
-                    raise ProviderError("configured SSL_CERT_FILE is missing") from exc
-                if exc.errno in {errno.EACCES, errno.EPERM}:
-                    raise ProviderError(
-                        "configured SSL_CERT_FILE is unreadable"
-                    ) from exc
-                raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
-            return OpenAICompatibleProvider._load_ca_bundle(cert_path)
+            return OpenAICompatibleProvider._load_ca_bundle(Path(configured))
         # Standalone PyInstaller bundles do not inherit a usable system CA path
         # on every supported host. Prefer certifi after an explicit override.
         try:
@@ -288,32 +283,6 @@ class OpenAICompatibleProvider:
                     raise ProviderError(
                         "OpenAI-compatible opener could not be called"
                     ) from exc
-
-    @staticmethod
-    def _read_bounded_body(response: Any, maximum: int) -> bytearray:
-        body = bytearray()
-        while True:
-            # Read one byte beyond the ceiling so an exact-limit response can
-            # be accepted while an oversized response fails closed.  Check the
-            # chunk length before extending the buffer because some injected
-            # responses ignore the requested size.
-            requested = maximum - len(body) + 1
-            try:
-                chunk = response.read(requested)
-            except TypeError as exc:
-                raise ProviderError(
-                    "OpenAI-compatible response body could not be read"
-                ) from exc
-            if not chunk:
-                break
-            if not isinstance(chunk, (bytes, bytearray)):
-                raise ProviderError("OpenAI-compatible response body is invalid")
-            if len(chunk) > requested or len(body) + len(chunk) > maximum:
-                raise ProviderError(
-                    "OpenAI-compatible response exceeded the configured size limit"
-                )
-            body.extend(chunk)
-        return body
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         model = (request.model if self.allow_model_override else None) or self.model
@@ -353,10 +322,18 @@ class OpenAICompatibleProvider:
                 with self._safe_opener.open(
                     http_request, timeout=self.timeout_seconds
                 ) as response:
-                    body = self._read_bounded_body(response, request.max_response_bytes)
+                    body = read_bounded_body(
+                        response,
+                        request.max_response_bytes,
+                        label="OpenAI-compatible response",
+                    )
             else:
                 with self._call_custom_opener(http_request) as response:
-                    body = self._read_bounded_body(response, request.max_response_bytes)
+                    body = read_bounded_body(
+                        response,
+                        request.max_response_bytes,
+                        label="OpenAI-compatible response",
+                    )
         except HTTPError as exc:
             raise ProviderError(
                 f"OpenAI-compatible request failed with HTTP {exc.code}"
@@ -381,7 +358,7 @@ class OpenAICompatibleProvider:
         except TypeError as exc:
             # Context-manager protocol only. Opener invocation TypeErrors are
             # normalized in ``_call_custom_opener``; reader TypeErrors are
-            # normalized in ``_read_bounded_body``.
+            # normalized in ``read_bounded_body``.
             raise ProviderError(
                 "OpenAI-compatible response could not be opened"
             ) from exc
