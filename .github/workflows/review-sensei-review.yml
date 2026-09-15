@@ -72,10 +72,12 @@ permissions:
 jobs:
   resolve-trigger:
     if: >-
+      github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
-      github.event_name == 'workflow_dispatch' ||
+      (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -90,9 +92,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot')) &&
-      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
+      github.event.comment.user.type != 'Bot')))
     runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -104,11 +104,15 @@ jobs:
       head_ref: ${{ steps.resolve.outputs.head_ref }}
       base_ref: ${{ steps.resolve.outputs.base_ref }}
       base_sha: ${{ steps.resolve.outputs.base_sha }}
+      pull_request_number: ${{ steps.resolve.outputs.pull_request_number }}
       pull_request_title: ${{ steps.resolve.outputs.pull_request_title }}
       enable_review: ${{ steps.resolve.outputs.enable_review }}
     steps:
-      - name: Check out trigger resolver
+      - name: Check out trusted trigger resolver
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Resolve pull-request trigger metadata
         id: resolve
@@ -117,45 +121,97 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
           PULL_REQUEST: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
+          PULL_REQUEST_URL: ${{ github.event.comment.pull_request_url }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           AUTO_REVIEW: ${{ vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
-          DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
-          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
-          DISPATCH_BASE_REF: ${{ inputs.base_ref }}
-          DISPATCH_BASE_SHA: ${{ inputs.base_sha }}
-          DISPATCH_TITLE: ${{ inputs.pull_request_title }}
         run: |
           set -euo pipefail
+          PULL_REQUEST="${PULL_REQUEST:-}"
+          PULL_REQUEST_URL="${PULL_REQUEST_URL:-}"
+          COMMENT_BODY="${COMMENT_BODY:-}"
+          if [[ -z "${PULL_REQUEST}" && -n "${PULL_REQUEST_URL}" ]]; then
+            PULL_REQUEST="${PULL_REQUEST_URL##*/}"
+          fi
+          if [[ ! "${PULL_REQUEST}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::pull request number is unavailable"
+            exit 1
+          fi
           pull_json="$RUNNER_TEMP/review-sensei-pull.json"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             printf '%s' '${{ toJson(github.event.pull_request) }}' > "$pull_json"
-            PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
-              --event pull_request \
+          else
+            gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
+          fi
+          resolver="src/review_sensei/hosting/github/trigger.py"
+          if [[ -f "$resolver" ]]; then
+            PYTHONPATH=src python "$resolver" \
+              --event "$EVENT_NAME" \
+              --comment-body "$COMMENT_BODY" \
               --pull-json "$pull_json" \
               --auto-review "$AUTO_REVIEW"
             exit 0
           fi
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
-            PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
-              --event workflow_dispatch \
-              --pull-json "$pull_json"
-            exit 0
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "::error::trusted trigger resolver is missing from the default branch"
+            exit 1
           fi
-          gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
-          PYTHONPATH=src python src/review_sensei/hosting/github/trigger.py \
-            --event "$EVENT_NAME" \
-            --comment-body "$COMMENT_BODY" \
-            --pull-json "$pull_json" \
-            --auto-review "$AUTO_REVIEW"
+          python - "$pull_json" "$AUTO_REVIEW" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sha = re.compile(r"^[a-f0-9]{40}$")
+          pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          auto_review = sys.argv[2]
+          head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+          base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+          number = pull.get("number")
+          head_sha = head.get("sha")
+          head_ref = head.get("ref")
+          base_sha = base.get("sha")
+          base_ref = base.get("ref")
+          title = pull.get("title") if isinstance(pull.get("title"), str) else ""
+          title = " ".join(title.split())
+          if (
+              isinstance(number, bool)
+              or not isinstance(number, int)
+              or number < 1
+              or not isinstance(head_sha, str)
+              or sha.fullmatch(head_sha) is None
+              or not isinstance(head_ref, str)
+              or not head_ref.strip()
+              or not isinstance(base_sha, str)
+              or sha.fullmatch(base_sha) is None
+              or not isinstance(base_ref, str)
+              or not base_ref.strip()
+          ):
+              raise SystemExit("pull request identity metadata is invalid")
+          output = os.environ.get("GITHUB_OUTPUT")
+          if not output:
+              raise SystemExit("GITHUB_OUTPUT is unavailable")
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write("operation=review\n")
+              handle.write(f"head_sha={head_sha}\n")
+              handle.write(f"head_ref={head_ref}\n")
+              handle.write(f"base_ref={base_ref}\n")
+              handle.write(f"base_sha={base_sha}\n")
+              handle.write(f"pull_request_number={number}\n")
+              handle.write("pull_request_title<<RS_PULL_REQUEST_TITLE\n")
+              handle.write(f"{title}\nRS_PULL_REQUEST_TITLE\n")
+              handle.write(f"enable_review={auto_review}\n")
+          PY
 
   review-or-reply:
     needs: resolve-trigger
     if: >-
+      github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
-      github.event_name == 'workflow_dispatch' ||
+      (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -170,9 +226,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot')) &&
-      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
+      github.event.comment.user.type != 'Bot')))
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
@@ -180,7 +234,7 @@ jobs:
       operation: ${{ needs.resolve-trigger.outputs.operation }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
-      pull_request_number: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
+      pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}
       base_ref: ${{ needs.resolve-trigger.outputs.base_ref || inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
       base_sha: ${{ needs.resolve-trigger.outputs.base_sha || inputs.base_sha || github.event.pull_request.base.sha }}
       head_ref: ${{ needs.resolve-trigger.outputs.head_ref || inputs.head_ref || github.event.pull_request.head.ref || '' }}

@@ -18,10 +18,26 @@ from review_sensei.hosting.github.trigger import (
 
 def _pull(*, head_sha: str = "b" * 40, base_sha: str = "a" * 40) -> dict[str, object]:
     return {
+        "number": 7,
         "title": "Add provider profiles",
         "head": {"sha": head_sha, "ref": "feature/providers"},
         "base": {"sha": base_sha, "ref": "main"},
     }
+
+
+def _resolution(**overrides: str) -> TriggerResolution:
+    values = {
+        "operation": "reply",
+        "head_sha": "b" * 40,
+        "head_ref": "feature/providers",
+        "base_ref": "main",
+        "base_sha": "a" * 40,
+        "pull_request_number": "7",
+        "pull_request_title": "Add provider profiles",
+        "enable_review": "false",
+    }
+    values.update(overrides)
+    return TriggerResolution(**values)
 
 
 class GitHubTriggerTests(unittest.TestCase):
@@ -85,11 +101,19 @@ class GitHubTriggerTests(unittest.TestCase):
         resolution = resolve_pull_request_event(_pull(), auto_review="true")
         self.assertEqual(resolution.operation, "review")
         self.assertEqual(resolution.enable_review, "true")
+        self.assertEqual(resolution.pull_request_number, "7")
+
+    def test_resolve_requires_pull_request_number(self):
+        pull = _pull()
+        pull["number"] = 0
+        with self.assertRaisesRegex(ValueError, "pull request number is invalid"):
+            resolve_pull_request_event(pull, auto_review="true")
 
     def test_resolve_review_comment_event(self):
         resolution = resolve_review_comment_event("@sensei fixed?", _pull())
         self.assertEqual(resolution.operation, "reply")
         self.assertEqual(resolution.head_sha, "b" * 40)
+        self.assertEqual(resolution.pull_request_number, "7")
 
     def test_resolve_issue_comment_collapses_multiline_title(self):
         pull = _pull()
@@ -98,31 +122,20 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertEqual(resolution.pull_request_title, "Add provider profiles")
 
     def test_write_github_output_uses_heredoc_for_title(self):
-        resolution = TriggerResolution(
-            operation="reply",
-            head_sha="b" * 40,
-            head_ref="feature/providers",
-            base_ref="main",
-            base_sha="a" * 40,
-            pull_request_title="Add provider profiles",
-            enable_review="false",
-        )
+        resolution = _resolution()
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "github-output"
             with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
                 write_github_output(resolution)
             text = output.read_text(encoding="utf-8")
         self.assertIn("operation=reply\n", text)
+        self.assertIn("pull_request_number=7\n", text)
         self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE\n", text)
         self.assertIn("Add provider profiles\nRS_PULL_REQUEST_TITLE\n", text)
 
     def test_write_github_output_escapes_newline_title(self):
-        resolution = TriggerResolution(
+        resolution = _resolution(
             operation="review",
-            head_sha="b" * 40,
-            head_ref="feature/providers",
-            base_ref="main",
-            base_sha="a" * 40,
             pull_request_title="Add provider\nprofiles",
             enable_review="true",
         )
@@ -136,15 +149,7 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertNotIn("pull_request_title=Add provider\n", text)
 
     def test_write_github_output_requires_github_output(self):
-        resolution = TriggerResolution(
-            operation="reply",
-            head_sha="b" * 40,
-            head_ref="feature/providers",
-            base_ref="main",
-            base_sha="a" * 40,
-            pull_request_title="Add provider profiles",
-            enable_review="false",
-        )
+        resolution = _resolution()
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "GITHUB_OUTPUT is unavailable"):
                 write_github_output(resolution)

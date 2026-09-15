@@ -163,6 +163,21 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
             text,
         )
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn(
+            "ref: ${{ github.event.repository.default_branch }}",
+            text,
+        )
+        self.assertIn(
+            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}",
+            text,
+        )
+        self.assertIn("github.event.comment.pull_request_url", text)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' ||",
+            text,
+        )
+        self.assertNotIn("PYTHONPATH=src python src/", text)
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (

@@ -25,6 +25,7 @@ class TriggerResolution:
     head_ref: str
     base_ref: str
     base_sha: str
+    pull_request_number: str
     pull_request_title: str
     enable_review: str
 
@@ -103,33 +104,48 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
     return head_sha, head_ref, base_ref, base_sha, title
 
 
+def _pull_request_number(pull: Mapping[str, Any]) -> str:
+    number = pull.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise ValueError("pull request number is invalid")
+    return str(number)
+
+
+def _resolution_from_pull(
+    pull: Mapping[str, Any],
+    *,
+    operation: str,
+    enable_review: str,
+    head_sha: str | None = None,
+) -> TriggerResolution:
+    resolved_head, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+    return TriggerResolution(
+        operation=operation,
+        head_sha=resolved_head if head_sha is None else head_sha,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        base_sha=base_sha,
+        pull_request_number=_pull_request_number(pull),
+        pull_request_title=title,
+        enable_review=enable_review,
+    )
+
+
 def resolve_issue_comment(
     body: str,
     pull: Mapping[str, Any],
 ) -> TriggerResolution:
     """Resolve a PR issue comment into review or mention-reply operation inputs."""
 
-    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
     if issue_comment_requests_rescan(body):
         requested = extract_requested_commit(body)
-        return TriggerResolution(
+        return _resolution_from_pull(
+            pull,
             operation="review",
-            head_sha=choose_head_sha(pull, requested),
-            head_ref=head_ref,
-            base_ref=base_ref,
-            base_sha=base_sha,
-            pull_request_title=title,
             enable_review="true",
+            head_sha=choose_head_sha(pull, requested),
         )
-    return TriggerResolution(
-        operation="reply",
-        head_sha=head_sha,
-        head_ref=head_ref,
-        base_ref=base_ref,
-        base_sha=base_sha,
-        pull_request_title=title,
-        enable_review="false",
-    )
+    return _resolution_from_pull(pull, operation="reply", enable_review="false")
 
 
 def resolve_pull_request_event(
@@ -139,16 +155,7 @@ def resolve_pull_request_event(
 ) -> TriggerResolution:
     """Resolve a pull_request webhook event."""
 
-    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
-    return TriggerResolution(
-        operation="review",
-        head_sha=head_sha,
-        head_ref=head_ref,
-        base_ref=base_ref,
-        base_sha=base_sha,
-        pull_request_title=title,
-        enable_review=auto_review,
-    )
+    return _resolution_from_pull(pull, operation="review", enable_review=auto_review)
 
 
 def resolve_review_comment_event(
@@ -157,16 +164,7 @@ def resolve_review_comment_event(
 ) -> TriggerResolution:
     """Resolve an inline review comment mention into mention-reply inputs."""
 
-    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
-    return TriggerResolution(
-        operation="reply",
-        head_sha=head_sha,
-        head_ref=head_ref,
-        base_ref=base_ref,
-        base_sha=base_sha,
-        pull_request_title=title,
-        enable_review="false",
-    )
+    return _resolution_from_pull(pull, operation="reply", enable_review="false")
 
 
 def _write_github_output_value(
@@ -200,6 +198,9 @@ def write_github_output(resolution: TriggerResolution) -> None:
         _write_github_output_value(handle, "head_ref", resolution.head_ref)
         _write_github_output_value(handle, "base_ref", resolution.base_ref)
         _write_github_output_value(handle, "base_sha", resolution.base_sha)
+        _write_github_output_value(
+            handle, "pull_request_number", resolution.pull_request_number
+        )
         _write_github_output_value(
             handle,
             "pull_request_title",
@@ -235,15 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     elif event == "pull_request_review_comment":
         resolution = resolve_review_comment_event(args.comment_body, pull)
     elif event == "workflow_dispatch":
-        head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
-        resolution = TriggerResolution(
-            operation="review",
-            head_sha=head_sha,
-            head_ref=head_ref,
-            base_ref=base_ref,
-            base_sha=base_sha,
-            pull_request_title=title,
-            enable_review="true",
+        resolution = _resolution_from_pull(
+            pull, operation="review", enable_review="true"
         )
     else:
         raise SystemExit(f"unsupported event: {event}")
