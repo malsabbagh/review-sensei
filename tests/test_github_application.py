@@ -225,7 +225,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertTrue(self.reviewer.calls[0]["auto_approve"])
         self.assertEqual(self.learner.calls[0]["token"], "capability-learning_write")
         self.assertEqual(self.replier.calls[0]["token"], "capability-issue_reply")
-        self.assertNotIn("auto_approve", self.replier.calls[0])
+        self.assertTrue(self.replier.calls[0]["auto_approve"])
 
     def test_learning_proposals_reuse_one_learning_capability(self):
         options = GitHubWriteOptions(github_writes=True, learning_prs=True)

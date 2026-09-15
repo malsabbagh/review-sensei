@@ -72,10 +72,23 @@ deletion terms before sending source data.
 ## Threshold and provider-change policy
 
 Corpus, matching, threshold, and report-schema changes require maintainer
-review. A provider/model/configuration change is approved only after three
-independent fixture or live runs are recorded with the same corpus and no
-regression in the deterministic or quality thresholds. CI remains fixture-only;
-live runs are gated, non-secret, and performed outside the CI workflow.
+review. Fixture runs are deterministic engine checks only and can never approve
+a real model, prompt, generation-setting, or routing promotion. Such a
+promotion requires a validated `promotion-record` document (the packaged
+`promotion-record` schema) binding engine, prompt, configuration, and corpus
+digests; provider/model identity or observed revision; at least three repeated
+runs; date; and reproducibility settings. The record must include an explicit
+`supported`, `insufficient`, or `unsupported` status and rollback decision.
+The record is metadata about the evaluation, not the run evidence itself:
+operators must retain exact run outputs and provider terms/egress approval
+separately. Every status still records at least one run and its reproducibility
+settings; only `supported` can authorize promotion, and it requires at least
+three runs.
+
+CI remains fixture-only. Live runs are gated, non-secret, and performed outside
+the CI workflow against reviewed synthetic or explicitly authorized data. The
+repository does not claim hosted-provider or GitHub evidence until that
+separately retained evidence is available.
 
 ## Rollback
 

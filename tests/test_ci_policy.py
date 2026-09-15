@@ -209,6 +209,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("github reply \\\n"), 2)
         self.assertEqual(text.count("github review \\\n"), 2)
         self.assertEqual(text.count("Publish or promote"), 2)
+        self.assertNotIn("after AI resolution", text)
+        self.assertIn("auto_approve_args", text)
+        self.assertEqual(text.count("reply_exit=$?"), 2)
+        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
+        self.assertEqual(
+            text.count("mention reply command failed (exit $reply_exit)"), 2
+        )
+        self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 2)
+        self.assertEqual(text.count("Verify mention reply completed"), 2)
+        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
+        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 

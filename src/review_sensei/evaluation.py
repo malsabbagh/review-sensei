@@ -5,6 +5,7 @@ import json
 import math
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -34,6 +35,156 @@ _PRIVACY_PATTERNS = (
     re.compile(r"[A-Za-z0-9._%+-]+@(?!example\.com)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
 )
 _SECRET_MARKERS = ("PRIVATE_DIFF_MARKER", "PRIVATE_PROMPT_MARKER", "PROD_OUTPUT_MARKER")
+
+
+def _reproducibility_dict(value: object) -> dict[str, Any]:
+    """Copy reproducibility settings into a JSON-object-shaped dictionary."""
+
+    if not isinstance(value, Mapping):
+        raise ReviewInputError("promotion record reproducibility must be an object")
+    try:
+        copied = dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ReviewInputError(
+            "promotion record reproducibility must be an object"
+        ) from exc
+    if any(not isinstance(key, str) for key in copied):
+        raise ReviewInputError("promotion record reproducibility keys must be strings")
+    return copied
+
+
+def _is_fixture_alias(value: str) -> bool:
+    """Recognize fixture-only provider aliases without case sensitivity."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().casefold()).strip("-")
+    return normalized in {
+        "fixture",
+        "fixture-provider",
+        "fixture-v1",
+        "fixtureprovider",
+        "stub",
+        "stub-provider",
+        "stubprovider",
+        "fake",
+        "fake-provider",
+        "fakeprovider",
+    }
+
+
+@dataclass(frozen=True)
+class PromotionRecord:
+    """Evidence metadata required before promoting a real model/prompt configuration.
+
+    Every status records at least one observed run; only ``supported`` requires
+    three or more runs and reproducibility settings before promotion.
+    The status and rollback defaults preserve direct-constructor compatibility;
+    ``validate_promotion_record`` still requires both fields in untrusted JSON.
+    """
+
+    engine_digest: str
+    prompt_digest: str
+    configuration_digest: str
+    corpus_digest: str
+    provider: str
+    model: str
+    observed_revision: str
+    run_count: int
+    evaluated_at: str
+    reproducibility: Mapping[str, Any]
+    status: str = "supported"
+    rollback_decision: str = "revert-to-baseline"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "engine_digest",
+            "prompt_digest",
+            "configuration_digest",
+            "corpus_digest",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise ReviewInputError(
+                    f"promotion record {name} must be a SHA-256 digest"
+                )
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (
+                self.provider,
+                self.model,
+                self.observed_revision,
+                self.evaluated_at,
+            )
+        ):
+            raise ReviewInputError("promotion record identity fields are required")
+        reproducibility = _reproducibility_dict(self.reproducibility)
+        object.__setattr__(self, "reproducibility", reproducibility)
+        if (
+            isinstance(self.run_count, bool)
+            or not isinstance(self.run_count, int)
+            or self.run_count < 1
+        ):
+            raise ReviewInputError("promotion record run_count must be positive")
+        if self.status not in {"supported", "insufficient", "unsupported"}:
+            raise ReviewInputError("promotion record status is unsupported")
+        if self.status == "supported" and self.run_count < 3:
+            raise ReviewInputError(
+                "supported promotion evidence requires at least three runs"
+            )
+        if not self.reproducibility:
+            raise ReviewInputError("promotion record requires reproducibility settings")
+        if self.status == "supported" and _is_fixture_alias(self.provider):
+            raise ReviewInputError("fixture-only evidence cannot support promotion")
+        if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:
+            raise ReviewInputError("promotion record rollback decision is unsupported")
+
+    def to_dict(self) -> dict[str, Any]:
+        value = {
+            "schema_version": "1.0",
+            "engine_digest": self.engine_digest,
+            "prompt_digest": self.prompt_digest,
+            "configuration_digest": self.configuration_digest,
+            "corpus_digest": self.corpus_digest,
+            "provider": self.provider,
+            "model": self.model,
+            "observed_revision": self.observed_revision,
+            "run_count": self.run_count,
+            "evaluated_at": self.evaluated_at,
+            "reproducibility": _reproducibility_dict(self.reproducibility),
+            "status": self.status,
+            "rollback_decision": self.rollback_decision,
+        }
+        validate_public_document(value, "promotion-record")
+        return value
+
+
+def validate_promotion_record(value: Mapping[str, Any]) -> PromotionRecord:
+    """Parse and validate promotion evidence, rejecting incomplete records."""
+
+    if not isinstance(value, dict):
+        raise ReviewInputError("promotion record must be a JSON object")
+    validate_public_document(value, "promotion-record")
+    try:
+        return PromotionRecord(
+            **{
+                key: value[key]
+                for key in (
+                    "engine_digest",
+                    "prompt_digest",
+                    "configuration_digest",
+                    "corpus_digest",
+                    "provider",
+                    "model",
+                    "observed_revision",
+                    "run_count",
+                    "evaluated_at",
+                    "reproducibility",
+                    "status",
+                    "rollback_decision",
+                )
+            }
+        )
+    except KeyError as exc:
+        raise ReviewInputError("promotion record is incomplete") from exc
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -493,14 +644,19 @@ def run_case(
                 label="expected result",
             )
         )
-        # Pre-status fixtures remain valid as complete deterministic outputs;
-        # this compatibility applies only to evaluation, never publication.
-        if (
-            isinstance(expected_document, dict)
-            and "review_status" not in expected_document
-        ):
-            expected_document["review_status"] = "complete"
-        status = "passed" if expected_document == result.to_dict() else "failed"
+        # Pre-status fixtures remain valid as complete deterministic outputs.
+        # Evaluation accepts both the legacy fixture shape and the additive
+        # explicit ``complete`` status, while publication keeps its
+        # fail-closed parser strict for artifacts missing a status.
+        actual_document = result.to_dict()
+        if isinstance(expected_document, dict):
+            if expected_document.get("review_status") == "complete":
+                expected_document = dict(expected_document)
+                expected_document.pop("review_status")
+            if actual_document.get("review_status") == "complete":
+                actual_document = dict(actual_document)
+                actual_document.pop("review_status")
+        status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(
         comment.line > 0 and comment.path for comment in result.comments
     )

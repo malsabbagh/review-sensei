@@ -189,6 +189,7 @@ class GitHubApplication:
             app_slug=app_slug,
             root_comment_id=root_comment_id,
             source_kind=source_kind,
+            auto_approve=options.auto_approve,
         )
 
     def generate_and_publish_reply(
@@ -253,6 +254,7 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
+                auto_approve=options.auto_approve,
             )
         finally:
             self.replier.remove_processing_reaction(

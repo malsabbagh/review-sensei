@@ -560,27 +560,34 @@ canonical base commit. Reply operations use a no-op preflight and cannot
 select a review step; unavailable GitHub metadata fails closed with an
 explicit error rather than allowing a stale or ambiguous review.
 
-The existing automatic-review and GitHub-writes caller path can emit a
-deterministic approval: only a validated exact-head result with no blocking
-findings whose final
-bounded GraphQL `reviewThreads` sweep finds no unresolved thread can emit
-`APPROVE`. Blocking findings, unresolved threads, draft/closed/stale/fork targets,
-App-authored PRs, and conversation replies remain `COMMENT`; malformed or
-unavailable thread state fails closed before a write. The sweep asks only for
-`isResolved`, is capped at ten pages, and runs after marker reconciliation and
-the final PR preflight. The existing `pull_requests: write` capability and
-per-head marker/idempotency boundary are shared. Reconciliation tracks the
-published GitHub review state, allowing one same-head `COMMENTED` to
-`APPROVED` promotion after a fresh clean run while deduplicating repeated
-events, so approval adds no credential or persistence boundary.
+The automatic-review and GitHub-writes caller path defaults to automatic
+approval. Findings publish as `COMMENT`; a shared deterministic finalizer then
+emits `APPROVE` only when an eligible exact-head PR has no unresolved
+ReviewSensei root classified blocking. Non-blocking ReviewSensei roots and
+human threads may remain open. Blocking or unclassified ReviewSensei roots,
+draft/closed/stale/fork targets, App-authored PRs, and malformed or unavailable
+thread state withhold approval or fail closed. The classification sweep asks
+only for bounded root data, is capped at ten pages, and runs before a final PR
+preflight. The finalizer runs after review publication and after the AI resolves
+a blocking root. The existing `pull_requests: write` capability and per-head
+approval marker/idempotency boundary are shared, so approval adds no credential
+or persistence boundary.
 
 Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the
 source comment, the provider receives the already-bounded thread/diff/findings/
 learnings context, and a `finally` cleanup removes the reaction after reply
-publication or another terminal outcome. Reply markers still provide
-idempotency, so a retry can reconcile an already-published response without
-creating a duplicate.
+publication or another terminal outcome. The validated reply may also carry an
+explicit `resolve` decision. Only a ReviewSensei-authored inline root can be
+resolved; the publisher rechecks the exact head, performs a bounded GraphQL
+root-to-thread lookup, and confirms an idempotent `resolveReviewThread` result.
+Issue comments, human roots, stale heads, and malformed or unavailable thread
+responses remain unresolved. Reply markers still provide idempotency, so a
+retry can reconcile an already-published response and finish a pending
+resolution without creating a duplicate. After a successful AI resolution of a
+blocking root, the adapter invokes the shared finalizer on the same exact head;
+this avoids a second provider pass, synthetic commit, or Actions-dispatch
+capability while preserving the normal approval gates.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

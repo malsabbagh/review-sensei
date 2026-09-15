@@ -543,6 +543,7 @@ jobs:
             --allow-write "${review_args[@]}"
 
       - name: Generate and publish cloud mention reply
+        id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -553,6 +554,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -561,13 +563,53 @@ jobs:
             echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
             exit 1
           fi
+          reply_output="$RUNNER_TEMP/review-sensei-reply-status"
+          auto_approve_args=()
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            auto_approve_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            auto_approve_args+=(--no-auto-approve)
+          fi
+          set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply
+            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+          reply_exit=$?
+          set -e
+          reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
+          echo "$reply_status"
+          if [[ "$reply_exit" -ne 0 ]]; then
+            echo "::error::mention reply command failed (exit $reply_exit)" >&2
+            exit 1
+          fi
+          case "$reply_status" in
+            replied_and_resolved|already_replied_and_resolved)
+              echo "resolved=true" >> "$GITHUB_OUTPUT"
+              ;;
+            replied|already_replied|skipped_source_gone|skipped_no_mention|\
+              skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
+              skipped_stale_head|skipped_fork)
+              echo "resolved=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unexpected mention reply status: $reply_status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify mention reply completed
+        if: >-
+          always() && inputs.operation == 'reply' &&
+          inputs.enable_github_writes == 'true' &&
+          inputs.enable_mention_replies == 'true' &&
+          steps.reply.outcome != 'success'
+        run: |
+          echo '::error::mention reply step did not complete successfully' >&2
+          exit 1
 
       - name: Upload opt-in review artifact
         if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
@@ -777,6 +819,7 @@ jobs:
             --allow-write "${review_args[@]}"
 
       - name: Generate and publish trusted local mention reply
+        id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -788,16 +831,57 @@ jobs:
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
+          reply_output="$RUNNER_TEMP/review-sensei-reply-status"
+          auto_approve_args=()
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            auto_approve_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            auto_approve_args+=(--no-auto-approve)
+          fi
+          set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url http://127.0.0.1:11434/api \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply
+            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+          reply_exit=$?
+          set -e
+          reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
+          echo "$reply_status"
+          if [[ "$reply_exit" -ne 0 ]]; then
+            echo "::error::mention reply command failed (exit $reply_exit)" >&2
+            exit 1
+          fi
+          case "$reply_status" in
+            replied_and_resolved|already_replied_and_resolved)
+              echo "resolved=true" >> "$GITHUB_OUTPUT"
+              ;;
+            replied|already_replied|skipped_source_gone|skipped_no_mention|\
+              skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
+              skipped_stale_head|skipped_fork)
+              echo "resolved=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unexpected mention reply status: $reply_status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify mention reply completed
+        if: >-
+          always() && inputs.operation == 'reply' &&
+          inputs.enable_github_writes == 'true' &&
+          inputs.enable_mention_replies == 'true' &&
+          steps.reply.outcome != 'success'
+        run: |
+          echo '::error::mention reply step did not complete successfully' >&2
+          exit 1
 
       - name: Upload opt-in review artifact
         if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'

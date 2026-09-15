@@ -62,6 +62,11 @@ containing `/v1/`.
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 
+Compatibility-manifest worker ranges support bounded numeric, caret, tilde, and
+wildcard forms. An unqualified `x` or `*` is intentionally an explicit
+all-non-negative-semver range; releases that need a compatibility gate should
+prefer a bounded range.
+
 The `$id` policy is fixed: the path after the package namespace must include
 `/v1/` for v1 documents. Schema identity is the `$id`. Legacy review-result
 documents do not carry `schema_version`; the newer operational contracts emit
@@ -422,6 +427,15 @@ from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
 validated before marker append; source update time, exact head, root-thread
 identity, PR state, and fork state are reread before publication. The inline
 reply marker binds source comment, updated-time digest, PR, and head.
+The provider may return an optional boolean `resolve` decision. Missing or
+false keeps the thread open; true is honored only for an inline thread whose
+root comment is authored by the ReviewSensei App. The publisher maps that root
+comment to GitHub's GraphQL review-thread id, rechecks the exact head, and then
+performs an idempotent `resolveReviewThread` mutation. Issue-only comments,
+human-authored roots, stale heads, ambiguous mappings, and malformed or failed
+GraphQL responses never resolve a thread. A successful resolution is reported
+as `replied_and_resolved`; the reply marker still permits a later retry to
+complete a resolution that followed an already-published reply.
 Generated review and comment-event execution supports both provider modes.
 Cloud operations use GitHub-hosted compute and send bounded review or
 conversation context to Ollama Cloud; local operations use the labelled
@@ -429,30 +443,32 @@ self-hosted runner and configured local Ollama service. After authorization and
 before provider execution, ReviewSensei adds an App-authored `eyes` reaction to
 the source comment. It removes that reaction after reply publication or another
 terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
-idempotent conversation turn over the current thread and exact PR head.
+idempotent conversation turn over the current thread and exact PR head. When a
+reply returns `resolve: true` for a blocking root and the resolution mutation
+succeeds, the same provider job invokes the deterministic exact-head approval
+finalizer. It does not call the provider again.
 
 All setup-v4 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
 Automatic approval defaults to `true` and can be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
-enabled, `APPROVE` is emitted only when the validated result
-is marked `complete`, has no blocking findings, and a bounded GraphQL
-`reviewThreads` sweep confirms that every existing review thread is resolved.
-Non-blocking findings may be published as follow-up comments alongside an
-approval; blocking findings, unresolved threads, and `@sensei` replies remain
+enabled, findings publish as `COMMENT` and the shared finalizer emits `APPROVE`
+only for an eligible exact head with no unresolved ReviewSensei root classified
+blocking. Non-blocking ReviewSensei follow-ups and human threads may remain
+open; blocking or unclassified ReviewSensei roots and `@sensei` replies remain
 `COMMENT`. Partial, incomplete, or summary-only artifacts are always comments,
-even when approval is enabled. Draft, closed, stale, fork, or App-authored pull requests are never
-approved. A malformed, unauthorized, incomplete, or over-limit thread response
-fails closed before the write. The marker deduplicates each review state per
-exact head: a no-blocker rerun may promote an earlier same-head `COMMENTED` review
-to one `APPROVED` review after all threads resolve, while repeated comments and
-approvals remain no-ops. Thread resolution alone does not trigger a workflow
-run. The generated caller may contain only the name-only secret mapping
+even when approval is enabled. Draft, closed, stale, fork, or App-authored pull
+requests are never approved. A malformed, unauthorized, incomplete, or
+over-limit thread response fails closed before the write. The approval marker
+deduplicates each exact-head approval while repeated comments and approvals
+remain no-ops. The finalizer runs after review publication and after an AI
+resolution of a blocking root. Manual thread resolution alone does not trigger
+a workflow run. The generated caller may contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 
 The approval decision is deterministic: explicit blocking findings or
-unclassified canonical `critical`/`high` severity block approval; open-thread
-safety remains independent. Inline comments and review summaries render that
-same effective merge-impact classification. The policy exposes stable
+unclassified canonical `critical`/`high` severity block approval; malformed or
+unknown ReviewSensei roots fail closed. Inline comments and review summaries
+render that same effective merge-impact classification. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.

@@ -7,6 +7,7 @@ from .context import (
     build_review_context_selection,
 )
 from .conversation import ConversationService
+from .evaluation import PromotionRecord, validate_promotion_record
 from .learnings import LearningStore, load_repository_learnings
 from .models import (
     ConversationContext,
@@ -22,6 +23,11 @@ from .models import (
     ReviewLensContext,
     ReviewRequest,
     ReviewResult,
+)
+from .release_manifest import (
+    Artifact,
+    CompatibilityManifest,
+    validate_compatibility_manifest,
 )
 from .service import ReviewService
 from .stages import (
@@ -42,6 +48,11 @@ __all__ = [
     "ConversationMessage",
     "ConversationReply",
     "ConversationService",
+    "PromotionRecord",
+    "validate_promotion_record",
+    "Artifact",
+    "CompatibilityManifest",
+    "validate_compatibility_manifest",
     "LearningEntry",
     "LearningProposal",
     "LearningStore",

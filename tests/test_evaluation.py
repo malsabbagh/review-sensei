@@ -13,8 +13,9 @@ from review_sensei.evaluation import (
     endpoint_scope,
     evaluate_fixture,
     load_corpus,
+    run_case,
 )
-from review_sensei.models import ReviewComment
+from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
 
 
@@ -249,6 +250,45 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(report["metrics"]["provider_calls"], 1)
         self.assertNotIn("diff", report)
         self.assertNotIn("response", report)
+
+    def test_legacy_fixture_does_not_accept_a_noncomplete_actual_status(self) -> None:
+        class PartialService:
+            def review(self, _request):
+                return ReviewResult(
+                    summary="ok",
+                    comments=(),
+                    provider="fixture",
+                    model="fixture-v1",
+                    review_status="partial",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            measured = MeasuredProvider(None)
+
+            outcome = run_case(
+                corpus,
+                corpus.document["cases"][0],
+                PartialService(),
+                measured,
+            )
+
+        self.assertEqual(outcome["status"], "failed")
+
+    def test_fixture_explicitly_matching_complete_status_passes(self) -> None:
+        expected = (
+            '{"summary":"ok","comments":[],"provider":"fixture",'
+            '"model":"fixture-v1","learning_proposals":[],'
+            '"review_status":"complete"}'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(
+                _write_corpus(Path(temp_dir), expected_result_text=expected)
+            )
+
+            report = evaluate_fixture(corpus)
+
+        self.assertTrue(report["passed"])
 
     def test_degraded_report_fails_named_thresholds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

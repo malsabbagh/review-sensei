@@ -109,22 +109,21 @@ learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically by default. Set
-`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Before choosing `APPROVE`, the
-publisher requires a validated exact-head result marked `complete`, with no
-blocking findings, a same-repository non-draft PR, and a final bounded
-GraphQL sweep showing that all existing review threads are resolved.
-Non-blocking findings are published as optional follow-ups and can accompany an
-approval. An open thread, an App-authored PR, a partial/incomplete/summary-only
-result, an incomplete/error response, or any stale/fork/closed target keeps the
-event as `COMMENT` or fails closed before writing. All `@sensei` replies remain
-ordinary comments.
+`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Findings are
+published as `COMMENT`, then a shared idempotent finalizer may emit `APPROVE`.
+It requires an eligible exact-head, same-repository, non-draft PR and no
+unresolved ReviewSensei root classified blocking. Non-blocking ReviewSensei
+follow-ups and human threads may remain open. An unclassified ReviewSensei root,
+partial/incomplete/summary-only result, incomplete/error thread response, or
+stale/fork/closed/App-authored target remains a comment or fails closed before
+writing. All `@sensei` replies remain ordinary comments.
 
-The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
-After every thread is resolved, a fresh workflow run with no blocking findings on the same exact
-head can promote the earlier ReviewSensei comment to one formal approval. It
-does not duplicate the comment or approval. GitHub Actions does not start a run
-when a thread is resolved, so rerun **ReviewSensei review** manually (supplying
-the current exact PR head and base) or push a new head. Classification metadata
+The approval marker deduplicates the `APPROVED` state per exact head. The
+finalizer runs immediately after review publication and after an AI reply
+successfully resolves a blocking root. A maintainer resolving a blocking root
+manually still needs to rerun **ReviewSensei review** (supplying the current
+exact PR head and base) or push a new head because GitHub Actions does not start
+a run for thread resolution alone. Classification metadata
 (blocking, severity, fix effort, and lens) controls the approval boundary:
 explicit `false` does not prevent approval, while an omitted flag is
 blocking only for case-insensitive `critical` or `high` severity; missing,
@@ -164,8 +163,14 @@ reply operations run on `[self-hosted, linux, x64, ollama]`. Both modes support
 automatic review, manual review, validated review publication, learning draft
 PRs, optional artifacts, and authorized `@sensei` conversations. An authorized
 mention receives 👀 while the response is being generated, and the reaction is
-removed after the reply or another terminal outcome. Add another standalone
-`@sensei` mention in the same thread to continue the bounded conversation.
+removed after the reply or another terminal outcome. The provider may include
+`resolve: true` in its validated reply when the current exact-head context
+shows that a ReviewSensei-authored inline finding is fully addressed; the
+publisher then resolves only that thread through a bounded GraphQL mutation.
+Issue comments and human-authored roots remain open. Add another standalone
+`@sensei` mention in the same thread to continue the bounded conversation. A
+successful AI resolution automatically causes one fresh same-head review pass;
+approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
 The generated caller may contain the literal name-only mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read the value

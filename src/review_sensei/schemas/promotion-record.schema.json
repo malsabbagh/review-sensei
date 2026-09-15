@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/promotion-record.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "engine_digest", "prompt_digest", "configuration_digest", "corpus_digest", "provider", "model", "observed_revision", "run_count", "evaluated_at", "reproducibility", "status", "rollback_decision"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "engine_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "prompt_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "configuration_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "corpus_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "provider": {"type": "string", "minLength": 1, "maxLength": 128},
+    "model": {"type": "string", "minLength": 1, "maxLength": 256},
+    "observed_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_count": {"type": "integer", "minimum": 1, "description": "At least one observed run is required for every status; supported promotions require at least three."},
+    "evaluated_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32, "description": "Reproducibility settings are required for every status."},
+    "status": {"enum": ["supported", "insufficient", "unsupported"], "description": "Only supported with at least three runs can authorize promotion."},
+    "rollback_decision": {"enum": ["revert-to-baseline", "hold", "none"]}
+  }
+}

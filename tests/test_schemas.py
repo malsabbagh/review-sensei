@@ -87,6 +87,14 @@ class PublicSchemaTests(unittest.TestCase):
         )
         validate_public_document(result.to_dict(), "review-result")
 
+    def test_conversation_reply_resolution_flag_is_optional_boolean(self) -> None:
+        validate_public_document({"body": "ok"}, "conversation-reply")
+        validate_public_document({"body": "ok", "resolve": True}, "conversation-reply")
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                {"body": "ok", "resolve": "yes"}, "conversation-reply"
+            )
+
     def test_error_categories_are_stable(self) -> None:
         self.assertEqual(ReviewSenseiError.error_category, "unknown")
         self.assertEqual(ReviewInputError.error_category, "input")

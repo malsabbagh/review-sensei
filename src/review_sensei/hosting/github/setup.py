@@ -486,7 +486,7 @@ jobs:
       head_sha: ${{{{ github.event.pull_request.head.sha }}}}
       review_sensei_version: ${{{{ vars.REVIEWSENSEI_VERSION }}}}
       enable_review: ${{{{ vars.REVIEWSENSEI_AUTO_REVIEW }}}}
-      enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}}}
+      enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}}}
       enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
       enable_learning_prs: ${{{{ vars.REVIEWSENSEI_LEARNING_PRS }}}}
       enable_mention_replies: ${{{{ vars.REVIEWSENSEI_MENTION_REPLIES }}}}
@@ -531,7 +531,7 @@ jobs:
       root_comment_id: ${{{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}}}
       review_sensei_version: ${{{{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}}}
       enable_review: ${{{{ (inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply') == 'review' && vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}}}
-      enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'false' }}}}
+      enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}}}
       enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
       enable_learning_prs: ${{{{ vars.REVIEWSENSEI_LEARNING_PRS }}}}
       enable_mention_replies: ${{{{ vars.REVIEWSENSEI_MENTION_REPLIES }}}}

@@ -663,7 +663,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             hashlib.sha256(
                 files[".github/workflows/review-sensei-review.yml"].encode()
             ).hexdigest(),
-            "e6c290f6fff1b634dd3b6b7e93c16afd7284c3eee704edf56800c14cd1fc084b",
+            "5c56bef7ff9dcd0602b085f7ab54bdce7e0447be6c03e085795c4d1a6d4be5c8",
         )
         self.assertEqual(
             hashlib.sha256(
