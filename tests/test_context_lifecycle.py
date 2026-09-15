@@ -227,6 +227,8 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         with self.assertRaises(ContextLoadError):
             stable_finding_fingerprint(path=PurePosixPath("../outside.py"), symbol="run")
+        with self.assertRaises(ContextLoadError):
+            stable_finding_fingerprint(path="src/../outside.py", symbol="run")
         self.assertEqual(
             reconcile_finding_lifecycle(None, one).state,
             "new",

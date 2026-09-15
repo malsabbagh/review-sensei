@@ -996,21 +996,22 @@ def stable_finding_fingerprint(
     """Hash stable concern identity, excluding line numbers and prose wording."""
 
     if isinstance(path, PurePosixPath):
-        normalized_path = path.as_posix()
+        raw_path = path.as_posix()
     elif path is None:
-        normalized_path = ""
+        raw_path = ""
     elif isinstance(path, str):
-        normalized_path = PurePosixPath(path).as_posix()
+        raw_path = path
     else:
         raise ContextLoadError("finding fingerprint path must be a string")
-    if normalized_path:
+    if raw_path:
         try:
             validate_repository_path(
-                normalized_path,
+                raw_path,
                 label="finding fingerprint path",
             )
         except ReviewInputError as exc:
             raise ContextLoadError("finding fingerprint path is invalid") from exc
+    normalized_path = PurePosixPath(raw_path).as_posix() if raw_path else ""
     parts = {
         "evidence_id": evidence_id or "",
         "path": normalized_path,
