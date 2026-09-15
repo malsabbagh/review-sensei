@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
+from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.schemas import validate_public_document
 from review_sensei.verifier import (
@@ -39,6 +40,27 @@ class ContractsTests(unittest.TestCase):
         value = RunOutcome("skipped_policy", diagnostic="policy").to_dict()
         self.assertEqual(value["status"], "skipped_policy")
 
+    def test_run_outcome_to_dict_with_all_optional_fields(self):
+        outcome = RunOutcome(
+            "reviewed",
+            repository="acme/repo",
+            pull_request_number=42,
+            base_sha=SHA,
+            head_sha=SHA,
+            stage_summary={"stage": "complete"},
+            provider_calls=2,
+            retry_attempts=1,
+            prompt_bytes=128,
+            response_bytes=256,
+            elapsed_ms=900,
+            diagnostic="ok",
+        )
+        value = outcome.to_dict()
+        self.assertEqual(value["repository"], "acme/repo")
+        self.assertEqual(value["pull_request_number"], 42)
+        self.assertEqual(value["stage_summary"], {"stage": "complete"})
+        validate_public_document(value, "run-outcome")
+
     def test_budget_and_outcome_validation_boundaries(self):
         for field in (
             "max_provider_calls",
@@ -54,7 +76,13 @@ class ContractsTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             ResourceBudget(max_prompt_bytes=5_000_000)
         with self.assertRaises(ReviewInputError):
-            ResourceBudget(max_output_bytes=2_097_152)
+            ResourceBudget(
+                max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
+                + 1
+            )
+        ResourceBudget(
+            max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
+        )
         with self.assertRaises(ReviewInputError):
             RunOutcome("not-a-status")
         for field in (
@@ -428,6 +456,19 @@ class ContractsTests(unittest.TestCase):
             created_at=created_at,
         )
         self.assertEqual(artifact.created_at, created_at)
+
+    def test_recovery_artifact_create_accepts_injected_now(self):
+        fixed_now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        artifact = RecoveryArtifact.create(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            result=self.RESULT,
+            expires_at="2026-01-01T13:00:00+00:00",
+            now=fixed_now,
+        )
+        self.assertEqual(artifact.created_at, "2026-01-01T12:00:00+00:00")
 
     def test_recovery_artifact_rejects_invalid_identity_at_create(self):
         with self.assertRaises(ReviewInputError):

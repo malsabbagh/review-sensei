@@ -237,6 +237,13 @@ def _check_snapshot_bounds(
 
 
 def _canonical_snapshot_bytes(snapshot: Mapping[str, str]) -> bytes:
+    """Return the canonical UTF-8 bytes used for snapshot digests.
+
+    Callers must hash this exact representation: sorted object keys,
+    ``sort_keys=True``, compact separators ``(",", ":")``, and
+    ``ensure_ascii=True`` (non-ASCII code points are escaped).
+    """
+
     return json.dumps(
         dict(sorted(snapshot.items())),
         sort_keys=True,
@@ -284,7 +291,7 @@ def _verify_candidate_evidence(
             reasons.append("evidence path is absent from reviewed snapshot")
             continue
         lines = snapshot_content.splitlines()
-        if reference.line > len(lines):
+        if reference.line < 1 or reference.line > len(lines):
             evidence_valid = False
             reasons.append("evidence line is outside reviewed snapshot")
             continue

@@ -194,8 +194,11 @@ class ResourceBudget:
     contract slices in issues #36 and #37); this PR publishes the wire shape
     only and does not wire runtime enforcement yet.
 
-    Defaults are public downward-only ceilings.  Prompt and response byte limits
-    must not exceed the corresponding ``ReviewLimits`` profile.
+    Defaults are public downward-only ceilings.  ``max_prompt_bytes`` and
+    ``max_output_bytes`` must not exceed the corresponding ``ReviewLimits``
+    provider-call profile (``max_prompt_bytes`` and
+    ``max_provider_response_bytes``).  Published result size is governed
+    separately by ``ReviewLimits.max_result_bytes``.
     """
 
     max_provider_calls: int = 8
@@ -222,6 +225,13 @@ class ResourceBudget:
 
 @dataclass(frozen=True)
 class RunOutcome:
+    """Bounded run summary for one review attempt.
+
+    ``stage_summary`` keys and values must be printable strings at runtime.
+    The public JSON schema enforces structural bounds only; runtime validation
+    in ``__post_init__`` is authoritative for character content.
+    """
+
     status: str
     repository: str | None = None
     pull_request_number: int | None = None
