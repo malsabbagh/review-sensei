@@ -2,13 +2,28 @@
 
 from .concurrency import ConcurrencyGroup, ReviewConcurrencyPlan
 from .context import (
+    ContextSnapshot,
+    FindingLifecycle,
     RepositoryContextStore,
+    ReviewContextCache,
+    ReviewContextCacheKey,
     ReviewContextSelection,
+    SourceContextExcerpt,
+    SourceContextSelection,
+    SymbolAwareContextSelector,
     build_review_context_selection,
+    reconcile_finding_lifecycle,
+    stable_concern_identity,
+    stable_finding_fingerprint,
 )
 from .conversation import ConversationService
 from .evaluation import PromotionRecord, validate_promotion_record
-from .learnings import LearningStore, load_repository_learnings
+from .learnings import (
+    LearningDiagnostic,
+    LearningFeedback,
+    LearningStore,
+    load_repository_learnings,
+)
 from .models import (
     ConversationContext,
     ConversationFinding,
@@ -56,6 +71,8 @@ __all__ = [
     "ConversationMessage",
     "ConversationReply",
     "ConversationService",
+    "ContextSnapshot",
+    "FindingLifecycle",
     "PromotionRecord",
     "validate_promotion_record",
     "Artifact",
@@ -64,10 +81,17 @@ __all__ = [
     "LearningEntry",
     "LearningProposal",
     "LearningStore",
+    "LearningDiagnostic",
+    "LearningFeedback",
     "load_repository_learnings",
     "ProviderRequest",
     "ProviderResponse",
     "RepositoryContextStore",
+    "SourceContextExcerpt",
+    "SourceContextSelection",
+    "SymbolAwareContextSelector",
+    "ReviewContextCache",
+    "ReviewContextCacheKey",
     "ReviewContextSelection",
     "ReviewComment",
     "ReviewDocument",
@@ -79,6 +103,9 @@ __all__ = [
     "ReviewRequest",
     "ReviewResult",
     "ReviewService",
+    "stable_finding_fingerprint",
+    "stable_concern_identity",
+    "reconcile_finding_lifecycle",
     "RecoveryArtifact",
     "ResourceBudget",
     "RunOutcome",

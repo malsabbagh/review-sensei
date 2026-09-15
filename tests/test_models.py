@@ -183,6 +183,23 @@ class ModelTests(unittest.TestCase):
                 scope=(" src/**",),
             )
 
+    def test_learning_entry_requires_superseded_by_for_superseded_status(self):
+        with self.assertRaises(ReviewInputError):
+            LearningEntry(
+                id="old-rule",
+                title="Old rule",
+                rule="Retired by a newer entry.",
+                status="superseded",
+            )
+        with self.assertRaises(ReviewInputError):
+            LearningEntry(
+                id="old-rule",
+                title="Old rule",
+                rule="Retired by a newer entry.",
+                status="superseded",
+                superseded_by="Bad Identifier",
+            )
+
     def test_learning_proposal_serializes_without_unapproved_source_metadata(self):
         proposal = LearningProposal(
             title="Preserve adapter boundaries",
@@ -490,6 +507,12 @@ class ModelTests(unittest.TestCase):
             provider="fake",
         )
         self.assertEqual(result.comments, (first, distinct))
+
+    def test_review_result_preserves_legacy_positional_status_before_limits(self):
+        limits = ReviewLimits(max_summary_bytes=16)
+        result = ReviewResult("ok", (), "fake", None, (), "complete", limits)
+        self.assertEqual(result.review_status, "complete")
+        self.assertIs(result.limits, limits)
 
     def test_result_custom_limits_reject_every_output_dimension(self):
         base = dict(summary="summary", comments=(), provider="fake")
