@@ -181,14 +181,14 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
 The `review_publish` capability covers both `COMMENT` and `APPROVE` events; no
-additional App permission or secret is required. Automatic approval is enabled
-by default and may be disabled with `REVIEWSENSEI_AUTO_APPROVE=false`. Alongside
-the automatic review and GitHub-writes path, the publisher emits `APPROVE` only for
-a validated exact-head result marked `complete`, with no blocking findings and
-a complete, bounded GraphQL review-thread sweep showing every existing thread
-resolved. Explicit non-blocking follow-ups can accompany an approval; any open
-thread, partial/incomplete/summary-only result, or incomplete sweep remains a
-comment or fails closed. Omitted finding classifications are blocking only for
+additional App permission or secret is required. Automatic approval defaults to
+enabled and may be disabled with `REVIEWSENSEI_AUTO_APPROVE=false`. The shared
+finalizer runs after review publication and after an AI resolution of a blocking
+ReviewSensei root. It emits `APPROVE` only for an eligible exact head with no
+unresolved ReviewSensei root classified blocking. Explicit non-blocking
+follow-ups and human threads can remain open; an unclassified ReviewSensei root,
+partial/incomplete/summary-only result, or incomplete sweep remains a comment
+or fails closed. Omitted finding classifications are blocking only for
 case-insensitive critical/high severity; missing, lower-severity, and legacy
 free-form values are non-blocking.
 

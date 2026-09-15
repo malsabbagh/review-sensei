@@ -5,7 +5,14 @@ from review_sensei.hosting.github import (
     GitHubPublicationTransientError,
     ReviewPublisher,
 )
-from review_sensei.hosting.github.publication import review_marker
+from review_sensei.hosting.github.publication import (
+    ReviewApprovalFinalizer,
+    approval_marker,
+    finding_blocks_approval,
+    finding_declares_blocking,
+    finding_marker,
+    review_marker,
+)
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.validation import ReviewLimits
 
@@ -155,6 +162,385 @@ class ReviewPublisherTests(unittest.TestCase):
         arguments.update(overrides)
         http, calls = make_http(responses)
         return ReviewPublisher(http=http).publish(**arguments), calls
+
+    def finalize(self, responses, **overrides):
+        head = "b" * 40
+        arguments = {
+            "token": "token",
+            "repository": "owner/repo",
+            "pull_request": 2,
+            "head_sha": head,
+            "app_slug": "reviewsensei[bot]",
+        }
+        arguments.update(overrides)
+        http, calls = make_http(responses)
+        return ReviewApprovalFinalizer(http=http).finalize(**arguments), calls
+
+    def test_finalizer_approves_with_only_non_blocking_and_human_threads_open(self):
+        head = "b" * 40
+        marker = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=non_blocking_result(),
+            blocking=False,
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": marker,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "[🚫 Blocking] human finding",
+                                        "author": {"login": "alice"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "approved")
+        approval = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(approval["event"], "APPROVE")
+        self.assertNotIn("comments", approval)
+
+    def test_finalizer_fails_closed_for_an_unclassified_app_thread(self):
+        head = "b" * 40
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "unclassified App root",
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+            ]
+        )
+        self.assertEqual(outcome.status, "blocking_findings_open")
+        self.assertEqual([call[0] for call in calls], ["GET", "POST"])
+
+    def test_finalizer_reconciles_an_existing_exact_head_approval(self):
+        head = "b" * 40
+        marker = approval_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="APPROVED")]
+                ),
+            ]
+        )
+        self.assertEqual(outcome.status, "already_approved")
+        self.assertEqual([call[0] for call in calls], ["GET", "POST", "GET", "GET"])
+
+    def test_finalizer_reconciles_an_ambiguous_approval_write(self):
+        head = "b" * 40
+        marker = approval_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({}, 500),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="APPROVED")]
+                ),
+            ]
+        )
+        self.assertEqual(outcome.status, "already_approved")
+        self.assertEqual(
+            [call[0] for call in calls], ["GET", "POST", "GET", "GET", "POST", "GET"]
+        )
+
+    def test_finalizer_honors_explicit_opt_out_and_known_blocking_result(self):
+        for overrides, expected in (
+            ({"enabled": False}, "auto_approval_disabled"),
+            ({"known_blocking_finding": True}, "blocking_findings_open"),
+        ):
+            with self.subTest(overrides=overrides):
+                outcome, calls = self.finalize([], **overrides)
+                self.assertEqual(outcome.status, expected)
+                self.assertEqual(calls, [])
+
+    def test_finalizer_rejects_invalid_controls_before_networking(self):
+        for overrides in (
+            {"enabled": "true"},
+            {"known_blocking_finding": "false"},
+            {"head_sha": "not-a-sha"},
+        ):
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(GitHubPublicationError):
+                    self.finalize([], **overrides)
+
+    def test_finalizer_skips_ineligible_pull_requests(self):
+        head = "b" * 40
+        cases = (
+            (pr_payload(head_sha=head, state="closed"), "skipped_pr_state"),
+            (pr_payload(head_sha=head, draft=True), "skipped_pr_state"),
+            (pr_payload(head_sha="c" * 40), "skipped_stale_head"),
+            (pr_payload(head_sha=head, fork=True), "skipped_fork"),
+            (
+                pr_payload(head_sha=head, author="reviewsensei[bot]"),
+                "skipped_app_authored",
+            ),
+        )
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                outcome, calls = self.finalize([json_response(payload)])
+                self.assertEqual(outcome.status, expected)
+                self.assertEqual([call[0] for call in calls], ["GET"])
+
+    def test_finalizer_rejects_malformed_preflight_and_thread_responses(self):
+        head = "b" * 40
+        malformed_pr = pr_payload(head_sha=head)
+        malformed_pr["base"] = None
+        with self.assertRaises(GitHubPublicationError):
+            self.finalize([json_response(malformed_pr)])
+        with self.assertRaises(GitHubPublicationError):
+            self.finalize(
+                [
+                    json_response(pr_payload(head_sha=head)),
+                    json_response({"data": {"repository": {}}}),
+                ]
+            )
+
+    def test_finalizer_paginates_review_threads_before_approving(self):
+        head = "b" * 40
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    has_next_page=True, end_cursor="page-2"
+                ),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 12}),
+            ]
+        )
+        self.assertEqual(outcome.status, "approved")
+        first_query = __import__("json").loads(calls[1][2].decode("utf-8"))
+        second_query = __import__("json").loads(calls[2][2].decode("utf-8"))
+        self.assertIsNone(first_query["variables"]["after"])
+        self.assertEqual(second_query["variables"]["after"], "page-2")
+
+    def test_finalizer_reconciles_or_reports_terminal_approval_errors(self):
+        head = "b" * 40
+        for status, error in (
+            (422, GitHubPublicationError),
+            (404, GitHubPublicationError),
+            (403, GitHubPublicationError),
+            (429, GitHubPublicationTransientError),
+        ):
+            with self.subTest(status=status):
+                responses = [
+                    json_response(pr_payload(head_sha=head)),
+                    graphql_review_threads_response(),
+                    json_response(pr_payload(head_sha=head)),
+                    json_response([]),
+                    json_response({}, status),
+                ]
+                if status in {422, 429}:
+                    responses.append(json_response([]))
+                with self.assertRaises(error):
+                    self.finalize(responses)
+
+    def test_finding_classification_is_exact_head_bound_and_legacy_compatible(self):
+        head = "b" * 40
+        marker = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=non_blocking_result(),
+            blocking=False,
+        )
+        arguments = {
+            "repository_id": 1,
+            "pull_request": 2,
+            "head_sha": head,
+            "base_sha": "a" * 40,
+        }
+        self.assertFalse(finding_blocks_approval(body=marker, **arguments))
+        self.assertIsNone(
+            finding_blocks_approval(
+                body=marker,
+                head_sha="c" * 40,
+                **{key: value for key, value in arguments.items() if key != "head_sha"},
+            )
+        )
+        self.assertTrue(
+            finding_blocks_approval(body="[🚫 Blocking] legacy", **arguments)
+        )
+        self.assertFalse(
+            finding_blocks_approval(body="[💬 Non-blocking] legacy", **arguments)
+        )
+        self.assertIsNone(finding_blocks_approval(body=None, **arguments))
+        self.assertTrue(finding_declares_blocking("[🚫 Blocking] legacy"))
+        self.assertFalse(finding_declares_blocking(None))
+
+    def test_finalizer_rejects_invalid_preflight_shapes_and_statuses(self):
+        head = "b" * 40
+        missing_repository = pr_payload(head_sha=head)
+        missing_repository["base"]["repo"] = None
+        invalid_repository_id = pr_payload(head_sha=head)
+        invalid_repository_id["base"]["repo"]["id"] = True
+        for response in (
+            json_response({}, 404),
+            json_response([], 200),
+            json_response(missing_repository),
+            json_response(invalid_repository_id),
+        ):
+            with self.subTest(status=response.status):
+                with self.assertRaises(GitHubPublicationError):
+                    self.finalize([response])
+
+    def test_finalizer_fails_closed_for_invalid_review_thread_pages(self):
+        head = "b" * 40
+        thread_errors = json_response({"data": {}, "errors": [{"message": "no"}]})
+        malformed_nodes = graphql_review_threads_response(nodes=({"isResolved": "no"},))
+        malformed_roots = graphql_review_threads_response(
+            nodes=({"isResolved": False, "comments": {"nodes": []}},)
+        )
+        missing_cursor = graphql_review_threads_response(has_next_page=True)
+        malformed_page_info = json_response(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": "yes"},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        for response, error in (
+            (json_response({}, 429), GitHubPublicationTransientError),
+            (json_response({}, 400), GitHubPublicationError),
+            (thread_errors, GitHubPublicationError),
+            (malformed_nodes, GitHubPublicationError),
+            (malformed_roots, GitHubPublicationError),
+            (missing_cursor, GitHubPublicationError),
+            (malformed_page_info, GitHubPublicationError),
+        ):
+            with self.subTest(status=response.status):
+                with self.assertRaises(error):
+                    self.finalize([json_response(pr_payload(head_sha=head)), response])
+
+    def test_finalizer_rejects_invalid_thread_repository_and_approval_payload(self):
+        finalizer = ReviewApprovalFinalizer(http=make_http([])[0])
+        with self.assertRaises(GitHubPublicationError):
+            finalizer._has_open_blocking_findings(
+                token="token",
+                repository="owner",
+                pull_request=2,
+                repository_id=1,
+                head_sha="b" * 40,
+                base_sha="a" * 40,
+                app_slug="reviewsensei[bot]",
+            )
+        with self.assertRaises(GitHubPublicationError):
+            self.finalize(
+                [
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    graphql_review_threads_response(),
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    json_response([]),
+                    json_response({}, 200),
+                ]
+            )
+
+    def test_finalizer_ignores_non_mapping_reviews_during_reconciliation(self):
+        head = "b" * 40
+        outcome, _ = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response(["unexpected review"]),
+                json_response({"id": 22}),
+            ]
+        )
+        self.assertEqual(outcome.status, "approved")
+
+    def test_finalizer_rechecks_write_target_before_approval(self):
+        head = "b" * 40
+        closed = pr_payload(head_sha=head, state="closed")
+        app_authored = pr_payload(head_sha=head, author="reviewsensei[bot]")
+        changed_base = pr_payload(head_sha=head)
+        changed_base["base"]["sha"] = "c" * 40
+        for payload, expected in (
+            (closed, "skipped_pr_state"),
+            (app_authored, "skipped_app_authored"),
+            (changed_base, "skipped_stale_base"),
+        ):
+            with self.subTest(expected=expected):
+                outcome, _ = self.finalize(
+                    [
+                        json_response(pr_payload(head_sha=head)),
+                        graphql_review_threads_response(),
+                        json_response(payload),
+                    ]
+                )
+                self.assertEqual(outcome.status, expected)
+
+    def test_marker_declares_blocking_for_current_classification(self):
+        marker = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha="b" * 40,
+            base_sha="a" * 40,
+            result=result(),
+            blocking=True,
+        )
+        self.assertTrue(finding_declares_blocking(marker))
 
     def test_disabled_review_requests_no_write(self):
         from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions

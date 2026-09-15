@@ -37,7 +37,9 @@ Missing, lower-severity, and legacy free-form severity values are non-blocking.
 
 Review publication records findings as `COMMENT` reviews, with a hidden,
 exact-head-bound marker on each root that persists the typed blocking decision.
-The shared approval finalizer then performs the only `APPROVE` write. It may
+Automatic approval defaults to enabled when automatic review and GitHub writes
+are enabled; `REVIEWSENSEI_AUTO_APPROVE=false` is the explicit opt-out. The
+shared approval finalizer then performs the only `APPROVE` write. It may
 approve when no unresolved ReviewSensei root is classified blocking; unresolved
 non-blocking ReviewSensei findings and human threads do not withhold that
 approval. The finalizer runs after a review is published and after the AI
@@ -108,7 +110,8 @@ blocking root invokes one exact-head idempotent approval finalization.
 Rollout is a reviewed package and workflow update. New default prompts emit the
 flag immediately; callers that omit it use the severity fallback. Verify both a
 non-blocking approval and a blocking comment in a test repository before
-enabling the flow for protected production branches.
+enabling the flow for protected production branches. Verify the default-on
+approval path and the explicit `REVIEWSENSEI_AUTO_APPROVE=false` opt-out.
 
 Rollback by disabling automatic review or GitHub writes, or reverting the
 feature. No persisted review data or GitHub thread mutation requires migration.

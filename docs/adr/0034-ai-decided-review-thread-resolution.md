@@ -11,9 +11,9 @@ Approved by: not applicable
 
 ReviewSensei can answer a maintainer's bounded `@sensei` mention, but the
 resulting reply historically had no machine-readable way to say whether the
-original ReviewSensei finding was fully addressed. Maintainers therefore had
-to resolve every addressed thread manually before a clean same-head review
-could be promoted to `APPROVE`.
+original ReviewSensei finding was fully addressed. ReviewSensei needs a bounded
+way to resolve an addressed blocking root and immediately re-evaluate its
+deterministic approval boundary without a second provider pass.
 
 ## Decision
 

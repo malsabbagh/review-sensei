@@ -109,21 +109,18 @@ learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically by default. Set
-`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Before choosing `APPROVE`, the
-publisher requires a validated exact-head result marked `complete`, with no
-blocking findings, a same-repository non-draft PR, and a final bounded
-GraphQL sweep showing that all existing review threads are resolved.
-Non-blocking findings are published as optional follow-ups and can accompany an
-approval. An open thread, an App-authored PR, a partial/incomplete/summary-only
-result, an incomplete/error response, or any stale/fork/closed target keeps the
-event as `COMMENT` or fails closed before writing. All `@sensei` replies remain
-ordinary comments.
+`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Findings are
+published as `COMMENT`, then a shared idempotent finalizer may emit `APPROVE`.
+It requires an eligible exact-head, same-repository, non-draft PR and no
+unresolved ReviewSensei root classified blocking. Non-blocking ReviewSensei
+follow-ups and human threads may remain open. An unclassified ReviewSensei root,
+partial/incomplete/summary-only result, incomplete/error thread response, or
+stale/fork/closed/App-authored target remains a comment or fails closed before
+writing. All `@sensei` replies remain ordinary comments.
 
-The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
-After every thread is resolved, a fresh workflow run with no blocking findings
-on the same exact head can promote the earlier ReviewSensei comment to one
-formal approval. An AI reply that returns `resolve: true` starts that bounded
-same-head pass in the same provider job; a maintainer resolving a thread
+The approval marker deduplicates the `APPROVED` state per exact head. The
+finalizer runs immediately after review publication and after an AI reply
+successfully resolves a blocking root. A maintainer resolving a blocking root
 manually still needs to rerun **ReviewSensei review** (supplying the current
 exact PR head and base) or push a new head because GitHub Actions does not start
 a run for thread resolution alone. Classification metadata

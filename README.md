@@ -142,7 +142,9 @@ The selected provider mode applies consistently to automatic pull-request
 reviews, manual reviews, learning proposals, artifacts, and authorized
 `@sensei` conversations. Cloud runs use GitHub-hosted compute; local runs use
 the operator-controlled labeled self-hosted runner. Every generated write
-switch defaults to `false`.
+switch except automatic approval defaults to `false`; automatic approval
+defaults to `true` and requires automatic review and GitHub writes as separate
+gates.
 
 Cloud mode may pass the existing customer-owned `OLLAMA_API_KEY` secret by
 name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
@@ -432,9 +434,8 @@ commit only when that package/version is unavailable. Unrelated PyPI
 installation failures remain fatal. All nine
 `REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
 review, GitHub writes, learning PRs, mention replies, and artifact upload are
-off. The App never creates the customer-owned
-`OLLAMA_API_KEY` secret.
-The five feature switches are all disabled by default.
+off, while automatic approval is `true` when those review and write gates are
+enabled. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
 
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
@@ -448,22 +449,23 @@ item only when the transport reports an oversized response. The 512 KiB
 transport ceiling remains unchanged. Fork pull requests fail closed before
 provider or broker access.
 
-When automatic review and GitHub writes are enabled, ReviewSensei selects
-`APPROVE` for a validated exact-head result only when it has no blocking finding
-and a final bounded GitHub thread sweep confirms that every existing review
-thread is resolved. Non-blocking findings are published as optional follow-ups
-and do not independently prevent approval. Any open thread, draft/closed/fork/stale PR,
-App-authored PR, or incomplete thread lookup keeps the event as `COMMENT` or
-fails closed; `@sensei` replies are always ordinary comments. Existing review
-markers deduplicate each review state per head. A fresh no-blocker review run on the
-same exact head may promote an earlier `COMMENTED` review to `APPROVED` after
-the final thread sweep confirms that every thread is resolved; it never posts
-a duplicate comment or approval.
+When automatic review and GitHub writes are enabled, automatic approval is on by
+default; set `REVIEWSENSEI_AUTO_APPROVE=false` for an explicit opt-out.
+ReviewSensei publishes findings as `COMMENT` and then invokes one shared,
+idempotent approval finalizer. It emits `APPROVE` for an eligible exact head
+when no unresolved ReviewSensei root is classified blocking. Unresolved
+non-blocking ReviewSensei findings and human threads do not withhold approval.
+An unclassified ReviewSensei root, malformed or incomplete thread data, or a
+draft/closed/fork/stale/App-authored PR fails closed. The finalizer runs after
+review publication and after the AI resolves a blocking ReviewSensei thread;
+`@sensei` replies themselves remain ordinary comments. Existing approval
+markers prevent duplicate approvals.
 
-The approval policy is deliberately conservative: an explicit blocking label or
-an unclassified canonical `critical`/`high` severity blocks approval; unresolved
-threads also remain blocking. Resolving a thread does not itself start a GitHub Actions run, so rerun
-the review workflow (or push a new head) after the final resolution. See
+The approval policy is deliberately conservative: explicit blocking metadata,
+or an unclassified canonical `critical`/`high` severity, blocks approval.
+Resolving a thread manually does not start GitHub Actions, so rerun the review
+workflow (or push a new head) if a manually resolved blocking root was the last
+blocker. See
 [ADR 0032](docs/adr/0032-blocking-finding-classification-for-approvals.md)
 for the criteria and rollback path.
 
