@@ -1,11 +1,14 @@
+import io
 import json
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from itertools import repeat
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei.cli import _doctor_parser, _plan_parser, main
 from review_sensei.diagnostics import (
     DiagnosticCheck,
     build_plan,
@@ -31,6 +34,89 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_doctor_parser_accepts_configuration_flags(self):
+        args = _doctor_parser().parse_args(
+            [
+                "--stages-dir",
+                "stages",
+                "--categories-dir",
+                "categories",
+                "--context-root",
+                "context",
+                "--network",
+                "--json",
+            ]
+        )
+        self.assertEqual(args.stages_dir, Path("stages"))
+        self.assertEqual(args.categories_dir, Path("categories"))
+        self.assertEqual(args.context_root, Path("context"))
+        self.assertTrue(args.network)
+        self.assertTrue(args.as_json)
+
+    def test_plan_parser_accepts_preview_flags(self):
+        args = _plan_parser().parse_args(
+            [
+                "--diff",
+                "review.patch",
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "3",
+                "--title",
+                "Preview",
+                "--stage",
+                "review",
+                "--provider-mode",
+                "local",
+                "--json",
+            ]
+        )
+        self.assertEqual(args.diff, Path("review.patch"))
+        self.assertEqual(args.repository, "owner/repo")
+        self.assertEqual(args.pull_request, 3)
+        self.assertEqual(args.stage, ["review"])
+        self.assertTrue(args.as_json)
+
+    def test_doctor_cli_renders_json_and_exit_code(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["doctor", "--json"])
+        self.assertEqual(status, 3)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema_version"], "v1")
+        self.assertIn("checks", payload)
+
+    def test_plan_cli_renders_ready_plan_from_diff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            diff_path = Path(temporary) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stderr(io.StringIO()):
+                with patch("sys.stdout", stdout):
+                    status = main(
+                        [
+                            "plan",
+                            "--diff",
+                            str(diff_path),
+                            "--repository",
+                            "owner/repo",
+                            "--json",
+                        ]
+                    )
+        self.assertEqual(status, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["operations"]["provider_calls"], 0)
+
+    def test_plan_cli_without_diff_exits_incomplete(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["plan"])
+        self.assertEqual(status, 3)
+        self.assertIn("incomplete", stdout.getvalue())
+
     def test_doctor_is_bounded_and_reports_unknown_network(self):
         report = run_doctor()
         self.assertEqual(report["schema_version"], "v1")
@@ -181,10 +267,11 @@ class DiagnosticsTests(unittest.TestCase):
 
 class PatchSuggestionTests(unittest.TestCase):
     SNAPSHOT_MODES = {"src/app.py": "100644"}
+    FINDING = {"id": "finding-1", "status": "confirmed", "path": "src/app.py"}
 
     def test_only_confirmed_findings_can_create_suggestions(self):
         suggestion = create_patch_suggestion(
-            {"id": "finding-1", "status": "confirmed"},
+            self.FINDING,
             patch=DIFF,
             base_sha="a" * 40,
             head_sha="b" * 40,
@@ -199,19 +286,42 @@ class PatchSuggestionTests(unittest.TestCase):
     def test_unverified_or_out_of_scope_suggestions_fail_closed(self):
         with self.assertRaises(ReviewInputError):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "rejected"},
+                {"id": "finding-1", "status": "rejected", "path": "src/app.py"},
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
                 allowed_paths=("src/app.py",),
             )
-        with self.assertRaises(ReviewInputError):
+        with self.assertRaisesRegex(ReviewInputError, "exactly match the finding"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
                 allowed_paths=("src/other.py",),
+            )
+
+    def test_allowed_paths_must_exactly_match_changed_paths(self):
+        with self.assertRaisesRegex(ReviewInputError, "exactly match the validated"):
+            create_patch_suggestion(
+                {**self.FINDING, "affected_paths": ("src/app.py", "src/extra.py")},
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=("src/app.py", "src/extra.py"),
+                snapshot_modes=self.SNAPSHOT_MODES,
+            )
+
+    def test_changed_paths_are_validated_as_repository_paths(self):
+        traversal_patch = DIFF.replace("src/app.py", "src/../evil.py")
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                {"id": "finding-1", "status": "confirmed", "path": "src/../evil.py"},
+                patch=traversal_patch,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=("src/../evil.py",),
+                snapshot_modes={"src/../evil.py": "100644"},
             )
 
     def test_mode_less_patch_requires_exact_regular_file_snapshot_modes(self):
@@ -219,7 +329,7 @@ class PatchSuggestionTests(unittest.TestCase):
             ReviewInputError, "trusted regular-file snapshot mode provenance"
         ):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -227,7 +337,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ReviewInputError, "cover exactly"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -236,7 +346,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ReviewInputError, "regular files"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -250,7 +360,7 @@ class PatchSuggestionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ReviewInputError, "regular files"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                {"id": "finding-1", "status": "confirmed", "path": "src/link"},
                 patch=symlink_diff,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -261,7 +371,7 @@ class PatchSuggestionTests(unittest.TestCase):
     def test_unbounded_iterables_are_rejected_after_bounded_inspection(self):
         with self.assertRaisesRegex(ReviewInputError, "allowed_paths"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -270,7 +380,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ReviewInputError, "metadata"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -280,7 +390,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ReviewInputError, "metadata"):
             create_patch_suggestion(
-                {"id": "finding-1", "status": "confirmed"},
+                self.FINDING,
                 patch=DIFF,
                 base_sha="a" * 40,
                 head_sha="b" * 40,
@@ -304,7 +414,7 @@ class PatchSuggestionTests(unittest.TestCase):
                     ReviewInputError, "symlink patches are not supported"
                 ):
                     create_patch_suggestion(
-                        {"id": "finding-1", "status": "confirmed"},
+                        self.FINDING,
                         patch=f"{header}\n{DIFF}",
                         base_sha="a" * 40,
                         head_sha="b" * 40,
@@ -315,7 +425,7 @@ class PatchSuggestionTests(unittest.TestCase):
         textual = DIFF.replace("+change", "+Binary files is a documentation phrase")
         textual = textual.replace(" keep", " GIT binary patch is documented here")
         suggestion = create_patch_suggestion(
-            {"id": "finding-1", "status": "confirmed"},
+            self.FINDING,
             patch=textual,
             base_sha="a" * 40,
             head_sha="b" * 40,
@@ -336,7 +446,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
 
     def test_patch_helper_iterables_and_metadata_fail_closed(self):
-        finding = {"id": "finding-1", "status": "confirmed"}
+        finding = self.FINDING
         with self.assertRaises(ReviewInputError):
             create_patch_suggestion(
                 finding,
@@ -397,7 +507,7 @@ class PatchSuggestionTests(unittest.TestCase):
             )
 
     def test_patch_snapshot_mode_and_constructor_boundaries(self):
-        finding = {"id": "finding-1", "status": "confirmed"}
+        finding = self.FINDING
         common = {
             "patch": DIFF,
             "base_sha": "a" * 40,
