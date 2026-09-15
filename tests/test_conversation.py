@@ -194,7 +194,9 @@ class ConversationContractTests(unittest.TestCase):
         prompt = provider.requests[0].prompt
         self.assertIn("Fixed in <sha>", prompt)
         self.assertIn("Set resolve to true", prompt)
-        self.assertIn("not enough by itself", prompt)
+        self.assertIn("not a command", prompt)
+        self.assertIn("valid, concrete reason", prompt)
+        self.assertIn("bare dismissal", prompt)
 
     def test_review_result_reconstructs_and_revalidates(self):
         value = {
