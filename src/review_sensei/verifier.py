@@ -268,6 +268,13 @@ def _snapshot_digest(
     return hashlib.sha256(_canonical_snapshot_bytes(snapshot)).hexdigest()
 
 
+def _snapshot_lines(content: str) -> list[str]:
+    """Split reviewed snapshot text on normalized Unix line boundaries."""
+
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.split("\n")
+
+
 def _candidate_dedup_key(candidate: CandidateFinding) -> tuple[str, str, str]:
     evidence_payload = json.dumps(
         [reference.to_dict() for reference in candidate.evidence],
@@ -297,7 +304,7 @@ def _verify_candidate_evidence(
             evidence_valid = False
             reasons.append("evidence path is absent from reviewed snapshot")
             continue
-        lines = snapshot_content.splitlines()
+        lines = _snapshot_lines(snapshot_content)
         if reference.line < 1 or reference.line > len(lines):
             evidence_valid = False
             reasons.append("evidence line is outside reviewed snapshot")

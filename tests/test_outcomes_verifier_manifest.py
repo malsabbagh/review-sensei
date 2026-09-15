@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
+from review_sensei.outcomes import (
+    MAX_RECOVERY_RESULT_DEPTH,
+    RecoveryArtifact,
+    ResourceBudget,
+    RunOutcome,
+)
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.schemas import validate_public_document
 from review_sensei.validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
@@ -217,6 +222,33 @@ class ContractsTests(unittest.TestCase):
                     ).isoformat(),
                 )
 
+    def test_recovery_artifact_rejects_excessive_result_depth(self):
+        nested: dict[str, object] = {
+            "summary": "ok",
+            "comments": [],
+            "provider": "fixture",
+        }
+        current: dict[str, object] = nested
+        for index in range(MAX_RECOVERY_RESULT_DEPTH):
+            inner: dict[str, object] = {
+                "summary": "ok",
+                "comments": [],
+                "provider": "fixture",
+            }
+            current["payload"] = inner
+            current = inner
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact.create(
+                repository="acme/repo",
+                pull_request_number=1,
+                base_sha=SHA,
+                head_sha=SHA,
+                result=nested,
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+            )
+
     def test_recovery_artifact_rejects_oversized_nested_keys(self):
         with self.assertRaises(ReviewInputError):
             RecoveryArtifact.create(
@@ -248,6 +280,28 @@ class ContractsTests(unittest.TestCase):
                 base_sha=SHA,
                 head_sha=SHA,
             )
+
+    def test_evidence_verifier_normalizes_windows_line_endings(self):
+        text = "line one\r\nline two\r\n"
+        snapshot = {"src/app.py": text}
+        snapshot_sha = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        candidate = CandidateFinding(
+            "bug",
+            "when called",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, snapshot_sha, "line two"),),
+            "causes failure",
+        )
+        self.assertEqual(
+            verify_candidate(
+                candidate, snapshot, snapshot_sha256=snapshot_sha
+            ).disposition,
+            "confirmed",
+        )
 
     def test_evidence_verifier_requires_exact_snapshot(self):
         text = "line one\nline two\n"

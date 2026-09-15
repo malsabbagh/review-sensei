@@ -133,11 +133,11 @@ def _validate_recovery_identity(
 
 
 def _json_value_depth(value: object, *, limit: int = MAX_RECOVERY_RESULT_DEPTH) -> int:
+    if limit < 1:
+        raise ReviewInputError(
+            "recovery artifact result exceeds the configured depth limit"
+        )
     if isinstance(value, Mapping):
-        if limit <= 0:
-            raise ReviewInputError(
-                "recovery artifact result exceeds the configured depth limit"
-            )
         if not value:
             return 1
         child_depths: list[int] = []
@@ -151,10 +151,6 @@ def _json_value_depth(value: object, *, limit: int = MAX_RECOVERY_RESULT_DEPTH) 
             child_depths.append(_json_value_depth(item, limit=limit - 1))
         return 1 + max(child_depths)
     if isinstance(value, (list, tuple)):
-        if limit <= 0:
-            raise ReviewInputError(
-                "recovery artifact result exceeds the configured depth limit"
-            )
         if not value:
             return 1
         return 1 + max(_json_value_depth(item, limit=limit - 1) for item in value)
@@ -434,7 +430,7 @@ class RecoveryArtifact:
             pull_request_number,
             base_sha,
             head_sha,
-            result,
+            json.loads(canonical),
             created,
             expires_at,
             _digest(canonical),
