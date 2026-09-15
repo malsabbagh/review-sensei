@@ -15,10 +15,16 @@ from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
 from .schemas import validate_public_document
-from .validation import validate_repository_path
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    ReviewLimits,
+    utf8_size,
+    validate_repository_path,
+)
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DISPOSITIONS = frozenset({"confirmed", "rejected", "insufficient-evidence"})
+_EVIDENCE_FIELDS = frozenset({"path", "line", "snapshot_sha256", "excerpt"})
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,9 @@ class CandidateFinding:
             for item in raw_evidence:
                 if not isinstance(item, Mapping):
                     raise TypeError("evidence reference must be an object")
+                unknown = set(item) - _EVIDENCE_FIELDS
+                if unknown:
+                    raise TypeError("evidence reference contains unknown fields")
                 evidence_values.append(EvidenceReference(**item))  # type: ignore[arg-type]
             evidence = tuple(evidence_values)
             raw_assumptions = value.get("assumptions", ())
@@ -162,32 +171,53 @@ class VerificationResult:
         return value
 
 
-def verify_candidate(
-    candidate: CandidateFinding, snapshot: Mapping[str, str], *, snapshot_sha256: str
-) -> VerificationResult:
-    """Verify evidence paths/lines and excerpts against a reviewed snapshot.
-
-    ``snapshot`` maps canonical repository paths to source text.  It is treated
-    as data only; no instructions in source or candidate fields are executed.
-    """
-    if not isinstance(candidate, CandidateFinding):
-        raise ReviewInputError("candidate must be a CandidateFinding")
+def _validate_snapshot(
+    snapshot: Mapping[str, str],
+    *,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> bytes:
     if not isinstance(snapshot, Mapping):
         raise ReviewInputError("snapshot must be a mapping")
-    if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
-        raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
+    if len(snapshot) > limits.max_diff_files:
+        raise ReviewInputError("snapshot contains too many files")
+    total_bytes = 0
     for path, content in snapshot.items():
         if not isinstance(path, str) or not isinstance(content, str):
             raise ReviewInputError("snapshot paths and contents must be strings")
         validate_repository_path(path, label="snapshot path")
-    canonical_snapshot = json.dumps(
+        total_bytes += utf8_size(path, label="snapshot path")
+        total_bytes += utf8_size(content, label="snapshot content")
+        if total_bytes > limits.max_diff_bytes:
+            raise ReviewInputError("snapshot exceeds the configured byte limit")
+    return json.dumps(
         dict(sorted(snapshot.items())),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
-    if hashlib.sha256(canonical_snapshot).hexdigest() != snapshot_sha256:
-        raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
+
+
+def _snapshot_digest(snapshot: Mapping[str, str]) -> str:
+    return hashlib.sha256(_validate_snapshot(snapshot)).hexdigest()
+
+
+def _candidate_dedup_key(candidate: CandidateFinding) -> tuple[str, str, str]:
+    evidence_payload = json.dumps(
+        [reference.to_dict() for reference in candidate.evidence],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    evidence_digest = hashlib.sha256(evidence_payload.encode("utf-8")).hexdigest()
+    return (candidate.impacted_path, candidate.claim, evidence_digest)
+
+
+def _verify_candidate_evidence(
+    candidate: CandidateFinding,
+    snapshot: Mapping[str, str],
+    *,
+    snapshot_sha256: str,
+) -> VerificationResult:
     reasons: list[str] = []
     evidence_valid = True
     for reference in candidate.evidence:
@@ -229,6 +259,25 @@ def verify_candidate(
     return VerificationResult("confirmed", (), True, True)
 
 
+def verify_candidate(
+    candidate: CandidateFinding, snapshot: Mapping[str, str], *, snapshot_sha256: str
+) -> VerificationResult:
+    """Verify evidence paths/lines and excerpts against a reviewed snapshot.
+
+    ``snapshot`` maps canonical repository paths to source text.  It is treated
+    as data only; no instructions in source or candidate fields are executed.
+    """
+    if not isinstance(candidate, CandidateFinding):
+        raise ReviewInputError("candidate must be a CandidateFinding")
+    if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
+        raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
+    if _snapshot_digest(snapshot) != snapshot_sha256:
+        raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
+    return _verify_candidate_evidence(
+        candidate, snapshot, snapshot_sha256=snapshot_sha256
+    )
+
+
 def verify_candidates(
     candidates: Sequence[CandidateFinding],
     snapshot: Mapping[str, str],
@@ -236,12 +285,17 @@ def verify_candidates(
     snapshot_sha256: str,
 ) -> tuple[VerificationResult, ...]:
     """Verify candidates independently, de-duplicating identical claims."""
-    seen: set[tuple[str, str, int]] = set()
+    if not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256):
+        raise ReviewInputError("snapshot_sha256 must be a SHA-256 digest")
+    digest = _snapshot_digest(snapshot)
+    if digest != snapshot_sha256:
+        raise ReviewInputError("snapshot_sha256 does not match reviewed snapshot")
+    seen: set[tuple[str, str, str]] = set()
     results: list[VerificationResult] = []
     for candidate in candidates:
         if not isinstance(candidate, CandidateFinding):
             raise ReviewInputError("candidates must contain CandidateFinding values")
-        key = (candidate.impacted_path, candidate.claim, candidate.evidence[0].line)
+        key = _candidate_dedup_key(candidate)
         if key in seen:
             results.append(
                 VerificationResult("rejected", ("duplicate candidate",), False, True)
@@ -249,6 +303,8 @@ def verify_candidates(
             continue
         seen.add(key)
         results.append(
-            verify_candidate(candidate, snapshot, snapshot_sha256=snapshot_sha256)
+            _verify_candidate_evidence(
+                candidate, snapshot, snapshot_sha256=snapshot_sha256
+            )
         )
     return tuple(results)

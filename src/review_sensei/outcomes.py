@@ -32,10 +32,92 @@ RUN_STATUSES = frozenset(
 )
 _SNAPSHOT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 MAX_RECOVERY_RESULT_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
+MAX_RECOVERY_RESULT_DEPTH = 32
+MAX_STAGE_SUMMARY_ENTRIES = 64
+MAX_STAGE_SUMMARY_KEY_LENGTH = 128
+MAX_STAGE_SUMMARY_VALUE_LENGTH = 128
 
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _parse_aware_datetime(value: str, *, label: str) -> datetime:
+    normalized = value.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ReviewInputError(f"{label} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReviewInputError(f"{label} must include a timezone")
+    return parsed
+
+
+def _validate_stage_summary(stage_summary: Mapping[str, str]) -> None:
+    if not isinstance(stage_summary, Mapping):
+        raise ReviewInputError("run outcome stage_summary must be a mapping")
+    if len(stage_summary) > MAX_STAGE_SUMMARY_ENTRIES:
+        raise ReviewInputError("run outcome stage_summary has too many entries")
+    for key, value in stage_summary.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key) > MAX_STAGE_SUMMARY_KEY_LENGTH
+        ):
+            raise ReviewInputError("run outcome stage_summary key is invalid")
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > MAX_STAGE_SUMMARY_VALUE_LENGTH
+        ):
+            raise ReviewInputError("run outcome stage_summary value is invalid")
+
+
+def _validate_recovery_identity(
+    *,
+    repository: str,
+    pull_request_number: int,
+    base_sha: str,
+    head_sha: str,
+) -> None:
+    if (
+        not isinstance(repository, str)
+        or not repository.strip()
+        or len(repository) > 256
+    ):
+        raise ReviewInputError("recovery artifact repository is invalid")
+    if (
+        isinstance(pull_request_number, bool)
+        or not isinstance(pull_request_number, int)
+        or pull_request_number < 1
+    ):
+        raise ReviewInputError("recovery artifact pull_request_number is invalid")
+    if not isinstance(base_sha, str) or not _SNAPSHOT.fullmatch(base_sha):
+        raise ReviewInputError("recovery artifact base_sha is invalid")
+    if not isinstance(head_sha, str) or not _SNAPSHOT.fullmatch(head_sha):
+        raise ReviewInputError("recovery artifact head_sha is invalid")
+
+
+def _json_value_depth(value: object, *, limit: int = MAX_RECOVERY_RESULT_DEPTH) -> int:
+    if isinstance(value, Mapping):
+        if limit <= 0:
+            raise ReviewInputError(
+                "recovery artifact result exceeds the configured depth limit"
+            )
+        if not value:
+            return 1
+        return 1 + max(
+            _json_value_depth(item, limit=limit - 1) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        if limit <= 0:
+            raise ReviewInputError(
+                "recovery artifact result exceeds the configured depth limit"
+            )
+        if not value:
+            return 1
+        return 1 + max(_json_value_depth(item, limit=limit - 1) for item in value)
+    return 1
 
 
 def _canonical_recovery_result(result: Mapping[str, object]) -> str:
@@ -44,11 +126,20 @@ def _canonical_recovery_result(result: Mapping[str, object]) -> str:
     if not isinstance(result, Mapping):
         raise ReviewInputError("recovery artifact result must be an object")
     document = dict(result)
+    _json_value_depth(document)
     validate_public_document(document, "review-result")
     try:
         canonical = json.dumps(
-            document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            check_circular=True,
         )
+    except RecursionError as exc:
+        raise ReviewInputError(
+            "recovery artifact result exceeds the configured depth limit"
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise ReviewInputError(
             "recovery artifact result is not JSON-serializable"
@@ -123,6 +214,7 @@ class RunOutcome:
             not isinstance(self.diagnostic, str) or len(self.diagnostic) > 512
         ):
             raise ReviewInputError("run outcome diagnostic is too long")
+        _validate_stage_summary(self.stage_summary)
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -157,6 +249,24 @@ class RecoveryArtifact:
     expires_at: str
     result_sha256: str
 
+    def __post_init__(self) -> None:
+        _validate_recovery_identity(
+            repository=self.repository,
+            pull_request_number=self.pull_request_number,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+        )
+        if not isinstance(self.created_at, str) or not self.created_at.strip():
+            raise ReviewInputError("recovery artifact created_at is invalid")
+        if not isinstance(self.expires_at, str) or not self.expires_at.strip():
+            raise ReviewInputError("recovery artifact expires_at is invalid")
+        if not isinstance(self.result_sha256, str) or not re.fullmatch(
+            r"^[a-f0-9]{64}$", self.result_sha256
+        ):
+            raise ReviewInputError("recovery artifact result_sha256 is invalid")
+        _parse_aware_datetime(self.created_at, label="recovery artifact created_at")
+        _parse_aware_datetime(self.expires_at, label="recovery artifact expires_at")
+
     @classmethod
     def create(
         cls,
@@ -167,8 +277,24 @@ class RecoveryArtifact:
         head_sha: str,
         result: Mapping[str, object],
         expires_at: str,
+        created_at: str | None = None,
+        now: datetime | None = None,
     ) -> "RecoveryArtifact":
-        created = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        _validate_recovery_identity(
+            repository=repository,
+            pull_request_number=pull_request_number,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+        _parse_aware_datetime(expires_at, label="recovery artifact expires_at")
+        if created_at is None:
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None or current.utcoffset() is None:
+                current = current.replace(tzinfo=timezone.utc)
+            created = current.replace(microsecond=0).isoformat()
+        else:
+            _parse_aware_datetime(created_at, label="recovery artifact created_at")
+            created = created_at
         canonical = _canonical_recovery_result(result)
         return cls(
             repository,
@@ -202,12 +328,9 @@ class RecoveryArtifact:
         canonical = _canonical_recovery_result(self.result)
         if _digest(canonical) != self.result_sha256:
             raise ReviewInputError("recovery artifact integrity check failed")
-        try:
-            expiry = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ReviewInputError("recovery artifact expiry is invalid") from exc
-        if expiry.tzinfo is None or expiry.utcoffset() is None:
-            raise ReviewInputError("recovery artifact expiry must include a timezone")
+        expiry = _parse_aware_datetime(
+            self.expires_at, label="recovery artifact expiry"
+        )
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None or current.utcoffset() is None:
             current = current.replace(tzinfo=timezone.utc)
