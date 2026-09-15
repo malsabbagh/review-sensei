@@ -12,6 +12,7 @@ from typing import Any, Mapping, TextIO
 
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
+_GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 
@@ -91,9 +92,9 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
         not isinstance(head_sha, str)
         or not _GIT_SHA_FULL.fullmatch(head_sha)
         or not isinstance(head_ref, str)
-        or not head_ref.strip()
+        or not _GIT_REF.fullmatch(head_ref)
         or not isinstance(base_ref, str)
-        or not base_ref.strip()
+        or not _GIT_REF.fullmatch(base_ref)
         or not isinstance(base_sha, str)
         or not _GIT_SHA_FULL.fullmatch(base_sha)
     ):

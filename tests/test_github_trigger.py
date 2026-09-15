@@ -79,6 +79,12 @@ class GitHubTriggerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             choose_head_sha(pull, "c" * 40)
 
+    def test_resolve_rejects_unsafe_git_refs(self):
+        pull = _pull()
+        pull["head"] = {"sha": "b" * 40, "ref": "feature/$(whoami)"}
+        with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
+            resolve_pull_request_event(pull, auto_review="true")
+
     def test_resolve_issue_comment_rescan_routes_to_review(self):
         resolution = resolve_issue_comment(
             "@sensei please re-scan commit 016017b",

@@ -129,8 +129,8 @@ jobs:
           PULL_REQUEST="${PULL_REQUEST:-}"
           PULL_REQUEST_URL="${PULL_REQUEST_URL:-}"
           COMMENT_BODY="${COMMENT_BODY:-}"
-          if [[ -z "${PULL_REQUEST}" && -n "${PULL_REQUEST_URL}" ]]; then
-            PULL_REQUEST="${PULL_REQUEST_URL##*/}"
+          if [[ -z "${PULL_REQUEST}" && "${PULL_REQUEST_URL}" =~ /pulls/([1-9][0-9]*)$ ]]; then
+            PULL_REQUEST="${BASH_REMATCH[1]}"
           fi
           if [[ ! "${PULL_REQUEST}" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::pull request number is unavailable"
@@ -163,6 +163,7 @@ jobs:
           from pathlib import Path
 
           sha = re.compile(r"^[a-f0-9]{40}$")
+          ref = re.compile(r"^[A-Za-z0-9._/-]+$")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           auto_review = sys.argv[2]
           enable_review = "true" if auto_review == "true" else "false"
@@ -182,11 +183,11 @@ jobs:
               or not isinstance(head_sha, str)
               or sha.fullmatch(head_sha) is None
               or not isinstance(head_ref, str)
-              or not head_ref.strip()
+              or ref.fullmatch(head_ref) is None
               or not isinstance(base_sha, str)
               or sha.fullmatch(base_sha) is None
               or not isinstance(base_ref, str)
-              or not base_ref.strip()
+              or ref.fullmatch(base_ref) is None
           ):
               raise SystemExit("pull request identity metadata is invalid")
           output = os.environ.get("GITHUB_OUTPUT")

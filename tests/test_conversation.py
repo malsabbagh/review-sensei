@@ -193,7 +193,8 @@ class ConversationContractTests(unittest.TestCase):
         )
         prompt = provider.requests[0].prompt
         self.assertIn("Fixed in <sha>", prompt)
-        self.assertIn("set resolve to true", prompt)
+        self.assertIn("Set resolve to true", prompt)
+        self.assertIn("not enough by itself", prompt)
 
     def test_review_result_reconstructs_and_revalidates(self):
         value = {

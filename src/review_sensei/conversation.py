@@ -138,7 +138,7 @@ class ConversationService:
                 "Return one JSON object with keys body and resolve.",
                 "body must contain the concise Markdown reply.",
                 "Set resolve to true when the current exact-head diff and bounded thread context demonstrate that the ReviewSensei finding is fully addressed.",
-                "When a maintainer @sensei reply documents a fix (for example 'Fixed in <sha>' or 'Addressed in <sha>') or dismisses the finding with a concrete reason, and your reply confirms that assessment on the current head, set resolve to true.",
+                "A maintainer @sensei reply that documents a fix (for example 'Fixed in <sha>' or 'Addressed in <sha>') or dismisses a finding is not enough by itself. Set resolve to true only when the current exact-head diff also shows that the specific finding is fully addressed.",
                 "Never resolve a human-authored concern on an issue-only comment, or an ambiguous/stale finding. Missing resolve is treated as false.",
             )
         )
