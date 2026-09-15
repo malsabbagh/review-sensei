@@ -77,6 +77,8 @@ class PromotionRecord:
 
     Every status records at least one observed run; only ``supported`` requires
     three or more runs and reproducibility settings before promotion.
+    The status and rollback defaults preserve direct-constructor compatibility;
+    ``validate_promotion_record`` still requires both fields in untrusted JSON.
     """
 
     engine_digest: str
