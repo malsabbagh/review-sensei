@@ -217,6 +217,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count("mention reply command failed (exit $reply_exit)"), 2
         )
         self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 2)
+        self.assertEqual(text.count("Verify mention reply completed"), 2)
+        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
+        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
