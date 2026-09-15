@@ -214,7 +214,7 @@ jobs:
       operation: @@{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
-      pull_request_number: @@{{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
+      pull_request_number: @@{{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
       base_ref: @@{{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
       base_sha: @@{{ inputs.base_sha || github.event.pull_request.base.sha }}
       head_ref: @@{{ inputs.head_ref || '' }}
@@ -342,7 +342,7 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
-      operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
+      operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
       pull_request_number: @@{{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
@@ -359,7 +359,7 @@ jobs:
       pull_request_title: @@{{ inputs.pull_request_title || github.event.pull_request.title }}
       stages_dir: @@{{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
       categories_dir: @@{{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
-      enable_review: @@{{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_review: @@{{ github.event_name == 'workflow_dispatch' && 'true' || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'true') || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
       enable_auto_approve: @@{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}
       enable_learning_proposals: @@{{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: @@{{ vars.REVIEWSENSEI_GITHUB_WRITES }}
@@ -390,7 +390,7 @@ export function previousProviderParityWorkflowTemplate(publicWorkflowTag: string
 function historicalProviderParityWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return previousProviderParityWorkflowTemplate(tag).replace(
-    "      operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}\n",
+    "      operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}\n",
     "      operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}\n",
   );
 }

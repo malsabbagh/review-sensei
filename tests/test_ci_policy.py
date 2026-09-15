@@ -131,9 +131,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn(
             "enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' "
+            "|| (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') "
+            "|| contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'true') "
             "|| vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}",
             text,
         )
+        self.assertIn("contains(github.event.comment.body, 're-scan')", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
