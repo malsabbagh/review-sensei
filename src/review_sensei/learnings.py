@@ -79,19 +79,25 @@ def _glob_witnesses(patterns: Iterable[str]) -> tuple[str, ...]:
                     start, end = token_match.span()
                     for replacement in replacements:
                         next_variants.add(variant[:start] + replacement + variant[end:])
+                        if len(next_variants) >= MAX_SCOPE_WITNESSES:
+                            break
+                    if len(next_variants) >= MAX_SCOPE_WITNESSES:
+                        break
                 variants = next_variants
-                if len(variants) > MAX_SCOPE_WITNESSES:
-                    variants = set(sorted(variants)[:MAX_SCOPE_WITNESSES])
             segment_options.append(tuple(sorted(variants)))
         candidates = {""}
         for options in segment_options:
-            candidates = {
-                "/".join(part for part in (prefix, option) if part)
-                for prefix in candidates
-                for option in options
-            }
-            if len(candidates) > MAX_SCOPE_WITNESSES:
-                candidates = set(sorted(candidates)[:MAX_SCOPE_WITNESSES])
+            next_candidates: set[str] = set()
+            for prefix in candidates:
+                for option in options:
+                    next_candidates.add(
+                        "/".join(part for part in (prefix, option) if part)
+                    )
+                    if len(next_candidates) >= MAX_SCOPE_WITNESSES:
+                        break
+                if len(next_candidates) >= MAX_SCOPE_WITNESSES:
+                    break
+            candidates = next_candidates
         witnesses.update(candidates)
         if len(witnesses) > MAX_SCOPE_WITNESSES:
             witnesses = set(sorted(witnesses)[:MAX_SCOPE_WITNESSES])
@@ -121,12 +127,14 @@ class LearningStore:
         raw_entries = tuple(entries)
         if any(not isinstance(entry, LearningEntry) for entry in raw_entries):
             raise LearningLoadError("repository learnings contain an invalid entry")
-        normalized = tuple(sorted(raw_entries, key=lambda entry: entry.id))
-        identifiers = [entry.id for entry in normalized]
+        sorted_entries = tuple(sorted(raw_entries, key=lambda entry: entry.id))
+        identifiers = [entry.id for entry in sorted_entries]
         if len(identifiers) != len(set(identifiers)):
             raise LearningLoadError("repository learnings contain duplicate ids")
-        self.all_entries = normalized
-        self.entries = tuple(entry for entry in normalized if entry.status == "active")
+        self.all_entries = sorted_entries
+        self.entries = tuple(
+            entry for entry in sorted_entries if entry.status == "active"
+        )
 
     def for_paths(
         self,
