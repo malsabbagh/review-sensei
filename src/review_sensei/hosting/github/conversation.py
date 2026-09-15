@@ -26,6 +26,8 @@ from .errors import (
     GitHubConversationTransientError,
     GitHubHTTPError,
     GitHubHTTPTransientError,
+    GitHubPublicationError,
+    GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
 from .publication import (
@@ -902,7 +904,8 @@ class ConversationPublisher:
             root_user = root.get("user")
             root_is_app_authored = (
                 isinstance(root_user, dict)
-                and root_user.get("login") == app_slug
+                and isinstance(root_user.get("login"), str)
+                and root_user["login"].casefold() == app_slug.casefold()
                 and root_user.get("type") == "Bot"
             )
             root_is_blocking_finding = finding_declares_blocking(root.get("body"))
@@ -1089,11 +1092,11 @@ class ConversationPublisher:
                 app_slug=app_slug,
                 enabled=auto_approve,
             )
-        except GitHubHTTPTransientError as exc:
+        except (GitHubHTTPTransientError, GitHubPublicationTransientError) as exc:
             raise GitHubConversationTransientError(
                 "approval finalization failed temporarily"
             ) from exc
-        except GitHubHTTPError as exc:
+        except (GitHubHTTPError, GitHubPublicationError) as exc:
             raise GitHubConversationError("approval finalization failed") from exc
 
     def _preflight_resolution_pr(

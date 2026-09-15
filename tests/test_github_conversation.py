@@ -8,6 +8,7 @@ from review_sensei.hosting.github import (
     ConversationPublisher,
     GitHubConversationError,
     GitHubConversationTransientError,
+    GitHubPublicationError,
 )
 from review_sensei.hosting.github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
@@ -643,7 +644,7 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertFalse(
             authorized_human_comment(
                 {
-                    "user": {"login": "review-sensei[bot]", "type": "Bot"},
+                    "user": {"login": "Review-Sensei[Bot]", "type": "Bot"},
                     "author_association": "OWNER",
                 },
                 app_slug="review-sensei[bot]",
@@ -832,7 +833,7 @@ class ConversationPublisherTests(unittest.TestCase):
                     "id": 10,
                     "pull_request_url": INLINE_URL,
                     "body": "[🚫 Blocking] The original finding",
-                    "user": {"login": "review-sensei[bot]", "type": "Bot"},
+                    "user": {"login": "Review-Sensei[Bot]", "type": "Bot"},
                     "author_association": "OWNER",
                     "in_reply_to_id": None,
                 }
@@ -941,6 +942,27 @@ class ConversationPublisherTests(unittest.TestCase):
         approval = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(approval["event"], "APPROVE")
         self.assertNotIn("comments", approval)
+
+    def test_ai_resolution_wraps_finalizer_publication_errors(self):
+        class FailingFinalizer:
+            def finalize(self, **_kwargs):
+                raise GitHubPublicationError("finalization rejected")
+
+        publisher = ConversationPublisher(http=make_http([])[0])
+        publisher.finalizer = FailingFinalizer()
+        publisher._resolve_review_thread = lambda **_kwargs: None
+
+        with self.assertRaises(GitHubConversationError):
+            publisher._resolve_and_finalize(
+                token="token",
+                repository="owner/repo",
+                pull_request=1,
+                root_comment_id=10,
+                head_sha="b" * 40,
+                app_slug="review-sensei[bot]",
+                auto_approve=True,
+                root_is_blocking_finding=True,
+            )
 
     def test_ai_resolution_does_not_resolve_human_root_thread(self):
         head = "b" * 40

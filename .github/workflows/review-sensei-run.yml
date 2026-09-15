@@ -570,6 +570,7 @@ jobs:
           elif [[ "$AUTO_APPROVE" == "false" ]]; then
             auto_approve_args+=(--no-auto-approve)
           fi
+          set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
@@ -577,19 +578,31 @@ jobs:
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
             --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
-          reply_status="$(tail -n 1 "$reply_output")"
+          reply_exit=$?
+          set -e
+          reply_status="$(tail -n 1 "$reply_output" 2>/dev/null || true)"
           echo "$reply_status"
           case "$reply_status" in
             replied_and_resolved|already_replied_and_resolved)
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::warning::mention reply command exited $reply_exit after a reconciled status"
+              fi
               echo "resolved=true" >> "$GITHUB_OUTPUT"
               ;;
             replied|already_replied|skipped_source_gone|skipped_no_mention|\
               skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
               skipped_stale_head|skipped_fork)
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::warning::mention reply command exited $reply_exit after a reconciled status"
+              fi
               echo "resolved=false" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "::error::unexpected mention reply status: $reply_status" >&2
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::error::mention reply failed without a reconcilable status (exit $reply_exit)" >&2
+              else
+                echo "::error::unexpected mention reply status: $reply_status" >&2
+              fi
               exit 1
               ;;
           esac
@@ -835,6 +848,7 @@ jobs:
           elif [[ "$AUTO_APPROVE" == "false" ]]; then
             auto_approve_args+=(--no-auto-approve)
           fi
+          set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url http://127.0.0.1:11434/api \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
@@ -842,19 +856,31 @@ jobs:
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
             --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
-          reply_status="$(tail -n 1 "$reply_output")"
+          reply_exit=$?
+          set -e
+          reply_status="$(tail -n 1 "$reply_output" 2>/dev/null || true)"
           echo "$reply_status"
           case "$reply_status" in
             replied_and_resolved|already_replied_and_resolved)
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::warning::mention reply command exited $reply_exit after a reconciled status"
+              fi
               echo "resolved=true" >> "$GITHUB_OUTPUT"
               ;;
             replied|already_replied|skipped_source_gone|skipped_no_mention|\
               skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
               skipped_stale_head|skipped_fork)
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::warning::mention reply command exited $reply_exit after a reconciled status"
+              fi
               echo "resolved=false" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "::error::unexpected mention reply status: $reply_status" >&2
+              if [[ "$reply_exit" -ne 0 ]]; then
+                echo "::error::mention reply failed without a reconcilable status (exit $reply_exit)" >&2
+              else
+                echo "::error::unexpected mention reply status: $reply_status" >&2
+              fi
               exit 1
               ;;
           esac

@@ -211,6 +211,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("Publish or promote"), 2)
         self.assertNotIn("after AI resolution", text)
         self.assertIn("auto_approve_args", text)
+        self.assertEqual(text.count("reply_exit=$?"), 2)
+        self.assertEqual(text.count("after a reconciled status"), 4)
+        self.assertEqual(text.count("without a reconcilable status"), 2)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
