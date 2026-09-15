@@ -2,7 +2,11 @@ import unittest
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest, ProviderResponse
-from review_sensei.providers.profiles import get_provider_profile, profile_names
+from review_sensei.providers.profiles import (
+    ProviderProfile,
+    get_provider_profile,
+    profile_names,
+)
 from review_sensei.providers.registry import (
     ProviderRegistry,
     ProviderSettings,
@@ -24,6 +28,13 @@ class InvalidProvider:
     complete = 1
 
 
+class MissingNameProvider:
+    model = "missing-name"
+
+    def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse("{}", "missing", self.model)
+
+
 class ProviderRegistryTests(unittest.TestCase):
     def test_custom_provider_can_be_registered_without_changing_review_service(self):
         registry = ProviderRegistry()
@@ -37,8 +48,15 @@ class ProviderRegistryTests(unittest.TestCase):
         registry = ProviderRegistry()
         registry.register("invalid", lambda settings: InvalidProvider())
 
-        with self.assertRaisesRegex(TypeError, "complete"):
+        with self.assertRaisesRegex(ProviderError, "complete"):
             registry.create(ProviderSettings(name="invalid"))
+
+    def test_registry_rejects_provider_missing_name_attribute(self):
+        registry = ProviderRegistry()
+        registry.register("missing-name", lambda settings: MissingNameProvider())
+
+        with self.assertRaisesRegex(ProviderError, "name, model, and complete"):
+            registry.create(ProviderSettings(name="missing-name"))
 
     def test_unknown_provider_fails_with_available_names(self):
         registry = ProviderRegistry()
@@ -57,6 +75,18 @@ class ProviderRegistryTests(unittest.TestCase):
         provider = default_registry().create(settings)
         self.assertEqual(provider.name, "ollama")
         self.assertIsNone(settings.api_key)
+
+    def test_profile_rejects_unknown_endpoint_scope_at_runtime(self):
+        with self.assertRaisesRegex(ValueError, "endpoint_scope"):
+            ProviderProfile(
+                name="broken",
+                provider="ollama",
+                model="qwen3.5:4b",
+                base_url="http://127.0.0.1:11434/api",
+                endpoint_scope="invalid",
+                timeout_seconds=1,
+                max_output_tokens=1,
+            )
 
     def test_credentialed_profile_requires_explicit_key(self):
         with self.assertRaisesRegex(ProviderError, "requires an explicit API key"):
@@ -146,9 +176,9 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(provider.timeout_seconds, 120)
         self.assertEqual(provider.max_output_tokens, 2048)
 
-    def test_unprofiled_ollama_keeps_default_output_budget(self):
+    def test_unprofiled_ollama_keeps_unbounded_output_budget(self):
         provider = default_registry().create(ProviderSettings(name="ollama"))
-        self.assertEqual(provider.max_output_tokens, 2048)
+        self.assertIsNone(provider.max_output_tokens)
 
     def test_custom_endpoint_requires_explicit_registry_opt_in(self):
         with self.assertRaisesRegex(ValueError, "not allowlisted"):

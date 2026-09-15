@@ -139,11 +139,7 @@ def default_registry() -> ProviderRegistry:
                 if settings.timeout_seconds is not None
                 else 900
             ),
-            max_output_tokens=(
-                settings.max_output_tokens
-                if settings.max_output_tokens is not None
-                else 2048
-            ),
+            max_output_tokens=settings.max_output_tokens,
             allow_model_override=settings.profile is None,
         )
 

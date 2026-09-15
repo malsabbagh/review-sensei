@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from ..errors import ProviderError
 from ..models import ProviderRequest, ProviderResponse
 
 
@@ -25,14 +26,16 @@ def validate_provider_contract(provider: object) -> ReviewProvider:
     It does not invoke the provider or inspect credentials.
     """
 
-    if not isinstance(provider, ReviewProvider) or not callable(
-        getattr(provider, "complete", None)
-    ):
-        raise TypeError("provider must expose name, model, and complete(request)")
+    if not hasattr(provider, "name") or not hasattr(provider, "model"):
+        raise ProviderError("provider must expose name, model, and complete(request)")
+    if not callable(getattr(provider, "complete", None)):
+        raise ProviderError("provider must expose name, model, and complete(request)")
+    if not isinstance(provider, ReviewProvider):
+        raise ProviderError("provider must expose name, model, and complete(request)")
     name = provider.name
     if not isinstance(name, str) or not name.strip():
-        raise TypeError("provider name must be a non-empty string")
+        raise ProviderError("provider name must be a non-empty string")
     model = provider.model
     if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise TypeError("provider model must be a non-empty string or None")
+        raise ProviderError("provider model must be a non-empty string or None")
     return provider

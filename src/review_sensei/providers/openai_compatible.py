@@ -7,6 +7,7 @@ only to the configured HTTPS endpoint.
 
 from __future__ import annotations
 
+import errno
 import inspect
 import json
 import math
@@ -27,6 +28,8 @@ from urllib.request import (
     urlopen,
 )
 
+import certifi
+
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
@@ -36,6 +39,27 @@ from ..validation import validate_bounded_text
 # unbounded request header, and reject all Unicode control/format/surrogate
 # code points before constructing ``Authorization``.
 MAX_API_KEY_BYTES = 4_096
+ALLOWLISTED_OPENAI_HOSTNAME = "api.openai.com"
+
+
+def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
+    """Return whether ``base_url`` is the built-in OpenAI Chat Completions host."""
+
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    parsed = urlsplit(base_url)
+    if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").casefold()
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        return False
+    return hostname == ALLOWLISTED_OPENAI_HOSTNAME and (port is None or port == 443)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -161,11 +185,19 @@ class OpenAICompatibleProvider:
         if configured:
             try:
                 cert_path = Path(configured)
+                if not cert_path.exists():
+                    raise ProviderError("configured SSL_CERT_FILE is missing")
                 if cert_path.is_symlink() or not cert_path.is_file():
                     raise ProviderError(
                         "configured SSL_CERT_FILE is not a regular file"
                     )
             except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    raise ProviderError("configured SSL_CERT_FILE is missing") from exc
+                if exc.errno in {errno.EACCES, errno.EPERM}:
+                    raise ProviderError(
+                        "configured SSL_CERT_FILE is unreadable"
+                    ) from exc
                 raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
             try:
                 return ssl.create_default_context(cafile=str(cert_path))
@@ -173,10 +205,14 @@ class OpenAICompatibleProvider:
                 raise ProviderError(
                     "configured SSL_CERT_FILE could not be loaded"
                 ) from exc
+        # Standalone PyInstaller bundles do not inherit a usable system CA path
+        # on every supported host. Prefer certifi after an explicit override.
         try:
-            return ssl.create_default_context()
+            return ssl.create_default_context(cafile=certifi.where())
         except (OSError, ssl.SSLError) as exc:
-            raise ProviderError("the system CA store could not be loaded") from exc
+            raise ProviderError(
+                "OpenAI-compatible TLS trust store could not be loaded"
+            ) from exc
 
     @property
     def endpoint(self) -> str:
@@ -316,10 +352,9 @@ class OpenAICompatibleProvider:
                 ) from exc
             raise ProviderError("OpenAI-compatible request failed") from exc
         except TypeError as exc:
-            # A custom transport that does not return a context manager is a
-            # transport-contract failure, not a provider implementation leak.
-            # Response-reader TypeErrors are normalized inside
-            # ``_read_bounded_body`` before reaching this handler.
+            # Context-manager protocol only. Opener invocation TypeErrors are
+            # normalized in ``_call_custom_opener``; reader TypeErrors are
+            # normalized in ``_read_bounded_body``.
             raise ProviderError(
                 "OpenAI-compatible response could not be opened"
             ) from exc

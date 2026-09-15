@@ -300,6 +300,146 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.api_key_env, "OPENAI_API_KEY")
         self.assertEqual(args.timeout_seconds, 120.0)
 
+    def test_provider_defaults_follow_fixture_adapter(self):
+        args = _parser().parse_args(["--provider", "fixture"])
+        self.assertEqual(args.model, "fixture-v1")
+        self.assertIsNone(args.api_key_env)
+
+    def test_openai_compatible_explicit_flags_override_environment(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENAI_BASE_URL": "https://api.openai.com/v1",
+                "OPENAI_MODEL": "env-model",
+                "OPENAI_TIMEOUT_SECONDS": "30",
+            },
+            clear=True,
+        ):
+            args = _parser().parse_args(
+                [
+                    "--provider",
+                    "openai-compatible",
+                    "--base-url",
+                    "https://api.openai.com/v1",
+                    "--model",
+                    "cli-model",
+                    "--timeout-seconds",
+                    "9",
+                ]
+            )
+        self.assertEqual(args.base_url, "https://api.openai.com/v1")
+        self.assertEqual(args.model, "cli-model")
+        self.assertEqual(args.timeout_seconds, 9.0)
+
+    def test_prepare_diff_parser_does_not_receive_provider_defaults(self):
+        from review_sensei.cli import _prepare_diff_parser
+
+        args = _prepare_diff_parser().parse_args(
+            ["--base-ref", "main", "--head-ref", "feature"]
+        )
+        self.assertFalse(hasattr(args, "provider"))
+        self.assertFalse(hasattr(args, "base_url"))
+        self.assertFalse(hasattr(args, "model"))
+        self.assertFalse(hasattr(args, "api_key_env"))
+
+    def test_github_review_parser_does_not_receive_provider_defaults(self):
+        args = _github_parser().parse_args(
+            [
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "pr.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "b" * 40,
+            ]
+        )
+        self.assertFalse(hasattr(args, "provider"))
+        self.assertFalse(hasattr(args, "base_url"))
+        self.assertFalse(hasattr(args, "model"))
+        self.assertFalse(hasattr(args, "api_key_env"))
+
+    def test_openai_provider_rejects_non_allowlisted_environment_endpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OPENAI_BASE_URL": "https://attacker.example/v1",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                str(diff_path),
+                                "--provider",
+                                "openai-compatible",
+                                "--no-learning-proposals",
+                            ]
+                        )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(created, [])
+        self.assertIn("not allowlisted", stderr.getvalue())
+
+    def test_openai_provider_accepts_explicit_custom_endpoint_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OPENAI_BASE_URL": "https://llm.internal/v1",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openai-compatible",
+                            "--allow-custom-endpoint",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].base_url, "https://llm.internal/v1")
+        self.assertTrue(created[0].allow_custom_endpoint)
+
     def test_openai_provider_uses_openai_credential_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
