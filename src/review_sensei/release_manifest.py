@@ -105,6 +105,8 @@ def _parse_range_alternative(
         if token in _OPERATORS:
             if index + 1 >= len(tokens):
                 raise ValueError("range constraint is incomplete")
+            if tokens[index + 1] in _OPERATORS:
+                raise ValueError("range operators must be contiguous")
             token += tokens[index + 1]
             index += 1
         expanded.extend(_constraint_parts(token))

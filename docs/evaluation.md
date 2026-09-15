@@ -81,7 +81,9 @@ runs; date; and reproducibility settings. The record must include an explicit
 `supported`, `insufficient`, or `unsupported` status and rollback decision.
 The record is metadata about the evaluation, not the run evidence itself:
 operators must retain exact run outputs and provider terms/egress approval
-separately.
+separately. Every status still records at least one run and its reproducibility
+settings; only `supported` can authorize promotion, and it requires at least
+three runs.
 
 CI remains fixture-only. Live runs are gated, non-secret, and performed outside
 the CI workflow against reviewed synthetic or explicitly authorized data. The

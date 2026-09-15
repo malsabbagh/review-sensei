@@ -73,7 +73,11 @@ def _is_fixture_alias(value: str) -> bool:
 
 @dataclass(frozen=True)
 class PromotionRecord:
-    """Evidence required before promoting a real model/prompt configuration."""
+    """Evidence metadata required before promoting a real model/prompt configuration.
+
+    Every status records at least one observed run; only ``supported`` requires
+    three or more runs and reproducibility settings before promotion.
+    """
 
     engine_digest: str
     prompt_digest: str
@@ -124,10 +128,8 @@ class PromotionRecord:
             raise ReviewInputError(
                 "supported promotion evidence requires at least three runs"
             )
-        if self.status == "supported" and not self.reproducibility:
-            raise ReviewInputError(
-                "supported promotion evidence requires reproducibility settings"
-            )
+        if not self.reproducibility:
+            raise ReviewInputError("promotion record requires reproducibility settings")
         if self.status == "supported" and _is_fixture_alias(self.provider):
             raise ReviewInputError("fixture-only evidence cannot support promotion")
         if self.rollback_decision not in {"revert-to-baseline", "hold", "none"}:

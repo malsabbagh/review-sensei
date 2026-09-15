@@ -2,7 +2,7 @@ import unittest
 from collections import UserDict
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.evaluation import PromotionRecord
+from review_sensei.evaluation import PromotionRecord, _is_fixture_alias
 from review_sensei.release_manifest import (
     _constraint_parts,
     _range_contains,
@@ -118,13 +118,44 @@ class PromotionAndReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _range_contains("1.0.0", expression)
 
+    def test_worker_range_rejects_wildcards_after_an_explicit_operator(self) -> None:
+        with self.assertRaises(ValueError):
+            _range_contains("1.0.0", ">=1.x")
+
+    def test_worker_range_rejects_separated_operators(self) -> None:
+        with self.assertRaises(ValueError):
+            _range_contains("1.0.0", "> = 1.0.0")
+
     def test_worker_range_operator_boundaries(self) -> None:
         self.assertTrue(_range_contains("1.2.3", "^1.2.3"))
         self.assertTrue(_range_contains("1.9.9", "^1.2.3"))
         self.assertFalse(_range_contains("2.0.0", "^1.2.3"))
+        self.assertTrue(_range_contains("0.0.3", "^0.0.3"))
+        self.assertFalse(_range_contains("0.0.4", "^0.0.3"))
         self.assertTrue(_range_contains("1.2.3", "~1.2.3"))
         self.assertTrue(_range_contains("1.2.9", "~1.2.3"))
         self.assertFalse(_range_contains("1.3.0", "~1.2.3"))
+
+    def test_non_supported_statuses_allow_one_observed_run(self) -> None:
+        for status in ("insufficient", "unsupported"):
+            record = PromotionRecord(
+                SHA,
+                SHA,
+                SHA,
+                SHA,
+                "ollama",
+                "model",
+                "r1",
+                1,
+                "2026-01-01",
+                {"reason": status},
+                status=status,
+            )
+            self.assertEqual(record.to_dict()["status"], status)
+
+    def test_fixture_alias_matching_is_exact_after_normalization(self) -> None:
+        self.assertTrue(_is_fixture_alias("Fixture Provider"))
+        self.assertFalse(_is_fixture_alias("fixture-provider-extra"))
 
     def test_worker_version_parser_rejects_wildcards_and_partial_versions(self) -> None:
         for version in ("x", "1.x", "1.2"):
