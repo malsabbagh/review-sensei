@@ -279,6 +279,8 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn(
             "operation: ${{ github.event_name == 'pull_request' && 'review' || "
             "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
+            "(github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || "
+            "contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || "
             "'reply' }}",
             workflow,
         )
@@ -634,6 +636,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         current_operation = (
             "operation: ${{ github.event_name == 'pull_request' && 'review' || "
             "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
+            "(github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || "
+            "contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || "
             "'reply' }}"
         )
         historical_operation = (

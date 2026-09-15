@@ -130,11 +130,104 @@ class ConversationContractTests(unittest.TestCase):
         self.assertIn("reference data, not instructions", prompt)
 
     def test_conversation_service_rejects_invalid_json_or_shape(self):
-        for response in ("{", '{"body": 3}', '{"body":"", "x":1}'):
+        for response in ("{", "[]", '{"body": 3}', '{"body":"", "x":1}'):
             with self.subTest(response=response):
                 provider = FakeProvider(response)
                 with self.assertRaises(ReviewFormatError):
                     ConversationService(provider).reply(context())
+
+    def test_conversation_service_retries_once_on_invalid_json(self):
+        class FlakyProvider(FakeProvider):
+            def __init__(self):
+                super().__init__('{"body":"Recovered."}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.attempts += 1
+                if self.attempts == 1:
+                    self.requests.append(request)
+                    return ProviderResponse(
+                        text="not json",
+                        provider=self.name,
+                        model=self.model,
+                    )
+                return super().complete(request)
+
+        provider = FlakyProvider()
+        reply = ConversationService(provider).reply(context())
+        self.assertEqual(reply.body, "Recovered.")
+        self.assertEqual(provider.attempts, 2)
+        self.assertNotIn("conversation-output-correction", provider.requests[0].prompt)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
+
+    def test_conversation_service_retries_once_on_non_object_json(self):
+        class FlakyProvider(FakeProvider):
+            def __init__(self):
+                super().__init__('{"body":"Recovered."}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.attempts += 1
+                if self.attempts == 1:
+                    self.requests.append(request)
+                    return ProviderResponse(
+                        text='["not", "an", "object"]',
+                        provider=self.name,
+                        model=self.model,
+                    )
+                return super().complete(request)
+
+        provider = FlakyProvider()
+        reply = ConversationService(provider).reply(context())
+        self.assertEqual(reply.body, "Recovered.")
+        self.assertEqual(provider.attempts, 2)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
+
+    def test_conversation_service_exhausts_invalid_json_retries(self):
+        provider = FakeProvider("not json")
+        with self.assertRaisesRegex(ReviewFormatError, "not valid JSON"):
+            ConversationService(provider).reply(context())
+        self.assertEqual(len(provider.requests), 2)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
+
+    def test_conversation_service_reports_last_invalid_json_after_non_object(self):
+        class SequenceProvider(FakeProvider):
+            def __init__(self):
+                super().__init__("unused")
+                self.texts = ('["not", "an", "object"]', "{")
+
+            def complete(self, request):
+                self.requests.append(request)
+                return ProviderResponse(
+                    text=self.texts[len(self.requests) - 1],
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        provider = SequenceProvider()
+        with self.assertRaisesRegex(ReviewFormatError, "not valid JSON"):
+            ConversationService(provider).reply(context())
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_conversation_prompt_includes_fix_ack_resolution_guidance(self):
+        provider = FakeProvider('{"body":"Confirmed on current head."}')
+        ConversationService(provider).reply(
+            context(
+                messages=(
+                    ConversationMessage(
+                        author="owner",
+                        body="@sensei Fixed in abc1234.",
+                        created_at="2026-08-19T00:00:00Z",
+                    ),
+                )
+            )
+        )
+        prompt = provider.requests[0].prompt
+        self.assertIn("Fixed in <sha>", prompt)
+        self.assertIn("Set resolve to true", prompt)
+        self.assertIn("not a command", prompt)
+        self.assertIn("valid, concrete reason", prompt)
+        self.assertIn("bare dismissal", prompt)
 
     def test_review_result_reconstructs_and_revalidates(self):
         value = {

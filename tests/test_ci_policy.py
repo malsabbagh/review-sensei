@@ -131,9 +131,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn(
             "enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' "
+            "|| (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') "
+            "|| contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'true') "
             "|| vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}",
             text,
         )
+        self.assertIn("contains(github.event.comment.body, 're-scan')", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
@@ -152,6 +155,43 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
         self.assertIn("github.event.comment.author_association == 'COLLABORATOR'", text)
         self.assertIn("github.event.comment.user.type != 'Bot'", text)
+        self.assertIn(
+            "github.event_name == 'issue_comment' && github.event.issue.number",
+            text,
+        )
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
+            text,
+        )
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn(
+            "ref: ${{ github.event.repository.default_branch }}",
+            text,
+        )
+        self.assertIn(
+            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}",
+            text,
+        )
+        self.assertIn("github.event.comment.pull_request_url", text)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' ||",
+            text,
+        )
+        self.assertNotIn("PYTHONPATH=src python src/", text)
+        self.assertIn(
+            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
+            text,
+        )
+        self.assertIn("contains(github.event.comment.body, '@sensei')", text)
+        self.assertIn("while delimiter in title:", text)
+        self.assertIn(
+            'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY"',
+            text,
+        )
+        self.assertIn('event_name == "pull_request_review_comment"', text)
+        self.assertNotIn(
+            "trusted trigger resolver is missing from the default branch", text
+        )
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (
