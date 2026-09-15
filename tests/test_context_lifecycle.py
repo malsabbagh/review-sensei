@@ -12,6 +12,7 @@ from review_sensei.context import (
     SourceContextExcerpt,
     SymbolAwareContextSelector,
     reconcile_finding_lifecycle,
+    stable_concern_identity,
     stable_finding_fingerprint,
 )
 from review_sensei.errors import ContextLoadError
@@ -134,6 +135,14 @@ class ContextLifecycleTests(unittest.TestCase):
             SourceContextExcerpt(path="source.py", content="   ")
         with self.assertRaises(ContextLoadError):
             SourceContextExcerpt(path="source.py", content="x", reason="\t")
+        with self.assertRaises(ContextLoadError):
+            SourceContextExcerpt(
+                path="source.py", content="one\ntwo", start_line=1, end_line=5
+            )
+
+    def test_context_snapshot_rejects_untrusted_head_kind(self):
+        with self.assertRaises(ContextLoadError):
+            ContextSnapshot("a" * 40, kind="head")
 
     def test_context_reader_enforces_bounded_read_and_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -247,13 +256,70 @@ class ContextLifecycleTests(unittest.TestCase):
         current = stable_finding_fingerprint(
             path="src/a.py", symbol="run", evidence="x"
         )
+        concern = stable_concern_identity(path="src/a.py", symbol="run")
         result = reconcile_finding_lifecycle(
             FindingLifecycle(previous, "still-present"),
             current,
+            previous_concern=concern,
+            current_concern=concern,
             evidence_confirmed=True,
             review_complete=False,
         )
         self.assertEqual(result.state, "uncertain")
+
+    def test_reconcile_marks_fixed_only_for_matching_concern(self):
+        previous = stable_finding_fingerprint(path="src/a.py", symbol="run")
+        current = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", evidence="resolved"
+        )
+        concern = stable_concern_identity(path="src/a.py", symbol="run")
+        result = reconcile_finding_lifecycle(
+            FindingLifecycle(previous, "still-present"),
+            current,
+            previous_concern=concern,
+            current_concern=concern,
+            evidence_confirmed=True,
+            review_complete=True,
+        )
+        self.assertEqual(result.state, "fixed")
+
+    def test_reconcile_does_not_mark_unrelated_finding_as_fixed(self):
+        previous = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", defect_kind="race"
+        )
+        current = stable_finding_fingerprint(
+            path="src/b.py", symbol="save", defect_kind="null"
+        )
+        result = reconcile_finding_lifecycle(
+            FindingLifecycle(previous, "still-present"),
+            current,
+            previous_concern=stable_concern_identity(
+                path="src/a.py", symbol="run", defect_kind="race"
+            ),
+            current_concern=stable_concern_identity(
+                path="src/b.py", symbol="save", defect_kind="null"
+            ),
+            evidence_confirmed=True,
+            review_complete=True,
+        )
+        self.assertEqual(result.state, "outdated")
+
+    def test_reconcile_preserves_terminal_previous_state(self):
+        previous = stable_finding_fingerprint(path="src/a.py", symbol="run")
+        current = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", evidence="resolved"
+        )
+        concern = stable_concern_identity(path="src/a.py", symbol="run")
+        result = reconcile_finding_lifecycle(
+            FindingLifecycle(previous, "fixed"),
+            current,
+            previous_concern=concern,
+            current_concern=concern,
+            evidence_confirmed=True,
+            review_complete=True,
+        )
+        self.assertEqual(result.state, "fixed")
+        self.assertEqual(result.fingerprint, previous)
 
     def test_cache_key_accepts_repository_names_up_to_512_bytes(self):
         repository = "o/" + ("r" * 509)

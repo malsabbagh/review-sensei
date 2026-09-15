@@ -13,6 +13,7 @@ from .context import (
     SymbolAwareContextSelector,
     build_review_context_selection,
     reconcile_finding_lifecycle,
+    stable_concern_identity,
     stable_finding_fingerprint,
 )
 from .conversation import ConversationService
@@ -103,6 +104,7 @@ __all__ = [
     "ReviewResult",
     "ReviewService",
     "stable_finding_fingerprint",
+    "stable_concern_identity",
     "reconcile_finding_lifecycle",
     "RecoveryArtifact",
     "ResourceBudget",

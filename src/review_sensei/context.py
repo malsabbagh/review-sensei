@@ -177,15 +177,13 @@ def _read_file_under_root_fallback(
     except ValueError:
         return None
     try:
-        size = path.stat().st_size
+        with open(path, "rb") as stream:
+            data = stream.read(max_bytes + 1)
     except OSError:
         return None
-    if size > max_bytes:
+    if len(data) > max_bytes:
         return None
-    try:
-        return path.read_bytes()[: max_bytes + 1]
-    except OSError:
-        return None
+    return data
 
 
 def _opened_path_within_root(root: Path, descriptor: int) -> bool:
@@ -404,7 +402,7 @@ class ReviewContextSelection:
 
 @dataclass(frozen=True)
 class ContextSnapshot:
-    """Immutable identity for the trusted source tree used for context."""
+    """Immutable identity for the trusted base source tree used for context."""
 
     revision: str = "0" * 40
     kind: str = "base"
@@ -412,8 +410,8 @@ class ContextSnapshot:
     def __post_init__(self) -> None:
         if not isinstance(self.revision, str) or not _SHA1.fullmatch(self.revision):
             raise ContextLoadError("context snapshot revision must be a commit SHA")
-        if self.kind not in {"base", "head"}:
-            raise ContextLoadError("context snapshot kind must be base or head")
+        if self.kind != "base":
+            raise ContextLoadError("context snapshot kind must be base")
 
 
 @dataclass(frozen=True)
@@ -423,7 +421,6 @@ class SourceContextExcerpt:
     path: str
     content: str
     snapshot: ContextSnapshot = ContextSnapshot()
-    blob_sha: str = ""
     start_line: int = 1
     end_line: int = 1
     reason: str = "changed-file"
@@ -461,12 +458,9 @@ class SourceContextExcerpt:
             raise ContextLoadError("source context excerpt line range is invalid")
         if self.end_line < self.start_line:
             raise ContextLoadError("source context excerpt line range is invalid")
-        if not isinstance(self.blob_sha, str):
-            raise ContextLoadError("source context excerpt blob identity is invalid")
-        if not self.blob_sha:
-            object.__setattr__(self, "blob_sha", _git_blob_sha(self.content))
-        if not _SHA1.fullmatch(self.blob_sha):
-            raise ContextLoadError("source context excerpt blob identity is invalid")
+        line_count = max(1, len(self.content.splitlines()))
+        if self.start_line > line_count or self.end_line > line_count:
+            raise ContextLoadError("source context excerpt line range is invalid")
         try:
             validate_bounded_text(
                 self.reason,
@@ -503,16 +497,6 @@ class SourceContextSelection:
     excerpts: tuple[SourceContextExcerpt, ...] = ()
     outcomes: tuple[tuple[str, str], ...] = ()
     complete: bool = True
-
-
-def _git_blob_sha(content: str) -> str:
-    """Return the Git blob object id (SHA-1) for provenance interop.
-
-    Integrity for excerpts is carried separately by ``SourceContextExcerpt.sha256``.
-    """
-
-    payload = content.encode("utf-8")
-    return hashlib.sha1(f"blob {len(payload)}\0".encode() + payload).hexdigest()
 
 
 class SymbolAwareContextSelector:
@@ -1045,16 +1029,14 @@ class SymbolAwareContextSelector:
         return SourceContextSelection(tuple(excerpts), ordered_outcomes, complete)
 
 
-def stable_finding_fingerprint(
+def _normalized_finding_parts(
     *,
     evidence_id: str | None = None,
     path: str | None = None,
     symbol: str | None = None,
     defect_kind: str | None = None,
     evidence: str | None = None,
-) -> str:
-    """Hash stable concern identity, excluding line numbers and prose wording."""
-
+) -> dict[str, str]:
     if isinstance(path, PurePosixPath):
         raw_path = path.as_posix()
     elif path is None:
@@ -1072,18 +1054,63 @@ def stable_finding_fingerprint(
         except ReviewInputError as exc:
             raise ContextLoadError("finding fingerprint path is invalid") from exc
     normalized_path = PurePosixPath(raw_path).as_posix() if raw_path else ""
-    parts = {
+    return {
         "evidence_id": evidence_id or "",
         "path": normalized_path,
         "symbol": " ".join((symbol or "").split()),
         "defect_kind": " ".join((defect_kind or "").lower().split()),
         "evidence": " ".join((evidence or "").split()),
     }
-    if not any(parts.values()):
-        raise ContextLoadError("finding fingerprint requires stable evidence")
+
+
+def _finding_identity_digest(parts: dict[str, str]) -> str:
     return hashlib.sha256(
         json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def stable_concern_identity(
+    *,
+    evidence_id: str | None = None,
+    path: str | None = None,
+    symbol: str | None = None,
+    defect_kind: str | None = None,
+) -> str:
+    """Hash stable concern identity without prose evidence."""
+
+    parts = _normalized_finding_parts(
+        evidence_id=evidence_id,
+        path=path,
+        symbol=symbol,
+        defect_kind=defect_kind,
+        evidence=None,
+    )
+    parts["evidence"] = ""
+    if not any(parts.values()):
+        raise ContextLoadError("finding concern identity requires stable evidence")
+    return _finding_identity_digest(parts)
+
+
+def stable_finding_fingerprint(
+    *,
+    evidence_id: str | None = None,
+    path: str | None = None,
+    symbol: str | None = None,
+    defect_kind: str | None = None,
+    evidence: str | None = None,
+) -> str:
+    """Hash stable concern identity, excluding line numbers and prose wording."""
+
+    parts = _normalized_finding_parts(
+        evidence_id=evidence_id,
+        path=path,
+        symbol=symbol,
+        defect_kind=defect_kind,
+        evidence=evidence,
+    )
+    if not any(parts.values()):
+        raise ContextLoadError("finding fingerprint requires stable evidence")
+    return _finding_identity_digest(parts)
 
 
 @dataclass(frozen=True)
@@ -1103,6 +1130,8 @@ def reconcile_finding_lifecycle(
     previous: FindingLifecycle | None,
     current_fingerprint: str,
     *,
+    current_concern: str | None = None,
+    previous_concern: str | None = None,
     evidence_confirmed: bool = False,
     review_complete: bool = True,
 ) -> FindingLifecycle:
@@ -1114,9 +1143,16 @@ def reconcile_finding_lifecycle(
         return FindingLifecycle(current_fingerprint, "new")
     if previous.fingerprint == current_fingerprint:
         return FindingLifecycle(current_fingerprint, "still-present")
+    if previous.state in {"fixed", "outdated"}:
+        return previous
     if not review_complete:
         return FindingLifecycle(previous.fingerprint, "uncertain", previous.evidence)
-    if evidence_confirmed:
+    if (
+        evidence_confirmed
+        and previous_concern is not None
+        and current_concern is not None
+        and previous_concern == current_concern
+    ):
         return FindingLifecycle(previous.fingerprint, "fixed", previous.evidence)
     return FindingLifecycle(previous.fingerprint, "outdated", previous.evidence)
 
