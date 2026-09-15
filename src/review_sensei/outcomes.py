@@ -286,6 +286,8 @@ class RecoveryArtifact:
             base_sha=base_sha,
             head_sha=head_sha,
         )
+        if created_at is not None:
+            _parse_aware_datetime(created_at, label="recovery artifact created_at")
         _parse_aware_datetime(expires_at, label="recovery artifact expires_at")
         if created_at is None:
             current = now or datetime.now(timezone.utc)
@@ -293,7 +295,6 @@ class RecoveryArtifact:
                 current = current.replace(tzinfo=timezone.utc)
             created = current.replace(microsecond=0).isoformat()
         else:
-            _parse_aware_datetime(created_at, label="recovery artifact created_at")
             created = created_at
         canonical = _canonical_recovery_result(result)
         return cls(
