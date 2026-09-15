@@ -62,16 +62,38 @@ def _default_ollama_model() -> str:
 def _cli_option_set(arguments: list[str], option: str) -> bool:
     """Return True when *option* was explicitly passed on the command line."""
 
-    if option in arguments:
-        return True
-    prefix = f"{option}="
-    if any(value.startswith(prefix) for value in arguments):
+    if option in arguments or any(
+        value.startswith(f"{option}=") for value in arguments
+    ):
         return True
     try:
         index = arguments.index(option)
     except ValueError:
         return False
     return index + 1 < len(arguments) and not arguments[index + 1].startswith("-")
+
+
+def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> None:
+    """Ensure explicit profile and provider selections stay aligned."""
+
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return
+    selected = get_provider_profile(profile_name)
+    provider_name = str(args.provider).strip().lower()
+    if _cli_option_set(argv, "--provider"):
+        if provider_name == "fixture":
+            raise ReviewInputError("--provider fixture cannot be combined with --profile")
+        if provider_name != selected.provider:
+            raise ReviewInputError(
+                f"--provider {provider_name} does not match profile "
+                f"'{profile_name}' (requires {selected.provider})"
+            )
+        return
+    if provider_name != selected.provider:
+        raise ReviewInputError(
+            f"profile '{profile_name}' requires --provider {selected.provider}"
+        )
 
 
 def _openai_timeout_default() -> float:
@@ -151,14 +173,11 @@ def _resolve_api_key(
         profile = get_provider_profile(profile_name)
         if not profile.requires_api_key:
             return None
-        key_env = (
-            args.api_key_env
-            if _cli_option_set(argv, "--api-key-env")
-            else profile.api_key_env
-        )
-        if not key_env:
+        if _cli_option_set(argv, "--api-key-env"):
+            return os.getenv(args.api_key_env)
+        if not profile.api_key_env:
             return None
-        return os.getenv(key_env)
+        return os.getenv(profile.api_key_env)
     provider_name = str(args.provider).strip().lower()
     if provider_name == "fixture":
         return None
@@ -174,14 +193,8 @@ def _provider_settings_from_args(
 ) -> ProviderSettings:
     profile_name = getattr(args, "profile", None)
     if profile_name:
-        selected = get_provider_profile(profile_name)
-        provider_name = (
-            str(args.provider).strip().lower()
-            if argv is not None and _cli_option_set(argv, "--provider")
-            else selected.provider
-        )
         return ProviderSettings(
-            name=provider_name,
+            name=str(args.provider).strip().lower(),
             profile=profile_name,
             model=args.model
             if argv is None or _cli_option_set(argv, "--model")
@@ -423,6 +436,7 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
                 "--mode live with a remote endpoint requires --allow-data-egress"
             )
         corpus = load_corpus(args.corpus)
+        _validate_profile_cli_args(args, argv)
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
@@ -645,6 +659,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError(
                 f"GitHub read token environment variable {args.github_token_env} is unavailable"
             )
+        _validate_profile_cli_args(args, argv)
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
@@ -751,8 +766,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.diff:
             raise ReviewInputError("--diff is required")
+        _validate_profile_cli_args(args, args_list)
         provider_name = str(args.provider).strip().lower()
-        if provider_name == "fixture" and not getattr(args, "profile", None):
+        if provider_name == "fixture":
             if not args.fixture_response:
                 raise ReviewInputError("--provider fixture requires --fixture-response")
             api_key = None

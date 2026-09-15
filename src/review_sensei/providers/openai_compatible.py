@@ -8,14 +8,13 @@ only to the configured HTTPS endpoint.
 from __future__ import annotations
 
 import errno
-import inspect
 import json
 import math
 import os
 import ssl
 import stat
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from http.client import HTTPException
 from pathlib import Path
 from typing import Any
@@ -200,17 +199,28 @@ class OpenAICompatibleProvider:
                 raise ProviderError("configured SSL_CERT_FILE is missing") from exc
             if exc.errno in {errno.EACCES, errno.EPERM}:
                 raise ProviderError("configured SSL_CERT_FILE is unreadable") from exc
+            if exc.errno == errno.ELOOP:
+                raise ProviderError(
+                    "configured SSL_CERT_FILE is not a regular file"
+                ) from exc
             raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
         try:
-            file_stat = os.fstat(fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise ProviderError("configured SSL_CERT_FILE is not a regular file")
-            with os.fdopen(fd, "rb") as handle:
-                fd = -1
-                contents = handle.read()
-        finally:
-            if fd >= 0:
-                os.close(fd)
+            try:
+                file_stat = os.fstat(fd)
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise ProviderError(
+                        "configured SSL_CERT_FILE is not a regular file"
+                    )
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1
+                    contents = handle.read()
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        except ProviderError:
+            raise
+        except OSError as exc:
+            raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
         try:
             context = ssl.create_default_context()
             context.load_verify_locations(cadata=contents.decode("ascii"))
@@ -253,47 +263,25 @@ class OpenAICompatibleProvider:
         return f"{self.base_url}/chat/completions"
 
     def _call_custom_opener(self, http_request: Request) -> Any:
-        """Invoke an injected opener using only kwargs it declares.
-
-        The default transport is always the no-redirect opener created at
-        construction.  Injected openers are an explicit seam for tests and
-        callers that own their transport policy; introspection avoids turning a
-        harmless signature difference into an opaque response-read failure.
-        """
+        """Invoke an injected opener, falling back when kwargs are unsupported."""
 
         opener = getattr(self._opener, "open", self._opener)
-        kwargs: dict[str, object] = {}
-        positional: list[object] = [http_request]
-        parameters: Mapping[str, inspect.Parameter]
         try:
-            parameters = inspect.signature(opener).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        accepts_var_kwargs = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-        for name, value in (
-            ("timeout", self.timeout_seconds),
-            ("context", self._ssl_context),
-        ):
-            parameter = parameters.get(name)
-            if accepts_var_kwargs or (
-                parameter is not None
-                and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
-            ):
-                kwargs[name] = value
-            elif (
-                parameter is not None
-                and parameter.kind is inspect.Parameter.POSITIONAL_ONLY
-            ):
-                positional.append(value)
-        try:
-            return opener(*positional, **kwargs)
-        except TypeError as exc:
-            # This catches only errors raised while invoking the opener.  The
-            # response reader below handles its own type errors separately.
-            raise ProviderError("OpenAI-compatible opener could not be called") from exc
+            return opener(
+                http_request,
+                timeout=self.timeout_seconds,
+                context=self._ssl_context,
+            )
+        except TypeError:
+            try:
+                return opener(http_request, timeout=self.timeout_seconds)
+            except TypeError:
+                try:
+                    return opener(http_request)
+                except TypeError as exc:
+                    raise ProviderError(
+                        "OpenAI-compatible opener could not be called"
+                    ) from exc
 
     @staticmethod
     def _read_bounded_body(response: Any, maximum: int) -> bytearray:

@@ -248,13 +248,15 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
                 "review_sensei.providers.openai_compatible.ssl.create_default_context",
                 return_value=dummy,
             ) as create:
-                OpenAICompatibleProvider(
+                provider = OpenAICompatibleProvider(
                     api_key="secret",
                     opener=lambda request, timeout: _Response(
                         b'{"choices":[{"message":{"content":"ok"}}]}'
                     ),
                 )
         create.assert_called_once_with(cafile=certifi.where())
+        self.assertIs(provider._ssl_context, dummy)
+        self.assertIsNotNone(provider._safe_opener)
 
     def test_allowlisted_endpoint_helper_rejects_custom_hosts(self):
         self.assertTrue(

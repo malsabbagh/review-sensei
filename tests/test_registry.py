@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest, ProviderResponse
@@ -189,6 +190,33 @@ class ProviderRegistryTests(unittest.TestCase):
                     api_key="secret",
                 )
             )
+
+    def test_profile_cli_settings_with_omitted_values_use_canonical_budget(self):
+        from review_sensei.cli import _provider_settings_from_args
+
+        args = SimpleNamespace(
+            provider="openai-compatible",
+            profile="fast-triage",
+            model="gpt-4o-mini",
+            base_url="https://api.openai.com/v1",
+            timeout_seconds=120.0,
+            allow_custom_endpoint=False,
+            api_key_env="OLLAMA_API_KEY",
+        )
+        settings = _provider_settings_from_args(
+            args,
+            api_key="secret",
+            argv=[
+                "--profile",
+                "fast-triage",
+                "--provider",
+                "openai-compatible",
+            ],
+        )
+        provider = default_registry().create(settings)
+        self.assertEqual(provider.model, "gpt-4o-mini")
+        self.assertEqual(provider.timeout_seconds, 120)
+        self.assertEqual(provider.max_output_tokens, 2048)
 
     def test_profile_rejects_allow_custom_endpoint(self):
         with self.assertRaisesRegex(
