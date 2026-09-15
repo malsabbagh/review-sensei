@@ -8,6 +8,7 @@ only to the configured HTTPS endpoint.
 from __future__ import annotations
 
 import errno
+import http.client
 import json
 import math
 import os
@@ -80,6 +81,35 @@ class _NoRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, new):
         raise ProviderError("OpenAI-compatible endpoint redirected")
+
+
+class _VerifiedHTTPSHandler(HTTPSHandler):
+    """Verify TLS against the configured hostname, not only the resolved peer."""
+
+    def __init__(self, context: ssl.SSLContext, *, expected_hostname: str) -> None:
+        super().__init__(context=context)
+        self._expected_hostname = expected_hostname
+        self._verified_context = context
+
+    def https_open(self, req: Request) -> http.client.HTTPResponse:
+        verified_context = self._verified_context
+        expected_hostname = self._expected_hostname
+
+        def connection_factory(
+            host: str,
+            port: int | None = 443,
+            timeout: float | object = object(),
+            **kwargs: object,
+        ) -> http.client.HTTPSConnection:
+            return http.client.HTTPSConnection(
+                host,
+                port=port or 443,
+                timeout=timeout,
+                context=verified_context,
+                server_hostname=expected_hostname,  # type: ignore[call-overload]
+            )
+
+        return self.do_open(connection_factory, req)
 
 
 class OpenAICompatibleProvider:
@@ -188,10 +218,14 @@ class OpenAICompatibleProvider:
         self.max_output_tokens = max_output_tokens
         self.allow_model_override = allow_model_override
         self.allow_custom_endpoint = allow_custom_endpoint
+        self._expected_hostname = hostname
         self._opener = opener
         self._ssl_context = self._build_ssl_context()
         self._safe_opener = build_opener(
-            _NoRedirect(), HTTPSHandler(context=self._ssl_context)
+            _NoRedirect(),
+            _VerifiedHTTPSHandler(
+                self._ssl_context, expected_hostname=self._expected_hostname
+            ),
         )
 
     @staticmethod
@@ -253,15 +287,19 @@ class OpenAICompatibleProvider:
 
         configured = os.getenv("SSL_CERT_FILE")
         if configured:
-            return OpenAICompatibleProvider._load_ca_bundle(Path(configured))
-        # Standalone PyInstaller bundles do not inherit a usable system CA path
-        # on every supported host. Prefer certifi after an explicit override.
-        try:
-            return ssl.create_default_context(cafile=certifi.where())
-        except (OSError, ssl.SSLError) as exc:
-            raise ProviderError(
-                "OpenAI-compatible TLS trust store could not be loaded"
-            ) from exc
+            context = OpenAICompatibleProvider._load_ca_bundle(Path(configured))
+        else:
+            # Standalone PyInstaller bundles do not inherit a usable system CA path
+            # on every supported host. Prefer certifi after an explicit override.
+            try:
+                context = ssl.create_default_context(cafile=certifi.where())
+            except (OSError, ssl.SSLError) as exc:
+                raise ProviderError(
+                    "OpenAI-compatible TLS trust store could not be loaded"
+                ) from exc
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        return context
 
     @property
     def endpoint(self) -> str:

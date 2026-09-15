@@ -295,6 +295,12 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             is_allowlisted_openai_compatible_endpoint("https://@api.openai.com/v1")
         )
 
+    def test_builtin_transport_pins_tls_hostname_verification(self):
+        provider = OpenAICompatibleProvider(api_key="secret")
+        self.assertEqual(provider._expected_hostname, "api.openai.com")
+        self.assertTrue(provider._ssl_context.check_hostname)
+        self.assertEqual(provider._ssl_context.verify_mode, ssl.CERT_REQUIRED)
+
     def test_http_rate_limit_and_server_errors_are_transient(self):
         from urllib.error import HTTPError
 

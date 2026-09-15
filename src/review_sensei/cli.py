@@ -59,9 +59,79 @@ def _default_ollama_model() -> str:
     return os.getenv("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL)
 
 
-def _cli_option_set(arguments: list[str], option: str) -> bool:
+def _is_registered_option_token(
+    token: str, option_actions: dict[str, argparse.Action]
+) -> bool:
+    if token in option_actions:
+        return True
+    return any(
+        token.startswith(f"{option}=")
+        for option in option_actions
+        if option.startswith("--")
+    )
+
+
+def _explicit_cli_options(
+    parser: argparse.ArgumentParser, arguments: list[str]
+) -> set[str]:
+    """Return long options from *arguments* that include an explicit value."""
+
+    option_actions = parser._option_string_actions
+    long_options = sorted(
+        (option for option in option_actions if option.startswith("--")),
+        key=len,
+        reverse=True,
+    )
+    explicit: set[str] = set()
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        matched_option: str | None = None
+        matched_action: argparse.Action | None = None
+        for option in long_options:
+            if token == option:
+                matched_option = option
+                matched_action = option_actions[option]
+                break
+            prefix = f"{option}="
+            if token.startswith(prefix):
+                if token[len(prefix) :]:
+                    explicit.add(option)
+                index += 1
+                matched_option = ""
+                break
+        if matched_option == "":
+            continue
+        if matched_option is None:
+            index += 1
+            continue
+        assert matched_action is not None
+        if matched_action.nargs == 0:
+            explicit.add(matched_option)
+            index += 1
+            continue
+        if index + 1 >= len(arguments):
+            index += 1
+            continue
+        next_token = arguments[index + 1]
+        if _is_registered_option_token(next_token, option_actions):
+            index += 1
+            continue
+        explicit.add(matched_option)
+        index += 2
+    return explicit
+
+
+def _cli_option_set(
+    arguments: list[str],
+    option: str,
+    *,
+    explicit: set[str] | None = None,
+) -> bool:
     """Return True when *option* was explicitly passed on the command line."""
 
+    if explicit is not None:
+        return option in explicit
     prefix = f"{option}="
     if any(value.startswith(prefix) and value[len(prefix) :] for value in arguments):
         return True
@@ -88,7 +158,8 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
             "--allow-custom-endpoint cannot be combined with --profile"
         )
     provider_name = str(args.provider).strip().lower()
-    if _cli_option_set(argv, "--provider"):
+    explicit = getattr(args, "_explicit_cli_options", None)
+    if _cli_option_set(argv, "--provider", explicit=explicit):
         if provider_name == "fixture":
             raise ReviewInputError(
                 "--provider fixture cannot be combined with --profile"
@@ -131,24 +202,25 @@ def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> 
         return
     if getattr(args, "profile", None):
         return
+    explicit = getattr(args, "_explicit_cli_options", None)
     provider = str(args.provider).strip().lower()
     if provider == "openai-compatible":
-        if not _cli_option_set(arguments, "--base-url"):
+        if not _cli_option_set(arguments, "--base-url", explicit=explicit):
             _assign_if_present(
                 args, "base_url", os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
             )
-        if not _cli_option_set(arguments, "--model"):
+        if not _cli_option_set(arguments, "--model", explicit=explicit):
             _assign_if_present(
                 args, "model", os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
             )
-        if not _cli_option_set(arguments, "--api-key-env"):
+        if not _cli_option_set(arguments, "--api-key-env", explicit=explicit):
             _assign_if_present(args, "api_key_env", "OPENAI_API_KEY")
-        if not _cli_option_set(arguments, "--timeout-seconds"):
+        if not _cli_option_set(arguments, "--timeout-seconds", explicit=explicit):
             _assign_if_present(args, "timeout_seconds", _openai_timeout_default())
     elif provider == "fixture":
-        if not _cli_option_set(arguments, "--model"):
+        if not _cli_option_set(arguments, "--model", explicit=explicit):
             _assign_if_present(args, "model", "fixture-v1")
-        if not _cli_option_set(arguments, "--api-key-env"):
+        if not _cli_option_set(arguments, "--api-key-env", explicit=explicit):
             _assign_if_present(args, "api_key_env", None)
 
 
@@ -189,11 +261,23 @@ def _resolve_api_key(
         profile = get_provider_profile(profile_name)
         if not profile.requires_api_key:
             return None
-        if _cli_option_set(argv, "--api-key-env"):
-            return os.getenv(args.api_key_env)
+        if _cli_option_set(
+            argv, "--api-key-env", explicit=getattr(args, "_explicit_cli_options", None)
+        ):
+            api_key = os.getenv(args.api_key_env)
+            if not api_key:
+                raise ReviewInputError(
+                    f"environment variable {args.api_key_env} is unavailable"
+                )
+            return api_key
         if not profile.api_key_env:
             return None
-        return os.getenv(profile.api_key_env)
+        api_key = os.getenv(profile.api_key_env)
+        if not api_key:
+            raise ReviewInputError(
+                f"environment variable {profile.api_key_env} is unavailable"
+            )
+        return api_key
     provider_name = str(args.provider).strip().lower()
     if provider_name == "fixture":
         return None
@@ -208,23 +292,26 @@ def _provider_settings_from_args(
     argv: list[str] | None = None,
 ) -> ProviderSettings:
     profile_name = getattr(args, "profile", None)
+    explicit = getattr(args, "_explicit_cli_options", None)
     if profile_name:
         return ProviderSettings(
             name=str(args.provider).strip().lower(),
             profile=profile_name,
             model=args.model
-            if argv is None or _cli_option_set(argv, "--model")
+            if argv is None or _cli_option_set(argv, "--model", explicit=explicit)
             else None,
             base_url=(
                 args.base_url
-                if argv is None or _cli_option_set(argv, "--base-url")
+                if argv is None
+                or _cli_option_set(argv, "--base-url", explicit=explicit)
                 else None
             ),
             api_key=api_key,
             fixture_response=fixture_response,
             timeout_seconds=(
                 args.timeout_seconds
-                if argv is None or _cli_option_set(argv, "--timeout-seconds")
+                if argv is None
+                or _cli_option_set(argv, "--timeout-seconds", explicit=explicit)
                 else None
             ),
             allow_custom_endpoint=False,
@@ -251,6 +338,7 @@ class _ProviderArgumentParser(argparse.ArgumentParser):
     ) -> argparse.Namespace:
         raw_arguments = list(args) if args is not None else sys.argv[1:]
         parsed = super().parse_args(args, namespace)
+        parsed._explicit_cli_options = _explicit_cli_options(self, raw_arguments)
         _apply_provider_defaults(parsed, raw_arguments)
         return parsed
 
@@ -771,7 +859,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args_list and args_list[0] == "github":
         github_argv = args_list[1:]
-        args = _github_parser().parse_args(github_argv)
+        github_parser = _github_parser()
+        args = github_parser.parse_args(github_argv)
+        args._explicit_cli_options = _explicit_cli_options(github_parser, github_argv)
         try:
             if getattr(args, "command", None) == "reply":
                 _apply_provider_defaults(args, github_argv)
