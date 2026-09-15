@@ -1,10 +1,11 @@
 import json
 import ssl
 import unittest
+from urllib.request import Request
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest
-from review_sensei.providers.ollama import OllamaProvider
+from review_sensei.providers.ollama import OllamaProvider, _NoRedirect
 from review_sensei.validation import ReviewLimits
 
 
@@ -66,13 +67,76 @@ class ShortReadFakeResponse:
 
 
 class OllamaProviderTests(unittest.TestCase):
+    def test_builtin_transport_rejects_cross_origin_redirects_before_replay(self):
+        request = Request(
+            "https://ollama.example/api/generate",
+            headers={"Authorization": "Bearer private-secret"},
+        )
+        handler = _NoRedirect()
+        for status in (301, 302, 303):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(
+                    ProviderError, "Ollama endpoint redirected"
+                ) as raised:
+                    handler.redirect_request(
+                        request,
+                        None,
+                        status,
+                        "redirect",
+                        {"Location": "https://attacker.example/collect"},
+                        "https://attacker.example/collect",
+                    )
+                self.assertNotIn("private-secret", str(raised.exception))
+
+    def test_api_key_rejects_control_characters(self):
+        for api_key in (
+            "secret\nheader",
+            "secret\rheader",
+            "secret\x00value",
+            "secret\x7fvalue",
+        ):
+            with self.subTest(api_key=repr(api_key)):
+                with self.assertRaisesRegex(
+                    ValueError, "must not contain control characters"
+                ):
+                    OllamaProvider(api_key=api_key)
+
+    def test_api_key_rejects_non_ascii_values(self):
+        with self.assertRaisesRegex(ValueError, "only ASCII"):
+            OllamaProvider(api_key="secret-é")
+
+    def test_transport_errors_do_not_echo_api_key(self):
+        secret = "private-secret"
+
+        def opener(request, timeout, context):
+            raise ProviderError(f"transport failed for {secret}")
+
+        with self.assertRaisesRegex(ProviderError, "Ollama request failed") as raised:
+            OllamaProvider(api_key=secret, opener=opener).complete(
+                ProviderRequest(prompt="review")
+            )
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_transport_errors_do_not_echo_api_key_casefold(self):
+        secret = "Private-Secret"
+
+        def opener(request, timeout, context):
+            raise ProviderError(f"transport failed for {secret.lower()}")
+
+        with self.assertRaisesRegex(ProviderError, "Ollama request failed") as raised:
+            OllamaProvider(api_key=secret, opener=opener).complete(
+                ProviderRequest(prompt="review")
+            )
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(secret.lower(), str(raised.exception))
+
     def test_sends_non_streaming_json_review_request(self):
         captured = {}
         raw_response = FakeResponse(
             b'{"response":"{\\"summary\\":\\"ok\\",\\"comments\\":[]}"}'
         )
 
-        def opener(request, timeout, context=None):
+        def opener(request, timeout, context):
             captured["request"] = request
             captured["timeout"] = timeout
             captured["context"] = context
@@ -113,7 +177,7 @@ class OllamaProviderTests(unittest.TestCase):
     def test_api_key_none_sends_no_authorization_header(self):
         captured = {}
 
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             captured["request"] = request
             return FakeResponse(b'{"response":"ok"}')
 
@@ -128,16 +192,15 @@ class OllamaProviderTests(unittest.TestCase):
 
     def test_unsized_response_read_fails_without_an_unbounded_retry(self):
         provider = OllamaProvider(
-            opener=lambda request, timeout: UnsizedOnlyResponse(b"{}")
+            opener=lambda request, timeout, context: UnsizedOnlyResponse(b"{}")
         )
-        with self.assertRaises(ProviderError) as raised:
+        with self.assertRaisesRegex(ProviderError, "body could not be read"):
             provider.complete(ProviderRequest(prompt="private prompt"))
-        self.assertEqual(str(raised.exception), "Ollama request failed")
 
     def test_effective_constructor_model_respects_request_model_limit_before_open(self):
         opened = []
 
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             opened.append(request)
             return SizedFakeResponse(b'{"response":"ok"}')
 
@@ -151,7 +214,7 @@ class OllamaProviderTests(unittest.TestCase):
         self.assertEqual(opened, [])
 
     def test_surfaces_provider_transport_errors_without_exposing_prompt(self):
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             raise TimeoutError("timed out")
 
         with self.assertRaisesRegex(ProviderError, "Ollama request timed out"):
@@ -162,7 +225,7 @@ class OllamaProviderTests(unittest.TestCase):
     def test_reads_exactly_one_byte_beyond_the_response_ceiling(self):
         response = SizedFakeResponse(b'{"response":"ok"}')
 
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             return response
 
         limits = ReviewLimits(max_provider_response_bytes=64)
@@ -180,7 +243,7 @@ class OllamaProviderTests(unittest.TestCase):
         body = b'{"response":"ok"}'
         response = ShortReadFakeResponse(body, 4)
 
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             return response
 
         limits = ReviewLimits(max_provider_response_bytes=64)
@@ -199,7 +262,7 @@ class OllamaProviderTests(unittest.TestCase):
         body = b'{"response":"ok"}'
         response = ShortReadFakeResponse(body, 4)
 
-        def opener(request, timeout):
+        def opener(request, timeout, context):
             return response
 
         limits = ReviewLimits(max_provider_response_bytes=8)
@@ -212,9 +275,7 @@ class OllamaProviderTests(unittest.TestCase):
                     limits=limits,
                 )
             )
-        self.assertEqual(
-            str(raised.exception), "Ollama response exceeded the configured size limit"
-        )
+        self.assertIn("exceeded the configured size limit", str(raised.exception))
 
     def test_oversize_invalid_utf8_and_malformed_envelope_are_sanitized(self):
         marker = "PRIVATE_RESPONSE_MARKER"

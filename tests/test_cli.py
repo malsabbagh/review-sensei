@@ -9,7 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei import ProviderResponse
-from review_sensei.cli import _github_parser, _parser, main
+from review_sensei.cli import (
+    _cli_option_set,
+    _explicit_cli_options,
+    _github_parser,
+    _parser,
+    main,
+)
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -292,6 +298,469 @@ class CliTests(unittest.TestCase):
             local = _parser().parse_args([])
         self.assertEqual(local.base_url, "http://127.0.0.1:11434/api")
         self.assertEqual(local.model, "qwen3.5:4b")
+
+    def test_provider_defaults_follow_openai_compatible_adapter(self):
+        args = _parser().parse_args(["--provider", "openai-compatible"])
+        self.assertEqual(args.base_url, "https://api.openai.com/v1")
+        self.assertEqual(args.model, "gpt-4o-mini")
+        self.assertEqual(args.api_key_env, "OPENAI_API_KEY")
+        self.assertEqual(args.timeout_seconds, 120.0)
+
+    def test_provider_defaults_follow_fixture_adapter(self):
+        args = _parser().parse_args(["--provider", "fixture"])
+        self.assertEqual(args.model, "fixture-v1")
+        self.assertIsNone(args.api_key_env)
+
+    def test_cli_option_set_detects_space_separated_values(self):
+        self.assertTrue(_cli_option_set(["--model", "gpt-4o"], "--model"))
+        self.assertFalse(
+            _cli_option_set(["--provider", "openai-compatible"], "--model")
+        )
+        self.assertTrue(_cli_option_set(["--model=gpt-4o"], "--model"))
+
+    def test_openai_timeout_rejects_invalid_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        "review.patch",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
+
+    def test_openai_timeout_prefers_reviewsensei_environment_variable(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS": "45",
+                "OPENAI_TIMEOUT_SECONDS": "9",
+            },
+            clear=True,
+        ):
+            args = _parser().parse_args(["--provider", "openai-compatible"])
+        self.assertEqual(args.timeout_seconds, 45.0)
+
+    def test_github_reply_rejects_invalid_openai_timeout_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "github",
+                        "reply",
+                        "--generate",
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "1",
+                        "--source-comment-id",
+                        "2",
+                        "--source-updated-at",
+                        "2026-01-01T00:00:00Z",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
+
+    def test_cli_option_set_ignores_empty_space_separated_values(self):
+        self.assertFalse(_cli_option_set(["--model", ""], "--model"))
+        self.assertFalse(_cli_option_set(["--model"], "--model"))
+
+    def test_cli_option_set_detects_equals_form_and_rejects_empty_values(self):
+        self.assertTrue(
+            _cli_option_set(["--api-key-env=OPENAI_API_KEY"], "--api-key-env")
+        )
+        self.assertFalse(_cli_option_set(["--api-key-env="], "--api-key-env"))
+
+    def test_explicit_cli_options_treat_unknown_hyphen_values_as_set(self):
+        argv = ["--model", "--looks-like-flag"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertIn("--model", explicit)
+        equals_argv = ["--model=--looks-like-flag"]
+        self.assertEqual(_explicit_cli_options(_parser(), equals_argv), {"--model"})
+        args = _parser().parse_args(equals_argv)
+        self.assertEqual(args.model, "--looks-like-flag")
+
+    def test_explicit_cli_options_ignore_option_tokens_without_values(self):
+        argv = ["--model", "--provider", "ollama"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertNotIn("--model", explicit)
+        self.assertNotIn("--provider", explicit)
+
+    def test_explicit_cli_options_ignore_chained_option_tokens(self):
+        argv = ["--provider", "--model", "ollama"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertNotIn("--provider", explicit)
+        self.assertNotIn("--model", explicit)
+
+    def test_profile_missing_api_key_env_is_rejected_at_cli_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.dict("os.environ", {}, clear=True):
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+        self.assertIn("OPENAI_API_KEY is unavailable", stderr.getvalue())
+
+    def test_profile_rejects_allow_custom_endpoint(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                    "--provider",
+                    "openai-compatible",
+                    "--allow-custom-endpoint",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--allow-custom-endpoint cannot be combined with --profile",
+            stderr.getvalue(),
+        )
+
+    def test_github_parser_exposes_allow_custom_endpoint_on_review(self):
+        args = _github_parser().parse_args(
+            [
+                "--allow-custom-endpoint",
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "pr.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "abc123",
+            ]
+        )
+        self.assertTrue(args.allow_custom_endpoint)
+
+    def test_evaluate_rejects_invalid_openai_timeout_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--provider",
+                        "openai-compatible",
+                        "--allow-live-model",
+                        "--allow-data-egress",
+                        "--provider-version",
+                        "test",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
+
+    def test_profile_fast_triage_omits_conflicting_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].profile, "fast-triage")
+        self.assertIsNone(created[0].model)
+        self.assertIsNone(created[0].base_url)
+        self.assertIsNone(created[0].timeout_seconds)
+        self.assertEqual(created[0].api_key, "openai-secret")
+
+    def test_profile_requires_matching_explicit_provider(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("requires --provider openai-compatible", stderr.getvalue())
+
+    def test_profile_deep_verification_uses_profile_api_key_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OLLAMA_API_KEY": "ollama-secret",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "deep-verification",
+                            "--provider",
+                            "ollama",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "ollama-secret")
+
+    def test_profile_rejects_fixture_provider(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "local-private",
+                    "--provider",
+                    "fixture",
+                    "--fixture-response",
+                    "response.json",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("fixture cannot be combined with --profile", stderr.getvalue())
+
+    def test_openai_compatible_explicit_flags_override_environment(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENAI_BASE_URL": "https://api.openai.com/v1",
+                "OPENAI_MODEL": "env-model",
+                "OPENAI_TIMEOUT_SECONDS": "30",
+            },
+            clear=True,
+        ):
+            args = _parser().parse_args(
+                [
+                    "--provider",
+                    "openai-compatible",
+                    "--base-url",
+                    "https://api.openai.com/v1",
+                    "--model",
+                    "cli-model",
+                    "--timeout-seconds",
+                    "9",
+                ]
+            )
+        self.assertEqual(args.base_url, "https://api.openai.com/v1")
+        self.assertEqual(args.model, "cli-model")
+        self.assertEqual(args.timeout_seconds, 9.0)
+
+    def test_prepare_diff_parser_does_not_receive_provider_defaults(self):
+        from review_sensei.cli import _prepare_diff_parser
+
+        args = _prepare_diff_parser().parse_args(
+            ["--base-ref", "main", "--head-ref", "feature"]
+        )
+        self.assertFalse(hasattr(args, "provider"))
+        self.assertFalse(hasattr(args, "base_url"))
+        self.assertFalse(hasattr(args, "model"))
+        self.assertFalse(hasattr(args, "api_key_env"))
+
+    def test_github_review_parser_does_not_receive_provider_defaults(self):
+        args = _github_parser().parse_args(
+            [
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "pr.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "b" * 40,
+            ]
+        )
+        self.assertFalse(hasattr(args, "provider"))
+        self.assertFalse(hasattr(args, "base_url"))
+        self.assertFalse(hasattr(args, "model"))
+        self.assertFalse(hasattr(args, "api_key_env"))
+
+    def test_openai_provider_rejects_non_allowlisted_environment_endpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OPENAI_BASE_URL": "https://attacker.example/v1",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                str(diff_path),
+                                "--provider",
+                                "openai-compatible",
+                                "--no-learning-proposals",
+                            ]
+                        )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(created, [])
+        self.assertIn("not allowlisted", stderr.getvalue())
+
+    def test_openai_provider_accepts_explicit_custom_endpoint_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OPENAI_BASE_URL": "https://llm.internal/v1",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openai-compatible",
+                            "--allow-custom-endpoint",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].base_url, "https://llm.internal/v1")
+        self.assertTrue(created[0].allow_custom_endpoint)
+
+    def test_openai_provider_uses_openai_credential_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {"OPENAI_API_KEY": "openai-secret", "OLLAMA_API_KEY": "ollama-secret"},
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "openai-secret")
+        self.assertEqual(created[0].base_url, "https://api.openai.com/v1")
+        self.assertEqual(created[0].model, "gpt-4o-mini")
 
     def test_parser_accepts_version_flag(self):
         args = _parser().parse_args(["--version"])
