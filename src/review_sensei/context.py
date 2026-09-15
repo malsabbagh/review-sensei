@@ -29,6 +29,8 @@ MAX_CONTEXT_FILES = MAX_REVIEW_CONTEXT_FILES
 MAX_CONTEXT_FILE_BYTES = MAX_REVIEW_DOCUMENT_BYTES
 MAX_CONTEXT_TOTAL_BYTES = MAX_REVIEW_CONTEXT_TOTAL_BYTES
 MAX_ALLOWED_CONTEXT_PATTERNS = 64
+MAX_CACHE_METADATA_ITEMS = MAX_CONTEXT_FILES * 8
+MAX_CACHE_REPOSITORY_BYTES = 512
 
 # Relationship expansion is deliberately bounded independently of the byte
 # and file budgets.  A single file can import a large number of modules (or be
@@ -1075,7 +1077,7 @@ class ReviewContextCacheKey:
         try:
             validate_bounded_text(
                 self.repository,
-                256,
+                MAX_CACHE_REPOSITORY_BYTES,
                 label="cache repository",
                 allow_empty=False,
             )
@@ -1131,7 +1133,12 @@ class ReviewContextCache:
             return value
 
     def put(self, key: ReviewContextCacheKey, metadata: Iterable[object]) -> None:
-        value = tuple(metadata)
+        items: list[object] = []
+        for index, item in enumerate(metadata):
+            if index >= MAX_CACHE_METADATA_ITEMS:
+                raise ContextLoadError("context cache metadata exceeds the bounded limit")
+            items.append(item)
+        value = tuple(items)
         with self._lock:
             digest = key.digest()
             self._values[digest] = value

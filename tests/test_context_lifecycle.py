@@ -249,6 +249,35 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result.state, "uncertain")
 
+    def test_cache_key_accepts_repository_names_up_to_512_bytes(self):
+        repository = "o/" + ("r" * 509)
+        key = ReviewContextCacheKey(
+            repository,
+            1,
+            "a" * 40,
+            "b" * 40,
+            "e",
+            "m",
+            "p",
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+        )
+        self.assertEqual(key.repository, repository)
+
+    def test_cache_put_rejects_unbounded_metadata_iterables(self):
+        cache = ReviewContextCache(max_entries=1)
+        key = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+
+        def endless_metadata():
+            while True:
+                yield "metadata"
+
+        with self.assertRaises(ContextLoadError):
+            cache.put(key, endless_metadata())
+
     def test_cache_is_keyed_by_snapshot_and_bounded(self):
         cache = ReviewContextCache(max_entries=1)
         digest_a = "a" * 64
