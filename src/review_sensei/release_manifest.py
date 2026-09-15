@@ -23,11 +23,14 @@ _OPERATORS = frozenset({"<=", ">=", "==", "=", "<", ">", "^", "~"})
 def _version_parts(value: str) -> tuple[int, int, int]:
     """Parse a bounded numeric semantic version for range comparisons."""
 
-    match = _RANGE_VERSION.fullmatch(value.strip())
+    if not isinstance(value, str):
+        raise ValueError("version must be a string")
+    normalized = value.strip()
+    match = _RANGE_VERSION.fullmatch(normalized)
     if match is None or any(part in {"x", "X", "*"} for part in match.groups() if part):
         raise ValueError("version must contain three numeric components")
     parts = [int(part) if part is not None else 0 for part in match.groups()]
-    if len(value.strip().split(".")) != 3:
+    if len(normalized.split(".")) != 3:
         raise ValueError("version must contain three numeric components")
     return parts[0], parts[1], parts[2]
 
@@ -48,8 +51,12 @@ def _constraint_parts(token: str) -> list[tuple[str, tuple[int, int, int]]]:
     if wildcard_at is not None:
         if operator != "=":
             raise ValueError("wildcard range constraints require equality")
+        if any(
+            part not in {None, "x", "X", "*"} for part in components[wildcard_at + 1 :]
+        ):
+            raise ValueError("wildcard range constraints must end at the wildcard")
         if wildcard_at == 0:
-            return []
+            return [(">=", (0, 0, 0))]
         lower: tuple[int, int, int] = (
             int(components[0]) if components[0] not in {None, "x", "X", "*"} else 0,
             int(components[1]) if components[1] not in {None, "x", "X", "*"} else 0,
@@ -83,6 +90,46 @@ def _constraint_parts(token: str) -> list[tuple[str, tuple[int, int, int]]]:
     return [(operator, base)]
 
 
+def _parse_range_alternative(
+    alternative: str,
+) -> list[tuple[str, tuple[int, int, int]]]:
+    """Expand one comma/space-separated range alternative into constraints."""
+
+    tokens = [token for token in re.split(r"\s*,\s*|\s+", alternative) if token]
+    if not tokens:
+        raise ValueError("range must contain a constraint")
+    expanded: list[tuple[str, tuple[int, int, int]]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _OPERATORS:
+            if index + 1 >= len(tokens):
+                raise ValueError("range constraint is incomplete")
+            token += tokens[index + 1]
+            index += 1
+        expanded.extend(_constraint_parts(token))
+        index += 1
+    return expanded
+
+
+def _constraint_matches(
+    candidate: tuple[int, int, int],
+    constraint: tuple[str, tuple[int, int, int]],
+) -> bool:
+    operator, bound = constraint
+    if operator in {"=", "=="}:
+        return candidate == bound
+    if operator == ">":
+        return candidate > bound
+    if operator == ">=":
+        return candidate >= bound
+    if operator == "<":
+        return candidate < bound
+    if operator == "<=":
+        return candidate <= bound
+    raise ValueError("range operator is unsupported")
+
+
 def _range_contains(version: str, expression: str) -> bool:
     """Return whether a strict semantic version is admitted by a bounded range."""
 
@@ -93,35 +140,12 @@ def _range_contains(version: str, expression: str) -> bool:
     ):
         raise ValueError("compatible worker range is malformed")
     candidate = _version_parts(version)
-    alternatives = [part.strip() for part in expression.split("||")]
-    if any(not part for part in alternatives):
+    alternatives = expression.split("||")
+    if any(not part.strip() for part in alternatives):
         raise ValueError("range alternative is empty")
     for alternative in alternatives:
-        expanded: list[tuple[str, tuple[int, int, int]]] = []
-        tokens = [token for token in re.split(r"\s*,\s*|\s+", alternative) if token]
-        if not tokens:
-            raise ValueError("range must contain a constraint")
-        index = 0
-        while index < len(tokens):
-            token = tokens[index]
-            if token in _OPERATORS:
-                if index + 1 >= len(tokens):
-                    raise ValueError("range constraint is incomplete")
-                token += tokens[index + 1]
-                index += 1
-            expanded.extend(_constraint_parts(token))
-            index += 1
-        if all(
-            {
-                "=": candidate == bound,
-                "==": candidate == bound,
-                ">": candidate > bound,
-                ">=": candidate >= bound,
-                "<": candidate < bound,
-                "<=": candidate <= bound,
-            }[operator]
-            for operator, bound in expanded
-        ):
+        expanded = _parse_range_alternative(alternative.strip())
+        if all(_constraint_matches(candidate, constraint) for constraint in expanded):
             return True
     return False
 

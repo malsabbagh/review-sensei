@@ -79,11 +79,14 @@ promotion requires a validated `promotion-record` document (the packaged
 digests; provider/model identity or observed revision; at least three repeated
 runs; date; and reproducibility settings. The record must include an explicit
 `supported`, `insufficient`, or `unsupported` status and rollback decision.
+The record is metadata about the evaluation, not the run evidence itself:
+operators must retain exact run outputs and provider terms/egress approval
+separately.
 
 CI remains fixture-only. Live runs are gated, non-secret, and performed outside
 the CI workflow against reviewed synthetic or explicitly authorized data. The
-repository does not claim hosted-provider or GitHub evidence until an operator
-retains the exact run output and provider terms/egress approval.
+repository does not claim hosted-provider or GitHub evidence until that
+separately retained evidence is available.
 
 ## Rollback
 

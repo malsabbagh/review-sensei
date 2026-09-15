@@ -5,9 +5,10 @@ import json
 import math
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 from .errors import ReviewInputError, ReviewSenseiError
 from .models import ProviderRequest, ProviderResponse, ReviewComment, ReviewRequest
@@ -34,6 +35,22 @@ _PRIVACY_PATTERNS = (
     re.compile(r"[A-Za-z0-9._%+-]+@(?!example\.com)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
 )
 _SECRET_MARKERS = ("PRIVATE_DIFF_MARKER", "PRIVATE_PROMPT_MARKER", "PROD_OUTPUT_MARKER")
+
+
+def _reproducibility_dict(value: object) -> dict[str, Any]:
+    """Copy reproducibility settings into a JSON-object-shaped dictionary."""
+
+    if not isinstance(value, Mapping):
+        raise ReviewInputError("promotion record reproducibility must be an object")
+    try:
+        copied = dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ReviewInputError(
+            "promotion record reproducibility must be an object"
+        ) from exc
+    if any(not isinstance(key, str) for key in copied):
+        raise ReviewInputError("promotion record reproducibility keys must be strings")
+    return copied
 
 
 def _is_fixture_alias(value: str) -> bool:
@@ -67,7 +84,7 @@ class PromotionRecord:
     observed_revision: str
     run_count: int
     evaluated_at: str
-    reproducibility: dict[str, Any]
+    reproducibility: Mapping[str, Any]
     status: str = "supported"
     rollback_decision: str = "revert-to-baseline"
 
@@ -93,8 +110,8 @@ class PromotionRecord:
             )
         ):
             raise ReviewInputError("promotion record identity fields are required")
-        if not isinstance(self.reproducibility, dict):
-            raise ReviewInputError("promotion record reproducibility must be an object")
+        reproducibility = _reproducibility_dict(self.reproducibility)
+        object.__setattr__(self, "reproducibility", reproducibility)
         if (
             isinstance(self.run_count, bool)
             or not isinstance(self.run_count, int)
@@ -128,7 +145,7 @@ class PromotionRecord:
             "observed_revision": self.observed_revision,
             "run_count": self.run_count,
             "evaluated_at": self.evaluated_at,
-            "reproducibility": dict(self.reproducibility),
+            "reproducibility": _reproducibility_dict(self.reproducibility),
             "status": self.status,
             "rollback_decision": self.rollback_decision,
         }
