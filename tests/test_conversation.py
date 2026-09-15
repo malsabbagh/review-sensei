@@ -136,6 +136,44 @@ class ConversationContractTests(unittest.TestCase):
                 with self.assertRaises(ReviewFormatError):
                     ConversationService(provider).reply(context())
 
+    def test_conversation_service_retries_once_on_invalid_json(self):
+        class FlakyProvider(FakeProvider):
+            def __init__(self):
+                super().__init__('{"body":"Recovered."}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.attempts += 1
+                if self.attempts == 1:
+                    return ProviderResponse(
+                        text="not json",
+                        provider=self.name,
+                        model=self.model,
+                    )
+                return super().complete(request)
+
+        provider = FlakyProvider()
+        reply = ConversationService(provider).reply(context())
+        self.assertEqual(reply.body, "Recovered.")
+        self.assertEqual(provider.attempts, 2)
+
+    def test_conversation_prompt_includes_fix_ack_resolution_guidance(self):
+        provider = FakeProvider('{"body":"Confirmed on current head."}')
+        ConversationService(provider).reply(
+            context(
+                messages=(
+                    ConversationMessage(
+                        author="owner",
+                        body="@sensei Fixed in abc1234.",
+                        created_at="2026-08-19T00:00:00Z",
+                    ),
+                )
+            )
+        )
+        prompt = provider.requests[0].prompt
+        self.assertIn("Fixed in <sha>", prompt)
+        self.assertIn("set resolve to true", prompt)
+
     def test_review_result_reconstructs_and_revalidates(self):
         value = {
             "summary": "Review complete.",

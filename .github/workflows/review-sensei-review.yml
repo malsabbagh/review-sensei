@@ -70,7 +70,87 @@ permissions:
   id-token: write
 
 jobs:
+  resolve-trigger:
+    if: >-
+      (github.event_name == 'pull_request' &&
+      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot')) &&
+      vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      operation: ${{ steps.resolve.outputs.operation }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      head_ref: ${{ steps.resolve.outputs.head_ref }}
+      base_ref: ${{ steps.resolve.outputs.base_ref }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      pull_request_title: ${{ steps.resolve.outputs.pull_request_title }}
+      enable_review: ${{ steps.resolve.outputs.enable_review }}
+    steps:
+      - name: Check out trigger resolver
+        uses: actions/checkout@8e8a652145304606226e869eefe187fd1eabc831 # v4.3.0
+
+      - name: Resolve pull-request trigger metadata
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTO_REVIEW: ${{ vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+          DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
+          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          DISPATCH_BASE_REF: ${{ inputs.base_ref }}
+          DISPATCH_BASE_SHA: ${{ inputs.base_sha }}
+          DISPATCH_TITLE: ${{ inputs.pull_request_title }}
+        run: |
+          set -euo pipefail
+          pull_json="$RUNNER_TEMP/review-sensei-pull.json"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            printf '%s' '${{ toJson(github.event.pull_request) }}' > "$pull_json"
+            PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+              --event pull_request \
+              --pull-json "$pull_json" \
+              --auto-review "$AUTO_REVIEW"
+            exit 0
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
+            PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+              --event workflow_dispatch \
+              --pull-json "$pull_json"
+            exit 0
+          fi
+          gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
+          PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+            --event "$EVENT_NAME" \
+            --comment-body "$COMMENT_BODY" \
+            --pull-json "$pull_json" \
+            --auto-review "$AUTO_REVIEW"
+
   review-or-reply:
+    needs: resolve-trigger
     if: >-
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
@@ -97,24 +177,24 @@ jobs:
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
-      operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
+      operation: ${{ needs.resolve-trigger.outputs.operation }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
       pull_request_number: ${{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
-      base_ref: ${{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
-      base_sha: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
-      head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}
+      base_ref: ${{ needs.resolve-trigger.outputs.base_ref || inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
+      base_sha: ${{ needs.resolve-trigger.outputs.base_sha || inputs.base_sha || github.event.pull_request.base.sha }}
+      head_ref: ${{ needs.resolve-trigger.outputs.head_ref || inputs.head_ref || github.event.pull_request.head.ref || '' }}
       head_repository: ${{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}
-      head_sha: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
+      head_sha: ${{ needs.resolve-trigger.outputs.head_sha || inputs.head_sha || github.event.pull_request.head.sha }}
       source_kind: ${{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}
       source_comment_id: ${{ inputs.source_comment_id || github.event.comment.id }}
       source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: ${{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
       review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
-      pull_request_title: ${{ inputs.pull_request_title || github.event.pull_request.title }}
+      pull_request_title: ${{ needs.resolve-trigger.outputs.pull_request_title || inputs.pull_request_title || github.event.pull_request.title }}
       stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
       categories_dir: ${{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
-      enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+      enable_review: ${{ needs.resolve-trigger.outputs.enable_review || (github.event_name == 'workflow_dispatch' && 'true') || vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
       enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}
       enable_learning_proposals: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
       enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}

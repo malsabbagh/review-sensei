@@ -1,0 +1,236 @@
+"""Resolve ReviewSensei workflow trigger metadata from GitHub events."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+_GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
+_GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
+_RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
+_COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
+_HEX_SHA = re.compile(r"\b([a-f0-9]{7,40})\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class TriggerResolution:
+    """Normalized inputs for the reusable ReviewSensei runner."""
+
+    operation: str
+    head_sha: str
+    head_ref: str
+    base_ref: str
+    base_sha: str
+    pull_request_title: str
+    enable_review: str
+
+
+def issue_comment_requests_rescan(body: str) -> bool:
+    """Return whether a PR issue comment asks ReviewSensei to re-scan."""
+
+    if not isinstance(body, str) or "@sensei" not in body.casefold():
+        return False
+    return _RESCAN.search(body) is not None
+
+
+def extract_requested_commit(body: str) -> str | None:
+    """Return an optional commit token from a maintainer comment body."""
+
+    if not isinstance(body, str):
+        return None
+    match = _COMMIT_SHA.search(body)
+    if match is not None:
+        return match.group(1).casefold()
+    for match in _HEX_SHA.finditer(body):
+        token = match.group(1).casefold()
+        if _GIT_SHA_FULL.fullmatch(token) or _GIT_SHA_PREFIX.fullmatch(token):
+            return token
+    return None
+
+
+def choose_head_sha(pull: Mapping[str, Any], requested: str | None) -> str:
+    """Pick the authoritative head SHA for a pull request trigger."""
+
+    head = pull.get("head")
+    if not isinstance(head, Mapping):
+        raise ValueError("pull request head metadata is unavailable")
+    head_sha = head.get("sha")
+    if not isinstance(head_sha, str) or not _GIT_SHA_FULL.fullmatch(head_sha):
+        raise ValueError("pull request head sha is invalid")
+    if not requested:
+        return head_sha
+    requested = requested.casefold()
+    if _GIT_SHA_FULL.fullmatch(requested):
+        if requested != head_sha:
+            raise ValueError("requested head sha does not match the pull request head")
+        return requested
+    if head_sha.startswith(requested):
+        return head_sha
+    raise ValueError("requested commit does not match the pull request head")
+
+
+def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    head = pull.get("head")
+    base = pull.get("base")
+    if not isinstance(head, Mapping) or not isinstance(base, Mapping):
+        raise ValueError("pull request identity metadata is unavailable")
+    head_sha = head.get("sha")
+    head_ref = head.get("ref")
+    base_ref = base.get("ref")
+    base_sha = base.get("sha")
+    title = pull.get("title")
+    if (
+        not isinstance(head_sha, str)
+        or not _GIT_SHA_FULL.fullmatch(head_sha)
+        or not isinstance(head_ref, str)
+        or not head_ref.strip()
+        or not isinstance(base_ref, str)
+        or not base_ref.strip()
+        or not isinstance(base_sha, str)
+        or not _GIT_SHA_FULL.fullmatch(base_sha)
+    ):
+        raise ValueError("pull request identity metadata is invalid")
+    if not isinstance(title, str):
+        title = ""
+    return head_sha, head_ref, base_ref, base_sha, title
+
+
+def resolve_issue_comment(
+    body: str,
+    pull: Mapping[str, Any],
+) -> TriggerResolution:
+    """Resolve a PR issue comment into review or mention-reply operation inputs."""
+
+    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+    if issue_comment_requests_rescan(body):
+        requested = extract_requested_commit(body)
+        return TriggerResolution(
+            operation="review",
+            head_sha=choose_head_sha(pull, requested),
+            head_ref=head_ref,
+            base_ref=base_ref,
+            base_sha=base_sha,
+            pull_request_title=title,
+            enable_review="true",
+        )
+    return TriggerResolution(
+        operation="reply",
+        head_sha=head_sha,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        base_sha=base_sha,
+        pull_request_title=title,
+        enable_review="false",
+    )
+
+
+def resolve_pull_request_event(
+    pull: Mapping[str, Any],
+    *,
+    auto_review: str,
+) -> TriggerResolution:
+    """Resolve a pull_request webhook event."""
+
+    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+    return TriggerResolution(
+        operation="review",
+        head_sha=head_sha,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        base_sha=base_sha,
+        pull_request_title=title,
+        enable_review=auto_review,
+    )
+
+
+def resolve_review_comment_event(
+    body: str,
+    pull: Mapping[str, Any],
+) -> TriggerResolution:
+    """Resolve an inline review comment mention into mention-reply inputs."""
+
+    head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+    return TriggerResolution(
+        operation="reply",
+        head_sha=head_sha,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        base_sha=base_sha,
+        pull_request_title=title,
+        enable_review="false",
+    )
+
+
+def write_github_output(resolution: TriggerResolution) -> None:
+    """Append workflow outputs for a trigger resolution."""
+
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if not output_path:
+        raise RuntimeError("GITHUB_OUTPUT is unavailable")
+    lines = (
+        f"operation={resolution.operation}",
+        f"head_sha={resolution.head_sha}",
+        f"head_ref={resolution.head_ref}",
+        f"base_ref={resolution.base_ref}",
+        f"base_sha={resolution.base_sha}",
+        f"pull_request_title={resolution.pull_request_title}",
+        f"enable_review={resolution.enable_review}",
+    )
+    with open(output_path, "a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(f"{line}\n")
+
+
+def _load_pull_json(path: str) -> Mapping[str, Any]:
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("pull request metadata must be a JSON object")
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Resolve ReviewSensei workflow trigger metadata."
+    )
+    parser.add_argument("--event", required=True)
+    parser.add_argument("--comment-body", default="")
+    parser.add_argument("--pull-json", required=True)
+    parser.add_argument("--auto-review", default="false")
+    args = parser.parse_args(argv)
+    pull = _load_pull_json(args.pull_json)
+    event = args.event.strip()
+    if event == "issue_comment":
+        resolution = resolve_issue_comment(args.comment_body, pull)
+    elif event == "pull_request":
+        resolution = resolve_pull_request_event(pull, auto_review=args.auto_review)
+    elif event == "pull_request_review_comment":
+        resolution = resolve_review_comment_event(args.comment_body, pull)
+    elif event == "workflow_dispatch":
+        head_sha, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+        resolution = TriggerResolution(
+            operation="review",
+            head_sha=head_sha,
+            head_ref=head_ref,
+            base_ref=base_ref,
+            base_sha=base_sha,
+            pull_request_title=title,
+            enable_review="true",
+        )
+    else:
+        raise SystemExit(f"unsupported event: {event}")
+    write_github_output(resolution)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

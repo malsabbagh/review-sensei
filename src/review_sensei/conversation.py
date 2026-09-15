@@ -42,23 +42,33 @@ class ConversationService:
             raise ReviewInputError(
                 "conversation prompt exceeds the configured limit"
             ) from exc
-        response = self.provider.complete(
-            ProviderRequest(
-                prompt=prompt,
-                model=model,
-                json_mode=True,
-                max_prompt_bytes=max_prompt_bytes,
-                max_response_bytes=16 * 1024,
+        last_json_error: json.JSONDecodeError | None = None
+        payload: Mapping[str, object] | None = None
+        for _attempt in range(2):
+            response = self.provider.complete(
+                ProviderRequest(
+                    prompt=prompt,
+                    model=model,
+                    json_mode=True,
+                    max_prompt_bytes=max_prompt_bytes,
+                    max_response_bytes=16 * 1024,
+                )
             )
-        )
-        if not hasattr(response, "text") or not isinstance(response.text, str):
-            raise ReviewFormatError("provider response did not contain reply text")
-        try:
-            payload = json.loads(response.text)
-        except json.JSONDecodeError as exc:
-            raise ReviewFormatError("provider response was not valid JSON") from exc
-        if not isinstance(payload, Mapping):
+            if not hasattr(response, "text") or not isinstance(response.text, str):
+                raise ReviewFormatError("provider response did not contain reply text")
+            try:
+                parsed = json.loads(response.text)
+            except json.JSONDecodeError as exc:
+                last_json_error = exc
+                continue
+            if isinstance(parsed, Mapping):
+                payload = parsed
+                break
             raise ReviewFormatError("provider response must be a JSON object")
+        if payload is None:
+            raise ReviewFormatError("provider response was not valid JSON") from (
+                last_json_error
+            )
         try:
             return ConversationReply.from_dict(dict(payload))
         except (ReviewInputError, TypeError) as exc:
@@ -124,8 +134,9 @@ class ConversationService:
             (
                 "Return one JSON object with keys body and resolve.",
                 "body must contain the concise Markdown reply.",
-                "Set resolve to true only when the current exact-head diff and bounded thread context demonstrate that the ReviewSensei finding is fully addressed; otherwise set resolve to false.",
-                "Never resolve a human-authored concern, an issue-only comment, or an ambiguous/stale finding. Missing resolve is treated as false.",
+                "Set resolve to true when the current exact-head diff and bounded thread context demonstrate that the ReviewSensei finding is fully addressed.",
+                "When a maintainer @sensei reply documents a fix (for example 'Fixed in <sha>' or 'Addressed in <sha>') or dismisses the finding with a concrete reason, and your reply confirms that assessment on the current head, set resolve to true.",
+                "Never resolve a human-authored concern on an issue-only comment, or an ambiguous/stale finding. Missing resolve is treated as false.",
             )
         )
         return "\n".join(lines)
