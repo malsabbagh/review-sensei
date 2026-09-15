@@ -75,14 +75,14 @@ class ContractsTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             ResourceBudget(max_provider_calls=True)
         with self.assertRaises(ReviewInputError):
-            ResourceBudget(max_prompt_bytes=5_000_000)
+            ResourceBudget(max_prompt_bytes=5_000_000).validate_against_limits()
         with self.assertRaises(ReviewInputError):
             ResourceBudget(
                 max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes + 1
-            )
+            ).validate_against_limits()
         ResourceBudget(
             max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
-        )
+        ).validate_against_limits()
         strict_limits = ReviewLimits(
             max_prompt_bytes=128, max_provider_response_bytes=256
         )
@@ -412,6 +412,7 @@ class ContractsTests(unittest.TestCase):
             [candidate, candidate], snapshot, snapshot_sha256=snapshot_sha
         )
         self.assertEqual(duplicate[1].reasons, ("duplicate candidate",))
+        self.assertFalse(duplicate[1].actionable)
 
     def test_candidate_parser_rejects_non_string_fields_and_assumptions(self):
         evidence = {
@@ -520,17 +521,50 @@ class ContractsTests(unittest.TestCase):
         self.assertEqual(artifact.created_at, "2026-01-01T17:00:00+00:00")
 
     def test_recovery_artifact_rejects_invalid_window_at_construction(self):
+        artifact = self._artifact()
         with self.assertRaises(ReviewInputError):
             RecoveryArtifact(
-                repository="acme/repo",
-                pull_request_number=1,
-                base_sha=SHA,
-                head_sha=SHA,
-                result=self.RESULT,
+                repository=artifact.repository,
+                pull_request_number=artifact.pull_request_number,
+                base_sha=artifact.base_sha,
+                head_sha=artifact.head_sha,
+                result=artifact.result,
                 created_at="2026-01-02T00:00:00+00:00",
                 expires_at="2026-01-01T00:00:00+00:00",
-                result_sha256=SHA,
+                result_sha256=artifact.result_sha256,
             )
+
+    def test_recovery_artifact_rejects_mismatched_digest_at_construction(self):
+        artifact = self._artifact()
+        with self.assertRaises(ReviewInputError):
+            RecoveryArtifact(
+                repository=artifact.repository,
+                pull_request_number=artifact.pull_request_number,
+                base_sha=artifact.base_sha,
+                head_sha=artifact.head_sha,
+                result=artifact.result,
+                created_at=artifact.created_at,
+                expires_at=artifact.expires_at,
+                result_sha256="b" * 64,
+            )
+
+    def test_verify_candidates_rejects_snapshot_digest_mismatch(self):
+        text = "line one\n"
+        snapshot = {"src/app.py": text}
+        snapshot_sha = hashlib.sha256(
+            json.dumps(
+                snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        candidate = CandidateFinding(
+            "bug",
+            "when called",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 1, snapshot_sha),),
+            "causes failure",
+        )
+        with self.assertRaises(ReviewInputError):
+            verify_candidates([candidate], snapshot, snapshot_sha256="b" * 64)
 
     def test_recovery_artifact_rejects_invalid_identity_at_create(self):
         with self.assertRaises(ReviewInputError):

@@ -206,11 +206,10 @@ class ResourceBudget:
     contract slices in issues #36 and #37); this PR publishes the wire shape
     only and does not wire runtime enforcement yet.
 
-    Defaults are public downward-only ceilings.  ``__post_init__`` enforces the
-    public profile; ``validate_against_limits`` must be called with the active
-    ``ReviewLimits`` profile before enforcement so stricter embedder settings
-    cannot be exceeded.  Published result size is governed separately by
-    ``ReviewLimits.max_result_bytes``.
+    Defaults are public downward-only ceilings.  Direct construction validates
+    field types only; ``create(limits=...)`` is the fail-closed entry point that
+    enforces both the public profile and the active ``ReviewLimits`` profile.
+    Published result size is governed separately by ``ReviewLimits.max_result_bytes``.
     """
 
     max_provider_calls: int = DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS
@@ -220,27 +219,30 @@ class ResourceBudget:
     max_output_bytes: int = DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
-        ceilings = {
-            "max_provider_calls": DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
-            "max_retry_attempts": DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
-            "timeout_ms": DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
-            "max_prompt_bytes": DEFAULT_REVIEW_LIMITS.max_prompt_bytes,
-            "max_output_bytes": DEFAULT_REVIEW_LIMITS.max_provider_response_bytes,
-        }
-        for name, ceiling in ceilings.items():
+        for name in (
+            "max_provider_calls",
+            "max_retry_attempts",
+            "timeout_ms",
+            "max_prompt_bytes",
+            "max_output_bytes",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewInputError(f"{name} must be a non-negative integer")
-            if value > ceiling:
-                raise ReviewInputError(f"{name} exceeds the public ceiling")
 
     def validate_against_limits(
         self, limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     ) -> None:
-        if self.max_prompt_bytes > limits.max_prompt_bytes:
-            raise ReviewInputError("max_prompt_bytes exceeds the configured ceiling")
-        if self.max_output_bytes > limits.max_provider_response_bytes:
-            raise ReviewInputError("max_output_bytes exceeds the configured ceiling")
+        ceilings = {
+            "max_provider_calls": DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            "max_retry_attempts": DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
+            "timeout_ms": DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
+            "max_prompt_bytes": limits.max_prompt_bytes,
+            "max_output_bytes": limits.max_provider_response_bytes,
+        }
+        for name, ceiling in ceilings.items():
+            if getattr(self, name) > ceiling:
+                raise ReviewInputError(f"{name} exceeds the configured ceiling")
 
     @classmethod
     def create(
@@ -382,6 +384,9 @@ class RecoveryArtifact:
         _validate_recovery_window(
             created_at=self.created_at, expires_at=self.expires_at
         )
+        canonical = _canonical_recovery_result(self.result)
+        if _digest(canonical) != self.result_sha256:
+            raise ReviewInputError("recovery artifact integrity check failed")
 
     @classmethod
     def create(

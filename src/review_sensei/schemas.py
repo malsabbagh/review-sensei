@@ -10,7 +10,6 @@ from referencing import Registry, Resource
 from .errors import ReviewInputError
 
 SCHEMA_DIR = Path(__file__).parent / "schemas"
-_SCHEMA_REGISTRY: Registry | None = None
 
 
 def load_schema(name: str) -> dict[str, object]:
@@ -26,16 +25,22 @@ def load_schema(name: str) -> dict[str, object]:
     return value
 
 
+def _build_schema_registry() -> Registry:
+    registry: Registry = Registry()
+    for path in sorted(SCHEMA_DIR.glob("*.schema.json")):
+        contents = json.loads(path.read_text(encoding="utf-8"))
+        resource = Resource.from_contents(contents)
+        schema_id = resource.id()
+        if not isinstance(schema_id, str):
+            raise ReviewInputError(f"schema '{path.name}' is missing an $id")
+        registry = registry.with_resource(schema_id, resource)
+    return registry
+
+
+_SCHEMA_REGISTRY = _build_schema_registry()
+
+
 def _schema_registry() -> Registry:
-    global _SCHEMA_REGISTRY
-    if _SCHEMA_REGISTRY is None:
-        registry: Registry = Registry()
-        for path in sorted(SCHEMA_DIR.glob("*.schema.json")):
-            contents = json.loads(path.read_text(encoding="utf-8"))
-            resource = Resource.from_contents(contents)
-            if resource.id() is not None:
-                registry = registry.with_resource(resource.id(), resource)
-        _SCHEMA_REGISTRY = registry
     return _SCHEMA_REGISTRY
 
 

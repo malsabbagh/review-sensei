@@ -317,7 +317,7 @@ def _verify_candidate_evidence(
         reasons.append("candidate lacks actionable triggering conditions")
     if not evidence_valid:
         return VerificationResult(
-            "rejected", tuple(dict.fromkeys(reasons)), False, actionable
+            "rejected", tuple(dict.fromkeys(reasons)), False, False
         )
     if not actionable:
         return VerificationResult(
@@ -380,7 +380,7 @@ def verify_candidates(
         key = _candidate_dedup_key(candidate)
         if key in seen:
             results.append(
-                VerificationResult("rejected", ("duplicate candidate",), False, True)
+                VerificationResult("rejected", ("duplicate candidate",), False, False)
             )
             continue
         seen.add(key)
