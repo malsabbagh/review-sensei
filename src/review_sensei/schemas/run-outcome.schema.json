@@ -12,7 +12,7 @@
     "base_sha": {"type": ["string", "null"], "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
     "head_sha": {"type": ["string", "null"], "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
     "stage_summary": {
-      "description": "Structural bounds only; runtime validation additionally requires printable Unicode keys and values (str.isprintable()).",
+      "description": "Structural bounds only; runtime validation additionally requires printable Unicode keys and values without control characters.",
       "type": "object",
       "maxProperties": 64,
       "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128},

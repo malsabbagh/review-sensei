@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
-from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.schemas import validate_public_document
+from review_sensei.validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
 from review_sensei.verifier import (
     CandidateFinding,
     EvidenceReference,
@@ -82,6 +82,16 @@ class ContractsTests(unittest.TestCase):
             )
         ResourceBudget(
             max_output_bytes=DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
+        )
+        strict_limits = ReviewLimits(
+            max_prompt_bytes=128, max_provider_response_bytes=256
+        )
+        with self.assertRaises(ReviewInputError):
+            ResourceBudget(max_prompt_bytes=256).validate_against_limits(strict_limits)
+        ResourceBudget.create(
+            limits=strict_limits,
+            max_prompt_bytes=128,
+            max_output_bytes=256,
         )
         with self.assertRaises(ReviewInputError):
             RunOutcome("not-a-status")
@@ -308,6 +318,13 @@ class ContractsTests(unittest.TestCase):
             CandidateFinding.from_dict({**base, "assumptions": "bad"})
         with self.assertRaises(ReviewInputError):
             CandidateFinding.from_dict({**base, "assumptions": [1]})
+        with self.assertRaisesRegex(ReviewInputError, "candidate finding is malformed"):
+            CandidateFinding.from_dict(
+                {
+                    **base,
+                    "evidence": [{**reference.to_dict(), "line": 1.5}],
+                }
+            )
         with self.assertRaises(ReviewInputError):
             CandidateFinding(
                 "bug",

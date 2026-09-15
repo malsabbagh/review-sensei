@@ -10,13 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping
 
 from .errors import ReviewInputError
 from .schemas import validate_public_document
-from .validation import DEFAULT_REVIEW_LIMITS
+from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
 
 RUN_STATUSES = frozenset(
     {
@@ -69,6 +70,12 @@ def _parse_aware_datetime(value: str, *, label: str) -> datetime:
     return parsed
 
 
+def _is_public_text(value: str) -> bool:
+    return value.isprintable() and not any(
+        unicodedata.category(character).startswith("C") for character in value
+    )
+
+
 def _validate_stage_summary(stage_summary: Mapping[str, str]) -> None:
     if not isinstance(stage_summary, Mapping):
         raise ReviewInputError("run outcome stage_summary must be a mapping")
@@ -79,14 +86,14 @@ def _validate_stage_summary(stage_summary: Mapping[str, str]) -> None:
             not isinstance(key, str)
             or not key
             or len(key) > MAX_STAGE_SUMMARY_KEY_LENGTH
-            or not key.isprintable()
+            or not _is_public_text(key)
         ):
             raise ReviewInputError("run outcome stage_summary key is invalid")
         if (
             not isinstance(value, str)
             or not value
             or len(value) > MAX_STAGE_SUMMARY_VALUE_LENGTH
-            or not value.isprintable()
+            or not _is_public_text(value)
         ):
             raise ReviewInputError("run outcome stage_summary value is invalid")
 
@@ -199,11 +206,11 @@ class ResourceBudget:
     contract slices in issues #36 and #37); this PR publishes the wire shape
     only and does not wire runtime enforcement yet.
 
-    Defaults are public downward-only ceilings.  ``max_prompt_bytes`` and
-    ``max_output_bytes`` must not exceed the corresponding ``ReviewLimits``
-    provider-call profile (``max_prompt_bytes`` and
-    ``max_provider_response_bytes``).  Published result size is governed
-    separately by ``ReviewLimits.max_result_bytes``.
+    Defaults are public downward-only ceilings.  ``__post_init__`` enforces the
+    public profile; ``validate_against_limits`` must be called with the active
+    ``ReviewLimits`` profile before enforcement so stricter embedder settings
+    cannot be exceeded.  Published result size is governed separately by
+    ``ReviewLimits.max_result_bytes``.
     """
 
     max_provider_calls: int = DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS
@@ -227,15 +234,44 @@ class ResourceBudget:
             if value > ceiling:
                 raise ReviewInputError(f"{name} exceeds the public ceiling")
 
+    def validate_against_limits(
+        self, limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    ) -> None:
+        if self.max_prompt_bytes > limits.max_prompt_bytes:
+            raise ReviewInputError("max_prompt_bytes exceeds the configured ceiling")
+        if self.max_output_bytes > limits.max_provider_response_bytes:
+            raise ReviewInputError("max_output_bytes exceeds the configured ceiling")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+        max_provider_calls: int = DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+        max_retry_attempts: int = DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
+        timeout_ms: int = DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
+        max_prompt_bytes: int = DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES,
+        max_output_bytes: int = DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES,
+    ) -> "ResourceBudget":
+        budget = cls(
+            max_provider_calls=max_provider_calls,
+            max_retry_attempts=max_retry_attempts,
+            timeout_ms=timeout_ms,
+            max_prompt_bytes=max_prompt_bytes,
+            max_output_bytes=max_output_bytes,
+        )
+        budget.validate_against_limits(limits)
+        return budget
+
 
 @dataclass(frozen=True)
 class RunOutcome:
     """Bounded run summary for one review attempt.
 
-    ``stage_summary`` keys and values must be printable Unicode strings
-    (``str.isprintable()``) at runtime.  The public JSON schema enforces
-    structural bounds only; runtime validation in ``__post_init__`` is
-    authoritative for character content.
+    ``stage_summary`` keys and values must be printable Unicode strings without
+    control characters at runtime.  The public JSON schema enforces structural
+    bounds only; runtime validation in ``__post_init__`` is authoritative for
+    character content.
     """
 
     status: str

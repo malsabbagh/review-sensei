@@ -155,7 +155,10 @@ class CandidateFinding:
                 unknown = set(item) - _EVIDENCE_FIELDS
                 if unknown:
                     raise TypeError("evidence reference contains unknown fields")
-                evidence_values.append(EvidenceReference(**item))  # type: ignore[arg-type]
+                try:
+                    evidence_values.append(EvidenceReference(**item))  # type: ignore[arg-type]
+                except ReviewInputError as exc:
+                    raise ReviewInputError("candidate finding is malformed") from exc
             evidence = tuple(evidence_values)
             raw_assumptions = value.get("assumptions", ())
             if not isinstance(raw_assumptions, (list, tuple)):
@@ -176,9 +179,11 @@ class CandidateFinding:
             raise ReviewInputError(
                 f"candidate finding is missing field '{field}'"
             ) from exc
-        except TypeError as exc:
+        except ReviewInputError as exc:
+            if str(exc) == "candidate finding is malformed":
+                raise
             raise ReviewInputError("candidate finding is malformed") from exc
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ReviewInputError("candidate finding is malformed") from exc
 
 

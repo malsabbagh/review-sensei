@@ -10,7 +10,7 @@
     "pull_request_number": {"type": "integer", "minimum": 1},
     "base_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
     "head_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
-    "result": {"type": "object", "maxProperties": 64},
+    "result": {"$ref": "https://reviewsensei.dev/schemas/v1/review-result.schema.json"},
     "created_at": {
       "type": "string",
       "format": "date-time",

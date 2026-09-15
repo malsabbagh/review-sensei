@@ -5,10 +5,12 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
 from .errors import ReviewInputError
 
 SCHEMA_DIR = Path(__file__).parent / "schemas"
+_SCHEMA_REGISTRY: Registry | None = None
 
 
 def load_schema(name: str) -> dict[str, object]:
@@ -24,10 +26,23 @@ def load_schema(name: str) -> dict[str, object]:
     return value
 
 
+def _schema_registry() -> Registry:
+    global _SCHEMA_REGISTRY
+    if _SCHEMA_REGISTRY is None:
+        registry: Registry = Registry()
+        for path in sorted(SCHEMA_DIR.glob("*.schema.json")):
+            contents = json.loads(path.read_text(encoding="utf-8"))
+            resource = Resource.from_contents(contents)
+            if resource.id() is not None:
+                registry = registry.with_resource(resource.id(), resource)
+        _SCHEMA_REGISTRY = registry
+    return _SCHEMA_REGISTRY
+
+
 def _validator(schema_name: str) -> Draft202012Validator:
     schema = load_schema(schema_name)
     try:
-        return Draft202012Validator(schema)
+        return Draft202012Validator(schema, registry=_schema_registry())
     except Exception as exc:
         raise ReviewInputError(
             f"schema '{schema_name}' is not a valid JSON Schema"
