@@ -268,6 +268,9 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
                 "https://api.openai.com/v1?redirect=https://attacker.example"
             )
         )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint("https://api.openai.com/v1/evil")
+        )
 
 
 if __name__ == "__main__":

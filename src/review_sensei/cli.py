@@ -15,6 +15,7 @@ from .learnings import DEFAULT_LEARNING_DIRECTORY, load_repository_learnings
 from .models import LearningEntry, ReviewRequest
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
+from .providers.profiles import get_provider_profile
 from .service import ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
@@ -58,8 +59,26 @@ def _default_ollama_model() -> str:
     return os.getenv("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL)
 
 
-def _option_present(arguments: list[str], option: str) -> bool:
-    return any(value == option or value.startswith(f"{option}=") for value in arguments)
+def _cli_option_set(arguments: list[str], option: str) -> bool:
+    """Return True when *option* was explicitly passed on the command line."""
+
+    if option in arguments:
+        return True
+    prefix = f"{option}="
+    if any(value.startswith(prefix) for value in arguments):
+        return True
+    try:
+        index = arguments.index(option)
+    except ValueError:
+        return False
+    return index + 1 < len(arguments) and not arguments[index + 1].startswith("-")
+
+
+def _openai_timeout_default() -> float:
+    configured = os.getenv("REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS")
+    if configured is None:
+        configured = os.getenv("OPENAI_TIMEOUT_SECONDS", "120")
+    return _positive_float(configured)
 
 
 def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
@@ -72,28 +91,26 @@ def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> 
 
     if not hasattr(args, "provider"):
         return
+    if getattr(args, "profile", None):
+        return
     provider = str(args.provider).strip().lower()
     if provider == "openai-compatible":
-        if not _option_present(arguments, "--base-url"):
+        if not _cli_option_set(arguments, "--base-url"):
             _assign_if_present(
                 args, "base_url", os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
             )
-        if not _option_present(arguments, "--model"):
+        if not _cli_option_set(arguments, "--model"):
             _assign_if_present(
                 args, "model", os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
             )
-        if not _option_present(arguments, "--api-key-env"):
+        if not _cli_option_set(arguments, "--api-key-env"):
             _assign_if_present(args, "api_key_env", "OPENAI_API_KEY")
-        if not _option_present(arguments, "--timeout-seconds"):
-            _assign_if_present(
-                args,
-                "timeout_seconds",
-                _positive_float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
-            )
+        if not _cli_option_set(arguments, "--timeout-seconds"):
+            _assign_if_present(args, "timeout_seconds", _openai_timeout_default())
     elif provider == "fixture":
-        if not _option_present(arguments, "--model"):
+        if not _cli_option_set(arguments, "--model"):
             _assign_if_present(args, "model", "fixture-v1")
-        if not _option_present(arguments, "--api-key-env"):
+        if not _cli_option_set(arguments, "--api-key-env"):
             _assign_if_present(args, "api_key_env", None)
 
 
@@ -124,12 +141,65 @@ def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
         )
 
 
+def _resolve_api_key(
+    args: argparse.Namespace,
+    *,
+    argv: list[str],
+) -> str | None:
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        profile = get_provider_profile(profile_name)
+        if not profile.requires_api_key:
+            return None
+        key_env = (
+            args.api_key_env
+            if _cli_option_set(argv, "--api-key-env")
+            else profile.api_key_env
+        )
+        if not key_env:
+            return None
+        return os.getenv(key_env)
+    provider_name = str(args.provider).strip().lower()
+    if provider_name == "fixture":
+        return None
+    return os.getenv(args.api_key_env)
+
+
 def _provider_settings_from_args(
     args: argparse.Namespace,
     *,
     api_key: str | None,
     fixture_response: Path | None = None,
+    argv: list[str] | None = None,
 ) -> ProviderSettings:
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        selected = get_provider_profile(profile_name)
+        provider_name = (
+            str(args.provider).strip().lower()
+            if argv is not None and _cli_option_set(argv, "--provider")
+            else selected.provider
+        )
+        return ProviderSettings(
+            name=provider_name,
+            profile=profile_name,
+            model=args.model
+            if argv is None or _cli_option_set(argv, "--model")
+            else None,
+            base_url=(
+                args.base_url
+                if argv is None or _cli_option_set(argv, "--base-url")
+                else None
+            ),
+            api_key=api_key,
+            fixture_response=fixture_response,
+            timeout_seconds=(
+                args.timeout_seconds
+                if argv is None or _cli_option_set(argv, "--timeout-seconds")
+                else None
+            ),
+            allow_custom_endpoint=bool(getattr(args, "allow_custom_endpoint", False)),
+        )
     _require_allowlisted_openai_endpoint(args)
     return ProviderSettings(
         name=str(args.provider).strip().lower(),
@@ -184,6 +254,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Print the installed ReviewSensei version and exit",
     )
     parser.add_argument("--diff", type=Path, help="Path to a unified diff file")
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+    )
     parser.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
     )
@@ -291,6 +366,11 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         default="fixture",
     )
     parser.add_argument(
+        "--profile",
+        default=None,
+        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+    )
+    parser.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
     )
     parser.add_argument("--base-url", default=_default_ollama_base_url())
@@ -317,7 +397,7 @@ def _evaluate_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_evaluate(args: argparse.Namespace) -> int:
+def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .evaluation import (
         endpoint_scope,
         evaluate_fixture,
@@ -346,7 +426,8 @@ def _run_evaluate(args: argparse.Namespace) -> int:
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
-                api_key=os.getenv(args.api_key_env),
+                api_key=_resolve_api_key(args, argv=argv),
+                argv=argv,
             )
         )
         report = evaluate_live(
@@ -365,7 +446,7 @@ def _run_evaluate(args: argparse.Namespace) -> int:
 
 
 def _github_parser() -> argparse.ArgumentParser:
-    parser = _ProviderArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="review-sensei github",
         description="Run GitHub publication seams with write opt-ins.",
     )
@@ -433,6 +514,11 @@ def _github_parser() -> argparse.ArgumentParser:
     reply.add_argument("--oidc-token")
     reply.add_argument("--github-token-env", default="GITHUB_TOKEN")
     reply.add_argument(
+        "--profile",
+        default=None,
+        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+    )
+    reply.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
     )
     reply.add_argument("--base-url", default=_default_ollama_base_url())
@@ -470,7 +556,7 @@ def _github_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_github(args: argparse.Namespace) -> int:
+def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .hosting.github import (
         BrokerClient,
         ConversationPublisher,
@@ -562,7 +648,8 @@ def _run_github(args: argparse.Namespace) -> int:
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
-                api_key=os.getenv(args.api_key_env),
+                api_key=_resolve_api_key(args, argv=argv),
+                argv=argv,
             )
         )
         reply_outcome = application.generate_and_publish_reply(
@@ -640,16 +727,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
     if args_list and args_list[0] == "evaluate":
-        args = _evaluate_parser().parse_args(args_list[1:])
+        evaluate_argv = args_list[1:]
+        args = _evaluate_parser().parse_args(evaluate_argv)
         try:
-            return _run_evaluate(args)
+            return _run_evaluate(args, argv=evaluate_argv)
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
     if args_list and args_list[0] == "github":
-        args = _github_parser().parse_args(args_list[1:])
+        github_argv = args_list[1:]
+        args = _github_parser().parse_args(github_argv)
+        if getattr(args, "command", None) == "reply":
+            _apply_provider_defaults(args, github_argv)
         try:
-            return _run_github(args)
+            return _run_github(args, argv=github_argv)
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
@@ -661,7 +752,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         provider_name = str(args.provider).strip().lower()
-        if provider_name == "fixture":
+        if provider_name == "fixture" and not getattr(args, "profile", None):
             if not args.fixture_response:
                 raise ReviewInputError("--provider fixture requires --fixture-response")
             api_key = None
@@ -670,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReviewInputError(
                     "--fixture-response is only valid with --provider fixture"
                 )
-            api_key = os.getenv(args.api_key_env)
+            api_key = _resolve_api_key(args, argv=args_list)
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
@@ -709,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
                 args,
                 api_key=api_key,
                 fixture_response=args.fixture_response,
+                argv=args_list,
             )
         )
 

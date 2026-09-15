@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei import ProviderResponse
-from review_sensei.cli import _github_parser, _parser, main
+from review_sensei.cli import _cli_option_set, _github_parser, _parser, main
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -304,6 +304,59 @@ class CliTests(unittest.TestCase):
         args = _parser().parse_args(["--provider", "fixture"])
         self.assertEqual(args.model, "fixture-v1")
         self.assertIsNone(args.api_key_env)
+
+    def test_cli_option_set_detects_space_separated_values(self):
+        self.assertTrue(_cli_option_set(["--model", "gpt-4o"], "--model"))
+        self.assertFalse(
+            _cli_option_set(["--provider", "openai-compatible"], "--model")
+        )
+        self.assertTrue(_cli_option_set(["--model=gpt-4o"], "--model"))
+
+    def test_openai_timeout_prefers_reviewsensei_environment_variable(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS": "45",
+                "OPENAI_TIMEOUT_SECONDS": "9",
+            },
+            clear=True,
+        ):
+            args = _parser().parse_args(["--provider", "openai-compatible"])
+        self.assertEqual(args.timeout_seconds, 45.0)
+
+    def test_profile_fast_triage_omits_conflicting_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].profile, "fast-triage")
+        self.assertIsNone(created[0].model)
+        self.assertIsNone(created[0].base_url)
+        self.assertIsNone(created[0].timeout_seconds)
+        self.assertEqual(created[0].api_key, "openai-secret")
 
     def test_openai_compatible_explicit_flags_override_environment(self):
         with patch.dict(

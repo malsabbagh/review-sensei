@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..errors import ProviderError
@@ -70,6 +70,10 @@ class ProviderRegistry:
     def create(self, settings: ProviderSettings) -> ReviewProvider:
         if settings.profile is not None:
             profile = get_provider_profile(settings.profile)
+            if settings.allow_custom_endpoint:
+                raise ProviderError(
+                    "allow_custom_endpoint cannot be used with a named provider profile"
+                )
             if settings.name.strip().lower() != profile.provider:
                 raise ProviderError(
                     "provider profile and provider name must select the same adapter"
@@ -104,12 +108,11 @@ class ProviderRegistry:
                 raise ProviderError(
                     "provider profile output budget cannot be overridden"
                 )
-            settings = ProviderSettings(
+            settings = replace(
+                settings,
                 name=profile.provider,
                 model=profile.model,
                 base_url=profile.base_url,
-                api_key=settings.api_key,
-                fixture_response=settings.fixture_response,
                 timeout_seconds=profile.timeout_seconds,
                 max_output_tokens=profile.max_output_tokens,
                 profile=profile.name,
