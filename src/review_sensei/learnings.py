@@ -42,6 +42,15 @@ class LearningFeedback:
             raise LearningLoadError("learning feedback outcome is invalid")
 
 
+def _aware_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp and normalize it to UTC."""
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _glob_witnesses(patterns: Iterable[str]) -> tuple[str, ...]:
     """Generate a small, bounded set of concrete paths for glob intersection."""
 
@@ -127,7 +136,8 @@ class LearningStore:
         selected = tuple(
             entry
             for entry in self.entries
-            if entry.superseded_by is None
+            if entry.status == "active"
+            and entry.superseded_by is None
             and (
                 (not changed_paths and "*" in entry.scope)
                 or any(
@@ -164,21 +174,13 @@ class LearningStore:
                     )
                 )
             if entry.expires_at:
-                expires = datetime.fromisoformat(
-                    entry.expires_at.replace("Z", "+00:00")
-                )
-                if expires.tzinfo is None:
-                    expires = expires.replace(tzinfo=timezone.utc)
+                expires = _aware_utc(entry.expires_at)
                 if expires <= instant:
                     diagnostics.append(
                         LearningDiagnostic("stale", entry.id, detail="expired")
                     )
             elif entry.reviewed_at:
-                reviewed = datetime.fromisoformat(
-                    entry.reviewed_at.replace("Z", "+00:00")
-                )
-                if reviewed.tzinfo is None:
-                    reviewed = reviewed.replace(tzinfo=timezone.utc)
+                reviewed = _aware_utc(entry.reviewed_at)
                 if reviewed + stale_after <= instant:
                     diagnostics.append(
                         LearningDiagnostic(

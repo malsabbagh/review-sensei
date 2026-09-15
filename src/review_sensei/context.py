@@ -385,7 +385,7 @@ class SourceContextExcerpt:
                 raise ReviewInputError(
                     "source context excerpt content must contain non-whitespace text"
                 )
-        except ReviewInputError as exc:
+        except (ReviewInputError, TypeError, ValueError) as exc:
             raise ContextLoadError(
                 "source context excerpt path/content is invalid"
             ) from exc
@@ -654,20 +654,11 @@ class SymbolAwareContextSelector:
                     if not resolution.consume_probe():
                         return tuple(sorted(candidates))
                     try:
-                        exists = candidate.exists()
-                    except OSError:
-                        exists = False
-                    is_link = False
-                    if not exists:
-                        if not resolution.consume_probe():
-                            return tuple(sorted(candidates))
-                        try:
-                            is_link = candidate.is_symlink()
-                        except OSError:
-                            is_link = False
-                        if not is_link:
+                        if candidate.is_symlink():
                             continue
-                    if not exists and not is_link:
+                        if not candidate.is_file():
+                            continue
+                    except OSError:
                         continue
                     relative = self._relative_path(candidate)
                     if relative is not None:
@@ -773,6 +764,9 @@ class SymbolAwareContextSelector:
             return True
 
         for node in ast.walk(tree):
+            if candidate_cap_reached or resolution.exhausted:
+                resolution.truncated = True
+                break
             if isinstance(node, ast.Import):
                 relation_nodes += 1
                 if relation_nodes > MAX_IMPORT_NODES_PER_FILE:
@@ -989,6 +983,14 @@ def stable_finding_fingerprint(
         normalized_path = PurePosixPath(path).as_posix()
     else:
         raise ContextLoadError("finding fingerprint path must be a string")
+    if normalized_path:
+        try:
+            validate_repository_path(
+                normalized_path,
+                label="finding fingerprint path",
+            )
+        except ReviewInputError as exc:
+            raise ContextLoadError("finding fingerprint path is invalid") from exc
     parts = {
         "evidence_id": evidence_id or "",
         "path": normalized_path,

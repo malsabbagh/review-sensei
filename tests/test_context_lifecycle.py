@@ -225,6 +225,8 @@ class ContextLifecycleTests(unittest.TestCase):
             ),
             one,
         )
+        with self.assertRaises(ContextLoadError):
+            stable_finding_fingerprint(path=PurePosixPath("../outside.py"), symbol="run")
         self.assertEqual(
             reconcile_finding_lifecycle(None, one).state,
             "new",
@@ -259,6 +261,22 @@ class ContextLifecycleTests(unittest.TestCase):
         cache.put(second, ("second",))
         self.assertIsNone(cache.get(first))
         self.assertEqual(cache.get(second), ("second",))
+
+    def test_learning_diagnostics_accept_naive_expiry_timestamps(self):
+        store = LearningStore(
+            (
+                LearningEntry(
+                    id="expired",
+                    title="Expired",
+                    rule="Rule",
+                    expires_at="2020-01-01T00:00:00",
+                ),
+            )
+        )
+        diagnostics = store.diagnostics(now=datetime(2025, 1, 1, tzinfo=timezone.utc))
+        self.assertTrue(
+            any(item.code == "stale" and item.detail == "expired" for item in diagnostics)
+        )
 
     def test_learning_diagnostics_report_conflict_and_expiry(self):
         store = LearningStore(
