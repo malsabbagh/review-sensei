@@ -9,7 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei import ProviderResponse
-from review_sensei.cli import _cli_option_set, _github_parser, _parser, main
+from review_sensei.cli import (
+    _cli_option_set,
+    _explicit_cli_options,
+    _github_parser,
+    _parser,
+    main,
+)
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -376,6 +382,40 @@ class CliTests(unittest.TestCase):
             _cli_option_set(["--api-key-env=OPENAI_API_KEY"], "--api-key-env")
         )
         self.assertFalse(_cli_option_set(["--api-key-env="], "--api-key-env"))
+
+    def test_explicit_cli_options_treat_unknown_hyphen_values_as_set(self):
+        argv = ["--model", "--looks-like-flag"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertIn("--model", explicit)
+        args = _parser().parse_args(argv)
+        self.assertEqual(args.model, "--looks-like-flag")
+
+    def test_explicit_cli_options_ignore_option_tokens_without_values(self):
+        argv = ["--model", "--provider", "ollama"]
+        explicit = _explicit_cli_options(_parser(), argv)
+        self.assertNotIn("--model", explicit)
+        self.assertIn("--provider", explicit)
+
+    def test_profile_missing_api_key_env_is_rejected_at_cli_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.dict("os.environ", {}, clear=True):
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+        self.assertIn("OPENAI_API_KEY is unavailable", stderr.getvalue())
 
     def test_profile_rejects_allow_custom_endpoint(self):
         stderr = io.StringIO()
