@@ -226,7 +226,9 @@ class ContextLifecycleTests(unittest.TestCase):
             one,
         )
         with self.assertRaises(ContextLoadError):
-            stable_finding_fingerprint(path=PurePosixPath("../outside.py"), symbol="run")
+            stable_finding_fingerprint(
+                path=PurePosixPath("../outside.py"), symbol="run"
+            )
         with self.assertRaises(ContextLoadError):
             stable_finding_fingerprint(path="src/../outside.py", symbol="run")
         self.assertEqual(
@@ -242,7 +244,9 @@ class ContextLifecycleTests(unittest.TestCase):
 
     def test_reconcile_never_marks_fixed_when_review_is_incomplete(self):
         previous = stable_finding_fingerprint(path="src/a.py", symbol="run")
-        current = stable_finding_fingerprint(path="src/a.py", symbol="run", evidence="x")
+        current = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", evidence="x"
+        )
         result = reconcile_finding_lifecycle(
             FindingLifecycle(previous, "still-present"),
             current,
@@ -266,6 +270,14 @@ class ContextLifecycleTests(unittest.TestCase):
             "c" * 64,
         )
         self.assertEqual(key.repository, repository)
+
+    def test_cache_put_rejects_oversized_metadata_items(self):
+        cache = ReviewContextCache(max_entries=1)
+        key = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        with self.assertRaises(ContextLoadError):
+            cache.put(key, ("x" * 513,))
 
     def test_cache_put_rejects_unbounded_metadata_iterables(self):
         cache = ReviewContextCache(max_entries=1)
@@ -309,7 +321,10 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         diagnostics = store.diagnostics(now=datetime(2025, 1, 1, tzinfo=timezone.utc))
         self.assertTrue(
-            any(item.code == "stale" and item.detail == "expired" for item in diagnostics)
+            any(
+                item.code == "stale" and item.detail == "expired"
+                for item in diagnostics
+            )
         )
 
     def test_learning_diagnostics_report_conflict_and_expiry(self):

@@ -30,6 +30,8 @@ MAX_CONTEXT_FILE_BYTES = MAX_REVIEW_DOCUMENT_BYTES
 MAX_CONTEXT_TOTAL_BYTES = MAX_REVIEW_CONTEXT_TOTAL_BYTES
 MAX_ALLOWED_CONTEXT_PATTERNS = 64
 MAX_CACHE_METADATA_ITEMS = MAX_CONTEXT_FILES * 8
+MAX_CACHE_METADATA_ITEM_BYTES = 512
+MAX_CACHE_METADATA_TOTAL_BYTES = 4096
 MAX_CACHE_REPOSITORY_BYTES = 512
 
 # Relationship expansion is deliberately bounded independently of the byte
@@ -157,6 +159,35 @@ def _has_symlink_component(root: Path, path: Path) -> bool:
     return False
 
 
+def _supports_root_relative_open() -> bool:
+    """Return whether root-relative ``openat`` reads are available."""
+
+    return os.name != "nt" and hasattr(os, "O_DIRECTORY")
+
+
+def _read_file_under_root_fallback(
+    root: Path, path: Path, *, max_bytes: int
+) -> bytes | None:
+    """Read a repository file when ``openat`` is unavailable."""
+
+    if _has_symlink_component(root, path):
+        return None
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > max_bytes:
+        return None
+    try:
+        return path.read_bytes()[: max_bytes + 1]
+    except OSError:
+        return None
+
+
 def _opened_path_within_root(root: Path, descriptor: int) -> bool:
     """Verify an opened descriptor still resolves inside ``root`` on Linux."""
 
@@ -174,6 +205,9 @@ def _opened_path_within_root(root: Path, descriptor: int) -> bool:
 
 def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | None:
     """Read a repository file without following symlinks outside ``root``."""
+
+    if not _supports_root_relative_open():
+        return _read_file_under_root_fallback(root, path, max_bytes=max_bytes)
 
     try:
         relative = path.relative_to(root)
@@ -215,11 +249,14 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
         if not _opened_path_within_root(root, file_fd):
             return None
         try:
-            if os.fstat(file_fd).st_size > max_bytes - 1:
+            if os.fstat(file_fd).st_size > max_bytes:
                 return None
             with os.fdopen(file_fd, "rb") as stream:
                 file_fd = None
-                return stream.read(max_bytes)
+                data = stream.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                return None
+            return data
         except OSError:
             return None
     finally:
@@ -558,13 +595,11 @@ class SymbolAwareContextSelector:
             raw = _read_file_under_root(
                 self.store.root,
                 path,
-                max_bytes=MAX_CONTEXT_FILE_BYTES + 1,
+                max_bytes=MAX_CONTEXT_FILE_BYTES,
             )
         except (OSError, UnicodeError, ValueError):
             return None
         if raw is None:
-            return None
-        if len(raw) > MAX_CONTEXT_FILE_BYTES:
             return None
         try:
             content = raw.decode("utf-8", errors="strict")
@@ -886,6 +921,7 @@ class SymbolAwareContextSelector:
             raise ContextLoadError("changed source paths must be iterable")
         changed_values: set[str] = set()
         changed_overflow = False
+        invalid_paths = False
         inspected_changed_paths = 0
         try:
             for path in changed_paths:
@@ -902,6 +938,8 @@ class SymbolAwareContextSelector:
                         changed_overflow = True
                         break
                     changed_values.add(path)
+                elif path is not None and path != "":
+                    invalid_paths = True
         except TypeError as exc:
             raise ContextLoadError("changed source paths must be iterable") from exc
         changed = tuple(sorted(changed_values))
@@ -911,7 +949,7 @@ class SymbolAwareContextSelector:
         excerpts: list[SourceContextExcerpt] = []
         outcomes: dict[str, str] = {}
         total = 0
-        incomplete = changed_overflow
+        incomplete = changed_overflow or invalid_paths
 
         def enqueue(path: str, depth: int, reason: str) -> bool:
             nonlocal incomplete
@@ -925,6 +963,9 @@ class SymbolAwareContextSelector:
             return True
 
         for path in changed:
+            if not isinstance(path, str):
+                incomplete = True
+                continue
             try:
                 validate_repository_path(path, label="changed source path")
             except ReviewInputError:
@@ -1118,7 +1159,9 @@ class ReviewContextCacheKey:
             ("profile", self.profile),
         ):
             try:
-                validate_bounded_text(value, 256, label=f"cache {label}", allow_empty=False)
+                validate_bounded_text(
+                    value, 256, label=f"cache {label}", allow_empty=False
+                )
             except ReviewInputError as exc:
                 raise ContextLoadError(f"cache {label} is invalid") from exc
         for label, value in (
@@ -1152,13 +1195,41 @@ class ReviewContextCache:
                 self._values.move_to_end(digest)
             return value
 
-    def put(self, key: ReviewContextCacheKey, metadata: Iterable[object]) -> None:
+    def _bounded_cache_metadata(self, metadata: Iterable[object]) -> tuple[object, ...]:
         items: list[object] = []
+        total_bytes = 0
         for index, item in enumerate(metadata):
             if index >= MAX_CACHE_METADATA_ITEMS:
-                raise ContextLoadError("context cache metadata exceeds the bounded limit")
+                raise ContextLoadError(
+                    "context cache metadata exceeds the bounded item limit"
+                )
+            if isinstance(item, str):
+                try:
+                    validate_bounded_text(
+                        item,
+                        MAX_CACHE_METADATA_ITEM_BYTES,
+                        label="context cache metadata item",
+                        allow_empty=True,
+                    )
+                except ReviewInputError as exc:
+                    raise ContextLoadError(
+                        "context cache metadata item is invalid"
+                    ) from exc
+                item_bytes = len(item.encode("utf-8"))
+            elif isinstance(item, (bool, int, float)) or item is None:
+                item_bytes = len(repr(item).encode("utf-8"))
+            else:
+                raise ContextLoadError("context cache metadata item type is invalid")
+            total_bytes += item_bytes
+            if total_bytes > MAX_CACHE_METADATA_TOTAL_BYTES:
+                raise ContextLoadError(
+                    "context cache metadata exceeds the bounded byte limit"
+                )
             items.append(item)
-        value = tuple(items)
+        return tuple(items)
+
+    def put(self, key: ReviewContextCacheKey, metadata: Iterable[object]) -> None:
+        value = self._bounded_cache_metadata(metadata)
         with self._lock:
             digest = key.digest()
             self._values[digest] = value

@@ -178,6 +178,9 @@ class LearningStore:
             instant = instant.replace(tzinfo=timezone.utc)
         diagnostics: list[LearningDiagnostic] = []
         by_id = {entry.id: entry for entry in self.all_entries}
+        diagnostic_entries = tuple(
+            entry for entry in self.all_entries if entry.status == "active"
+        )
         for entry in self.all_entries:
             if entry.superseded_by and entry.superseded_by not in by_id:
                 diagnostics.append(
@@ -201,15 +204,11 @@ class LearningStore:
                     )
 
         # Overlapping scopes with materially different rules are advisory conflicts.
-        for index, left in enumerate(self.all_entries):
-            for right in self.all_entries[index + 1 :]:
+        for index, left in enumerate(diagnostic_entries):
+            for right in diagnostic_entries[index + 1 :]:
                 if left.rule == right.rule:
                     continue
-                if (
-                    left.category
-                    and right.category
-                    and left.category != right.category
-                ):
+                if left.category and right.category and left.category != right.category:
                     # Different categories may coexist on overlapping scopes.
                     continue
                 if _scopes_overlap(left.scope, right.scope):
