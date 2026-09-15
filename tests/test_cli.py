@@ -11,9 +11,11 @@ from unittest.mock import patch
 from review_sensei import ProviderResponse
 from review_sensei.cli import (
     _cli_option_set,
+    _doctor_parser,
     _explicit_cli_options,
     _github_parser,
     _parser,
+    _plan_parser,
     main,
 )
 
@@ -1268,6 +1270,106 @@ class CliTests(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertEqual(created, [])
             self.assertNotIn("x" * 20, stderr.getvalue())
+
+
+class DoctorPlanCliTests(unittest.TestCase):
+    def test_doctor_parser_accepts_configuration_flags(self):
+        args = _doctor_parser().parse_args(
+            [
+                "--stages-dir",
+                "stages",
+                "--categories-dir",
+                "categories",
+                "--context-root",
+                "context",
+                "--network",
+                "--json",
+            ]
+        )
+        self.assertEqual(args.stages_dir, Path("stages"))
+        self.assertEqual(args.categories_dir, Path("categories"))
+        self.assertEqual(args.context_root, Path("context"))
+        self.assertTrue(args.network)
+        self.assertTrue(args.as_json)
+
+    def test_plan_parser_accepts_preview_flags(self):
+        args = _plan_parser().parse_args(
+            [
+                "--diff",
+                "review.patch",
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "3",
+                "--title",
+                "Preview",
+                "--stage",
+                "review",
+                "--provider-mode",
+                "local",
+                "--json",
+            ]
+        )
+        self.assertEqual(args.diff, Path("review.patch"))
+        self.assertEqual(args.repository, "owner/repo")
+        self.assertEqual(args.pull_request, 3)
+        self.assertEqual(args.stage, ["review"])
+        self.assertTrue(args.as_json)
+
+    def test_doctor_cli_renders_json_and_exit_code(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["doctor", "--json"])
+        self.assertEqual(status, 3)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema_version"], "v1")
+        self.assertIn("checks", payload)
+
+    def test_plan_cli_renders_ready_plan_from_diff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            diff_path = Path(temporary) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stderr(io.StringIO()):
+                with patch("sys.stdout", stdout):
+                    status = main(
+                        [
+                            "plan",
+                            "--diff",
+                            str(diff_path),
+                            "--repository",
+                            "owner/repo",
+                            "--json",
+                        ]
+                    )
+        self.assertEqual(status, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["operations"]["provider_calls"], 0)
+
+    def test_plan_cli_without_diff_exits_incomplete(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["plan"])
+        self.assertEqual(status, 3)
+        self.assertIn("incomplete", stdout.getvalue())
+
+    def test_plan_cli_unexpected_analyze_diff_failure_exits_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            diff_path = Path(temporary) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                with patch(
+                    "review_sensei.diagnostics.analyze_diff",
+                    side_effect=TypeError("boom"),
+                ):
+                    status = main(["plan", "--diff", str(diff_path)])
+        self.assertEqual(status, 2)
+        self.assertIn("boom", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":  # pragma: no cover

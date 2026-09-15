@@ -109,11 +109,13 @@ def _bounded_allowed_paths(values: Iterable[str]) -> tuple[str, ...]:
             "patch allowed_paths must be an iterable of paths"
         ) from exc
     unique: dict[str, None] = {}
-    for index, path in enumerate(iterator, start=1):
+    consumed = 0
+    for path in iterator:
         # Counting every item (including duplicates) is intentional: an
         # attacker-controlled generator yielding one path forever must not
         # bypass the input bound by relying on de-duplication.
-        if index > MAX_PATCH_FILES:
+        consumed += 1
+        if consumed > MAX_PATCH_FILES:
             raise ReviewInputError("patch allowed_paths has too many entries")
         if not isinstance(path, str):
             raise ReviewInputError("patch allowed paths must be strings")
@@ -320,7 +322,11 @@ def create_patch_suggestion(
     if status not in {"confirmed", "verified"}:
         raise ReviewInputError("patch suggestions require a confirmed finding")
     finding_id = finding.get("id", finding.get("finding_id"))
-    if not isinstance(finding_id, str) or not finding_id.strip():
+    if (
+        not isinstance(finding_id, str)
+        or not finding_id.strip()
+        or len(finding_id) > 256
+    ):
         raise ReviewInputError("verified finding must have a stable id")
     if isinstance(allowed_paths, (str, bytes)):
         raise ReviewInputError("patch allowed_paths must be an iterable of paths")

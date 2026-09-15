@@ -268,12 +268,27 @@ workflow additionally binds checkout to the repository default branch and
 requires a maintainer-controlled `ollama` self-hosted runner for its local
 provider default.
 
+The command also supports bounded offline `doctor` and `plan` subcommands.
+They share the same top-level command dispatch as `prepare-diff`, `evaluate`,
+and `github` (`argv[0]` selects the parser) and never construct a provider or
+write to GitHub.
+
+```bash
+review-sensei doctor --json
+review-sensei plan --diff pr.patch --repository owner/repo --json
+```
+
+`plan` analyzes a supplied diff with the same bounded `analyze_diff` path as
+review. Without `--diff`, the plan is incomplete rather than ready.
+
 Exit codes are stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written |
+| `0` | Review completed and output was written; `doctor` all-pass; `plan` ready |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
+| `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
+| `3` | `doctor` unknown check (offline network); `plan` incomplete (no diff) |
 
 ## Error Categories
 

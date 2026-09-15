@@ -197,6 +197,11 @@ def run_doctor(
                         configuration_error = configured_categories_error
                     else:
                         assert configured_category_catalog is not None
+                elif configured_categories_error is not None:
+                    configuration_error = (
+                        "skipping stages validation because categories "
+                        "configuration failed"
+                    )
                 else:
                     load_stages_from_dir(
                         configured,
@@ -284,7 +289,10 @@ def build_plan(
 
     if diff is None:
         diff_summary: dict[str, Any] = {"supplied": False, "status": "unknown"}
+    elif not isinstance(diff, str):
+        raise ReviewInputError("diff must be a string")
     else:
+        # Plan readiness uses the same bounded diff analysis path as review.
         analysis = analyze_diff(diff, limits=DEFAULT_REVIEW_LIMITS)
         diff_summary = {
             "supplied": True,

@@ -1,14 +1,11 @@
-import io
 import json
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stderr
 from itertools import repeat
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import _doctor_parser, _plan_parser, main
 from review_sensei.diagnostics import (
     DiagnosticCheck,
     build_plan,
@@ -34,89 +31,6 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 
 
 class DiagnosticsTests(unittest.TestCase):
-    def test_doctor_parser_accepts_configuration_flags(self):
-        args = _doctor_parser().parse_args(
-            [
-                "--stages-dir",
-                "stages",
-                "--categories-dir",
-                "categories",
-                "--context-root",
-                "context",
-                "--network",
-                "--json",
-            ]
-        )
-        self.assertEqual(args.stages_dir, Path("stages"))
-        self.assertEqual(args.categories_dir, Path("categories"))
-        self.assertEqual(args.context_root, Path("context"))
-        self.assertTrue(args.network)
-        self.assertTrue(args.as_json)
-
-    def test_plan_parser_accepts_preview_flags(self):
-        args = _plan_parser().parse_args(
-            [
-                "--diff",
-                "review.patch",
-                "--repository",
-                "owner/repo",
-                "--pull-request",
-                "3",
-                "--title",
-                "Preview",
-                "--stage",
-                "review",
-                "--provider-mode",
-                "local",
-                "--json",
-            ]
-        )
-        self.assertEqual(args.diff, Path("review.patch"))
-        self.assertEqual(args.repository, "owner/repo")
-        self.assertEqual(args.pull_request, 3)
-        self.assertEqual(args.stage, ["review"])
-        self.assertTrue(args.as_json)
-
-    def test_doctor_cli_renders_json_and_exit_code(self):
-        stdout = io.StringIO()
-        with redirect_stderr(io.StringIO()):
-            with patch("sys.stdout", stdout):
-                status = main(["doctor", "--json"])
-        self.assertEqual(status, 3)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema_version"], "v1")
-        self.assertIn("checks", payload)
-
-    def test_plan_cli_renders_ready_plan_from_diff(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            diff_path = Path(temporary) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
-            stdout = io.StringIO()
-            with redirect_stderr(io.StringIO()):
-                with patch("sys.stdout", stdout):
-                    status = main(
-                        [
-                            "plan",
-                            "--diff",
-                            str(diff_path),
-                            "--repository",
-                            "owner/repo",
-                            "--json",
-                        ]
-                    )
-        self.assertEqual(status, 0)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["status"], "ready")
-        self.assertEqual(payload["operations"]["provider_calls"], 0)
-
-    def test_plan_cli_without_diff_exits_incomplete(self):
-        stdout = io.StringIO()
-        with redirect_stderr(io.StringIO()):
-            with patch("sys.stdout", stdout):
-                status = main(["plan"])
-        self.assertEqual(status, 3)
-        self.assertIn("incomplete", stdout.getvalue())
-
     def test_doctor_is_bounded_and_reports_unknown_network(self):
         report = run_doctor()
         self.assertEqual(report["schema_version"], "v1")
@@ -219,6 +133,20 @@ class DiagnosticsTests(unittest.TestCase):
                 check for check in broken["checks"] if check["name"] == "categories"
             )
             self.assertEqual(category_check["status"], "action")
+            with patch(
+                "review_sensei.diagnostics.load_stages_from_dir"
+            ) as load_stages:
+                skipped = run_doctor(
+                    stages_dir=stages_dir, categories_dir=categories_dir
+                )
+            self.assertTrue(
+                all(call.args[0] != stages_dir for call in load_stages.call_args_list)
+            )
+            stages_check = next(
+                check for check in skipped["checks"] if check["name"] == "stages"
+            )
+            self.assertEqual(stages_check["status"], "action")
+            self.assertIn("categories configuration failed", stages_check["detail"])
 
     def test_plan_rejects_invalid_identity_and_provider_inputs(self):
         with self.assertRaises(ReviewInputError):
@@ -246,6 +174,8 @@ class DiagnosticsTests(unittest.TestCase):
         with patch.dict("os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "invalid"}):
             with self.assertRaises(ReviewInputError):
                 build_plan()
+        with self.assertRaisesRegex(ReviewInputError, "diff must be a string"):
+            build_plan(diff=b"not-a-string")  # type: ignore[arg-type]
 
     def test_render_diagnostic_supports_json_and_all_human_fields(self):
         check = DiagnosticCheck("sample", "pass", "ok")
@@ -472,6 +402,15 @@ class PatchSuggestionTests(unittest.TestCase):
                 base_sha="a" * 40,
                 head_sha="b" * 40,
                 allowed_paths=(),
+                snapshot_modes=self.SNAPSHOT_MODES,
+            )
+        with self.assertRaises(ReviewInputError):
+            create_patch_suggestion(
+                {**finding, "id": "f" * 257},
+                patch=DIFF,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                allowed_paths=("src/app.py",),
                 snapshot_modes=self.SNAPSHOT_MODES,
             )
         for label in ("assumptions", "validation"):

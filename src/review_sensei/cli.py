@@ -885,8 +885,14 @@ def main(argv: list[str] | None = None) -> int:
                 if report["status"] == "unknown"
                 else 0
             )
-        except (OSError, ValueError, ReviewSenseiError) as exc:
+        except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # pragma: no cover - unexpected diagnostic failure
+            print(
+                f"review-sensei: unexpected diagnostic failure: {exc}",
+                file=sys.stderr,
+            )
             return 2
     if args_list and args_list[0] == "plan":
         args = _plan_parser().parse_args(args_list[1:])
@@ -912,8 +918,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
             return 0 if report["status"] == "ready" else 3
-        except (OSError, ValueError, ReviewSenseiError) as exc:
+        except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # pragma: no cover - unexpected diagnostic failure
+            print(
+                f"review-sensei: unexpected diagnostic failure: {exc}",
+                file=sys.stderr,
+            )
             return 2
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
