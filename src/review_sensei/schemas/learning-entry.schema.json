@@ -20,7 +20,17 @@
     "rationale": {"type": "string", "minLength": 1},
     "category": {"type": "string", "minLength": 1},
     "source": {"type": "string", "minLength": 1},
-    "status": {"type": "string", "enum": ["active", "retired"]}
+    "status": {"type": "string", "enum": ["active", "retired", "superseded"]},
+    "owner": {"type": "string", "minLength": 1, "maxLength": 512},
+    "provenance": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "supersedes": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}
+    },
+    "superseded_by": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}
   },
   "examples": [
     {
