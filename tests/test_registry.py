@@ -189,3 +189,16 @@ class ProviderRegistryTests(unittest.TestCase):
                     api_key="secret",
                 )
             )
+
+    def test_profile_rejects_allow_custom_endpoint(self):
+        with self.assertRaisesRegex(
+            ProviderError, "allow_custom_endpoint cannot be used"
+        ):
+            default_registry().create(
+                ProviderSettings(
+                    name="openai-compatible",
+                    profile="fast-triage",
+                    api_key="secret",
+                    allow_custom_endpoint=True,
+                )
+            )

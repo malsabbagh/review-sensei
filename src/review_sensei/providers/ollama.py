@@ -229,7 +229,7 @@ class OllamaProvider:
                 label="Ollama review response",
                 allow_empty=False,
             )
-        except Exception as exc:
+        except ReviewInputError as exc:
             raise ProviderError(
                 "Ollama review response exceeded the configured size limit"
             ) from exc

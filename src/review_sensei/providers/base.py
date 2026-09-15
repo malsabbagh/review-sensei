@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from ..errors import ProviderError
 from ..models import ProviderRequest, ProviderResponse
@@ -30,12 +30,10 @@ def validate_provider_contract(provider: object) -> ReviewProvider:
         raise ProviderError("provider must expose name, model, and complete(request)")
     if not callable(getattr(provider, "complete", None)):
         raise ProviderError("provider must expose name, model, and complete(request)")
-    if not isinstance(provider, ReviewProvider):
-        raise ProviderError("provider must expose name, model, and complete(request)")
     name = provider.name
     if not isinstance(name, str) or not name.strip():
         raise ProviderError("provider name must be a non-empty string")
     model = provider.model
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ProviderError("provider model must be a non-empty string or None")
-    return provider
+    return cast(ReviewProvider, provider)

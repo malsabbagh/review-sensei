@@ -13,6 +13,7 @@ import json
 import math
 import os
 import ssl
+import stat
 import unicodedata
 from collections.abc import Callable, Mapping
 from http.client import HTTPException
@@ -59,7 +60,12 @@ def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
         port = parsed.port
     except (UnicodeError, ValueError):
         return False
-    return hostname == ALLOWLISTED_OPENAI_HOSTNAME and (port is None or port == 443)
+    path = parsed.path.rstrip("/") or "/"
+    return (
+        hostname == ALLOWLISTED_OPENAI_HOSTNAME
+        and (port is None or port == 443)
+        and path == "/v1"
+    )
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -151,7 +157,10 @@ class OpenAICompatibleProvider:
             hostname = parsed.hostname.encode("idna").decode("ascii").casefold()
         except UnicodeError as exc:
             raise ValueError("OpenAI-compatible endpoint host is invalid") from exc
-        if not allow_custom_endpoint and hostname != "api.openai.com":
+        path = parsed.path.rstrip("/") or "/"
+        if not allow_custom_endpoint and (
+            hostname != "api.openai.com" or path != "/v1"
+        ):
             raise ValueError(
                 "OpenAI-compatible endpoint is not allowlisted; pass "
                 "allow_custom_endpoint=True only for an explicitly trusted service"
@@ -178,6 +187,38 @@ class OpenAICompatibleProvider:
         )
 
     @staticmethod
+    def _load_ca_bundle(cert_path: Path) -> ssl.SSLContext:
+        """Load a CA bundle from a regular file without following symlinks."""
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(str(cert_path), flags)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise ProviderError("configured SSL_CERT_FILE is missing") from exc
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                raise ProviderError("configured SSL_CERT_FILE is unreadable") from exc
+            raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
+        try:
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ProviderError("configured SSL_CERT_FILE is not a regular file")
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                contents = handle.read()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        try:
+            context = ssl.create_default_context()
+            context.load_verify_locations(cadata=contents.decode("ascii"))
+            return context
+        except (OSError, ssl.SSLError, UnicodeDecodeError) as exc:
+            raise ProviderError("configured SSL_CERT_FILE could not be loaded") from exc
+
+    @staticmethod
     def _build_ssl_context() -> ssl.SSLContext:
         """Build one verified context, using only an explicit CA override."""
 
@@ -187,10 +228,6 @@ class OpenAICompatibleProvider:
                 cert_path = Path(configured)
                 if not cert_path.exists():
                     raise ProviderError("configured SSL_CERT_FILE is missing")
-                if cert_path.is_symlink() or not cert_path.is_file():
-                    raise ProviderError(
-                        "configured SSL_CERT_FILE is not a regular file"
-                    )
             except OSError as exc:
                 if exc.errno == errno.ENOENT:
                     raise ProviderError("configured SSL_CERT_FILE is missing") from exc
@@ -199,12 +236,7 @@ class OpenAICompatibleProvider:
                         "configured SSL_CERT_FILE is unreadable"
                     ) from exc
                 raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
-            try:
-                return ssl.create_default_context(cafile=str(cert_path))
-            except (OSError, ssl.SSLError) as exc:
-                raise ProviderError(
-                    "configured SSL_CERT_FILE could not be loaded"
-                ) from exc
+            return OpenAICompatibleProvider._load_ca_bundle(cert_path)
         # Standalone PyInstaller bundles do not inherit a usable system CA path
         # on every supported host. Prefer certifi after an explicit override.
         try:
@@ -310,6 +342,7 @@ class OpenAICompatibleProvider:
             "max_tokens": self.max_output_tokens,
         }
         if request.json_mode:
+            # The adapter returns message.content as text; ReviewService validates JSON.
             payload["response_format"] = {"type": "json_object"}
         http_request = Request(
             self.endpoint,
@@ -394,7 +427,7 @@ class OpenAICompatibleProvider:
                 label="OpenAI-compatible review response",
                 allow_empty=False,
             )
-        except Exception as exc:
+        except ReviewInputError as exc:
             raise ProviderError(
                 "OpenAI-compatible review response exceeded the configured size limit"
             ) from exc

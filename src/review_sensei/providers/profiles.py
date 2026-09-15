@@ -71,6 +71,9 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         api_key_env="OPENAI_API_KEY",
         requires_api_key=True,
     ),
+    # deepseek-v4-flash:cloud is the documented Ollama Cloud default across README,
+    # workflows, and installation docs; it requires a provisioned Ollama Cloud
+    # account and OLLAMA_API_KEY rather than a local model pull.
     "deep-verification": ProviderProfile(
         name="deep-verification",
         provider="ollama",
