@@ -132,6 +132,15 @@ class PromotionAndReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _range_contains("1.0.0", "> = 1.0.0")
 
+    def test_worker_range_rejects_bare_whitespace_constraints(self) -> None:
+        for expression in ("1.0.0 2.0.0", ">=1.0.0 2.0.0"):
+            with self.assertRaises(ValueError):
+                _range_contains("1.0.0", expression)
+
+    def test_worker_range_allows_explicitly_operator_separated_constraints(self) -> None:
+        self.assertTrue(_range_contains("1.5.0", ">=1.0.0 <2.0.0"))
+        self.assertFalse(_range_contains("2.0.0", ">=1.0.0 <2.0.0"))
+
     def test_worker_range_operator_boundaries(self) -> None:
         self.assertTrue(_range_contains("1.2.3", "^1.2.3"))
         self.assertTrue(_range_contains("1.9.9", "^1.2.3"))

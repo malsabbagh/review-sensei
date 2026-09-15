@@ -576,8 +576,14 @@ jobs:
             replied_and_resolved|already_replied_and_resolved)
               echo "resolved=true" >> "$GITHUB_OUTPUT"
               ;;
-            *)
+            replied|already_replied|skipped_source_gone|skipped_no_mention|\
+              skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
+              skipped_stale_head|skipped_fork)
               echo "resolved=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unexpected mention reply status: $reply_status" >&2
+              exit 1
               ;;
           esac
 
@@ -596,13 +602,10 @@ jobs:
         env:
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
         run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
             --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
+            --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
       - name: Run cloud-provider review after AI resolution
@@ -891,8 +894,14 @@ jobs:
             replied_and_resolved|already_replied_and_resolved)
               echo "resolved=true" >> "$GITHUB_OUTPUT"
               ;;
-            *)
+            replied|already_replied|skipped_source_gone|skipped_no_mention|\
+              skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
+              skipped_stale_head|skipped_fork)
               echo "resolved=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unexpected mention reply status: $reply_status" >&2
+              exit 1
               ;;
           esac
 
@@ -911,13 +920,10 @@ jobs:
         env:
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
         run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
             --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
+            --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
       - name: Run trusted local review after AI resolution

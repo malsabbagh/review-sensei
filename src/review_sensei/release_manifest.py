@@ -94,24 +94,42 @@ def _constraint_parts(token: str) -> list[tuple[str, tuple[int, int, int]]]:
 def _parse_range_alternative(
     alternative: str,
 ) -> list[tuple[str, tuple[int, int, int]]]:
-    """Expand one comma/space-separated range alternative into constraints."""
+    """Expand one comma-separated range alternative into constraints.
 
-    tokens = [token for token in re.split(r"\s*,\s*|\s+", alternative) if token]
-    if not tokens:
+    Whitespace may surround commas or separate an operator from its version,
+    but it is not itself a constraint separator. Additional constraints must
+    therefore carry an explicit operator (for example, ``>=1.0.0 <2.0.0``),
+    which keeps malformed expressions such as ``1.0.0 2.0.0`` fail-closed.
+    """
+
+    segments = [segment.strip() for segment in alternative.split(",")]
+    if not segments or any(not segment for segment in segments):
         raise ValueError("range must contain a constraint")
     expanded: list[tuple[str, tuple[int, int, int]]] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token in _OPERATORS:
-            if index + 1 >= len(tokens):
-                raise ValueError("range constraint is incomplete")
-            if tokens[index + 1] in _OPERATORS:
-                raise ValueError("range operators must be contiguous")
-            token += tokens[index + 1]
+    for segment in segments:
+        tokens = segment.split()
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if (
+                index > 0
+                and tokens[index - 1] not in _OPERATORS
+                and token not in _OPERATORS
+            ):
+                match = _RANGE_TOKEN.fullmatch(token)
+                if match is None or not match.group(1):
+                    raise ValueError(
+                        "range constraints after the first require an explicit operator"
+                    )
+            if token in _OPERATORS:
+                if index + 1 >= len(tokens):
+                    raise ValueError("range constraint is incomplete")
+                if tokens[index + 1] in _OPERATORS:
+                    raise ValueError("range operators must be contiguous")
+                token += tokens[index + 1]
+                index += 1
+            expanded.extend(_constraint_parts(token))
             index += 1
-        expanded.extend(_constraint_parts(token))
-        index += 1
     return expanded
 
 
