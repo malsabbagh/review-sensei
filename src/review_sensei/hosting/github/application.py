@@ -21,9 +21,10 @@ from .publication import PublicationResult, ReviewPublisher
 
 @dataclass(frozen=True)
 class GitHubWriteOptions:
-    """Opt-in switches; every switch defaults to disabled."""
+    """GitHub publication switches with default-on approval safety gates."""
 
     auto_review: bool = False
+    auto_approve: bool = True
     github_writes: bool = False
     learning_prs: bool = False
     mention_replies: bool = False
@@ -84,6 +85,7 @@ class GitHubApplication:
             result=result,
             diff=diff,
             app_slug=app_slug,
+            auto_approve=options.auto_approve,
         )
 
     def publish_learning(

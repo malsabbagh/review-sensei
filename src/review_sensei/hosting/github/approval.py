@@ -8,19 +8,20 @@ from ...models import ReviewResult
 
 
 @dataclass(frozen=True)
-class ApprovalDecision:
+class AutoApprovalDecision:
     """Explain whether a validated review may use GitHub's APPROVE event."""
 
     approved: bool
     blockers: tuple[str, ...] = ()
 
 
-def evaluate_approval(
+def evaluate_auto_approval(
     *,
+    enabled: bool = True,
     app_authored: bool,
     result: ReviewResult,
-    has_open_review_threads: bool,
-) -> ApprovalDecision:
+    has_open_review_threads: bool | None = None,
+) -> AutoApprovalDecision:
     """Apply the repository's conservative approval criteria.
 
     A finding blocks when it is explicitly classified as blocking. When the
@@ -31,13 +32,35 @@ def evaluate_approval(
     """
 
     blockers: list[str] = []
-    if app_authored:
+    if not isinstance(enabled, bool):
+        blockers.append("auto-approval-enabled-invalid")
+    if not isinstance(app_authored, bool):
+        blockers.append("app-authored-flag-invalid")
+    if has_open_review_threads is not None and not isinstance(
+        has_open_review_threads, bool
+    ):
+        blockers.append("review-threads-invalid")
+    if not isinstance(result, ReviewResult):
+        blockers.append("review-result-invalid")
+    # Approval remains the compatible default. A repository may explicitly
+    # disable it while retaining the same review-publication and
+    # marker/idempotency guarantees.
+    if enabled is not True:
+        blockers.append("auto-approval-disabled")
+    if app_authored is True:
         blockers.append("app-authored-pull-request")
-    if has_blocking_findings(result):
+    if isinstance(result, ReviewResult) and has_blocking_findings(result):
         blockers.append("blocking-findings-open")
-    if has_open_review_threads:
+    if has_open_review_threads is None:
+        blockers.append("review-threads-incomplete")
+    elif has_open_review_threads is True:
         blockers.append("review-threads-open")
-    return ApprovalDecision(approved=not blockers, blockers=tuple(blockers))
+    status = getattr(result, "review_status", "incomplete")
+    if status in {"partial", "incomplete", "summary-only"}:
+        blockers.append(f"review-{status}")
+    elif status != "complete":
+        blockers.append("review-status-invalid")
+    return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 
 def has_blocking_findings(result: ReviewResult) -> bool:
@@ -47,7 +70,7 @@ def has_blocking_findings(result: ReviewResult) -> bool:
 
 
 __all__ = [
-    "ApprovalDecision",
-    "evaluate_approval",
+    "AutoApprovalDecision",
+    "evaluate_auto_approval",
     "has_blocking_findings",
 ]

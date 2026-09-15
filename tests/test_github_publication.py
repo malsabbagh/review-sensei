@@ -38,6 +38,7 @@ def clean_result():
         summary="Summary.",
         comments=(),
         provider="ollama",
+        review_status="complete",
     )
 
 
@@ -71,6 +72,7 @@ def non_blocking_result():
             ),
         ),
         provider="ollama",
+        review_status="complete",
     )
 
 
@@ -277,6 +279,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=non_blocking_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
 
         self.assertEqual(outcome.status, "published")
@@ -346,7 +349,7 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         self.assertEqual(len(calls), 3)
 
-    def test_clean_review_uses_approve_event(self):
+    def test_clean_review_uses_approve_event_by_default(self):
         head = "b" * 40
         http, calls = make_http(
             [
@@ -375,6 +378,26 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["comments"], [])
 
+    def test_non_boolean_auto_approve_is_rejected_before_network_calls(self):
+        http, calls = make_http([])
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "auto_approve must be a boolean"
+        ):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha="b" * 40,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=clean_result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+                auto_approve="false",  # type: ignore[arg-type]
+            )
+        self.assertEqual(calls, [])
+
     def test_open_review_thread_downgrades_clean_review_to_comment(self):
         head = "b" * 40
         http, calls = make_http(
@@ -397,6 +420,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         query = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -429,6 +453,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -456,6 +481,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=clean_result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                auto_approve=True,
             )
         self.assertEqual(len(calls), 4)
 
@@ -481,6 +507,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=clean_result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                auto_approve=True,
             )
         self.assertEqual(len(calls), 4)
 
@@ -511,6 +538,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             diff=DIFF,
             app_slug="reviewsensei[bot]",
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         second_query = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -674,6 +702,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response({"id": 6}, 200),
             ],
             result=clean_result(),
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -701,6 +730,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response({"id": 6}, 200),
             ],
             result=non_blocking,
+            auto_approve=True,
         )
 
         self.assertEqual(outcome.status, "published")
@@ -726,6 +756,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 graphql_review_threads_response(nodes=({"isResolved": False},)),
             ],
             result=clean_result(),
+            auto_approve=True,
         )
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
@@ -778,6 +809,7 @@ class ReviewPublisherTests(unittest.TestCase):
                     json_response([prior_comment]),
                 ],
                 result=clean_result(),
+                auto_approve=True,
             )
 
     def test_matching_review_with_unknown_state_fails_closed(self):

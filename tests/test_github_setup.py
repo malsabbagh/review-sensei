@@ -15,6 +15,7 @@ from review_sensei.hosting.github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
+from review_sensei.hosting.github.setup import SETUP_VARIABLES
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
@@ -268,6 +269,13 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn("github.event.comment.user.type != 'Bot'", workflow)
         self.assertIn("github.event.issue.pull_request", workflow)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", workflow)
+        self.assertIn("REVIEWSENSEI_AUTO_APPROVE", workflow)
+        self.assertIn("enable_auto_approve", workflow)
+        self.assertIn(
+            "enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}",
+            workflow,
+        )
+        self.assertIn(("REVIEWSENSEI_AUTO_APPROVE", "true"), SETUP_VARIABLES)
         self.assertIn(
             "operation: ${{ github.event_name == 'pull_request' && 'review' || "
             "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
@@ -655,7 +663,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             hashlib.sha256(
                 files[".github/workflows/review-sensei-review.yml"].encode()
             ).hexdigest(),
-            "a693256f243dbeafc2910297375064b6133b7ace8f71b75712c72db43a6fafee",
+            "e6c290f6fff1b634dd3b6b7e93c16afd7284c3eee704edf56800c14cd1fc084b",
         )
         self.assertEqual(
             hashlib.sha256(

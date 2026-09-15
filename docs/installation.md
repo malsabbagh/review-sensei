@@ -80,13 +80,25 @@ other PyPI failures remain fatal. It then checks out only trusted base content,
 validates refs, and computes a bounded diff without installing or executing the
 head branch.
 
-The App creates nine repository variables: provider mode, local model, cloud
-model, package version, automatic review, GitHub writes, learning PRs, mention
-replies, and artifact upload. The five feature switches default to `false`.
+The App creates repository variables for provider mode/model selection, package
+version, independent analysis/publication controls, learning proposals and
+learning PRs, mention replies, artifact upload, and optional trusted stage and
+category directories. Feature switches default to `false`; empty stage/category
+paths preserve the packaged defaults.
+The generated setup exposes nine independent operational controls so analysis,
+publication, approval, learning, replies, and artifact retention can be enabled
+separately.
+The five setup files and generated workflow references remain byte-addressed
+and are migrated only when their managed content matches exactly.
 The App does not create a placeholder secret or overwrite an existing variable.
 
-To enable automatic same-repository review, set
-`REVIEWSENSEI_AUTO_REVIEW=true` and `REVIEWSENSEI_GITHUB_WRITES=true`.
+To enable automatic same-repository analysis, set
+`REVIEWSENSEI_AUTO_REVIEW=true`. Set `REVIEWSENSEI_GITHUB_WRITES=true`
+separately when the validated result may publish to GitHub; analysis remains
+provider-only while writes are disabled. Set
+`REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated
+learning proposals are desired, and `REVIEWSENSEI_LEARNING_PRS=true` to publish
+those proposals as draft PRs.
 `REVIEWSENSEI_PROVIDER_MODE=cloud` runs on `ubuntu-latest` and requires the
 customer-owned `OLLAMA_API_KEY` under Repository Settings → Secrets and
 variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` runs the same review
@@ -96,14 +108,16 @@ comments and a validated summary. Enable `REVIEWSENSEI_LEARNING_PRS` separately 
 learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
-satisfy branch-protection approvals automatically. Before choosing `APPROVE`,
-the publisher requires a validated exact-head result with no blocking findings, a
-same-repository non-draft PR, and a final bounded GraphQL sweep showing that all
-existing review threads are resolved. Non-blocking findings are published as
-optional follow-ups and can accompany an approval. An open thread, an App-authored PR, an
-incomplete/error response, or any stale/fork/closed target keeps the event as
-`COMMENT` or fails closed before writing. All `@sensei` replies remain ordinary
-comments.
+satisfy branch-protection approvals automatically by default. Set
+`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Before choosing `APPROVE`, the
+publisher requires a validated exact-head result marked `complete`, with no
+blocking findings, a same-repository non-draft PR, and a final bounded
+GraphQL sweep showing that all existing review threads are resolved.
+Non-blocking findings are published as optional follow-ups and can accompany an
+approval. An open thread, an App-authored PR, a partial/incomplete/summary-only
+result, an incomplete/error response, or any stale/fork/closed target keeps the
+event as `COMMENT` or fails closed before writing. All `@sensei` replies remain
+ordinary comments.
 
 The per-head marker deduplicates `COMMENTED` and `APPROVED` states separately.
 After every thread is resolved, a fresh workflow run with no blocking findings on the same exact

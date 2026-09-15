@@ -54,6 +54,54 @@ class SequenceProvider(FakeProvider):
 
 
 class ReviewServiceTests(unittest.TestCase):
+    def test_stage_with_no_active_lenses_does_not_call_provider(self):
+        category = ReviewCategory(
+            id="docs",
+            title="Documentation",
+            focus=("Documentation accuracy",),
+            applies_to=("docs/**",),
+        )
+        stage = Stage(
+            name="Docs review",
+            prompt_template="Categories: {review_categories}\nDiff: {diff}",
+            outputs=("summary", "comments"),
+            categories=(category,),
+        )
+        provider = FakeProvider('{"summary":"unused","comments":[]}')
+        result = ReviewService(provider, stages=[stage]).review(
+            ReviewRequest(diff=DIFF, active_category_ids=())
+        )
+        self.assertEqual(provider.requests, [])
+        self.assertTrue(result.summary)
+        self.assertEqual(result.review_status, "partial")
+
+    def test_summary_only_stage_is_not_approval_eligible(self):
+        stage = Stage(
+            name="Summary only",
+            prompt_template="Summarize: {diff}",
+            outputs=("summary",),
+        )
+        provider = FakeProvider('{"summary":"Looks good."}')
+        result = ReviewService(provider, stages=[stage]).review(
+            ReviewRequest(diff=DIFF)
+        )
+        self.assertEqual(result.review_status, "summary-only")
+
+    def test_invalid_inline_location_marks_result_partial(self):
+        stage = Stage(
+            name="Comments",
+            prompt_template="Review: {diff}",
+            outputs=("comments",),
+        )
+        provider = FakeProvider(
+            '{"comments":[{"path":"src/app.py","line":99,"body":"not changed"}]}'
+        )
+        result = ReviewService(provider, stages=[stage]).review(
+            ReviewRequest(diff=DIFF)
+        )
+        self.assertEqual(result.comments, ())
+        self.assertEqual(result.review_status, "partial")
+
     def test_renders_only_active_categories_and_their_structured_context(self):
         architecture = ReviewCategory(
             id="architecture",

@@ -13,7 +13,7 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
-from .approval import evaluate_approval, has_blocking_findings
+from .approval import evaluate_auto_approval, has_blocking_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -122,7 +122,10 @@ class ReviewPublisher:
         result: ReviewResult,
         diff: str,
         app_slug: str,
+        auto_approve: bool = True,
     ) -> PublicationResult:
+        if not isinstance(auto_approve, bool):
+            raise GitHubPublicationError("review auto_approve must be a boolean")
         if (
             isinstance(repository_id, bool)
             or not isinstance(repository_id, int)
@@ -248,13 +251,18 @@ class ReviewPublisher:
                 "formatted review exceeds the configured publication limit"
             ) from exc
         has_open_review_threads = False
-        if not has_blocking_findings(result) and not write_preflight.app_authored:
+        if (
+            auto_approve
+            and not has_blocking_findings(result)
+            and not write_preflight.app_authored
+        ):
             has_open_review_threads = self._has_open_review_threads(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
             )
-        approval = evaluate_approval(
+        approval = evaluate_auto_approval(
+            enabled=auto_approve,
             app_authored=write_preflight.app_authored,
             result=result,
             has_open_review_threads=has_open_review_threads,

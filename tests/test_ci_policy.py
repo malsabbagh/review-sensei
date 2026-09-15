@@ -1,7 +1,10 @@
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -34,6 +37,13 @@ def _run_blocks(text: str) -> list[str]:
             content.append(candidate[indent:])
         blocks.append("\n".join(content))
     return blocks
+
+
+def _run_block_containing(text: str, marker: str) -> str:
+    matches = [block for block in _run_blocks(text) if marker in block]
+    if len(matches) != 1:
+        raise AssertionError(f"expected one run block containing {marker!r}")
+    return matches[0]
 
 
 class ActionPinPolicyTests(unittest.TestCase):
@@ -114,6 +124,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             with self.subTest(input_name=input_name):
                 self.assertIn(f"inputs.{input_name}", text)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
+        self.assertIn("REVIEWSENSEI_AUTO_APPROVE", text)
         self.assertEqual(text.count("review-sensei-run.yml@" + "v4"), 1)
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
@@ -182,6 +193,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("provider_mode:", text)
+        self.assertIn("enable_auto_approve:", text)
+        self.assertIn(
+            "enable_auto_approve:\n        required: false\n        default: 'true'",
+            text,
+        )
+        self.assertIn("AUTO_APPROVE", text)
+        self.assertIn("--enable-auto-approve", text)
+        self.assertIn("--no-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("validate-provider-mode:", text)
@@ -206,12 +225,276 @@ class ActionPinPolicyTests(unittest.TestCase):
             2,
         )
         self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
-        self.assertIn("source_comment_id || inputs.head_sha", text)
+        self.assertIn(
+            "github.event.pull_request.number || github.run_id",
+            text,
+        )
+        # Concurrency keys are evaluated before validation jobs run, so they
+        # must not interpolate the caller-controlled PR number input.
+        group_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertTrue(group_lines)
+        for line in group_lines:
+            self.assertNotIn("inputs.pull_request_number", line)
         self.assertNotIn(
             '--base-ref "$BASE_REF" --head-ref "$HEAD_REF"'
             "\n            --head-repository",
             text,
         )
+
+    def test_reusable_concurrency_is_pr_scoped_for_reviews_and_run_scoped_for_replies(
+        self,
+    ):
+        """Review cancellation and reply isolation must be explicit in YAML.
+
+        Workflow-level concurrency cannot consume the validated PR output, so
+        pull-request events use their host PR number there. The provider jobs
+        additionally join manual reviews by the authoritative preflight
+        number. Both provider jobs must use the same expression: provider mode
+        is an execution detail, not a concurrency partition.
+        """
+
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        group_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertEqual(len(group_lines), 3)
+
+        top_level, cloud, local = group_lines
+        review_selector = "inputs.operation == 'review'"
+        reply_selector = "inputs.operation == 'review' && ("
+        self.assertIn(review_selector, top_level)
+        self.assertIn(reply_selector, top_level)
+        self.assertIn("github.event.pull_request.number", top_level)
+        # A pull_request_review_comment reply must not fall back to the PR
+        # number; doing so would replace an earlier reply for that PR.
+        self.assertTrue(
+            top_level.endswith(
+                "${{ inputs.operation == 'review' && (github.event.pull_request.number || github.run_id) || github.run_id }}"
+            )
+        )
+
+        expected_provider_group = (
+            "group: reviewsensei-provider-${{ inputs.operation == 'review' && "
+            "'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == "
+            "'review' && (needs.authoritative-preflight.outputs.pull_request_number || "
+            "github.event.pull_request.number || github.run_id) || github.run_id }}"
+        )
+        self.assertEqual(cloud, expected_provider_group)
+        self.assertEqual(local, expected_provider_group)
+        self.assertNotIn("-cloud-", cloud)
+        self.assertNotIn("-local-", local)
+
+        cancel_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("cancel-in-progress:")
+        ]
+        # Exactly one cancellation policy per block: latest-wins applies to
+        # reviews, while replies always retain their unique run-id group.
+        self.assertEqual(
+            cancel_lines,
+            [
+                "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+            ],
+        )
+
+    def test_reusable_workflow_preflights_authoritative_identity_and_gates_operations(
+        self,
+    ):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("if: needs.validate-provider-mode.result == 'success'", text)
+        self.assertIn(
+            "base_sha: ${{ steps.fetch-pr.outputs.base_sha }}",
+            text,
+        )
+        self.assertIn(
+            "repository id must be a positive decimal integer",
+            text,
+        )
+        self.assertIn(
+            "authoritative GitHub pull-request preflight was unavailable; refusing provider execution",
+            text,
+        )
+        self.assertIn(
+            "encoded pull request title exceeds the workflow output limit",
+            text,
+        )
+        self.assertIn(
+            "authoritative pull-request title output could not be decoded",
+            text,
+        )
+        # Provider jobs are selected only for an enabled operation. A reply
+        # event cannot accidentally run the review CLI or consume a provider
+        # runner when mention replies are disabled.
+        expected_gate = (
+            "(inputs.operation == 'review' && inputs.enable_review == 'true') || "
+            "(inputs.operation == 'reply' && inputs.enable_github_writes == 'true' "
+            "&& inputs.enable_mention_replies == 'true')"
+        )
+        self.assertEqual(text.count(expected_gate), 2)
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
+            ),
+            2,
+        )
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'"
+            ),
+            2,
+        )
+
+    def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
+        root = Path(__file__).resolve().parents[1]
+        ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--fail-under=80", ci_text)
+        self.assertNotIn("--fail-under=75", ci_text)
+        self.assertIn('len(title.encode("utf-8")) > 256', workflow_text)
+        self.assertIn('"$BASE_REF" == *--*', workflow_text)
+        self.assertIn('"$BASE_REF" == *-', workflow_text)
+        self.assertIn('"$BASE_REF" != *--*', workflow_text)
+        self.assertIn('"$BASE_REF" != *-', workflow_text)
+        self.assertIn('"--" not in value', workflow_text)
+        self.assertIn('not value.endswith("-")', workflow_text)
+
+    def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "ReviewSensei provider mode is unsupported"
+        )
+        self.assertIn('"$BASE_REF" == *--*', block)
+        self.assertIn('"$BASE_REF" == *-', block)
+        self.assertIn('"$HEAD_REF" == *--*', block)
+        self.assertIn('"$HEAD_REF" == *-', block)
+
+    def test_local_provider_validation_uses_the_same_safe_ref_rules(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "local job received an invalid provider mode"
+        )
+        block = block.split("python - <<'PY'\n", 1)[1]
+        block = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0])
+        environment = {
+            "MODE": "manual",
+            "OPERATION": "reply",
+            "PROVIDER_MODE": "local",
+            "REPOSITORY": "owner/repo",
+            "HEAD_REF": "",
+            "HEAD_REPOSITORY": "",
+            "REVIEW_SENSEI_VERSION": "0.1.1",
+            "BASE_SHA": "",
+            "HEAD_SHA": "",
+        }
+        for value in ("main--branch", "main-"):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["python3", "-c", block],
+                    env={**os.environ, **environment, "BASE_REF": value},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+        valid = subprocess.run(
+            ["python3", "-c", block],
+            env={**os.environ, **environment, "BASE_REF": "main-feature"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+
+    def test_authoritative_preflight_caps_pull_request_title_bytes(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow_text = (
+            root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        block = _run_block_containing(
+            workflow_text, "pull request title exceeds the 256-byte limit"
+        )
+        script = block.split("python - \"$payload\" <<'PY'\n", 1)[1]
+        script = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", script, maxsplit=1)[0])
+        metadata = {
+            "state": "open",
+            "draft": False,
+            "number": 1,
+            "title": "x" * 257,
+            "head": {
+                "sha": "b" * 40,
+                "repo": {"full_name": "owner/repo", "id": 42, "fork": False},
+            },
+            "base": {
+                "ref": "main",
+                "sha": "a" * 40,
+                "repo": {"full_name": "owner/repo", "id": 42},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = Path(temporary) / "pull-request.json"
+            output = Path(temporary) / "github-output"
+            payload.write_text(json.dumps(metadata), encoding="utf-8")
+            environment = {
+                "PULL_REQUEST": "1",
+                "REPOSITORY": "owner/repo",
+                "REPOSITORY_ID": "42",
+                "HEAD_SHA": "b" * 40,
+                "BASE_REF": "main",
+                "BASE_SHA": "",
+                "HEAD_REPOSITORY": "owner/repo",
+                "GITHUB_OUTPUT": str(output),
+            }
+            rejected = subprocess.run(
+                ["python3", "-c", script, str(payload)],
+                env={**os.environ, **environment},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("256-byte limit", rejected.stderr)
+
+            metadata["title"] = "x" * 256
+            payload.write_text(json.dumps(metadata), encoding="utf-8")
+            accepted = subprocess.run(
+                ["python3", "-c", script, str(payload)],
+                env={**os.environ, **environment},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
     def test_reusable_workflow_prefers_pypi_with_sha_verified_github_fallback(self):
         workflow = (

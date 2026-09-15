@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -55,6 +56,14 @@ combine these dimensions into one priority value.
 """.strip()
 
 
+@dataclass(frozen=True)
+class _ValidatedStageOutput:
+    summary: str | None
+    comments: tuple[ReviewComment, ...]
+    proposals: tuple[LearningProposal, ...]
+    omitted_inline_comments: int = 0
+
+
 class ReviewService:
     """Run and validate a review independently of GitHub and model vendors."""
 
@@ -99,6 +108,9 @@ class ReviewService:
         accumulated_proposals: list[LearningProposal] = []
         last_provider: str = self.provider.name
         last_model: str | None = request.model
+        skipped_stages = 0
+        omitted_inline_comments = 0
+        executed_comment_stage = False
 
         # Preflight the complete diff exactly once, before the first provider
         # construction/call.  The parser owns byte, line, file, hunk, marker,
@@ -125,6 +137,16 @@ class ReviewService:
                 )
                 if request.active_category_ids is not None
                 else stage.categories
+            )
+            # A stage whose configured lenses do not apply to the changed paths
+            # has no useful provider work.  Stages without categories are
+            # intentionally independent and continue to run (for example an
+            # overall summary stage).
+            if stage.categories and not active_categories:
+                skipped_stages += 1
+                continue
+            executed_comment_stage = (
+                executed_comment_stage or "comments" in stage.outputs
             )
             prompt = self._format_prompt(
                 stage,
@@ -167,15 +189,17 @@ class ReviewService:
                         "provider response exceeds the configured limit"
                     ) from exc
                 try:
-                    stage_summary, stage_comments, stage_proposals = (
-                        self._validated_stage_output(
-                            response.text,
-                            stage=stage,
-                            changed_lines=changed_lines,
-                            active_categories=active_categories,
-                            propose_learnings=request.propose_learnings,
-                        )
+                    stage_output = self._validated_stage_output(
+                        response.text,
+                        stage=stage,
+                        changed_lines=changed_lines,
+                        active_categories=active_categories,
+                        propose_learnings=request.propose_learnings,
                     )
+                    stage_summary = stage_output.summary
+                    stage_comments = stage_output.comments
+                    stage_proposals = stage_output.proposals
+                    omitted_inline_comments += stage_output.omitted_inline_comments
                 except ReviewFormatError:
                     if attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS:
                         raise
@@ -205,6 +229,13 @@ class ReviewService:
             # comments from the checkpoint carries stable first-wins
             # deduplication into the next stage.
             try:
+                checkpoint_status = (
+                    "partial"
+                    if skipped_stages or omitted_inline_comments
+                    else "summary-only"
+                    if not executed_comment_stage
+                    else "complete"
+                )
                 checkpoint = ReviewResult(
                     summary=candidate_summary or "Review complete.",
                     comments=tuple(candidate_comments),
@@ -212,6 +243,7 @@ class ReviewService:
                     model=response_model or request.model,
                     learning_proposals=tuple(candidate_proposals),
                     limits=request.limits,
+                    review_status=checkpoint_status,
                 )
             except ReviewInputError as exc:
                 raise ReviewFormatError(
@@ -224,6 +256,13 @@ class ReviewService:
             last_model = response_model
 
         final_summary = accumulated_summary or "Review complete."
+        review_status = (
+            "partial"
+            if skipped_stages or omitted_inline_comments
+            else "summary-only"
+            if not executed_comment_stage
+            else "complete"
+        )
         try:
             return ReviewResult(
                 summary=final_summary,
@@ -232,6 +271,7 @@ class ReviewService:
                 model=last_model or request.model,
                 learning_proposals=tuple(accumulated_proposals),
                 limits=request.limits,
+                review_status=review_status,
             )
         except ReviewInputError as exc:
             raise ReviewFormatError(
@@ -340,11 +380,12 @@ class ReviewService:
         changed_lines: dict[str, frozenset[int]],
         active_categories: tuple[ReviewCategory, ...],
         propose_learnings: bool,
-    ) -> tuple[str | None, tuple[ReviewComment, ...], tuple[LearningProposal, ...]]:
+    ) -> _ValidatedStageOutput:
         payload = self._decode_json(text)
         stage_summary: str | None = None
         stage_comments: list[ReviewComment] = []
         stage_proposals: list[LearningProposal] = []
+        omitted_inline_comments = 0
 
         if "summary" in stage.outputs:
             summary = payload.get("summary")
@@ -384,6 +425,7 @@ class ReviewService:
                         "is not an added or modified diff line",
                         index,
                     )
+                    omitted_inline_comments += 1
                     continue
                 stage_comments.append(comment)
 
@@ -404,7 +446,12 @@ class ReviewService:
                             msg = f"[{stage.name}] {msg}"
                         raise ReviewFormatError(msg) from exc
 
-        return stage_summary, tuple(stage_comments), tuple(stage_proposals)
+        return _ValidatedStageOutput(
+            stage_summary,
+            tuple(stage_comments),
+            tuple(stage_proposals),
+            omitted_inline_comments,
+        )
 
     @staticmethod
     def _decode_json(text: str) -> dict[str, Any]:

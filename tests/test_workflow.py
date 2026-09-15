@@ -5,8 +5,10 @@ from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.workflow import (
+    ReviewExecutionPlan,
     normalize_review_sensei_version,
     parse_prepare_diff_args,
+    plan_review_execution,
     prepare_diff,
 )
 
@@ -40,6 +42,62 @@ def _init_repository(root: Path, name: str) -> Path:
 
 
 class WorkflowValidationTests(unittest.TestCase):
+    def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
+        plan = plan_review_execution(
+            repository="owner/repo",
+            repository_id=42,
+            pull_request_number=7,
+            base_ref="main",
+            base_sha="a" * 40,
+            head_ref="feature",
+            head_repository="owner/repo",
+            head_sha="b" * 40,
+            title="Improve review",
+        )
+        self.assertIsInstance(plan, ReviewExecutionPlan)
+        self.assertTrue(plan.eligible)
+        self.assertIsNone(plan.skip_reason)
+        self.assertEqual(plan.to_dict()["head_sha"], "b" * 40)
+
+    def test_authoritative_execution_plan_skips_stale_or_ineligible_prs(self):
+        common = dict(
+            repository="owner/repo",
+            repository_id=42,
+            pull_request_number=7,
+            base_ref="main",
+            base_sha="a" * 40,
+            head_ref="feature",
+            head_repository="owner/repo",
+            head_sha="b" * 40,
+        )
+        self.assertEqual(
+            plan_review_execution(**common, state="closed").skip_reason,
+            "pr_not_open",
+        )
+        self.assertEqual(
+            plan_review_execution(**common, draft=True).skip_reason,
+            "draft_pr",
+        )
+        self.assertEqual(
+            plan_review_execution(
+                **{**common, "head_repository": "fork/repo"}
+            ).skip_reason,
+            "fork_not_allowed",
+        )
+
+    def test_authoritative_execution_plan_rejects_malformed_identity(self):
+        with self.assertRaises(ReviewInputError):
+            plan_review_execution(
+                repository="owner/repo",
+                repository_id=1,
+                pull_request_number=1,
+                base_ref="main",
+                base_sha="not-a-sha",
+                head_ref="feature",
+                head_repository="owner/repo",
+                head_sha="b" * 40,
+            )
+
     def test_malicious_refs_are_rejected_without_git(self):
         for value in (
             "-o",

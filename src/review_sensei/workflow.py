@@ -14,7 +14,7 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, cast
 
 from .diff import analyze_diff
 from .errors import ReviewInputError
@@ -103,7 +103,9 @@ def _positive_int(value: object, *, label: str, default: int) -> int:
         return default
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise _invalid(f"{label} must be a positive integer")
-    ceiling = getattr(DEFAULT_REVIEW_LIMITS, label)
+    # Metadata identifiers (for example a pull-request number) are bounded
+    # independently from diff resource limits.
+    ceiling = getattr(DEFAULT_REVIEW_LIMITS, label, 2_147_483_647)
     if value > ceiling:
         raise _invalid(f"{label} exceeds the public ceiling")
     return value
@@ -123,6 +125,177 @@ def normalize_review_sensei_version(value: object) -> str:
     if not _VERSION.fullmatch(value):
         raise _invalid("review_sensei_version must be an exact X.Y.Z version")
     return value[1:] if value.startswith("v") else value
+
+
+@dataclass(frozen=True)
+class ReviewExecutionPlan:
+    """Immutable, authoritative identity used by a hosted review run.
+
+    The reusable workflow performs a read-only GitHub PR lookup and supplies
+    the resulting values here before constructing any provider request.  A
+    plan is deliberately small: it contains identity and eligibility, never
+    prompt text or source excerpts.  ``skip_reason`` is a stable diagnostic
+    token suitable for logs and workflow outputs.
+    """
+
+    repository: str
+    repository_id: int
+    pull_request_number: int
+    base_ref: str
+    base_sha: str
+    head_ref: str
+    head_repository: str
+    head_sha: str
+    operation: str = "review"
+    title: str | None = None
+    eligible: bool = True
+    skip_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "repository", _validate_repository(self.repository) or ""
+        )
+        if (
+            isinstance(self.repository_id, bool)
+            or not isinstance(self.repository_id, int)
+            or self.repository_id < 1
+        ):
+            raise _invalid("repository_id must be a positive integer")
+        object.__setattr__(
+            self,
+            "pull_request_number",
+            _positive_int(
+                self.pull_request_number, label="pull_request_number", default=1
+            ),
+        )
+        object.__setattr__(
+            self, "base_ref", _validate_ref(self.base_ref, label="base_ref")
+        )
+        object.__setattr__(
+            self, "head_ref", _validate_ref(self.head_ref, label="head_ref")
+        )
+        for label, value in (("base_sha", self.base_sha), ("head_sha", self.head_sha)):
+            if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+                raise _invalid(f"{label} must be a 40-character commit SHA")
+        object.__setattr__(
+            self, "head_repository", _validate_repository(self.head_repository) or ""
+        )
+        if self.operation not in {"review", "reply"}:
+            raise _invalid("operation must be review or reply")
+        if self.title is not None:
+            if not isinstance(self.title, str):
+                raise _invalid("title must be a string")
+            # Keep title available to prompts while applying the same public
+            # bounded-text contract as ReviewRequest.
+            from .validation import validate_bounded_text
+
+            validate_bounded_text(
+                self.title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title"
+            )
+        if not isinstance(self.eligible, bool):
+            raise _invalid("eligible must be a boolean")
+        if self.skip_reason is not None and (
+            not isinstance(self.skip_reason, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.skip_reason)
+        ):
+            raise _invalid("skip_reason must be a safe identifier")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repository": self.repository,
+            "repository_id": self.repository_id,
+            "pull_request_number": self.pull_request_number,
+            "base_ref": self.base_ref,
+            "base_sha": self.base_sha,
+            "head_ref": self.head_ref,
+            "head_repository": self.head_repository,
+            "head_sha": self.head_sha,
+            "operation": self.operation,
+            "title": self.title,
+            "eligible": self.eligible,
+            "skip_reason": self.skip_reason,
+        }
+
+
+def plan_review_execution(
+    *,
+    repository: object,
+    repository_id: object,
+    pull_request_number: object,
+    base_ref: object,
+    base_sha: object,
+    head_ref: object,
+    head_repository: object,
+    head_sha: object,
+    operation: object = "review",
+    title: object = None,
+    state: object = "open",
+    draft: object = False,
+    allow_forks: bool = False,
+) -> ReviewExecutionPlan:
+    """Validate authoritative PR metadata and return an immutable plan.
+
+    Mismatches are represented as ineligible plans rather than exceptions so
+    callers can emit a bounded, stable skip outcome without leaking metadata.
+    Malformed identities remain hard input failures before provider setup.
+    """
+
+    validated_repository = _validate_repository(repository)
+    if validated_repository is None:
+        raise _invalid("repository must be an owner/repo slug")
+    if (
+        isinstance(repository_id, bool)
+        or not isinstance(repository_id, int)
+        or repository_id < 1
+    ):
+        raise _invalid("repository_id must be a positive integer")
+    number = _positive_int(pull_request_number, label="pull_request_number", default=1)
+    validated_base = _validate_ref(base_ref, label="base_ref")
+    validated_head = _validate_ref(head_ref, label="head_ref")
+    validated_head_repository = _validate_repository(head_repository)
+    if validated_head_repository is None:
+        raise _invalid("head_repository must be an owner/repo slug")
+    for label, value in (("base_sha", base_sha), ("head_sha", head_sha)):
+        if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+            raise _invalid(f"{label} must be a 40-character commit SHA")
+    if operation not in {"review", "reply"}:
+        raise _invalid("operation must be review or reply")
+    if not isinstance(state, str) or state not in {"open", "closed"}:
+        raise _invalid("state must be open or closed")
+    if not isinstance(draft, bool):
+        raise _invalid("draft must be a boolean")
+    if not isinstance(allow_forks, bool):
+        raise _invalid("allow_forks must be a boolean")
+    if title is not None and not isinstance(title, str):
+        raise _invalid("title must be a string")
+    if title is not None:
+        from .validation import validate_bounded_text
+
+        validate_bounded_text(
+            title, DEFAULT_REVIEW_LIMITS.max_title_bytes, label="title"
+        )
+
+    reason: str | None = None
+    if state != "open":
+        reason = "pr_not_open"
+    elif draft:
+        reason = "draft_pr"
+    elif operation == "review" and validated_head_repository != validated_repository:
+        reason = "fork_not_allowed" if not allow_forks else None
+    return ReviewExecutionPlan(
+        repository=validated_repository,
+        repository_id=repository_id,
+        pull_request_number=number,
+        base_ref=validated_base,
+        base_sha=cast(str, base_sha),
+        head_ref=validated_head,
+        head_repository=validated_head_repository,
+        head_sha=cast(str, head_sha),
+        operation=operation,
+        title=title,
+        eligible=reason is None,
+        skip_reason=reason,
+    )
 
 
 @dataclass(frozen=True)

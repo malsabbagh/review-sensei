@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
+  SETUP_VARIABLES,
   SETUP_VERSION,
+  buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowTag,
@@ -31,6 +33,9 @@ describe("setup-v4 public boundary", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
     expect(SETUP_VERSION).toBe(4);
+    expect(SETUP_VARIABLES).toContainEqual(
+      expect.objectContaining({ name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" }),
+    );
     expect(workflow).toContain("opened, reopened, synchronize, ready_for_review");
     expect(workflow).toContain(
       `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
@@ -39,6 +44,10 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
     expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
+    expect(workflow).toContain("enable_auto_approve");
+    expect(workflow).toContain(
+      "enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}",
+    );
     expect(workflow).toContain("source_kind:\n        description: Source kind for manual dispatch");
     expect(workflow).toContain("root_comment_id:\n        description: Root comment ID for manual reply thread");
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
@@ -62,6 +71,11 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'");
     expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'");
     expect(workflow).not.toContain("default: main");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).not.toContain("auto_approve");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("learning_proposals: false");
+    expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
+      "learning_proposals",
+    );
     expect(workflow).toBe(
       readFileSync(
         new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
