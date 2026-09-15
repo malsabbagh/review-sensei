@@ -33,6 +33,10 @@ def validate_provider_contract(provider: object) -> ReviewProvider:
             raise ProviderError(
                 "provider must expose name, model, and complete(request)"
             ) from None
+        except Exception as exc:
+            raise ProviderError(
+                "provider must expose name, model, and complete(request)"
+            ) from exc
     if not callable(getattr(provider, "complete", None)):
         raise ProviderError("provider must expose name, model, and complete(request)")
     try:

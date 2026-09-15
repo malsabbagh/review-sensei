@@ -62,7 +62,8 @@ def _default_ollama_model() -> str:
 def _cli_option_set(arguments: list[str], option: str) -> bool:
     """Return True when *option* was explicitly passed on the command line."""
 
-    if any(value.startswith(f"{option}=") for value in arguments):
+    prefix = f"{option}="
+    if any(value.startswith(prefix) and value[len(prefix) :] for value in arguments):
         return True
     try:
         index = arguments.index(option)
@@ -82,6 +83,10 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
     if not profile_name:
         return
     selected = get_provider_profile(profile_name)
+    if bool(getattr(args, "allow_custom_endpoint", False)):
+        raise ReviewInputError(
+            "--allow-custom-endpoint cannot be combined with --profile"
+        )
     provider_name = str(args.provider).strip().lower()
     if _cli_option_set(argv, "--provider"):
         if provider_name == "fixture":
@@ -222,7 +227,7 @@ def _provider_settings_from_args(
                 if argv is None or _cli_option_set(argv, "--timeout-seconds")
                 else None
             ),
-            allow_custom_endpoint=bool(getattr(args, "allow_custom_endpoint", False)),
+            allow_custom_endpoint=False,
         )
     _require_allowlisted_openai_endpoint(args)
     return ProviderSettings(
@@ -475,6 +480,7 @@ def _github_parser() -> argparse.ArgumentParser:
         prog="review-sensei github",
         description="Run GitHub publication seams with write opt-ins.",
     )
+    _add_allow_custom_endpoint_argument(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     review = subparsers.add_parser("review", help="Publish a validated review result")
@@ -554,7 +560,6 @@ def _github_parser() -> argparse.ArgumentParser:
         type=_positive_float,
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
-    _add_allow_custom_endpoint_argument(reply)
     reply.add_argument(
         "--allow-write",
         action="store_true",
@@ -754,7 +759,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args_list and args_list[0] == "evaluate":
         evaluate_argv = args_list[1:]
-        args = _evaluate_parser().parse_args(evaluate_argv)
+        try:
+            args = _evaluate_parser().parse_args(evaluate_argv)
+        except ReviewInputError as exc:
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            return 1
         try:
             return _run_evaluate(args, argv=evaluate_argv)
         except (OSError, ValueError, ReviewSenseiError) as exc:

@@ -281,6 +281,34 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertFalse(
             is_allowlisted_openai_compatible_endpoint("https://api.openai.com/v2")
         )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint(
+                "https://evil.com@api.openai.com:443/v1"
+            )
+        )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint(
+                "https://user:pass@api.openai.com:443/v1"
+            )
+        )
+        self.assertFalse(
+            is_allowlisted_openai_compatible_endpoint("https://@api.openai.com/v1")
+        )
+
+    def test_http_rate_limit_and_server_errors_are_transient(self):
+        from urllib.error import HTTPError
+
+        for code in (429, 500, 503):
+            with self.subTest(code=code):
+                provider = OpenAICompatibleProvider(
+                    api_key="secret",
+                    opener=lambda request, timeout, context: (_ for _ in ()).throw(
+                        HTTPError("https://api.openai.com/v1", code, "err", {}, None)
+                    ),
+                )
+                with self.assertRaises(ProviderError) as raised:
+                    provider.complete(ProviderRequest(prompt="private"))
+                self.assertTrue(raised.exception.transient)
 
 
 if __name__ == "__main__":

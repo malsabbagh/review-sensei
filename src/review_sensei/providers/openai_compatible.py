@@ -44,6 +44,12 @@ MAX_CA_BUNDLE_BYTES = 1_048_576
 ALLOWLISTED_OPENAI_HOSTNAME = "api.openai.com"
 
 
+def _openai_endpoint_has_userinfo(parsed: Any) -> bool:
+    """Return whether a parsed URL carries userinfo in ``netloc``."""
+
+    return "@" in parsed.netloc or bool(parsed.username) or bool(parsed.password)
+
+
 def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
     """Return whether ``base_url`` is the built-in OpenAI Chat Completions host."""
 
@@ -52,7 +58,7 @@ def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
     parsed = urlsplit(base_url)
     if parsed.scheme.casefold() != "https" or parsed.hostname is None:
         return False
-    if parsed.username is not None or parsed.password is not None:
+    if _openai_endpoint_has_userinfo(parsed):
         return False
     if parsed.query or parsed.fragment:
         return False
@@ -148,7 +154,7 @@ class OpenAICompatibleProvider:
         parsed = urlsplit(base_url)
         if parsed.scheme.casefold() != "https" or parsed.hostname is None:
             raise ValueError("OpenAI-compatible endpoint must use HTTPS")
-        if parsed.username is not None or parsed.password is not None:
+        if _openai_endpoint_has_userinfo(parsed):
             raise ValueError("OpenAI-compatible endpoint must not contain credentials")
         if parsed.query or parsed.fragment:
             raise ValueError(
@@ -335,8 +341,10 @@ class OpenAICompatibleProvider:
                         label="OpenAI-compatible response",
                     )
         except HTTPError as exc:
+            transient = exc.code == 429 or 500 <= exc.code < 600
             raise ProviderError(
-                f"OpenAI-compatible request failed with HTTP {exc.code}"
+                f"OpenAI-compatible request failed with HTTP {exc.code}",
+                transient=transient,
             ) from exc
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():

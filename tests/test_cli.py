@@ -371,6 +371,75 @@ class CliTests(unittest.TestCase):
         self.assertFalse(_cli_option_set(["--model", ""], "--model"))
         self.assertFalse(_cli_option_set(["--model"], "--model"))
 
+    def test_cli_option_set_detects_equals_form_and_rejects_empty_values(self):
+        self.assertTrue(
+            _cli_option_set(["--api-key-env=OPENAI_API_KEY"], "--api-key-env")
+        )
+        self.assertFalse(_cli_option_set(["--api-key-env="], "--api-key-env"))
+
+    def test_profile_rejects_allow_custom_endpoint(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                    "--provider",
+                    "openai-compatible",
+                    "--allow-custom-endpoint",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--allow-custom-endpoint cannot be combined with --profile",
+            stderr.getvalue(),
+        )
+
+    def test_github_parser_exposes_allow_custom_endpoint_on_review(self):
+        args = _github_parser().parse_args(
+            [
+                "--allow-custom-endpoint",
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "pr.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "abc123",
+            ]
+        )
+        self.assertTrue(args.allow_custom_endpoint)
+
+    def test_evaluate_rejects_invalid_openai_timeout_environment_value(self):
+        with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--provider",
+                        "openai-compatible",
+                        "--allow-live-model",
+                        "--allow-data-egress",
+                        "--provider-version",
+                        "test",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
+        )
+
     def test_profile_fast_triage_omits_conflicting_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
