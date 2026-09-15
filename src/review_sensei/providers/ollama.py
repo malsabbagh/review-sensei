@@ -116,19 +116,19 @@ class OllamaProvider:
             self._safe_opener = build_opener(*handlers)
 
     def _call_custom_opener(self, http_request: Request) -> Any:
-        """Invoke an injected opener, falling back when kwargs are unsupported."""
+        """Invoke an injected opener with timeout and TLS context kwargs."""
 
         opener = getattr(self._opener, "open", self._opener)
+        kwargs: dict[str, object] = {
+            "timeout": self.timeout_seconds,
+            "context": self._ssl_context,
+        }
         try:
-            kwargs: dict[str, object] = {"timeout": self.timeout_seconds}
-            if self._ssl_context is not None:
-                kwargs["context"] = self._ssl_context
             return opener(http_request, **kwargs)
-        except TypeError:
-            try:
-                return opener(http_request, timeout=self.timeout_seconds)
-            except TypeError:
-                return opener(http_request)
+        except TypeError as exc:
+            raise ProviderError(
+                "Ollama opener must accept timeout and context kwargs"
+            ) from exc
 
     @property
     def endpoint(self) -> str:

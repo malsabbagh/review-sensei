@@ -124,14 +124,14 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             OpenAICompatibleProvider(
                 base_url="https://example.test/v1",
                 api_key="secret",
-                opener=lambda request, timeout: _Response(b"{}"),
+                opener=lambda request, timeout, context: _Response(b"{}"),
             )
 
         provider = OpenAICompatibleProvider(
             base_url="https://example.test/v1",
             api_key="secret",
             allow_custom_endpoint=True,
-            opener=lambda request, timeout: _Response(
+            opener=lambda request, timeout, context: _Response(
                 b'{"choices":[{"message":{"content":"ok"}}]}'
             ),
         )
@@ -174,23 +174,20 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(len(contexts), 2)
         self.assertIs(contexts[0], contexts[1])
 
-    def test_custom_opener_kwargs_are_normalized(self):
-        calls = []
-
+    def test_custom_opener_without_context_kwarg_raises(self):
         def opener(request):
-            calls.append(request)
             return _Response(b'{"choices":[{"message":{"content":"ok"}}]}')
 
         provider = OpenAICompatibleProvider(api_key="secret", opener=opener)
-        self.assertEqual(
-            provider.complete(ProviderRequest(prompt="private")).text, "ok"
-        )
-        self.assertEqual(len(calls), 1)
+        with self.assertRaisesRegex(
+            ProviderError, "must accept timeout and context kwargs"
+        ):
+            provider.complete(ProviderRequest(prompt="private"))
 
     def test_response_reader_type_error_is_not_reported_as_opener_error(self):
         provider = OpenAICompatibleProvider(
             api_key="secret",
-            opener=lambda request, timeout: _ReadTypeErrorResponse(b"{}"),
+            opener=lambda request, timeout, context: _ReadTypeErrorResponse(b"{}"),
         )
         with self.assertRaisesRegex(ProviderError, "response body could not be read"):
             provider.complete(ProviderRequest(prompt="private"))
@@ -202,7 +199,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
 
         provider = OpenAICompatibleProvider(
             api_key="secret",
-            opener=lambda request, timeout: ResponseWithoutContextManager(),
+            opener=lambda request, timeout, context: ResponseWithoutContextManager(),
         )
         with self.assertRaisesRegex(ProviderError, "response could not be opened"):
             provider.complete(ProviderRequest(prompt="private"))
@@ -210,7 +207,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
     def test_http_protocol_failure_is_sanitized(self):
         provider = OpenAICompatibleProvider(
             api_key="secret",
-            opener=lambda request, timeout: (_ for _ in ()).throw(
+            opener=lambda request, timeout, context: (_ for _ in ()).throw(
                 RemoteDisconnected("private prompt")
             ),
         )
@@ -222,7 +219,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         secret_reason = "dns failure with credential=private-secret"
         provider = OpenAICompatibleProvider(
             api_key="secret",
-            opener=lambda request, timeout: (_ for _ in ()).throw(
+            opener=lambda request, timeout, context: (_ for _ in ()).throw(
                 URLError(secret_reason)
             ),
         )
@@ -250,7 +247,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             ) as create:
                 provider = OpenAICompatibleProvider(
                     api_key="secret",
-                    opener=lambda request, timeout: _Response(
+                    opener=lambda request, timeout, context: _Response(
                         b'{"choices":[{"message":{"content":"ok"}}]}'
                     ),
                 )
