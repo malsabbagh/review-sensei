@@ -212,6 +212,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("after AI resolution", text)
         self.assertIn("auto_approve_args", text)
         self.assertEqual(text.count("reply_exit=$?"), 2)
+        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
         self.assertEqual(
             text.count("mention reply command failed (exit $reply_exit)"), 2
         )

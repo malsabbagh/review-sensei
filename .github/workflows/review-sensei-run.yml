@@ -580,7 +580,7 @@ jobs:
             --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
-          reply_status="$(tail -n 1 "$reply_output" 2>/dev/null || true)"
+          reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
           echo "$reply_status"
           if [[ "$reply_exit" -ne 0 ]]; then
             echo "::error::mention reply command failed (exit $reply_exit)" >&2
@@ -852,7 +852,7 @@ jobs:
             --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
-          reply_status="$(tail -n 1 "$reply_output" 2>/dev/null || true)"
+          reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
           echo "$reply_status"
           if [[ "$reply_exit" -ne 0 ]]; then
             echo "::error::mention reply command failed (exit $reply_exit)" >&2
