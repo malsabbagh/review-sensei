@@ -93,7 +93,7 @@ jobs:
       github.event.comment.user.type != 'Bot')) &&
       vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
       vars.REVIEWSENSEI_MENTION_REPLIES == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read
@@ -108,7 +108,7 @@ jobs:
       enable_review: ${{ steps.resolve.outputs.enable_review }}
     steps:
       - name: Check out trigger resolver
-        uses: actions/checkout@8e8a652145304606226e869eefe187fd1eabc831 # v4.3.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve pull-request trigger metadata
         id: resolve
