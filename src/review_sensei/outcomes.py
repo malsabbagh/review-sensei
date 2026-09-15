@@ -72,7 +72,9 @@ def _parse_aware_datetime(value: str, *, label: str) -> datetime:
 
 def _is_public_text(value: str) -> bool:
     return value.isprintable() and not any(
-        unicodedata.category(character).startswith("C") for character in value
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) == "Cn"
+        for character in value
     )
 
 
@@ -233,6 +235,16 @@ class ResourceBudget:
     def validate_against_limits(
         self, limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     ) -> None:
+        for name in (
+            "max_provider_calls",
+            "max_retry_attempts",
+            "timeout_ms",
+            "max_prompt_bytes",
+            "max_output_bytes",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ReviewInputError(f"{name} must be a non-negative integer")
         ceilings = {
             "max_provider_calls": DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
             "max_retry_attempts": DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
@@ -387,6 +399,7 @@ class RecoveryArtifact:
         canonical = _canonical_recovery_result(self.result)
         if _digest(canonical) != self.result_sha256:
             raise ReviewInputError("recovery artifact integrity check failed")
+        object.__setattr__(self, "result", json.loads(canonical))
 
     @classmethod
     def create(

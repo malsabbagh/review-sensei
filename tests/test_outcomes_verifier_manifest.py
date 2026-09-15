@@ -88,6 +88,10 @@ class ContractsTests(unittest.TestCase):
         )
         with self.assertRaises(ReviewInputError):
             ResourceBudget(max_prompt_bytes=256).validate_against_limits(strict_limits)
+        budget = ResourceBudget(max_provider_calls=1)
+        object.__setattr__(budget, "max_provider_calls", -1)
+        with self.assertRaises(ReviewInputError):
+            budget.validate_against_limits()
         ResourceBudget.create(
             limits=strict_limits,
             max_prompt_bytes=128,
@@ -533,6 +537,19 @@ class ContractsTests(unittest.TestCase):
                 expires_at="2026-01-01T00:00:00+00:00",
                 result_sha256=artifact.result_sha256,
             )
+
+    def test_recovery_artifact_freezes_result_against_post_create_mutation(self):
+        result = {"summary": "ok", "comments": [], "provider": "fixture"}
+        artifact = RecoveryArtifact.create(
+            repository="acme/repo",
+            pull_request_number=1,
+            base_sha=SHA,
+            head_sha=SHA,
+            result=result,
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+        result["summary"] = "tampered"
+        self.assertEqual(artifact.to_dict()["result"]["summary"], "ok")
 
     def test_recovery_artifact_rejects_mismatched_digest_at_construction(self):
         artifact = self._artifact()
