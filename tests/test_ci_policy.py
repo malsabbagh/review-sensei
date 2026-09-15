@@ -207,12 +207,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("needs: validate-provider-mode"), 2)
         self.assertIn('case "$PROVIDER_MODE" in', text)
         self.assertEqual(text.count("github reply \\\n"), 2)
-        self.assertEqual(text.count("github review \\\n"), 4)
-        self.assertEqual(text.count("Publish or promote"), 4)
-        self.assertEqual(
-            text.count("after AI resolution"),
-            6,
-        )
+        self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertEqual(text.count("Publish or promote"), 2)
+        self.assertNotIn("after AI resolution", text)
+        self.assertIn("auto_approve_args", text)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
@@ -226,9 +224,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
-            4,
+            2,
         )
-        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 4)
+        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
         self.assertIn(
             "github.event.pull_request.number || github.run_id",
             text,

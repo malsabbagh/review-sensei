@@ -554,6 +554,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -563,13 +564,19 @@ jobs:
             exit 1
           fi
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
+          auto_approve_args=()
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            auto_approve_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            auto_approve_args+=(--no-auto-approve)
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply > "$reply_output"
+            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
           reply_status="$(tail -n 1 "$reply_output")"
           echo "$reply_status"
           case "$reply_status" in
@@ -596,66 +603,6 @@ jobs:
         run: |
           echo '::error::mention reply step did not complete successfully' >&2
           exit 1
-
-      - name: Prepare bounded trusted-base diff after AI resolution
-        if: steps.reply.outputs.resolved == 'true'
-        env:
-          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
-          HEAD_REF: ${{ inputs.head_sha }}
-        run: |
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-
-      - name: Run cloud-provider review after AI resolution
-        if: steps.reply.outputs.resolved == 'true'
-        env:
-          OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
-          TITLE: ${{ inputs.pull_request_title }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
-        run: |
-          if [[ -z "$OLLAMA_API_KEY" ]]; then
-            echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
-            exit 1
-          fi
-          review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
-          if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
-          if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
-          if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
-          if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
-            --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
-
-      - name: Publish or promote review after AI resolution
-        if: steps.reply.outputs.resolved == 'true' && inputs.enable_github_writes == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_REF: ${{ inputs.base_ref }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-        run: |
-          review_args=(--enable-review)
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            review_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            review_args+=(--no-auto-approve)
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
-            --result review.json --diff pr.patch --repository "$REPOSITORY" \
-            --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
-            --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --allow-write "${review_args[@]}"
 
       - name: Upload opt-in review artifact
         if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
@@ -877,17 +824,24 @@ jobs:
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
+          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
+          auto_approve_args=()
+          if [[ "$AUTO_APPROVE" == "true" ]]; then
+            auto_approve_args+=(--enable-auto-approve)
+          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+            auto_approve_args+=(--no-auto-approve)
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url http://127.0.0.1:11434/api \
             --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply > "$reply_output"
+            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
           reply_status="$(tail -n 1 "$reply_output")"
           echo "$reply_status"
           case "$reply_status" in
@@ -914,62 +868,6 @@ jobs:
         run: |
           echo '::error::mention reply step did not complete successfully' >&2
           exit 1
-
-      - name: Prepare bounded trusted-base diff after AI resolution
-        if: steps.reply.outputs.resolved == 'true'
-        env:
-          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
-          HEAD_REF: ${{ inputs.head_sha }}
-        run: |
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-
-      - name: Run trusted local review after AI resolution
-        if: steps.reply.outputs.resolved == 'true'
-        env:
-          OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
-          TITLE: ${{ inputs.pull_request_title }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
-        run: |
-          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
-          ollama show "$OLLAMA_MODEL" >/dev/null
-          review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
-          if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
-          if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
-          if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
-          if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
-            --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" --output review.json
-
-      - name: Publish or promote review after AI resolution
-        if: steps.reply.outputs.resolved == 'true' && inputs.enable_github_writes == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_REF: ${{ inputs.base_ref }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-        run: |
-          review_args=(--enable-review)
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            review_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            review_args+=(--no-auto-approve)
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
-            --result review.json --diff pr.patch --repository "$REPOSITORY" \
-            --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
-            --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --allow-write "${review_args[@]}"
 
       - name: Upload opt-in review artifact
         if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'

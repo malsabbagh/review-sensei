@@ -348,6 +348,19 @@ def _github_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable mention reply publication for this invocation.",
     )
+    reply.add_argument(
+        "--enable-auto-approve",
+        dest="enable_auto_approve",
+        action="store_true",
+        default=True,
+        help="Finalize approval after an AI-resolved blocking finding (the default).",
+    )
+    reply.add_argument(
+        "--no-auto-approve",
+        dest="enable_auto_approve",
+        action="store_false",
+        help="Resolve the thread without emitting an automatic approval.",
+    )
     return parser
 
 
@@ -453,6 +466,7 @@ def _run_github(args: argparse.Namespace) -> int:
             options=GitHubWriteOptions(
                 github_writes=True,
                 mention_replies=True,
+                auto_approve=args.enable_auto_approve,
             ),
             oidc_token=args.oidc_token,
             read_token=read_token,
@@ -480,6 +494,7 @@ def _run_github(args: argparse.Namespace) -> int:
         options=GitHubWriteOptions(
             github_writes=True,
             mention_replies=args.enable_reply,
+            auto_approve=args.enable_auto_approve,
         ),
         oidc_token=args.oidc_token,
         repository=args.repository,

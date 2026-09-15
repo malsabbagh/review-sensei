@@ -72,9 +72,9 @@ Tradeoffs:
 
 - A provider can make a mistaken resolution decision, so prompt quality and
   exact-head validation remain important controls.
-- A successful resolution causes one additional provider review in the same
-  workflow job; if that pass is interrupted or fails, the caller must retry the
-  mention or synchronize a fresh review before approval can be promoted.
+- Resolving a blocking root invokes the deterministic approval finalizer rather
+  than another provider review. If finalization is interrupted or fails, the
+  idempotent mention retry re-runs the same exact-head finalization.
 - GitHub GraphQL becomes a dependency for replies that request resolution.
 
 ## Validation and rollback

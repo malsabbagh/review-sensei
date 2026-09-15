@@ -27,8 +27,9 @@ def evaluate_auto_approval(
     A finding blocks when it is explicitly classified as blocking. When the
     optional classification is absent, only canonical critical/high severity
     blocks. Missing, lower-severity, and legacy free-form severity values are
-    non-blocking. Unresolved GitHub review threads remain an independent
-    fail-closed gate.
+    non-blocking. ``has_open_review_threads`` must describe only unresolved
+    *blocking ReviewSensei findings*; non-blocking and human threads are not
+    automatic-approval blockers.
     """
 
     blockers: list[str] = []

@@ -31,6 +31,7 @@ def pr_payload(head_sha, *, fork=False, state="open", draft=False):
     return {
         "state": state,
         "draft": draft,
+        "user": {"login": "alice", "type": "User"},
         "title": "Bounded PR title",
         "body": "Bounded PR body",
         "head": {
@@ -830,7 +831,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 {
                     "id": 10,
                     "pull_request_url": INLINE_URL,
-                    "body": "The original finding",
+                    "body": "[🚫 Blocking] The original finding",
                     "user": {"login": "review-sensei[bot]", "type": "Bot"},
                     "author_association": "OWNER",
                     "in_reply_to_id": None,
@@ -876,6 +877,27 @@ class ConversationPublisherTests(unittest.TestCase):
                     }
                 }
             ),
+            json_response(pr_payload(head)),
+            json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [{"isResolved": True}],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            json_response(pr_payload(head)),
+            json_response([]),
+            json_response({"id": 13}, 200),
         ]
         http, calls = make_http(responses)
         outcome = ConversationPublisher(http=http).publish(
@@ -906,11 +928,19 @@ class ConversationPublisherTests(unittest.TestCase):
                 "POST",
                 "GET",
                 "POST",
+                "GET",
+                "POST",
+                "GET",
+                "GET",
+                "POST",
             ],
         )
-        mutation = json.loads(calls[-1][2].decode("utf-8"))
+        mutation = json.loads(calls[8][2].decode("utf-8"))
         self.assertEqual(mutation["operationName"], "ResolveReviewThread")
         self.assertEqual(mutation["variables"], {"input": {"threadId": "PRRT_thread"}})
+        approval = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(approval["event"], "APPROVE")
+        self.assertNotIn("comments", approval)
 
     def test_ai_resolution_does_not_resolve_human_root_thread(self):
         head = "b" * 40

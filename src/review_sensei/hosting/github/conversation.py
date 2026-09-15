@@ -28,6 +28,10 @@ from .errors import (
     GitHubHTTPTransientError,
 )
 from .http import GitHubHttp
+from .publication import (
+    ReviewApprovalFinalizer,
+    finding_declares_blocking,
+)
 
 MAX_THREAD_MESSAGES = 20
 MAX_REPLY_BYTES = 16 * 1024
@@ -167,6 +171,7 @@ class ConversationPublisher:
 
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http
+        self.finalizer = ReviewApprovalFinalizer(http=http)
 
     @staticmethod
     def _reaction_path(*, source_kind: str, source_comment_id: int) -> str:
@@ -813,6 +818,7 @@ class ConversationPublisher:
         app_slug: str,
         root_comment_id: int,
         source_kind: str = "inline",
+        auto_approve: bool = True,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
@@ -871,6 +877,7 @@ class ConversationPublisher:
                 )
             resolved_root = authoritative_root
         root_is_app_authored = False
+        root_is_blocking_finding = False
         if source_kind == "inline" and resolved_root != source_comment_id:
             status, root = self.http.request(
                 "GET",
@@ -898,6 +905,7 @@ class ConversationPublisher:
                 and root_user.get("login") == app_slug
                 and root_user.get("type") == "Bot"
             )
+            root_is_blocking_finding = finding_declares_blocking(root.get("body"))
 
         existing = self._find_existing(
             token=token,
@@ -909,12 +917,15 @@ class ConversationPublisher:
         )
         if existing is not None:
             if reply.resolve and root_is_app_authored:
-                self._resolve_review_thread(
+                self._resolve_and_finalize(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
                     root_comment_id=resolved_root,
                     head_sha=head_sha,
+                    app_slug=app_slug,
+                    auto_approve=auto_approve,
+                    root_is_blocking_finding=root_is_blocking_finding,
                 )
                 return ReplyResult(
                     status="already_replied_and_resolved",
@@ -990,12 +1001,15 @@ class ConversationPublisher:
             comment_id = created.get("id")
             if isinstance(comment_id, int):
                 if reply.resolve and root_is_app_authored:
-                    self._resolve_review_thread(
+                    self._resolve_and_finalize(
                         token=token,
                         repository=repository,
                         pull_request=pull_request,
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
+                        app_slug=app_slug,
+                        auto_approve=auto_approve,
+                        root_is_blocking_finding=root_is_blocking_finding,
                     )
                     return ReplyResult(
                         status="replied_and_resolved",
@@ -1014,12 +1028,15 @@ class ConversationPublisher:
             )
             if existing_after is not None:
                 if reply.resolve and root_is_app_authored:
-                    self._resolve_review_thread(
+                    self._resolve_and_finalize(
                         token=token,
                         repository=repository,
                         pull_request=pull_request,
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
+                        app_slug=app_slug,
+                        auto_approve=auto_approve,
+                        root_is_blocking_finding=root_is_blocking_finding,
                     )
                     return ReplyResult(
                         status="already_replied_and_resolved",
@@ -1041,6 +1058,43 @@ class ConversationPublisher:
                 "reply publication failed temporarily"
             )
         raise GitHubConversationError("reply publication was rejected")
+
+    def _resolve_and_finalize(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        root_comment_id: int | None,
+        head_sha: str,
+        app_slug: str,
+        auto_approve: bool,
+        root_is_blocking_finding: bool,
+    ) -> None:
+        self._resolve_review_thread(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            root_comment_id=root_comment_id,
+            head_sha=head_sha,
+        )
+        if not root_is_blocking_finding:
+            return
+        try:
+            self.finalizer.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                enabled=auto_approve,
+            )
+        except GitHubHTTPTransientError as exc:
+            raise GitHubConversationTransientError(
+                "approval finalization failed temporarily"
+            ) from exc
+        except GitHubHTTPError as exc:
+            raise GitHubConversationError("approval finalization failed") from exc
 
     def _preflight_resolution_pr(
         self,

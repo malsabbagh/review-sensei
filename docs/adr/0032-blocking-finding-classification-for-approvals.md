@@ -2,6 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-14
+Last amended: 2026-09-15
 GitHub Issue: not configured
 Pull Request: draft PR to be linked
 Owners/Reviewers: Maintainers
@@ -14,15 +15,16 @@ otherwise healthy pull request cannot receive an App approval when the review
 contains an optional follow-up. Maintainers need reviews to distinguish issues
 that must be resolved before merge from suggestions that can be deferred or
 ignored. The existing exact-head, same-repository, non-draft, non-App-authored,
-and resolved-review-thread safeguards must remain in place.
+and exact-head safeguards must remain in place. A resolved blocking finding
+must also re-evaluate approval without requiring another provider pass.
 
 ## Decision Drivers
 
 - Make the merge decision explicit and visible beside each finding.
 - Allow optional follow-ups without withholding an otherwise eligible approval.
 - Preserve a deterministic fallback for providers that omit the new field.
-- Retain the existing GitHub thread-resolution safety gate and publication
-  idempotency boundary.
+- Retain exact-head, marker, and publication idempotency boundaries while
+  making blocking-thread state the sole ReviewSensei approval gate.
 
 ## Decision
 
@@ -33,11 +35,15 @@ every finding: `true` means the finding must be resolved before merge and
 is absent, only case-insensitive `critical`/`high` severity values block.
 Missing, lower-severity, and legacy free-form severity values are non-blocking.
 
-Approval requires no blocking findings and the existing bounded
-GitHub review-thread sweep to report every prior thread resolved. Non-blocking
-findings are published with their review and can accompany `APPROVE`; unresolved
-threads, App-authored pull requests, drafts, forks, closed/stale targets, and
-publication failures retain their existing fail-closed behavior.
+Review publication records findings as `COMMENT` reviews, with a hidden,
+exact-head-bound marker on each root that persists the typed blocking decision.
+The shared approval finalizer then performs the only `APPROVE` write. It may
+approve when no unresolved ReviewSensei root is classified blocking; unresolved
+non-blocking ReviewSensei findings and human threads do not withhold that
+approval. The finalizer runs after a review is published and after the AI
+resolves a blocking ReviewSensei thread. It is marker-idempotent, exact-head,
+same-repository, non-draft, and non-App-authored; malformed or incomplete
+ReviewSensei root metadata fails closed.
 
 ## Scope
 
@@ -52,8 +58,7 @@ Out of scope:
 
 - GitHub App permissions, setup variables, credentials, providers, or branch
   protection changes.
-- Resolving threads as part of the approval-policy decision; AI-driven
-  ReviewSensei-root resolution is specified separately in [ADR 0034](0034-ai-decided-review-thread-resolution.md).
+- Changing GitHub branch protection, maintainer approvals, or merge policy.
 - Changing the existing exact-head preflight, markers, or review-state
   reconciliation.
 
@@ -72,8 +77,8 @@ Tradeoffs:
 
 - Provider classification now directly informs approval eligibility, so prompt
   quality and deterministic validation are important controls.
-- A misclassified non-blocking issue can be approved; unresolved GitHub threads
-  and the normal maintainer merge gate remain independent safeguards.
+- A misclassified non-blocking issue can be approved; the normal maintainer
+  merge gate remains an independent safeguard.
 
 ## Alternatives Considered
 
@@ -86,18 +91,17 @@ Rejected because it cannot represent the requested optional-follow-up workflow.
 Rejected because impact and merge readiness are related but different decisions;
 an explicit boolean lets maintainers and providers state the intended outcome.
 
-### Remove the unresolved-review-thread gate
+### Treat every unresolved review thread as blocking
 
-Rejected because it would allow approval despite unresolved human or
-earlier review feedback and weakens the existing publication-control boundary.
+Rejected because it contradicts the explicit finding classification and leaves
+optional follow-ups capable of permanently withholding an approval.
 
 ## Validation
 
-Run model/schema, service, presentation, approval-policy, and GitHub publisher
-tests. Verify that explicit `false` can publish an approval after a resolved
-thread sweep; explicit `true` and omitted `critical`/`high` classifications
-remain comments; and omitted lower-severity, missing, and legacy free-form
-classifications are eligible subject to the same thread/preflight gates.
+Run model/schema, service, presentation, approval-finalizer, GitHub publisher,
+and conversation-resolution tests. Verify that an unresolved explicit `false`
+root does not block, an explicit `true` root does, and resolving the last
+blocking root invokes one exact-head idempotent approval finalization.
 
 ## Rollout and Rollback
 
