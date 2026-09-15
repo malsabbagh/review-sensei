@@ -8,13 +8,12 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, TextIO
 
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
-_HEX_SHA = re.compile(r"\b([a-f0-9]{7,40})\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -33,23 +32,26 @@ class TriggerResolution:
 def issue_comment_requests_rescan(body: str) -> bool:
     """Return whether a PR issue comment asks ReviewSensei to re-scan."""
 
-    if not isinstance(body, str) or "@sensei" not in body.casefold():
+    if not isinstance(body, str) or "@sensei" not in body:
         return False
     return _RESCAN.search(body) is not None
 
 
 def extract_requested_commit(body: str) -> str | None:
-    """Return an optional commit token from a maintainer comment body."""
+    """Return an optional commit token from a maintainer comment body.
+
+    Only tokens that follow the word ``commit`` are treated as SHA requests so
+    issue numbers and other hex-looking IDs in a re-scan comment are ignored.
+    """
 
     if not isinstance(body, str):
         return None
     match = _COMMIT_SHA.search(body)
-    if match is not None:
-        return match.group(1).casefold()
-    for match in _HEX_SHA.finditer(body):
-        token = match.group(1).casefold()
-        if _GIT_SHA_FULL.fullmatch(token) or _GIT_SHA_PREFIX.fullmatch(token):
-            return token
+    if match is None:
+        return None
+    token = match.group(1).casefold()
+    if _GIT_SHA_FULL.fullmatch(token) or _GIT_SHA_PREFIX.fullmatch(token):
+        return token
     return None
 
 
@@ -97,6 +99,7 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
         raise ValueError("pull request identity metadata is invalid")
     if not isinstance(title, str):
         title = ""
+    title = " ".join(title.split())
     return head_sha, head_ref, base_ref, base_sha, title
 
 
@@ -166,24 +169,44 @@ def resolve_review_comment_event(
     )
 
 
+def _write_github_output_value(
+    handle: TextIO,
+    name: str,
+    value: str,
+    *,
+    multiline: bool = False,
+) -> None:
+    """Write one GitHub Actions output, using a heredoc when needed."""
+
+    if not multiline and "\n" not in value and "\r" not in value:
+        handle.write(f"{name}={value}\n")
+        return
+    delimiter = f"RS_{name.upper()}"
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    while delimiter in normalized.split("\n"):
+        delimiter += "_EOF"
+    handle.write(f"{name}<<{delimiter}\n{normalized}\n{delimiter}\n")
+
+
 def write_github_output(resolution: TriggerResolution) -> None:
     """Append workflow outputs for a trigger resolution."""
 
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         raise RuntimeError("GITHUB_OUTPUT is unavailable")
-    lines = (
-        f"operation={resolution.operation}",
-        f"head_sha={resolution.head_sha}",
-        f"head_ref={resolution.head_ref}",
-        f"base_ref={resolution.base_ref}",
-        f"base_sha={resolution.base_sha}",
-        f"pull_request_title={resolution.pull_request_title}",
-        f"enable_review={resolution.enable_review}",
-    )
     with open(output_path, "a", encoding="utf-8") as handle:
-        for line in lines:
-            handle.write(f"{line}\n")
+        _write_github_output_value(handle, "operation", resolution.operation)
+        _write_github_output_value(handle, "head_sha", resolution.head_sha)
+        _write_github_output_value(handle, "head_ref", resolution.head_ref)
+        _write_github_output_value(handle, "base_ref", resolution.base_ref)
+        _write_github_output_value(handle, "base_sha", resolution.base_sha)
+        _write_github_output_value(
+            handle,
+            "pull_request_title",
+            resolution.pull_request_title,
+            multiline=True,
+        )
+        _write_github_output_value(handle, "enable_review", resolution.enable_review)
 
 
 def _load_pull_json(path: str) -> Mapping[str, Any]:

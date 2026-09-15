@@ -100,7 +100,7 @@ jobs:
       operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
-      pull_request_number: ${{ inputs.pull_request_number || github.event.issue.number || github.event.pull_request.number }}
+      pull_request_number: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
       base_ref: ${{ inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
       base_sha: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
       head_ref: ${{ inputs.head_ref || github.event.pull_request.head.ref || '' }}

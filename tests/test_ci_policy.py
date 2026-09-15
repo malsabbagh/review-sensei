@@ -152,6 +152,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
         self.assertIn("github.event.comment.author_association == 'COLLABORATOR'", text)
         self.assertIn("github.event.comment.user.type != 'Bot'", text)
+        self.assertIn(
+            "github.event_name == 'issue_comment' && github.event.issue.number",
+            text,
+        )
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
+            text,
+        )
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (

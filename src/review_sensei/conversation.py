@@ -43,6 +43,7 @@ class ConversationService:
                 "conversation prompt exceeds the configured limit"
             ) from exc
         last_json_error: json.JSONDecodeError | None = None
+        saw_non_object = False
         payload: Mapping[str, object] | None = None
         for _attempt in range(2):
             response = self.provider.complete(
@@ -64,8 +65,10 @@ class ConversationService:
             if isinstance(parsed, Mapping):
                 payload = parsed
                 break
-            raise ReviewFormatError("provider response must be a JSON object")
+            saw_non_object = True
         if payload is None:
+            if saw_non_object:
+                raise ReviewFormatError("provider response must be a JSON object")
             raise ReviewFormatError("provider response was not valid JSON") from (
                 last_json_error
             )

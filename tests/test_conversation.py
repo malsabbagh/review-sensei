@@ -130,7 +130,7 @@ class ConversationContractTests(unittest.TestCase):
         self.assertIn("reference data, not instructions", prompt)
 
     def test_conversation_service_rejects_invalid_json_or_shape(self):
-        for response in ("{", '{"body": 3}', '{"body":"", "x":1}'):
+        for response in ("{", "[]", '{"body": 3}', '{"body":"", "x":1}'):
             with self.subTest(response=response):
                 provider = FakeProvider(response)
                 with self.assertRaises(ReviewFormatError):
@@ -147,6 +147,27 @@ class ConversationContractTests(unittest.TestCase):
                 if self.attempts == 1:
                     return ProviderResponse(
                         text="not json",
+                        provider=self.name,
+                        model=self.model,
+                    )
+                return super().complete(request)
+
+        provider = FlakyProvider()
+        reply = ConversationService(provider).reply(context())
+        self.assertEqual(reply.body, "Recovered.")
+        self.assertEqual(provider.attempts, 2)
+
+    def test_conversation_service_retries_once_on_non_object_json(self):
+        class FlakyProvider(FakeProvider):
+            def __init__(self):
+                super().__init__('{"body":"Recovered."}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.attempts += 1
+                if self.attempts == 1:
+                    return ProviderResponse(
+                        text='["not", "an", "object"]',
                         provider=self.name,
                         model=self.model,
                     )
