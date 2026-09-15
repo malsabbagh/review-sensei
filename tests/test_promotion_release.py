@@ -125,8 +125,10 @@ class PromotionAndReleaseTests(unittest.TestCase):
                 _range_contains("1.0.0", expression)
 
     def test_worker_range_rejects_wildcards_after_an_explicit_operator(self) -> None:
-        with self.assertRaises(ValueError):
-            _range_contains("1.0.0", ">=1.x")
+        for expression in (">=1.x", ">1.*", "~1.x"):
+            with self.subTest(expression=expression):
+                with self.assertRaises(ValueError):
+                    _range_contains("1.0.0", expression)
 
     def test_worker_range_rejects_separated_operators(self) -> None:
         with self.assertRaises(ValueError):
