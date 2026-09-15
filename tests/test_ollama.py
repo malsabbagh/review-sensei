@@ -1,10 +1,11 @@
 import json
 import ssl
 import unittest
+from urllib.request import Request
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest
-from review_sensei.providers.ollama import OllamaProvider
+from review_sensei.providers.ollama import OllamaProvider, _NoRedirect
 from review_sensei.validation import ReviewLimits
 
 
@@ -66,6 +67,56 @@ class ShortReadFakeResponse:
 
 
 class OllamaProviderTests(unittest.TestCase):
+    def test_builtin_transport_rejects_cross_origin_redirects_before_replay(self):
+        request = Request(
+            "https://ollama.example/api/generate",
+            headers={"Authorization": "Bearer private-secret"},
+        )
+        handler = _NoRedirect()
+        for status in (301, 302, 303):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(
+                    ProviderError, "Ollama endpoint redirected"
+                ) as raised:
+                    handler.redirect_request(
+                        request,
+                        None,
+                        status,
+                        "redirect",
+                        {"Location": "https://attacker.example/collect"},
+                        "https://attacker.example/collect",
+                    )
+                self.assertNotIn("private-secret", str(raised.exception))
+
+    def test_api_key_rejects_control_characters(self):
+        for api_key in (
+            "secret\nheader",
+            "secret\rheader",
+            "secret\x00value",
+            "secret\x7fvalue",
+        ):
+            with self.subTest(api_key=repr(api_key)):
+                with self.assertRaisesRegex(
+                    ValueError, "must not contain control characters"
+                ):
+                    OllamaProvider(api_key=api_key)
+
+    def test_api_key_rejects_non_ascii_values(self):
+        with self.assertRaisesRegex(ValueError, "only ASCII"):
+            OllamaProvider(api_key="secret-é")
+
+    def test_transport_errors_do_not_echo_api_key(self):
+        secret = "private-secret"
+
+        def opener(request, timeout):
+            raise ProviderError(f"transport failed for {secret}")
+
+        with self.assertRaisesRegex(ProviderError, "Ollama request failed") as raised:
+            OllamaProvider(api_key=secret, opener=opener).complete(
+                ProviderRequest(prompt="review")
+            )
+        self.assertNotIn(secret, str(raised.exception))
+
     def test_sends_non_streaming_json_review_request(self):
         captured = {}
         raw_response = FakeResponse(

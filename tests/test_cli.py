@@ -293,6 +293,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(local.base_url, "http://127.0.0.1:11434/api")
         self.assertEqual(local.model, "qwen3.5:4b")
 
+    def test_provider_defaults_follow_openai_compatible_adapter(self):
+        args = _parser().parse_args(["--provider", "openai-compatible"])
+        self.assertEqual(args.base_url, "https://api.openai.com/v1")
+        self.assertEqual(args.model, "gpt-4o-mini")
+        self.assertEqual(args.api_key_env, "OPENAI_API_KEY")
+        self.assertEqual(args.timeout_seconds, 120.0)
+
+    def test_openai_provider_uses_openai_credential_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {"OPENAI_API_KEY": "openai-secret", "OLLAMA_API_KEY": "ollama-secret"},
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "openai-secret")
+        self.assertEqual(created[0].base_url, "https://api.openai.com/v1")
+        self.assertEqual(created[0].model, "gpt-4o-mini")
+
     def test_parser_accepts_version_flag(self):
         args = _parser().parse_args(["--version"])
         self.assertTrue(args.version)
