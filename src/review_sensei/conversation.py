@@ -11,6 +11,13 @@ from .providers.base import ReviewProvider
 from .validation import validate_bounded_text
 
 MAX_CONVERSATION_PROMPT_BYTES = 64 * 1024
+_CONVERSATION_OUTPUT_CORRECTION = """
+<conversation-output-correction>
+Your previous response failed validation. Return a fresh JSON object with keys
+body and resolve. body must contain the concise Markdown reply. resolve must be
+a boolean.
+</conversation-output-correction>
+""".strip()
 
 
 class ConversationService:
@@ -43,12 +50,23 @@ class ConversationService:
                 "conversation prompt exceeds the configured limit"
             ) from exc
         last_json_error: json.JSONDecodeError | None = None
-        saw_non_object = False
+        last_failure = "json"
         payload: Mapping[str, object] | None = None
+        request_prompt = prompt
+        correction_prompt = f"{prompt}\n\n{_CONVERSATION_OUTPUT_CORRECTION}"
+        try:
+            validate_bounded_text(
+                correction_prompt,
+                max_prompt_bytes,
+                label="conversation prompt",
+                allow_empty=False,
+            )
+        except ReviewInputError:
+            correction_prompt = prompt
         for _attempt in range(2):
             response = self.provider.complete(
                 ProviderRequest(
-                    prompt=prompt,
+                    prompt=request_prompt,
                     model=model,
                     json_mode=True,
                     max_prompt_bytes=max_prompt_bytes,
@@ -61,13 +79,16 @@ class ConversationService:
                 parsed = json.loads(response.text)
             except json.JSONDecodeError as exc:
                 last_json_error = exc
+                last_failure = "json"
+                request_prompt = correction_prompt
                 continue
             if isinstance(parsed, Mapping):
                 payload = parsed
                 break
-            saw_non_object = True
+            last_failure = "shape"
+            request_prompt = correction_prompt
         if payload is None:
-            if saw_non_object:
+            if last_failure == "shape":
                 raise ReviewFormatError("provider response must be a JSON object")
             raise ReviewFormatError("provider response was not valid JSON") from (
                 last_json_error

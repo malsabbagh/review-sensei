@@ -17,6 +17,16 @@ _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 
 
+def _is_valid_git_ref(value: str) -> bool:
+    """Return whether a GitHub ref is safe to emit as workflow output."""
+
+    if not _GIT_REF.fullmatch(value):
+        return False
+    if ".." in value or value.startswith("/") or value.endswith("/") or "//" in value:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class TriggerResolution:
     """Normalized inputs for the reusable ReviewSensei runner."""
@@ -92,9 +102,9 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
         not isinstance(head_sha, str)
         or not _GIT_SHA_FULL.fullmatch(head_sha)
         or not isinstance(head_ref, str)
-        or not _GIT_REF.fullmatch(head_ref)
+        or not _is_valid_git_ref(head_ref)
         or not isinstance(base_ref, str)
-        or not _GIT_REF.fullmatch(base_ref)
+        or not _is_valid_git_ref(base_ref)
         or not isinstance(base_sha, str)
         or not _GIT_SHA_FULL.fullmatch(base_sha)
     ):

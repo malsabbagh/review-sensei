@@ -46,9 +46,12 @@ class GitHubTriggerTests(unittest.TestCase):
             issue_comment_requests_rescan("@sensei please re-scan commit 016017b")
         )
         self.assertTrue(issue_comment_requests_rescan("@sensei re scan this PR"))
+        self.assertTrue(issue_comment_requests_rescan("@sensei Re-Scan"))
         self.assertFalse(issue_comment_requests_rescan("@sensei what changed?"))
         self.assertFalse(issue_comment_requests_rescan("please re-scan"))
         self.assertFalse(issue_comment_requests_rescan("@SENSEI please re-scan"))
+        self.assertFalse(issue_comment_requests_rescan("@sensei I rescanned the diff"))
+        self.assertFalse(issue_comment_requests_rescan("@sensei rescanning now"))
 
     def test_extract_requested_commit(self):
         self.assertEqual(
@@ -76,8 +79,19 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertEqual(choose_head_sha(pull, None), "b" * 40)
         self.assertEqual(choose_head_sha(pull, "bbbbbbb"), "b" * 40)
         self.assertEqual(choose_head_sha(pull, "b" * 40), "b" * 40)
-        with self.assertRaisesRegex(ValueError, "does not match"):
+        with self.assertRaisesRegex(ValueError, "does not match") as mismatch:
             choose_head_sha(pull, "c" * 40)
+        self.assertNotIn("c" * 40, str(mismatch.exception))
+
+    def test_resolve_rejects_double_dot_git_refs(self):
+        pull = _pull()
+        pull["head"] = {"sha": "b" * 40, "ref": "feature/../main"}
+        with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
+            resolve_pull_request_event(pull, auto_review="true")
+        pull = _pull()
+        pull["head"] = {"sha": "b" * 40, "ref": "feature/trailing/"}
+        with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
+            resolve_pull_request_event(pull, auto_review="true")
 
     def test_resolve_rejects_unsafe_git_refs(self):
         pull = _pull()

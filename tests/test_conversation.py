@@ -145,6 +145,7 @@ class ConversationContractTests(unittest.TestCase):
             def complete(self, request):
                 self.attempts += 1
                 if self.attempts == 1:
+                    self.requests.append(request)
                     return ProviderResponse(
                         text="not json",
                         provider=self.name,
@@ -156,6 +157,8 @@ class ConversationContractTests(unittest.TestCase):
         reply = ConversationService(provider).reply(context())
         self.assertEqual(reply.body, "Recovered.")
         self.assertEqual(provider.attempts, 2)
+        self.assertNotIn("conversation-output-correction", provider.requests[0].prompt)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
 
     def test_conversation_service_retries_once_on_non_object_json(self):
         class FlakyProvider(FakeProvider):
@@ -166,6 +169,7 @@ class ConversationContractTests(unittest.TestCase):
             def complete(self, request):
                 self.attempts += 1
                 if self.attempts == 1:
+                    self.requests.append(request)
                     return ProviderResponse(
                         text='["not", "an", "object"]',
                         provider=self.name,
@@ -177,6 +181,33 @@ class ConversationContractTests(unittest.TestCase):
         reply = ConversationService(provider).reply(context())
         self.assertEqual(reply.body, "Recovered.")
         self.assertEqual(provider.attempts, 2)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
+
+    def test_conversation_service_exhausts_invalid_json_retries(self):
+        provider = FakeProvider("not json")
+        with self.assertRaisesRegex(ReviewFormatError, "not valid JSON"):
+            ConversationService(provider).reply(context())
+        self.assertEqual(len(provider.requests), 2)
+        self.assertIn("conversation-output-correction", provider.requests[1].prompt)
+
+    def test_conversation_service_reports_last_invalid_json_after_non_object(self):
+        class SequenceProvider(FakeProvider):
+            def __init__(self):
+                super().__init__("unused")
+                self.texts = ('["not", "an", "object"]', "{")
+
+            def complete(self, request):
+                self.requests.append(request)
+                return ProviderResponse(
+                    text=self.texts[len(self.requests) - 1],
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        provider = SequenceProvider()
+        with self.assertRaisesRegex(ReviewFormatError, "not valid JSON"):
+            ConversationService(provider).reply(context())
+        self.assertEqual(len(provider.requests), 2)
 
     def test_conversation_prompt_includes_fix_ack_resolution_guidance(self):
         provider = FakeProvider('{"body":"Confirmed on current head."}')

@@ -193,6 +193,9 @@ jobs:
           output = os.environ.get("GITHUB_OUTPUT")
           if not output:
               raise SystemExit("GITHUB_OUTPUT is unavailable")
+          delimiter = "RS_PULL_REQUEST_TITLE"
+          while delimiter in title.split("\n"):
+              delimiter += "_EOF"
           with open(output, "a", encoding="utf-8") as handle:
               handle.write("operation=review\n")
               handle.write(f"head_sha={head_sha}\n")
@@ -200,8 +203,8 @@ jobs:
               handle.write(f"base_ref={base_ref}\n")
               handle.write(f"base_sha={base_sha}\n")
               handle.write(f"pull_request_number={number}\n")
-              handle.write("pull_request_title<<RS_PULL_REQUEST_TITLE\n")
-              handle.write(f"{title}\nRS_PULL_REQUEST_TITLE\n")
+              handle.write(f"pull_request_title<<{delimiter}\n")
+              handle.write(f"{title}\n{delimiter}\n")
               handle.write(f"enable_review={enable_review}\n")
           PY
 

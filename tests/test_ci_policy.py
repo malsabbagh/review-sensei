@@ -183,6 +183,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("contains(github.event.comment.body, '@sensei')", text)
+        self.assertIn('while delimiter in title.split("\\n"):', text)
+        self.assertIn(
+            "trusted trigger resolver is missing from the default branch", text
+        )
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (
