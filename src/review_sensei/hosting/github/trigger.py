@@ -15,6 +15,7 @@ _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
+_SENSEI_MENTION = "@sensei"
 
 
 def _is_valid_git_ref(value: str) -> bool:
@@ -41,10 +42,16 @@ class TriggerResolution:
     enable_review: str
 
 
+def comment_mentions_sensei(body: str) -> bool:
+    """Return whether a comment body includes the case-sensitive @sensei gate."""
+
+    return isinstance(body, str) and _SENSEI_MENTION in body
+
+
 def issue_comment_requests_rescan(body: str) -> bool:
     """Return whether a PR issue comment asks ReviewSensei to re-scan."""
 
-    if not isinstance(body, str) or "@sensei" not in body:
+    if not comment_mentions_sensei(body):
         return False
     return _RESCAN.search(body) is not None
 
@@ -109,10 +116,15 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
         or not _GIT_SHA_FULL.fullmatch(base_sha)
     ):
         raise ValueError("pull request identity metadata is invalid")
+    return head_sha, head_ref, base_ref, base_sha, _normalize_pull_request_title(title)
+
+
+def _normalize_pull_request_title(title: object) -> str:
+    """Collapse PR title whitespace, including Unicode line separators."""
+
     if not isinstance(title, str):
-        title = ""
-    title = " ".join(title.split())
-    return head_sha, head_ref, base_ref, base_sha, title
+        return ""
+    return " ".join(title.split())
 
 
 def _pull_request_number(pull: Mapping[str, Any]) -> str:
@@ -187,14 +199,14 @@ def _write_github_output_value(
 ) -> None:
     """Write one GitHub Actions output, using a heredoc when needed."""
 
-    if not multiline and "\n" not in value and "\r" not in value:
-        handle.write(f"{name}={value}\n")
-        return
-    delimiter = f"RS_{name.upper()}"
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
-    while delimiter in normalized.split("\n"):
-        delimiter += "_EOF"
-    handle.write(f"{name}<<{delimiter}\n{normalized}\n{delimiter}\n")
+    if multiline or "\n" in normalized:
+        delimiter = f"RS_{name.upper()}"
+        while delimiter in normalized:
+            delimiter += "_EOF"
+        handle.write(f"{name}<<{delimiter}\n{normalized}\n{delimiter}\n")
+        return
+    handle.write(f"{name}={value}\n")
 
 
 def write_github_output(resolution: TriggerResolution) -> None:

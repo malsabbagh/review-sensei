@@ -183,7 +183,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("contains(github.event.comment.body, '@sensei')", text)
-        self.assertIn('while delimiter in title.split("\\n"):', text)
+        self.assertIn("while delimiter in title:", text)
         self.assertIn(
             'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY"',
             text,

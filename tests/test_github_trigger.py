@@ -7,6 +7,7 @@ from unittest import mock
 from review_sensei.hosting.github.trigger import (
     TriggerResolution,
     choose_head_sha,
+    comment_mentions_sensei,
     extract_requested_commit,
     issue_comment_requests_rescan,
     resolve_issue_comment,
@@ -52,6 +53,10 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertFalse(issue_comment_requests_rescan("@SENSEI please re-scan"))
         self.assertFalse(issue_comment_requests_rescan("@sensei I rescanned the diff"))
         self.assertFalse(issue_comment_requests_rescan("@sensei rescanning now"))
+
+    def test_comment_mentions_sensei_matches_workflow_gate(self):
+        self.assertTrue(comment_mentions_sensei("@sensei please re-scan"))
+        self.assertFalse(comment_mentions_sensei("@SENSEI please re-scan"))
 
     def test_extract_requested_commit(self):
         self.assertEqual(
@@ -145,6 +150,12 @@ class GitHubTriggerTests(unittest.TestCase):
         resolution = resolve_issue_comment("@sensei what changed?", pull)
         self.assertEqual(resolution.pull_request_title, "Add provider profiles")
 
+    def test_resolve_issue_comment_collapses_unicode_line_separator_title(self):
+        pull = _pull()
+        pull["title"] = "Add provider\u2028profiles"
+        resolution = resolve_issue_comment("@sensei what changed?", pull)
+        self.assertEqual(resolution.pull_request_title, "Add provider profiles")
+
     def test_write_github_output_uses_heredoc_for_title(self):
         resolution = _resolution()
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,6 +167,19 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertIn("pull_request_number=7\n", text)
         self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE\n", text)
         self.assertIn("Add provider profiles\nRS_PULL_REQUEST_TITLE\n", text)
+        self.assertNotIn("pull_request_title=Add provider profiles\n", text)
+
+    def test_write_github_output_rotates_title_delimiter(self):
+        resolution = _resolution(pull_request_title="RS_PULL_REQUEST_TITLE in title")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "github-output"
+            with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+                write_github_output(resolution)
+            text = output.read_text(encoding="utf-8")
+        self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE_EOF\n", text)
+        self.assertIn(
+            "RS_PULL_REQUEST_TITLE in title\nRS_PULL_REQUEST_TITLE_EOF\n", text
+        )
 
     def test_write_github_output_escapes_newline_title(self):
         resolution = _resolution(

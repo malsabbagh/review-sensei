@@ -257,7 +257,7 @@ jobs:
               print("::error::GITHUB_OUTPUT is unavailable", file=sys.stderr)
               raise SystemExit(1)
           delimiter = "RS_PULL_REQUEST_TITLE"
-          while delimiter in title.split("\n"):
+          while delimiter in title:
               delimiter += "_EOF"
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"operation={operation}\n")
