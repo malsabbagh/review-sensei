@@ -18,12 +18,11 @@ class ReviewProvider(Protocol):
 
 
 def validate_provider_contract(provider: object) -> ReviewProvider:
-    """Validate the small provider contract at the registry boundary.
+    """Validate the documented ``ReviewProvider`` contract at the registry boundary.
 
-    Providers are deliberately duck-typed so downstream users can supply an
-    adapter without inheriting a ReviewSensei class.  This check keeps malformed
-    adapters from failing later, after a review has already been prepared.
-    It does not invoke the provider or inspect credentials.
+    The protocol requires ``name``, ``model``, and ``complete(request)``.  This
+    check keeps malformed adapters from failing later, after a review has already
+    been prepared.  It does not invoke the provider or inspect credentials.
     """
 
     if not hasattr(provider, "name") or not hasattr(provider, "model"):

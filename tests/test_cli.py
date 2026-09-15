@@ -347,6 +347,8 @@ class CliTests(unittest.TestCase):
                             str(diff_path),
                             "--profile",
                             "fast-triage",
+                            "--provider",
+                            "openai-compatible",
                             "--no-learning-proposals",
                         ]
                     )
@@ -357,6 +359,75 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(created[0].base_url)
         self.assertIsNone(created[0].timeout_seconds)
         self.assertEqual(created[0].api_key, "openai-secret")
+
+    def test_profile_requires_matching_explicit_provider(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("requires --provider openai-compatible", stderr.getvalue())
+
+    def test_profile_deep_verification_uses_profile_api_key_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "openai-secret",
+                    "OLLAMA_API_KEY": "ollama-secret",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "deep-verification",
+                            "--provider",
+                            "ollama",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "ollama-secret")
+
+    def test_profile_rejects_fixture_provider(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "local-private",
+                    "--provider",
+                    "fixture",
+                    "--fixture-response",
+                    "response.json",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("fixture cannot be combined with --profile", stderr.getvalue())
 
     def test_openai_compatible_explicit_flags_override_environment(self):
         with patch.dict(
