@@ -11,6 +11,7 @@ SCHEMAS = (
     "learning-entry.schema.json",
     "evaluation-corpus.schema.json",
     "evaluation-report.schema.json",
+    "promotion-record.schema.json",
 )
 
 

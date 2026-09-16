@@ -11,12 +11,19 @@ from review_sensei.evaluation import (
     _one_to_one_matches,
     build_report,
     endpoint_scope,
+    engine_digest,
     evaluate_fixture,
     load_corpus,
+    package_stage_digest,
+    promotion_record_from_reports,
+    prompt_digest,
+    require_supported_promotion,
     run_case,
 )
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
+from review_sensei.stages import ReviewCategory, Stage
+from review_sensei.validation import ReviewLimits
 
 
 def _sha256(value: str) -> str:
@@ -328,6 +335,98 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("exact_fixture_result_rate", report["threshold_failures"])
         self.assertIn("expected_finding_recall_minimum", report["threshold_failures"])
+
+    def test_engine_digest_is_stable_and_detects_engine_changes(self) -> None:
+        first = engine_digest(package_version="0.1.1")
+        second = engine_digest(package_version="0.1.1")
+        self.assertEqual(first, second)
+        self.assertRegex(first, r"^[a-f0-9]{64}$")
+        self.assertNotEqual(first, engine_digest(package_version="0.1.2"))
+        self.assertNotEqual(
+            first,
+            engine_digest(
+                package_version="0.1.1",
+                limits=ReviewLimits(max_comments=40),
+            ),
+        )
+        self.assertNotEqual(
+            first,
+            engine_digest(package_version="0.1.1", enforce_locations=False),
+        )
+
+    def test_prompt_digest_is_stable_and_detects_template_changes(self) -> None:
+        packaged = prompt_digest()
+        self.assertEqual(packaged, prompt_digest())
+        self.assertEqual(packaged, package_stage_digest())
+        custom = Stage(
+            name="custom",
+            prompt_template="Review {diff}",
+            outputs=("summary",),
+        )
+        changed = Stage(
+            name="custom",
+            prompt_template="Review {diff} carefully",
+            outputs=("summary",),
+        )
+        self.assertEqual(prompt_digest((custom,)), prompt_digest((custom,)))
+        self.assertNotEqual(prompt_digest((custom,)), prompt_digest((changed,)))
+        self.assertNotEqual(packaged, prompt_digest((custom,)))
+        first_category = ReviewCategory(
+            id="correctness",
+            title="Correctness",
+            focus=("Find logic bugs",),
+        )
+        second_category = ReviewCategory(
+            id="correctness",
+            title="Correctness",
+            focus=("Find logic bugs", "Reject silent data loss"),
+        )
+        with_first = Stage(
+            name="custom",
+            prompt_template="Review {review_categories}\n{diff}",
+            outputs=("summary",),
+            categories=(first_category,),
+        )
+        with_second = Stage(
+            name="custom",
+            prompt_template="Review {review_categories}\n{diff}",
+            outputs=("summary",),
+            categories=(second_category,),
+        )
+        self.assertNotEqual(prompt_digest((with_first,)), prompt_digest((with_second,)))
+
+    def test_fixture_report_includes_computed_engine_and_prompt_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+
+            report = evaluate_fixture(corpus)
+
+        self.assertEqual(report["run"]["engine_digest"], engine_digest())
+        self.assertEqual(report["run"]["prompt_digest"], prompt_digest())
+        self.assertEqual(report["run"]["package_stage_digest"], package_stage_digest())
+        self.assertRegex(report["run"]["invocation_id"], r"^[0-9a-f]{32}$")
+
+    def test_fixture_reports_cannot_mint_supported_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            report = evaluate_fixture(corpus)
+        reports = []
+        for index in range(3):
+            cloned = json.loads(json.dumps(report))
+            cloned["run"]["invocation_id"] = f"fixture-clone-{index}"
+            cloned["metrics"]["elapsed_total_ms"] = index + 1
+            reports.append(cloned)
+        kwargs = {
+            "observed_revision": "fixture-run",
+            "reproducibility": {"seed": "fixed"},
+            "evaluated_at": "2026-01-01T00:00:00Z",
+        }
+        minted = promotion_record_from_reports(reports, **kwargs)
+        self.assertEqual(minted.status, "insufficient")
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(reports, status="supported", **kwargs)
+        with self.assertRaises(ReviewInputError):
+            require_supported_promotion(minted, reports)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import functools
 import hashlib
+import importlib.metadata
 import json
 import math
 import re
+import secrets
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,8 +18,10 @@ from .models import ProviderRequest, ProviderResponse, ReviewComment, ReviewRequ
 from .providers.base import ReviewProvider
 from .schemas import validate_public_document
 from .service import ReviewService
+from .stages import ReviewCategory, Stage
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
+    ReviewLimits,
     read_bounded_utf8,
     validate_repository_path,
 )
@@ -185,6 +190,391 @@ def validate_promotion_record(value: Mapping[str, Any]) -> PromotionRecord:
         )
     except KeyError as exc:
         raise ReviewInputError("promotion record is incomplete") from exc
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_package_version() -> str:
+    try:
+        return importlib.metadata.version("review-sensei")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ReviewInputError("review-sensei package metadata is unavailable") from exc
+
+
+def _required_sha256(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+        raise ReviewInputError(f"{label} must be a SHA-256 digest")
+    return value
+
+
+def _required_invocation_id(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewInputError("promotion reports require a unique run invocation_id")
+    invocation_id = value.strip()
+    if len(invocation_id) > 128:
+        raise ReviewInputError("run invocation_id exceeds the 128-character limit")
+    return invocation_id
+
+
+def _category_digest_payload(category: ReviewCategory) -> dict[str, Any]:
+    return {
+        "id": category.id,
+        "title": category.title,
+        "focus": list(category.focus),
+        "applies_to": list(category.applies_to),
+        "learning_categories": list(category.learning_categories),
+        "include_uncategorized_learnings": category.include_uncategorized_learnings,
+        "document_sources": [
+            {
+                "path": source.path,
+                "include": list(source.include),
+                "exclude": list(source.exclude),
+                "required": source.required,
+            }
+            for source in category.document_sources
+        ],
+    }
+
+
+def _stage_digest_payload(stages: Sequence[Stage]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": stage.name,
+            "prompt_template": stage.prompt_template,
+            "outputs": list(stage.outputs),
+            "categories": [
+                _category_digest_payload(category) for category in stage.categories
+            ],
+        }
+        for stage in stages
+    ]
+
+
+def engine_digest(
+    *,
+    package_version: str | None = None,
+    limits: ReviewLimits | None = None,
+    enforce_locations: bool = True,
+) -> str:
+    """Return a bounded SHA-256 digest of package and engine identity.
+
+    The payload is canonical JSON over the installed package version, the
+    provider-neutral review engine identity, matching algorithm, output-correction
+    attempt budget, location enforcement, and ReviewLimits ceilings. It does not
+    hash repository source or untrusted inputs.
+    """
+
+    version = (
+        package_version if package_version is not None else _installed_package_version()
+    )
+    if not isinstance(version, str) or not version.strip():
+        raise ReviewInputError("engine digest requires a package version")
+    profile = limits if limits is not None else DEFAULT_REVIEW_LIMITS
+    if not isinstance(profile, ReviewLimits):
+        raise ReviewInputError("engine digest limits must be a ReviewLimits value")
+    return _json_digest(
+        {
+            "digest_version": 1,
+            "package": "review-sensei",
+            "version": version.strip(),
+            "engine": "review_sensei.service.ReviewService",
+            "enforce_locations": bool(enforce_locations),
+            "matching": "one-to-one-path-line-category-normalized-body-terms",
+            "max_provider_output_attempts": 2,
+            "limits": {
+                name: getattr(profile, name)
+                for name in sorted(profile.__dataclass_fields__)
+            },
+        }
+    )
+
+
+def prompt_digest(stages: Sequence[Stage] | None = None) -> str:
+    """Return a SHA-256 digest of packaged or caller-supplied stage templates."""
+
+    selected: Sequence[Stage]
+    if stages is None:
+        from .service import DEFAULT_STAGES
+
+        selected = DEFAULT_STAGES
+    else:
+        try:
+            selected = tuple(stages)
+        except TypeError as exc:
+            raise ReviewInputError("prompt digest stages must be iterable") from exc
+    if not selected:
+        raise ReviewInputError("prompt digest requires at least one stage")
+    if any(not isinstance(stage, Stage) for stage in selected):
+        raise ReviewInputError("prompt digest stages must contain only Stage values")
+    return _json_digest(_stage_digest_payload(selected))
+
+
+def load_evaluation_report(path: Path) -> dict[str, Any]:
+    """Load one bounded evaluation-report document from disk."""
+
+    value = _load_json(path, maximum=MAX_JSON_FILE_BYTES, label="evaluation report")
+    validate_public_document(value, "evaluation-report")
+    return value
+
+
+def _report_promotion_fields(report: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(report, Mapping):
+        raise ReviewInputError("evaluation report must be a JSON object")
+    try:
+        payload = dict(report)
+    except (TypeError, ValueError) as exc:
+        raise ReviewInputError("evaluation report must be a JSON object") from exc
+    validate_public_document(payload, "evaluation-report")
+    try:
+        run = payload["run"]
+        corpus = payload["corpus"]
+    except KeyError as exc:
+        raise ReviewInputError("evaluation report is incomplete") from exc
+    if not isinstance(run, Mapping) or not isinstance(corpus, Mapping):
+        raise ReviewInputError("evaluation report run and corpus must be objects")
+    try:
+        model = run.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ReviewInputError("evaluation report model is required for promotion")
+        provider = run.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            raise ReviewInputError(
+                "evaluation report provider is required for promotion"
+            )
+        prompt = run.get("prompt_digest")
+        if prompt is None:
+            prompt = run.get("package_stage_digest")
+        return {
+            "engine_digest": _required_sha256(
+                run.get("engine_digest"), label="report engine_digest"
+            ),
+            "prompt_digest": _required_sha256(prompt, label="report prompt_digest"),
+            "configuration_digest": _required_sha256(
+                run.get("configuration_digest"), label="report configuration_digest"
+            ),
+            "corpus_digest": _required_sha256(
+                corpus.get("sha256"), label="report corpus digest"
+            ),
+            "provider": provider.strip(),
+            "model": model.strip(),
+            "mode": run.get("mode"),
+            "passed": payload.get("passed") is True,
+            "threshold_failures": list(payload.get("threshold_failures") or []),
+            "provider_version": run.get("provider_version"),
+            "invocation_id": _required_invocation_id(run.get("invocation_id")),
+        }
+    except (KeyError, IndexError, AttributeError, TypeError) as exc:
+        raise ReviewInputError("evaluation report is incomplete") from exc
+
+
+def _classify_promotion_evidence(extracted: Sequence[Mapping[str, Any]]) -> str:
+    if not extracted:
+        raise ReviewInputError("promotion requires at least one evaluation report")
+    identities = {
+        (
+            item["engine_digest"],
+            item["prompt_digest"],
+            item["configuration_digest"],
+            item["corpus_digest"],
+            item["provider"],
+            item["model"],
+        )
+        for item in extracted
+    }
+    if len(identities) != 1:
+        raise ReviewInputError(
+            "promotion reports must share engine, prompt, configuration, "
+            "corpus, and provider identity"
+        )
+    invocation_ids = [str(item["invocation_id"]) for item in extracted]
+    if len(set(invocation_ids)) != len(invocation_ids):
+        raise ReviewInputError("promotion reports must be independent")
+    fixture = any(_is_fixture_alias(str(item["provider"])) for item in extracted)
+    live = all(item["mode"] == "live" for item in extracted)
+    passed = all(
+        item["passed"] is True and not item["threshold_failures"] for item in extracted
+    )
+    qualifies = len(extracted) >= 3 and live and not fixture and passed
+    if qualifies:
+        return "supported"
+    live_non_fixture = [
+        item
+        for item in extracted
+        if item["mode"] == "live" and not _is_fixture_alias(str(item["provider"]))
+    ]
+    if live_non_fixture and not all(
+        item["passed"] is True and not item["threshold_failures"]
+        for item in live_non_fixture
+    ):
+        return "unsupported"
+    return "insufficient"
+
+
+def promotion_record_from_reports(
+    reports: Sequence[Mapping[str, Any]],
+    *,
+    observed_revision: str,
+    reproducibility: Mapping[str, Any],
+    evaluated_at: str,
+    rollback_decision: str = "revert-to-baseline",
+    status: str | None = None,
+) -> PromotionRecord:
+    """Build a promotion record from independent evaluation reports.
+
+    ``status=supported`` requires at least three independent live runs that
+    passed quality thresholds. Fixture-provider reports cannot mint supported
+    evidence.
+    """
+
+    try:
+        documents = tuple(reports)
+    except TypeError as exc:
+        raise ReviewInputError("promotion reports must be iterable") from exc
+    extracted = [_report_promotion_fields(report) for report in documents]
+    inferred = _classify_promotion_evidence(extracted)
+    if status is None:
+        selected_status = inferred
+    elif status == inferred:
+        selected_status = status
+    elif status == "supported":
+        raise ReviewInputError(
+            "supported promotion requires at least three independent live "
+            "evaluation reports that passed quality thresholds"
+        )
+    else:
+        raise ReviewInputError(
+            "promotion status does not match the evaluation evidence"
+        )
+    first = extracted[0]
+    provider_versions = {
+        item["provider_version"]
+        for item in extracted
+        if isinstance(item["provider_version"], str)
+        and item["provider_version"].strip()
+    }
+    if len(provider_versions) > 1:
+        raise ReviewInputError(
+            "promotion reports must share one observed provider revision"
+        )
+    if (
+        isinstance(observed_revision, str)
+        and observed_revision.strip()
+        and provider_versions
+        and observed_revision.strip() not in provider_versions
+    ):
+        raise ReviewInputError(
+            "promotion observed_revision does not match the report provider version"
+        )
+    return PromotionRecord(
+        engine_digest=first["engine_digest"],
+        prompt_digest=first["prompt_digest"],
+        configuration_digest=first["configuration_digest"],
+        corpus_digest=first["corpus_digest"],
+        provider=first["provider"],
+        model=first["model"],
+        observed_revision=observed_revision,
+        run_count=len(extracted),
+        evaluated_at=evaluated_at,
+        reproducibility=reproducibility,
+        status=selected_status,
+        rollback_decision=rollback_decision,
+    )
+
+
+def validate_promotion_against_report(
+    record: PromotionRecord,
+    report: Mapping[str, Any],
+) -> None:
+    """Bind one promotion record to one evaluation report, failing closed."""
+
+    if not isinstance(record, PromotionRecord):
+        raise ReviewInputError("promotion record is required")
+    fields = _report_promotion_fields(report)
+    for name in (
+        "engine_digest",
+        "prompt_digest",
+        "configuration_digest",
+        "corpus_digest",
+        "provider",
+        "model",
+    ):
+        if getattr(record, name) != fields[name]:
+            raise ReviewInputError(
+                f"promotion record {name} does not match the evaluation report"
+            )
+    provider_version = fields["provider_version"]
+    if (
+        isinstance(provider_version, str)
+        and provider_version.strip()
+        and provider_version.strip() != record.observed_revision
+    ):
+        raise ReviewInputError(
+            "promotion observed_revision does not match the report provider version"
+        )
+    if record.status == "supported":
+        if not fields["passed"] or fields["threshold_failures"]:
+            raise ReviewInputError("evaluation report did not pass quality thresholds")
+        if fields["mode"] != "live":
+            raise ReviewInputError(
+                "supported promotion requires live evaluation reports"
+            )
+        if _is_fixture_alias(record.provider) or _is_fixture_alias(fields["provider"]):
+            raise ReviewInputError("fixture-only evidence cannot support promotion")
+    elif not fields["passed"] or fields["threshold_failures"]:
+        raise ReviewInputError("evaluation report did not pass quality thresholds")
+
+
+def require_supported_promotion(
+    record: PromotionRecord | Mapping[str, Any],
+    reports: Sequence[Mapping[str, Any]],
+) -> PromotionRecord:
+    """Fail-closed gate for model, prompt, or routing-config promotion.
+
+    Release and documentation workflows must call this before promoting a
+    real provider model, stage prompt, generation setting, or routing
+    configuration. Ordinary CI fixture evaluation must not call it to mint
+    approval. Fixture reports cannot produce a ``supported`` record.
+    """
+
+    parsed = (
+        record
+        if isinstance(record, PromotionRecord)
+        else validate_promotion_record(record)
+    )
+    if parsed.status != "supported":
+        raise ReviewInputError("promotion requires a supported promotion record")
+    try:
+        documents = tuple(reports)
+    except TypeError as exc:
+        raise ReviewInputError("promotion reports must be iterable") from exc
+    if len(documents) < 3:
+        raise ReviewInputError("promotion requires at least three evaluation reports")
+    minted = promotion_record_from_reports(
+        documents,
+        observed_revision=parsed.observed_revision,
+        reproducibility=parsed.reproducibility,
+        evaluated_at=parsed.evaluated_at,
+        rollback_decision=parsed.rollback_decision,
+        status="supported",
+    )
+    for name in (
+        "engine_digest",
+        "prompt_digest",
+        "configuration_digest",
+        "corpus_digest",
+        "provider",
+        "model",
+        "observed_revision",
+        "run_count",
+        "status",
+        "rollback_decision",
+    ):
+        if getattr(minted, name) != getattr(parsed, name):
+            raise ReviewInputError(
+                f"promotion record {name} does not match live evaluation evidence"
+            )
+    for report in documents:
+        validate_promotion_against_report(parsed, report)
+    return parsed
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -383,19 +773,7 @@ def load_corpus(corpus_path: Path) -> Corpus:
 
 
 def package_stage_digest() -> str:
-    from .service import DEFAULT_STAGES
-
-    return _json_digest(
-        [
-            {
-                "name": stage.name,
-                "prompt_template": stage.prompt_template,
-                "outputs": list(stage.outputs),
-                "category_ids": [category.id for category in stage.categories],
-            }
-            for stage in DEFAULT_STAGES
-        ]
-    )
+    return prompt_digest()
 
 
 def _packaged_category_digest() -> str:
@@ -765,8 +1143,6 @@ def build_report(
     model: str | None,
     endpoint_scope: str,
 ) -> dict[str, Any]:
-    from .cli import _package_version
-
     quality_cases = [case for case in cases if case["kind"] == "quality"]
     expected = sum(case["expected_matches"] for case in quality_cases)
     actual = sum(case["actual_matches"] for case in quality_cases)
@@ -814,11 +1190,14 @@ def build_report(
         },
         "run": {
             "mode": mode,
-            "review_sensei_version": _package_version(),
+            "review_sensei_version": _installed_package_version(),
             "provider": provider,
             "provider_version": provider_version,
             "model": model,
             "endpoint_scope": endpoint_scope,
+            "invocation_id": secrets.token_hex(16),
+            "engine_digest": engine_digest(),
+            "prompt_digest": prompt_digest(),
             "package_stage_digest": package_stage_digest(),
             "configuration_digest": configuration_digest(corpus, mode, provider, model),
         },

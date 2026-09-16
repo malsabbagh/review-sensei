@@ -140,7 +140,7 @@ jobs:
       - name: Check sdist contents
         shell: bash
         run: |
-          tar -tzf dist/*.tar.gz | grep -E 'src/review_sensei/schemas/(review-category|review-stage|learning-entry|evaluation-corpus|evaluation-report)\.schema\.json$'
+          tar -tzf dist/*.tar.gz | grep -E 'src/review_sensei/schemas/(review-category|review-stage|learning-entry|evaluation-corpus|evaluation-report|promotion-record)\.schema\.json$'
           tar -tzf dist/*.tar.gz | grep -E 'evaluation/v1/corpus\.json$'
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -171,6 +171,7 @@ jobs:
               "learning-entry.schema.json",
               "evaluation-corpus.schema.json",
               "evaluation-report.schema.json",
+              "promotion-record.schema.json",
           ):
               assert importlib.resources.files("review_sensei").joinpath("schemas", name).is_file()
           PY

@@ -27,6 +27,7 @@ SCHEMA_NAMES = (
     "concurrency-plan",
     "evaluation-corpus",
     "evaluation-report",
+    "promotion-record",
     "run-outcome",
     "recovery-artifact",
     "verification-result",
