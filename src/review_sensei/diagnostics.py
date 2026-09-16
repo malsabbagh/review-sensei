@@ -77,6 +77,11 @@ def run_doctor(
     ``include_network`` is intentionally reported as unknown rather than
     probing an endpoint.  Network probes belong to an explicitly authorized
     integration command and must not be part of ordinary diagnostics.
+
+    Custom ``stages_dir`` uses the same catalog selection as review: the
+    category catalog stays unset unless ``categories_dir`` is supplied.
+    Stages that declare ``category_ids`` therefore require ``--categories-dir``,
+    matching the review runner.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -242,13 +247,15 @@ def run_doctor(
         checks.append(
             DiagnosticCheck("network", "unknown", "not checked (offline mode)")
         )
-    status = (
-        "action"
-        if any(check.status == "action" for check in checks)
-        else (
-            "unknown" if any(check.status == "unknown" for check in checks) else "pass"
-        )
-    )
+    status = "action" if any(check.status == "action" for check in checks) else "pass"
+    unknown_checks = [check for check in checks if check.status == "unknown"]
+    if status != "action" and unknown_checks:
+        # Offline doctor always records the network check as unknown so an
+        # unprobed prerequisite cannot look like a pass.  That sentinel must
+        # not hide a healthy installation: only an explicitly requested
+        # ``--network`` check (or any other unknown) keeps the report unknown.
+        if include_network or any(check.name != "network" for check in unknown_checks):
+            status = "unknown"
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -357,7 +364,12 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
     if "version" in document:
         lines.append(f"version: {document.get('version') or 'unknown'}")
     for check in document.get("checks", []):
-        lines.append(f"{check['status']}: {check['name']} — {check['detail']}")
+        if not isinstance(check, dict):
+            continue
+        lines.append(
+            f"{check.get('status', 'unknown')}: {check.get('name', 'check')} — "
+            f"{check.get('detail', '')}"
+        )
     if "provider_mode" in document:
         lines.append(f"provider_mode: {document['provider_mode']}")
     if "stages" in document:

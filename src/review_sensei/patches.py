@@ -41,11 +41,13 @@ def _reject_unsupported_patch_content(patch: str) -> None:
             structural_line
         ):
             raise ReviewInputError("binary patches are not supported")
-        if _SYMLINK_MODE_LINE.fullmatch(structural_line) or (
-            structural_line.startswith("index ")
-            and structural_line.split()[-1:] == ["120000"]
-        ):
+        if _SYMLINK_MODE_LINE.fullmatch(structural_line):
             raise ReviewInputError("symlink patches are not supported")
+        if structural_line.startswith("index "):
+            # Git may emit ``index <oid>..<oid> <mode>`` or extra mode tokens.
+            # Reject when any token is the symlink mode, not only the last one.
+            if any(token == "120000" for token in structural_line.split()[1:]):
+                raise ReviewInputError("symlink patches are not supported")
 
 
 def _normalize_git_mode(value: object) -> str:

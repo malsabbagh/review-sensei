@@ -371,6 +371,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
         description="Run a provider-neutral AI review against a unified diff.",
+        epilog=(
+            "Additional commands use the same first-token dispatch as "
+            "prepare-diff, evaluate, and github: doctor, plan, prepare-diff, "
+            "evaluate, github."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -861,6 +866,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
+    # doctor/plan share first-token dispatch with prepare-diff, evaluate, and
+    # github because the default review command is flag-based, not a subparser.
     if args_list and args_list[0] == "doctor":
         args = _doctor_parser().parse_args(args_list[1:])
         try:

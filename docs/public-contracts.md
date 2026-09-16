@@ -285,10 +285,10 @@ Exit codes are stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written; `doctor` all-pass; `plan` ready |
+| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
 | `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
-| `3` | `doctor` unknown check (offline network); `plan` incomplete (no diff) |
+| `3` | `doctor --network` (unprobed); `plan` incomplete (no diff) |
 
 ## Error Categories
 

@@ -34,8 +34,15 @@ class DiagnosticsTests(unittest.TestCase):
     def test_doctor_is_bounded_and_reports_unknown_network(self):
         report = run_doctor()
         self.assertEqual(report["schema_version"], "v1")
-        self.assertEqual(report["status"], "unknown")
-        self.assertTrue(any(check["name"] == "network" for check in report["checks"]))
+        self.assertEqual(report["status"], "pass")
+        self.assertTrue(
+            any(
+                check["name"] == "network" and check["status"] == "unknown"
+                for check in report["checks"]
+            )
+        )
+        network_report = run_doctor(include_network=True)
+        self.assertEqual(network_report["status"], "unknown")
 
     def test_plan_never_enables_writes_or_provider_calls(self):
         report = build_plan(diff=DIFF, repository="owner/repo", pull_request=3)
@@ -119,7 +126,7 @@ class DiagnosticsTests(unittest.TestCase):
                 categories_dir=categories_dir,
                 context_root=context_dir,
             )
-            self.assertEqual(report["status"], "unknown")
+            self.assertEqual(report["status"], "pass")
             self.assertTrue(
                 all(
                     check["status"] == "pass"
@@ -191,6 +198,10 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("operations: provider_calls=0", rendered)
         self.assertEqual(render_diagnostic(document, as_json=True)[0], "{")
         self.assertIn("unknown", render_diagnostic({}))
+        self.assertIn(
+            "unknown: check — ",
+            render_diagnostic({"checks": [{"unexpected": True}, "not-a-dict"]}),
+        )
 
 
 class PatchSuggestionTests(unittest.TestCase):
@@ -335,6 +346,8 @@ class PatchSuggestionTests(unittest.TestCase):
             "new mode 120000",
             "deleted file mode 120000",
             "index 1111111..2222222 120000",
+            "index 1111111..2222222 120000 100644",
+            "index 1111111..2222222 100644 120000",
         )
         for header in mode_headers:
             with self.subTest(header=header):

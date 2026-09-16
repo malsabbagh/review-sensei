@@ -1321,10 +1321,20 @@ class DoctorPlanCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
                 status = main(["doctor", "--json"])
-        self.assertEqual(status, 3)
+        self.assertEqual(status, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema_version"], "v1")
         self.assertIn("checks", payload)
+        self.assertEqual(payload["status"], "pass")
+
+    def test_doctor_cli_network_flag_exits_unknown(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["doctor", "--network", "--json"])
+        self.assertEqual(status, 3)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "unknown")
 
     def test_plan_cli_renders_ready_plan_from_diff(self):
         with tempfile.TemporaryDirectory() as temporary:
