@@ -269,6 +269,28 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(outcomes["src/a.py"], "reviewed")
         self.assertEqual(outcomes["src/b.py"], "partially-reviewed")
 
+    def test_all_chunk_failures_report_no_validated_result(self):
+        limits = ReviewLimits(max_diff_files=1)
+        provider = FakeProvider([])
+
+        def always_invalid(_request):
+            provider.requests.append(_request)
+            return ProviderResponse(
+                text="not-json", provider=provider.name, model=provider.model
+            )
+
+        provider.complete = always_invalid  # type: ignore[method-assign]
+        run = ReviewService(provider).run(
+            ReviewRequest(
+                diff=TWO_FILES,
+                limits=limits,
+                orchestrate_large_changes=True,
+            )
+        )
+        self.assertEqual(run.outcome.status, "partial")
+        self.assertEqual(run.outcome.diagnostic, "no_validated_result")
+        self.assertEqual(run.result.review_status, "incomplete")
+
     def test_provider_budget_stops_unbounded_calls(self):
         limits = ReviewLimits(max_diff_files=1)
         provider = FakeProvider(

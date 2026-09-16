@@ -294,6 +294,17 @@ class ReviewService:
                 status = "partial"
         return replace(result, coverage=coverage, review_status=status)
 
+    @staticmethod
+    def _run_outcome_for_result(result: ReviewResult) -> tuple[str, str | None]:
+        status = result.review_status
+        if status == "partial":
+            return "partial", "partial_coverage"
+        if status == "incomplete":
+            return "partial", "no_validated_result"
+        if status == "summary-only":
+            return "partial", "partial_coverage"
+        return "reviewed", None
+
     def _review_chunks_run(
         self,
         request: ReviewRequest,
@@ -464,8 +475,7 @@ class ReviewService:
                 pull_request_number=request.pull_request_number,
             )
         result = self._attach_coverage(result, coverage)
-        status = "partial" if result.review_status == "partial" else "reviewed"
-        diagnostic = "partial_coverage" if status == "partial" else None
+        status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
             tracker=tracker,
             status=status,
@@ -539,7 +549,7 @@ class ReviewService:
         skipped_stages = 0
         omitted_inline_comments = 0
         executed_comment_stage = False
-        self._provider_calls = 0
+        self._provider_calls = 0 if tracker is None else tracker.provider_calls
         stage_summary: dict[str, str] = {}
 
         try:
@@ -993,8 +1003,7 @@ class ReviewService:
                 pull_request_number=request.pull_request_number,
             )
         result = self._attach_coverage(result, change_plan.coverage)
-        status = "partial" if review_status == "partial" else "reviewed"
-        diagnostic = "partial_coverage" if status == "partial" else None
+        status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
             tracker=tracker,
             status=status,

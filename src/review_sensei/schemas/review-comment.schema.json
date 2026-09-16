@@ -20,21 +20,15 @@
   },
   "allOf": [
     {
-      "anyOf": [
-        {"required": ["line"]},
-        {
-          "properties": {"side": {"const": "FILE"}},
-          "required": ["side"]
-        }
-      ]
-    },
-    {
       "if": {
         "properties": {"side": {"const": "FILE"}},
         "required": ["side"]
       },
       "then": {
         "not": {"required": ["line"]}
+      },
+      "else": {
+        "required": ["line"]
       }
     }
   ]

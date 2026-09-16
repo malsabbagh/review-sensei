@@ -71,12 +71,7 @@ from .models import (
 )
 from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from .patches import PatchSuggestion, create_patch_suggestion
-from .planning import (
-    LargeChangePlan,
-    ReviewChunk,
-    TotalWorkBudget,
-    plan_change,
-)
+from .planning import LargeChangePlan, ReviewChunk, plan_change
 from .release_manifest import (
     Artifact,
     CanaryBinding,
@@ -109,7 +104,7 @@ from .stages import (
     load_review_categories_from_dir,
     load_stages_from_dir,
 )
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
+from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, TotalWorkBudget
 from .verifier import (
     CandidateFinding,
     EvidenceReference,

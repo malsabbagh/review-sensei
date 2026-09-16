@@ -61,6 +61,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "draft_pr",
         "fork_not_allowed",
         "invalid_provider_output",
+        "no_validated_result",
         "output_budget",
         "partial_coverage",
         "pr_not_open",
