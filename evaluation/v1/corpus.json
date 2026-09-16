@@ -11,7 +11,7 @@
   "files": [
     {
       "path": "corpus.json",
-      "sha256": "a83cc877936dfc5a36e3d194e032b08d561bd8679236a71d1677787a5a42dd3a",
+      "sha256": "de749c211fde30c4a00a48bc106aaba7c2919958b98171785439973062e521a9",
       "purpose": "manifest"
     },
     {
@@ -51,27 +51,27 @@
     },
     {
       "path": "expected/clean-guard.review.json",
-      "sha256": "bf8df5c741b33b27311cfc6afacaac4c067fb6d7b644e727de25131aef9b74ae",
+      "sha256": "8cce7bb1a1e60bf5095903544a869b883593c20dd534eaf30a6f7a243b68348d",
       "purpose": "expected result"
     },
     {
       "path": "expected/layer-violation.review.json",
-      "sha256": "714612a72d09536fdfdcb260ff0f77b2d003dc2b80af495db00ced61a8021a72",
+      "sha256": "050fa788bf420c1d8e521fdc4a1c13f3bb3f1c5414e8350621edc430a7241b63",
       "purpose": "expected result"
     },
     {
       "path": "expected/missing-regression-test.review.json",
-      "sha256": "b46dfc93157b8246f0960576d85b2d0fab10f709eafb63f71aa33281e7a60ad8",
+      "sha256": "ca71589aeaa419daf78bc8195b943e9a6ba3970c40755056eaad5156dcce823d",
       "purpose": "expected result"
     },
     {
       "path": "expected/off-by-one.review.json",
-      "sha256": "a93a992ab56e3ecd449cc601e76160789e73228e611565931a04b9705d61d28d",
+      "sha256": "04c6dc89c6ff180a5ff713e0e224c537d3abb11c2823c8efca0f94cb5cb4b1fb",
       "purpose": "expected result"
     },
     {
       "path": "expected/shell-injection.review.json",
-      "sha256": "bcb5d14a5fd691a0c76611bc81b7d429909ba716824e0527d1fd48a610235993",
+      "sha256": "a284aaa24e8b730a73ebbdf6f34d50d1c687335fe864162ddb6ff147c420534f",
       "purpose": "expected result"
     },
     {

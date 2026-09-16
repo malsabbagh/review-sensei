@@ -29,6 +29,10 @@
       "type": "string",
       "enum": ["complete", "partial", "incomplete", "summary-only"]
     },
+    "evidence_policy": {
+      "type": "string",
+      "enum": ["legacy", "confirmed"]
+    },
     "model": {
       "anyOf": [
         {"type": "string", "minLength": 1},

@@ -98,7 +98,10 @@ from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
 from .verifier import (
     CandidateFinding,
     EvidenceReference,
+    PublishableReview,
     VerificationResult,
+    format_candidate_finding,
+    prepare_publishable_review,
     verify_candidate,
     verify_candidates,
 )
@@ -196,7 +199,10 @@ __all__ = [
     "verify_worker_compatibility",
     "CandidateFinding",
     "EvidenceReference",
+    "PublishableReview",
     "VerificationResult",
+    "format_candidate_finding",
+    "prepare_publishable_review",
     "verify_candidate",
     "verify_candidates",
 ]

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 from ...conversation import ConversationService
 from ...models import ReviewResult
 from ...providers.base import ReviewProvider
+from ...verifier import CandidateFinding
 from .broker_client import BrokerClient
 from .conversation import (
     ConversationPublisher,
@@ -63,12 +65,30 @@ class GitHubApplication:
         result: ReviewResult,
         diff: str,
         app_slug: str,
+        candidates: Sequence[CandidateFinding] | None = None,
+        snapshot: Mapping[str, str] | None = None,
+        snapshot_sha256: str | None = None,
+        evidence_policy: str = "legacy",
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
         if base_branch is None or base_sha is None:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
+            )
+        if evidence_policy not in {"legacy", "confirmed"}:
+            raise GitHubPublicationError("evidence policy is unsupported")
+        if evidence_policy == "confirmed" and (
+            snapshot is None or snapshot_sha256 is None
+        ):
+            raise GitHubPublicationError(
+                "confirmed evidence policy requires a reviewed snapshot"
+            )
+        if evidence_policy == "legacy" and (
+            candidates or snapshot is not None or snapshot_sha256 is not None
+        ):
+            raise GitHubPublicationError(
+                "legacy evidence policy cannot include candidate verification inputs"
             )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
@@ -86,6 +106,10 @@ class GitHubApplication:
             diff=diff,
             app_slug=app_slug,
             auto_approve=options.auto_approve,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
         )
 
     def publish_learning(

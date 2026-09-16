@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "claim": "bug",
+  "triggering_conditions": "when called",
+  "impacted_path": "src/app.py",
+  "severity_rationale": "causes failure",
+  "evidence": []
+}

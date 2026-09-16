@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 
 from review_sensei.hosting.github import (
@@ -16,6 +18,7 @@ from review_sensei.hosting.github.publication import (
 )
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.validation import ReviewLimits
+from review_sensei.verifier import CandidateFinding, EvidenceReference
 
 try:
     from fake_github_http import json_response, make_http
@@ -1841,6 +1844,77 @@ class ReviewPublisherTests(unittest.TestCase):
                         response,
                     ]
                 )
+
+    def _confirmed_snapshot(self):
+        snapshot = {"src/app.py": "keep\nchange\n"}
+        digest = hashlib.sha256(
+            json.dumps(
+                dict(sorted(snapshot.items())),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return snapshot, digest
+
+    def test_confirmed_policy_does_not_publish_unverified_candidates(self):
+        snapshot, digest = self._confirmed_snapshot()
+        confirmed = CandidateFinding(
+            "Added line is unbounded.",
+            "Call the changed helper with empty input.",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, digest, "change"),),
+            "The new line can fail closed callers.",
+        )
+        rejected = CandidateFinding(
+            "This claims a secret that is not in the snapshot.",
+            "Read an API key.",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, digest, "api_key = secret"),),
+            "Unsupported evidence cannot become a finding.",
+        )
+        unverified = ReviewResult(
+            summary="Review complete.",
+            comments=(
+                ReviewComment(path="src/app.py", line=2, body="unverified finding"),
+            ),
+            provider="ollama",
+            review_status="complete",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response([]),
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response({"id": 9}, 200),
+            ],
+            result=unverified,
+            candidates=(confirmed, rejected),
+            snapshot=snapshot,
+            snapshot_sha256=digest,
+            evidence_policy="confirmed",
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = json.loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertIn("Added line is unbounded.", body["comments"][0]["body"])
+        self.assertNotIn("unverified finding", body["comments"][0]["body"])
+        self.assertNotIn("api_key = secret", body["comments"][0]["body"])
+        self.assertIn("Verification coverage:", body["body"])
+        self.assertIn("Unpublished candidates are not findings", body["body"])
+
+    def test_confirmed_policy_without_snapshot_fails_closed_before_write(self):
+        with self.assertRaises(GitHubPublicationError):
+            self.publish(
+                [
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    json_response([]),
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    json_response({"id": 9}, 200),
+                ],
+                evidence_policy="confirmed",
+            )
 
 
 if __name__ == "__main__":

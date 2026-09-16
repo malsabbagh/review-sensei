@@ -27,6 +27,11 @@
   trusted provenance. PyPI-primary and executing-commit fallback paths prove
   that identity; live disposable-repository canary and `v4` movement stay
   operator-only.
+- Wired deterministic candidate-finding evidence verification into publication
+  so only snapshot-bound confirmed candidates become findings. Legacy
+  single-pass comments remain the default and are identified as `legacy`;
+  incomplete verification is `partial` and cannot be approved. Evaluation
+  comparison, model verification, and run-budget enforcement stay deferred.
 
 - Skip automatic ReviewSensei runs on draft pull requests instead of failing
   preflight with "pull request is not eligible for review". Review starts when

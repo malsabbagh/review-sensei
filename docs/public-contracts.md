@@ -60,6 +60,7 @@ containing `/v1/`.
 | `promotion-record.schema.json` | Real-provider promotion evidence |
 | `recovery-artifact.schema.json` | Publication-only recovery artifact |
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
+| `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
@@ -153,6 +154,7 @@ These imports are public and stable within a major version:
 - `review_sensei.CandidateFinding`
 - `review_sensei.EvidenceReference`
 - `review_sensei.VerificationResult`
+- `review_sensei.PublishableReview`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
 - `review_sensei.PromotionRecord`
@@ -162,6 +164,8 @@ These imports are public and stable within a major version:
 - `review_sensei.validate_promotion_against_report`
 - `review_sensei.require_supported_promotion`
 - `review_sensei.validate_promotion_record`
+- `review_sensei.prepare_publishable_review`
+- `review_sensei.format_candidate_finding`
 - `review_sensei.load_repository_learnings`
 - `review_sensei.load_learning_feedback`
 - `review_sensei.summarize_learning_feedback`
@@ -201,6 +205,21 @@ caller candidate set. This field is omitted on the default document/learning
 path. It never includes source text and does not change GitHub write, egress,
 or approval defaults. The loader requires the schema's exact types and rejects
 a malformed record rather than coercing it to defaults.
+
+Results also serialize `evidence_policy`. Omitted or `legacy` identifies the
+compatible single-pass comment mode. `confirmed` means `prepare_publishable_review`
+replaced comments with candidates whose evidence exists in the exact reviewed
+snapshot. Candidate text, excerpts, and source remain untrusted data: they
+cannot expand tool, write, or egress permissions. Rejected, duplicate,
+malformed, and insufficient-evidence candidates are unpublished, and
+incomplete coverage is `partial` rather than a clean review. Published
+confirmed findings include the claim, triggering conditions, severity
+rationale, and bounded evidence locations—not hidden reasoning transcripts.
+
+A second model's agreement is not proof and is not part of this contract.
+Production enablement still depends on the evaluation policy in issue #33 and
+the run/budget contract in issue #36. Automatic approval remains unchanged
+except that an incompletely verified `confirmed` review cannot be approved.
 
 ### Finding classification and presentation
 
@@ -543,13 +562,16 @@ review data migration is required.
 
 ## Issue-64 and Issue-97 publication contracts
 
-`ReviewPublisher` reconstructs a typed `ReviewResult`, revalidates all
+`ReviewPublisher` reconstructs a typed `ReviewResult`, applies
+`prepare_publishable_review` for the configured evidence policy, revalidates all
 locations against the exact diff, rereads the open non-draft same-repository PR
 head, and submits one App-authored review whose formatted summary and inline
 comments append the fixed follow-up instruction `To discuss this finding, reply
 with @sensei followed by your question.` and carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
-The formatted summary and inline bodies must fit their configured
+The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
+only snapshot-bound confirmed candidates; unverified comments never become
+findings. The formatted summary and inline bodies must fit their configured
 `ReviewLimits`; the complete framed review body must also fit the GitHub
 transport ceiling of 65,536 bytes before any POST is attempted.
 The marker, App slug, exact head commit, and repository identity form the

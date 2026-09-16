@@ -7,13 +7,14 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from ...diff import analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
+from ...verifier import CandidateFinding, prepare_publishable_review
 from .approval import has_blocking_findings
 from .errors import (
     GitHubHTTPError,
@@ -900,6 +901,10 @@ class ReviewPublisher:
         diff: str,
         app_slug: str,
         auto_approve: bool = True,
+        candidates: Sequence[CandidateFinding] | None = None,
+        snapshot: Mapping[str, str] | None = None,
+        snapshot_sha256: str | None = None,
+        evidence_policy: str = "legacy",
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -920,6 +925,22 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        try:
+            analysis = analyze_diff(diff)
+        except ReviewInputError as exc:
+            raise GitHubPublicationError("review diff failed validation") from exc
+        try:
+            prepared = prepare_publishable_review(
+                result,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                changed_lines=analysis.changed_lines,
+            )
+        except ReviewInputError as exc:
+            raise GitHubPublicationError("review evidence verification failed") from exc
+        result = prepared.result
         self._validate_locations(result, diff)
         marker = review_marker(
             repository_id=repository_id,
