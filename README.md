@@ -36,6 +36,8 @@ providers later.
 - Provides a narrow GitHub App JWT and installation-token auth adapter for
   optional App-identity comments or reviews.
 - Avoids retaining raw prompts and provider responses in the engine.
+- Provides `review-sensei doctor` and a zero-write `review-sensei plan`
+  preview so skipped or failed setup is diagnosable without forking workflows.
 
 ## Quick start
 
@@ -97,6 +99,8 @@ review-sensei prepare-diff \
   --base-ref main \
   --head-ref feature \
   --output pr.patch
+review-sensei doctor
+review-sensei plan --diff pr.patch --repository owner/repository --pull-request 42
 review-sensei \
   --diff pr.patch \
   --repository owner/repository \

@@ -5,10 +5,15 @@ import unittest
 from itertools import repeat
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import URLError
+from urllib.request import Request
 
 from review_sensei.diagnostics import (
     DiagnosticCheck,
     build_plan,
+    check_compatibility_manifest,
+    probe_provider_endpoint,
+    probe_repository_metadata,
     render_diagnostic,
     run_doctor,
 )
@@ -41,8 +46,6 @@ class DiagnosticsTests(unittest.TestCase):
                 for check in report["checks"]
             )
         )
-        network_report = run_doctor(include_network=True)
-        self.assertEqual(network_report["status"], "unknown")
 
     def test_plan_never_enables_writes_or_provider_calls(self):
         report = build_plan(diff=DIFF, repository="owner/repo", pull_request=3)
@@ -88,7 +91,7 @@ class DiagnosticsTests(unittest.TestCase):
                     stages_dir=missing,
                     categories_dir=missing,
                     context_root=missing,
-                    include_network=True,
+                    include_network=False,
                 )
             self.assertEqual(report["status"], "action")
             self.assertTrue(
@@ -202,6 +205,149 @@ class DiagnosticsTests(unittest.TestCase):
             "unknown: check — ",
             render_diagnostic({"checks": [{"unexpected": True}, "not-a-dict"]}),
         )
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            return self._body
+        return self._body[:size]
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+def _opener_for(mapping: dict[str, tuple[int, bytes]]):
+    def opener(request: Request, timeout: float | None = None) -> _FakeResponse:
+        url = request.full_url
+        if url not in mapping:
+            raise URLError("unreachable")
+        status, body = mapping[url]
+        if status >= 400:
+            raise URLError(f"HTTP {status}")
+        return _FakeResponse(status, body)
+
+    return opener
+
+
+class DiagnosticProbeTests(unittest.TestCase):
+    VALID_MANIFEST = {
+        "schema_version": "1.0",
+        "release": "1.0.0",
+        "compatible_worker_range": ">=1.0.0",
+        "provenance": "signed",
+        "artifacts": {
+            "workflow": {"name": "wf", "version": "1.0.0", "sha256": "a" * 64},
+            "python": {"name": "py", "version": "1.0.0", "sha256": "a" * 64},
+            "npm": [{"name": "cli", "version": "1.0.0", "sha256": "a" * 64}],
+            "schemas_version": "1.0",
+            "worker": {"name": "worker", "version": "1.0.0", "sha256": "a" * 64},
+        },
+    }
+
+    def test_loopback_probes_distinguish_unreachable_and_missing_model(self):
+        unreachable = _opener_for({})
+        endpoint, model = probe_provider_endpoint(
+            base_url="http://127.0.0.1:11434/api",
+            model="qwen3.5:4b",
+            opener=unreachable,
+            allow_remote=False,
+        )
+        self.assertEqual(endpoint.status, "action")
+        self.assertIn("unreachable endpoint", endpoint.detail)
+        self.assertEqual(model.status, "unknown")
+
+        present = _opener_for(
+            {
+                "http://127.0.0.1:11434/api/version": (200, b'{"version":"0.1"}'),
+                "http://127.0.0.1:11434/api/tags": (
+                    200,
+                    b'{"models":[{"name":"other:latest"}]}',
+                ),
+            }
+        )
+        endpoint, model = probe_provider_endpoint(
+            base_url="http://127.0.0.1:11434/api",
+            model="qwen3.5:4b",
+            opener=present,
+            allow_remote=False,
+        )
+        self.assertEqual(endpoint.status, "pass")
+        self.assertEqual(model.status, "action")
+        self.assertEqual(model.detail, "missing runner/model")
+
+    def test_remote_endpoint_stays_unknown_without_egress_authorization(self):
+        endpoint, model = probe_provider_endpoint(
+            base_url="https://ollama.com/api",
+            model="deepseek-v4-flash:cloud",
+            opener=_opener_for({}),
+            allow_remote=False,
+        )
+        self.assertEqual(endpoint.status, "unknown")
+        self.assertEqual(model.status, "unknown")
+
+    def test_repository_probe_redacts_tokens_and_marks_inaccessible(self):
+        canary = "ghp_CANARY_SECRET_VALUE_123456"
+        check = probe_repository_metadata(
+            "owner/repo",
+            token=canary,
+            opener=_opener_for({}),
+        )
+        self.assertEqual(check.status, "action")
+        self.assertNotIn(canary, check.detail)
+        self.assertNotIn(canary, render_diagnostic({"checks": [check.to_dict()]}))
+        missing = probe_repository_metadata(
+            "owner/repo", token=None, opener=_opener_for({})
+        )
+        self.assertEqual(missing.status, "unknown")
+
+    def test_compatibility_manifest_unknown_missing_and_valid(self):
+        self.assertEqual(check_compatibility_manifest(None).status, "unknown")
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing.json"
+            self.assertEqual(check_compatibility_manifest(missing).status, "action")
+            valid = Path(temporary) / "manifest.json"
+            valid.write_text(json.dumps(self.VALID_MANIFEST), encoding="utf-8")
+            self.assertEqual(check_compatibility_manifest(valid).status, "pass")
+
+    def test_doctor_network_success_does_not_call_provider_generate(self):
+        opener = _opener_for(
+            {
+                "http://127.0.0.1:11434/api/version": (200, b'{"version":"0.1"}'),
+                "http://127.0.0.1:11434/api/tags": (
+                    200,
+                    b'{"models":[{"name":"qwen3.5:4b"}]}',
+                ),
+            }
+        )
+        report = run_doctor(include_network=True, opener=opener, model="qwen3.5:4b")
+        self.assertEqual(report["status"], "pass")
+        names = {check["name"] for check in report["checks"]}
+        self.assertIn("endpoint", names)
+        self.assertIn("model", names)
+        self.assertNotIn("/generate", json.dumps(report))
+
+    def test_plan_records_supplied_snapshot_identity(self):
+        report = build_plan(
+            diff=DIFF,
+            repository="owner/repo",
+            pull_request=3,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+        )
+        self.assertEqual(report["identity"]["base_sha"], "a" * 40)
+        self.assertEqual(report["identity"]["head_sha"], "b" * 40)
+        self.assertEqual(report["operations"]["provider_calls"], 0)
+        self.assertEqual(report["skip_reasons"], [])
+        with self.assertRaises(ReviewInputError):
+            build_plan(base_sha="not-a-sha")
 
 
 class PatchSuggestionTests(unittest.TestCase):

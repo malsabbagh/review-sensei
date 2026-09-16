@@ -8,19 +8,30 @@ unless `--categories-dir` is supplied. Stages that declare `category_ids`
 therefore require `--categories-dir`. Malformed configuration, empty
 directories, and symlinked assets are reported as `action` rather than
 silently treated as available.
-It never calls a model, mints a broker token, or writes to GitHub. Optional
-network checks are reported as `unknown` and do not fail an otherwise healthy
-offline run. Passing `--network` keeps the report `unknown` because doctor
-never probes an endpoint.
+It never calls a model, mints a broker token, or writes to GitHub.
+
+Offline runs do not open sockets. Passing `--network` enables read-only probes
+that distinguish:
+
+- an unreachable local runner endpoint
+- a missing installed model
+- inaccessible repository metadata, only when `--repository` is supplied and a
+  `GITHUB_TOKEN`/`GH_TOKEN` is already present
+- unavailable compatibility evidence, when
+  `--compatibility-manifest` or `REVIEWSENSEI_COMPATIBILITY_MANIFEST` is set
+
+Loopback probes use GET `/api/version` and `/api/tags` only. They never POST a
+generation request and never mint a broker capability. Non-loopback endpoints
+stay `unknown` unless `--allow-data-egress` is also passed. Missing optional
+inputs (no repository, no manifest) stay `unknown` and do not fail an otherwise
+healthy probe.
 
 `review-sensei plan --diff <path>` validates a supplied diff with the same
 bounded `analyze_diff` path used by review. It prints the selected stages,
-packaged default category ids, budgets, identity fields, skip reasons, and a
-zero-call/zero-write operation summary. `plan` does not accept
-`--categories-dir`; custom catalogs are diagnosed by `doctor` and used by
-review when `--categories-dir` is supplied. Without a diff, the plan is
-explicitly incomplete. Use `--json` for the versioned machine-readable
-contract.
+category ids, budgets, identity fields including `--base-sha`/`--head-sha` when
+supplied, skip reasons, and a zero-call/zero-write operation summary. Without a
+diff, the plan is explicitly incomplete. Use `--json` for the versioned
+machine-readable contract.
 
 Exit codes:
 
@@ -28,7 +39,7 @@ Exit codes:
 | --- | --- | --- |
 | `doctor` | `0` | Configured checks passed (offline network is recorded but does not fail the run) |
 | `doctor` | `2` | Action required, or a diagnostic validation error |
-| `doctor` | `3` | An explicitly requested `--network` check (or another unknown) remains unprobed |
+| `doctor` | `3` | An explicitly requested probe remains unverifiable with current permissions |
 | `plan` | `0` | Plan is ready (diff analyzed) |
 | `plan` | `2` | Input or validation error |
 | `plan` | `3` | Plan is incomplete (no diff supplied) |

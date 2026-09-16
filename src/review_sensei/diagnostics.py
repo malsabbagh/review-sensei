@@ -11,12 +11,18 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
+from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
 from .stages import (
     MAX_STAGE_FILES,
@@ -30,6 +36,13 @@ DOCTOR_OK = 0
 DOCTOR_ACTION_REQUIRED = 2
 DOCTOR_UNKNOWN = 3
 SCHEMA_VERSION = "v1"
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SAFE_REPOSITORY_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+)
+MAX_PROBE_BYTES = 8192
+PROBE_TIMEOUT_SECONDS = 2.0
+LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,200 @@ def _package_version() -> str | None:
         return None
 
 
+def _snapshot_sha(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not _GIT_SHA_RE.fullmatch(value):
+        raise ReviewInputError(f"{label} must be a 40-character lowercase Git SHA")
+    return value
+
+
+def _is_loopback_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").strip().casefold()
+    return host in LOCAL_LOOPBACK_HOSTS
+
+
+def _bounded_probe_get(
+    url: str,
+    *,
+    opener: Callable[..., Any],
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        raise ReviewInputError("probe URL must be a credential-free http(s) URL")
+    request = Request(url, method="GET", headers=headers or {})
+    try:
+        with opener(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+            status = int(getattr(response, "status", 200))
+            body = response.read(MAX_PROBE_BYTES + 1)
+    except HTTPError as exc:
+        body = exc.read(MAX_PROBE_BYTES + 1) if exc.fp is not None else b""
+        return int(exc.code), body
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ReviewInputError(f"unreachable endpoint: {type(exc).__name__}") from exc
+    if len(body) > MAX_PROBE_BYTES:
+        raise ReviewInputError("probe response exceeds the diagnostic size limit")
+    return status, body
+
+
+def _provider_probe_url(base_url: str, suffix: str) -> str:
+    return base_url.rstrip("/") + suffix
+
+
+def check_compatibility_manifest(path: Path | None) -> DiagnosticCheck:
+    """Validate a supplied compatibility manifest without network access."""
+
+    if path is None:
+        return DiagnosticCheck(
+            "compatibility",
+            "unknown",
+            "compatibility evidence not supplied",
+        )
+    if path.is_symlink() or not path.is_file():
+        return DiagnosticCheck(
+            "compatibility",
+            "action",
+            "unavailable compatibility evidence",
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ReviewInputError("compatibility manifest must be an object")
+        validate_compatibility_manifest(payload)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ReviewSenseiError,
+        ValueError,
+    ) as exc:
+        return DiagnosticCheck(
+            "compatibility",
+            "action",
+            f"unavailable compatibility evidence: {exc}",
+        )
+    return DiagnosticCheck(
+        "compatibility",
+        "pass",
+        "compatibility manifest validated",
+    )
+
+
+def probe_provider_endpoint(
+    *,
+    base_url: str,
+    model: str,
+    opener: Callable[..., Any],
+    allow_remote: bool,
+) -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    """Read-only endpoint and model probes. Never send a generation request."""
+
+    if not allow_remote and not _is_loopback_url(base_url):
+        skipped = DiagnosticCheck(
+            "endpoint",
+            "unknown",
+            "remote endpoint not probed without explicit data-egress authorization",
+        )
+        return skipped, DiagnosticCheck(
+            "model",
+            "unknown",
+            "model inventory not probed for a remote endpoint",
+        )
+    try:
+        status, body = _bounded_probe_get(
+            _provider_probe_url(base_url, "/version"), opener=opener
+        )
+    except ReviewInputError as exc:
+        detail = str(exc)
+        failed = DiagnosticCheck("endpoint", "action", detail)
+        return failed, DiagnosticCheck("model", "unknown", "model inventory not probed")
+    if status != 200:
+        failed = DiagnosticCheck(
+            "endpoint", "action", f"unreachable endpoint (HTTP {status})"
+        )
+        return failed, DiagnosticCheck("model", "unknown", "model inventory not probed")
+    endpoint = DiagnosticCheck("endpoint", "pass", "local runner endpoint reachable")
+    try:
+        tags_status, tags_body = _bounded_probe_get(
+            _provider_probe_url(base_url, "/tags"), opener=opener
+        )
+    except ReviewInputError as exc:
+        return endpoint, DiagnosticCheck("model", "action", str(exc))
+    if tags_status != 200:
+        return endpoint, DiagnosticCheck(
+            "model", "action", f"missing runner/model (HTTP {tags_status})"
+        )
+    try:
+        payload = json.loads(tags_body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return endpoint, DiagnosticCheck(
+            "model", "action", "missing runner/model (malformed inventory)"
+        )
+    names: set[str] = set()
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if isinstance(models, list):
+        for item in models:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.add(item["name"])
+    if model not in names:
+        return endpoint, DiagnosticCheck("model", "action", "missing runner/model")
+    return endpoint, DiagnosticCheck("model", "pass", "configured model is installed")
+
+
+def probe_repository_metadata(
+    repository: str | None,
+    *,
+    token: str | None,
+    opener: Callable[..., Any],
+) -> DiagnosticCheck:
+    """Read-only GitHub metadata probe using an already-present token only."""
+
+    if repository is None:
+        return DiagnosticCheck(
+            "repository-metadata",
+            "unknown",
+            "repository metadata not checked (repository not supplied)",
+        )
+    if not _SAFE_REPOSITORY_RE.fullmatch(repository):
+        return DiagnosticCheck(
+            "repository-metadata",
+            "action",
+            "repository identity is malformed",
+        )
+    if not token:
+        return DiagnosticCheck(
+            "repository-metadata",
+            "unknown",
+            "repository metadata not checked (no token)",
+        )
+    url = f"https://api.github.com/repos/{repository}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "review-sensei-doctor",
+    }
+    try:
+        status, _body = _bounded_probe_get(url, opener=opener, headers=headers)
+    except ReviewInputError as exc:
+        return DiagnosticCheck("repository-metadata", "action", str(exc))
+    if status in {401, 403, 404}:
+        return DiagnosticCheck(
+            "repository-metadata",
+            "action",
+            "inaccessible repository metadata",
+        )
+    if status != 200:
+        return DiagnosticCheck(
+            "repository-metadata",
+            "action",
+            f"inaccessible repository metadata (HTTP {status})",
+        )
+    return DiagnosticCheck(
+        "repository-metadata", "pass", "repository metadata is readable"
+    )
+
+
 def run_doctor(
     *,
     stages_dir: Path | None = None,
@@ -73,12 +280,19 @@ def run_doctor(
     context_root: Path | None = None,
     include_network: bool = False,
     provider_mode: str | None = None,
+    repository: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    compatibility_manifest: Path | None = None,
+    allow_data_egress: bool = False,
+    opener: Callable[..., Any] = urlopen,
 ) -> dict[str, Any]:
     """Return bounded, side-effect-free installation diagnostics.
 
-    ``include_network`` is intentionally reported as unknown rather than
-    probing an endpoint.  Network probes belong to an explicitly authorized
-    integration command and must not be part of ordinary diagnostics.
+    Offline checks never open sockets.  ``include_network`` enables read-only
+    probes for a loopback runner/model, optional repository metadata when a
+    token is already present, and compatibility-evidence availability.
+    Probes never mint broker tokens or send a generation request.
 
     Custom ``stages_dir`` uses the same catalog selection as review: the
     category catalog stays unset unless ``categories_dir`` is supplied.
@@ -253,21 +467,51 @@ def run_doctor(
         )
     else:
         checks.append(DiagnosticCheck("context", "pass", "context root is readable"))
+    manifest_path = compatibility_manifest
+    if manifest_path is None:
+        configured_manifest = os.getenv(
+            "REVIEWSENSEI_COMPATIBILITY_MANIFEST", ""
+        ).strip()
+        if configured_manifest:
+            manifest_path = Path(configured_manifest)
+    if include_network or manifest_path is not None:
+        checks.append(check_compatibility_manifest(manifest_path))
     if include_network:
-        checks.append(
-            DiagnosticCheck(
-                "network", "unknown", "network probes are not run by doctor"
-            )
+        probe_base = (
+            base_url or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/api"
+        ).strip()
+        probe_model = (
+            model
+            or os.getenv("OLLAMA_MODEL")
+            or os.getenv("REVIEWSENSEI_LOCAL_MODEL")
+            or "qwen3.5:4b"
+        ).strip()
+        endpoint_check, model_check = probe_provider_endpoint(
+            base_url=probe_base,
+            model=probe_model,
+            opener=opener,
+            allow_remote=allow_data_egress,
         )
+        checks.append(endpoint_check)
+        checks.append(model_check)
+        token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+        checks.append(probe_repository_metadata(repository, token=token, opener=opener))
     else:
         checks.append(
             DiagnosticCheck("network", "unknown", "not checked (offline mode)")
         )
     if any(check.status == "action" for check in checks):
         status = "action"
-    elif include_network:
-        status = "unknown"
-    elif any(check.status == "unknown" and check.name != "network" for check in checks):
+    elif any(
+        check.status == "unknown"
+        and check.detail
+        not in {
+            "not checked (offline mode)",
+            "compatibility evidence not supplied",
+            "repository metadata not checked (repository not supplied)",
+        }
+        for check in checks
+    ):
         status = "unknown"
     else:
         status = "pass"
@@ -287,6 +531,9 @@ def build_plan(
     title: str | None = None,
     stages: Iterable[str] = (),
     provider_mode: str | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    categories_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build a read-only execution preview without provider or GitHub calls."""
 
@@ -308,6 +555,8 @@ def build_plan(
             raise ReviewInputError("title must be a non-empty string")
         if len(title.encode("utf-8")) > DEFAULT_REVIEW_LIMITS.max_title_bytes:
             raise ReviewInputError("title exceeds the configured size limit")
+    identity_base = _snapshot_sha(base_sha, label="base_sha") if base_sha else None
+    identity_head = _snapshot_sha(head_sha, label="head_sha") if head_sha else None
 
     if diff is None:
         diff_summary: dict[str, Any] = {"supplied": False, "status": "unknown"}
@@ -341,6 +590,16 @@ def build_plan(
     mode = raw_mode.strip().lower()
     if mode not in {"local", "cloud"}:
         raise ReviewInputError("provider mode must be local or cloud")
+    if categories_dir is None:
+        categories = [category.id for category in DEFAULT_CATEGORY_CATALOG.categories]
+    else:
+        catalog = load_review_categories_from_dir(categories_dir)
+        categories = [category.id for category in catalog.categories]
+    skip_reasons: list[str] = []
+    if diff_summary["status"] != "ready":
+        skip_reasons.append("diff-not-supplied")
+    if identity_base is None or identity_head is None:
+        skip_reasons.append("snapshot-identity-not-supplied")
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ready" if diff_summary["status"] == "ready" else "incomplete",
@@ -348,9 +607,11 @@ def build_plan(
             "repository": repository,
             "pull_request": pull_request,
             "title": title,
+            "base_sha": identity_base,
+            "head_sha": identity_head,
         },
         "stages": list(selected_stages),
-        "categories": [category.id for category in DEFAULT_CATEGORY_CATALOG.categories],
+        "categories": categories,
         "provider_mode": mode,
         "budgets": {
             "max_diff_bytes": DEFAULT_REVIEW_LIMITS.max_diff_bytes,
@@ -364,9 +625,7 @@ def build_plan(
             "approval": False,
         },
         "diff": diff_summary,
-        "skip_reasons": []
-        if diff_summary["status"] == "ready"
-        else ["diff-not-supplied"],
+        "skip_reasons": skip_reasons,
     }
 
 
@@ -387,6 +646,14 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         )
     if "provider_mode" in document:
         lines.append(f"provider_mode: {document['provider_mode']}")
+    identity = document.get("identity")
+    if isinstance(identity, dict):
+        if identity.get("base_sha") or identity.get("head_sha"):
+            lines.append(
+                "snapshot: "
+                f"base={identity.get('base_sha') or 'unknown'} "
+                f"head={identity.get('head_sha') or 'unknown'}"
+            )
     if "stages" in document:
         lines.append(f"stages: {len(document['stages'])}")
     if "operations" in document:
@@ -403,6 +670,9 @@ __all__ = [
     "DOCTOR_UNKNOWN",
     "DiagnosticCheck",
     "build_plan",
+    "check_compatibility_manifest",
+    "probe_provider_endpoint",
+    "probe_repository_metadata",
     "render_diagnostic",
     "run_doctor",
 ]

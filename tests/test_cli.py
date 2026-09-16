@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import URLError
 
 from review_sensei import ProviderResponse
 from review_sensei.cli import (
@@ -1291,6 +1292,18 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(args.context_root, Path("context"))
         self.assertTrue(args.network)
         self.assertTrue(args.as_json)
+        networked = _doctor_parser().parse_args(
+            [
+                "--network",
+                "--repository",
+                "owner/repo",
+                "--allow-data-egress",
+                "--compatibility-manifest",
+                "manifest.json",
+            ]
+        )
+        self.assertEqual(networked.repository, "owner/repo")
+        self.assertTrue(networked.allow_data_egress)
 
     def test_plan_parser_accepts_preview_flags(self):
         args = _plan_parser().parse_args(
@@ -1307,6 +1320,10 @@ class DoctorPlanCliTests(unittest.TestCase):
                 "review",
                 "--provider-mode",
                 "local",
+                "--base-sha",
+                "a" * 40,
+                "--head-sha",
+                "b" * 40,
                 "--json",
             ]
         )
@@ -1314,6 +1331,8 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(args.repository, "owner/repo")
         self.assertEqual(args.pull_request, 3)
         self.assertEqual(args.stage, ["review"])
+        self.assertEqual(args.base_sha, "a" * 40)
+        self.assertEqual(args.head_sha, "b" * 40)
         self.assertTrue(args.as_json)
 
     def test_doctor_cli_renders_json_and_exit_code(self):
@@ -1327,14 +1346,24 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertIn("checks", payload)
         self.assertEqual(payload["status"], "pass")
 
-    def test_doctor_cli_network_flag_exits_unknown(self):
+    def test_doctor_cli_network_flag_reports_unreachable_endpoint(self):
         stdout = io.StringIO()
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
-                status = main(["doctor", "--network", "--json"])
-        self.assertEqual(status, 3)
+                with patch(
+                    "review_sensei.diagnostics.urlopen",
+                    side_effect=URLError("connection refused"),
+                ):
+                    status = main(["doctor", "--network", "--json"])
+        self.assertEqual(status, 2)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["status"], "unknown")
+        self.assertEqual(payload["status"], "action")
+        self.assertTrue(
+            any(
+                check["name"] == "endpoint" and "unreachable" in check["detail"]
+                for check in payload["checks"]
+            )
+        )
 
     def test_plan_cli_renders_ready_plan_from_diff(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1350,6 +1379,10 @@ class DoctorPlanCliTests(unittest.TestCase):
                             str(diff_path),
                             "--repository",
                             "owner/repo",
+                            "--base-sha",
+                            "a" * 40,
+                            "--head-sha",
+                            "b" * 40,
                             "--json",
                         ]
                     )
@@ -1357,6 +1390,8 @@ class DoctorPlanCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["status"], "ready")
         self.assertEqual(payload["operations"]["provider_calls"], 0)
+        self.assertEqual(payload["identity"]["base_sha"], "a" * 40)
+        self.assertEqual(payload["identity"]["head_sha"], "b" * 40)
 
     def test_plan_cli_without_diff_exits_incomplete(self):
         stdout = io.StringIO()
