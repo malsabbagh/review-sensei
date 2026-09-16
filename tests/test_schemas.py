@@ -22,6 +22,7 @@ SCHEMA_NAMES = (
     "review-comment",
     "learning-entry",
     "learning-proposal",
+    "learning-feedback",
     "review-category",
     "stage",
     "concurrency-plan",

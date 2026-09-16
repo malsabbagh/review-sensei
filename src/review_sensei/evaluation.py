@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import ReviewInputError, ReviewSenseiError
-from .models import ProviderRequest, ProviderResponse, ReviewComment, ReviewRequest
+from .learnings import LearningStore, learning_digest
+from .models import (
+    LearningEntry,
+    ProviderRequest,
+    ProviderResponse,
+    ReviewComment,
+    ReviewRequest,
+)
 from .providers.base import ReviewProvider
 from .schemas import validate_public_document
 from .service import ReviewService
@@ -926,6 +933,8 @@ def run_case(
     case: dict[str, Any],
     service: ReviewService,
     measured: MeasuredProvider,
+    *,
+    learnings: Sequence[LearningEntry] = (),
 ) -> dict[str, Any]:
     case_id = str(case["id"])
     kind = str(case["kind"])
@@ -949,6 +958,7 @@ def run_case(
         ),
         repository="synthetic/sample",
         title=str(case["title"]),
+        learnings=tuple(learnings),
         propose_learnings=False,
         limits=DEFAULT_REVIEW_LIMITS,
     )
@@ -1061,17 +1071,32 @@ def run_case(
     }
 
 
-def evaluate_fixture(corpus: Corpus) -> dict[str, Any]:
+def evaluate_fixture(
+    corpus: Corpus,
+    *,
+    learnings: Sequence[LearningEntry] = (),
+) -> dict[str, Any]:
     from .providers.fixture import FixtureProvider
 
     cases: list[dict[str, Any]] = []
     measured = MeasuredProvider(None)
+    # Routed through the single selection seam rather than re-filtering, so the
+    # lifecycle rule is not duplicated in this module.
+    selected = LearningStore(learnings).selectable_entries
     for case in corpus.document["cases"]:
         response_path = corpus.asset_path(str(case["response_path"]))
         fixture = FixtureProvider(response_path, model="fixture-v1")
         case_measured = MeasuredProvider(fixture)
         service = ReviewService(case_measured)
-        cases.append(run_case(corpus, case, service, case_measured))
+        cases.append(
+            run_case(
+                corpus,
+                case,
+                service,
+                case_measured,
+                learnings=selected,
+            )
+        )
         measured.calls += case_measured.calls
         measured.elapsed_ms.extend(case_measured.elapsed_ms)
         measured.prompt_bytes += case_measured.prompt_bytes
@@ -1086,6 +1111,67 @@ def evaluate_fixture(corpus: Corpus) -> dict[str, Any]:
         model="fixture-v1",
         endpoint_scope="none",
     )
+
+
+COMPARISON_DELTA_KEYS = (
+    "actionable_precision",
+    "false_positive_rate",
+    "expected_finding_recall",
+    "location_validity",
+    "category_coverage",
+)
+
+
+def compare_learning_effect(
+    corpus: Corpus,
+    learnings: Sequence[LearningEntry] | LearningStore = (),
+) -> dict[str, Any]:
+    """Compare the same fixture cases with and without selected learnings.
+
+    Selection reuses ``LearningStore.selectable_entries`` so the comparison
+    reports on the same entries a review would use. Deltas are estimates, not
+    causal proof. Sparse production feedback must not be treated as a promotion
+    or effectiveness claim.
+    """
+
+    store = (
+        learnings if isinstance(learnings, LearningStore) else LearningStore(learnings)
+    )
+    selected = store.selectable_entries
+    with_learnings = evaluate_fixture(corpus, learnings=selected)
+    without_learnings = evaluate_fixture(corpus, learnings=())
+    with_quality = dict(with_learnings["quality"])
+    without_quality = dict(without_learnings["quality"])
+    # Allowlisted so a future numeric field in the fixture report cannot widen
+    # the comparison's public contract or be reported as a quality estimate.
+    # A renamed or retyped quality key fails loudly here rather than silently
+    # narrowing the reported deltas.
+    for key in COMPARISON_DELTA_KEYS:
+        if not isinstance(with_quality.get(key), (int, float)) or not isinstance(
+            without_quality.get(key), (int, float)
+        ):
+            raise ReviewInputError(
+                f"fixture quality metric {key} is missing or not numeric"
+            )
+    delta = {
+        key: with_quality[key] - without_quality[key] for key in COMPARISON_DELTA_KEYS
+    }
+    return {
+        "schema_version": "1.0",
+        "causal_claim": False,
+        "disclaimer": (
+            "Precision, recall, and false-positive deltas are estimates from the "
+            "same synthetic cases with and without selected approved learnings. "
+            "Sparse production feedback is not causal proof."
+        ),
+        "selected_learning_ids": [entry.id for entry in selected],
+        "learning_digest": learning_digest(selected),
+        "with_learnings": with_quality,
+        "without_learnings": without_quality,
+        "delta": delta,
+        "with_learnings_passed": with_learnings["passed"],
+        "without_learnings_passed": without_learnings["passed"],
+    }
 
 
 def evaluate_live(

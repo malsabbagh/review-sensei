@@ -16,6 +16,7 @@ from review_sensei.cli import (
     _doctor_parser,
     _explicit_cli_options,
     _github_parser,
+    _learnings_parser,
     _parser,
     _plan_parser,
     main,
@@ -1416,6 +1417,204 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("boom", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_learnings_parser_accepts_diagnose_and_feedback(self):
+        diagnose = _learnings_parser().parse_args(
+            ["diagnose", "--learning-root", ".", "--json"]
+        )
+        self.assertEqual(diagnose.command, "diagnose")
+        self.assertTrue(diagnose.as_json)
+        feedback = _learnings_parser().parse_args(
+            ["feedback", "--file", "feedback.json", "--json"]
+        )
+        self.assertEqual(feedback.command, "feedback")
+        self.assertEqual(str(feedback.file), "feedback.json")
+
+    def test_learnings_diagnose_requires_an_explicit_trusted_root(self):
+        # ADR 0005 forbids implicitly scanning the current working directory.
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                _learnings_parser().parse_args(["diagnose", "--json"])
+
+    def test_learnings_diagnose_cli_is_advisory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / ".github" / "review-sensei" / "learnings"
+            directory.mkdir(parents=True)
+            (directory / "rule.json").write_text(
+                json.dumps(
+                    {
+                        "id": "stale-rule",
+                        "title": "Stale",
+                        "rule": "Replace me.",
+                        "scope": ["*"],
+                        "reviewed_at": "2020-01-01T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "learnings",
+                        "diagnose",
+                        "--learning-root",
+                        str(root),
+                        "--json",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertFalse(report["automatic_mutation"])
+        self.assertTrue(report["human_decision_required"])
+
+    def test_learnings_feedback_cli_states_absence_is_not_approval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "unverified",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(["learnings", "feedback", "--file", str(path)])
+        self.assertEqual(status, 0)
+        self.assertIn("Absence of feedback is not approval.", stdout.getvalue())
+        self.assertIn("unverified 1", stdout.getvalue())
+        # Text mode must distinguish "no store loaded" from "all have feedback".
+        self.assertIn("not enumerated: no approved store loaded", stdout.getvalue())
+
+    def test_learnings_feedback_cli_text_lists_learnings_without_feedback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / ".github" / "review-sensei" / "learnings"
+            directory.mkdir(parents=True)
+            (directory / "rule.json").write_text(
+                json.dumps(
+                    {
+                        "id": "unused-rule",
+                        "title": "Unused",
+                        "rule": "Keep adapters isolated.",
+                        "scope": ["*"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path = root / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "useful",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "learnings",
+                        "feedback",
+                        "--file",
+                        str(path),
+                        "--learning-root",
+                        str(root),
+                    ]
+                )
+        self.assertEqual(status, 0)
+        self.assertIn("known learnings without feedback unused-rule", stdout.getvalue())
+
+    def test_learnings_feedback_cli_marks_known_id_scope_unset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "useful",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(["learnings", "feedback", "--file", str(path), "--json"])
+        self.assertEqual(status, 0)
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(summary["known_learning_ids_scope"], "unset")
+        self.assertEqual(summary["known_learning_ids_without_feedback"], [])
+
+    def _run_compare_learnings(self, *, passed: bool) -> tuple[int, str]:
+        # The corpus and comparison are stubbed so this exercises only the exit
+        # code contract, with no dependency on the working directory.
+        report = {"schema_version": "1.0", "with_learnings_passed": passed}
+        stdout = io.StringIO()
+        with patch("review_sensei.evaluation.load_corpus", return_value=object()):
+            with patch(
+                "review_sensei.evaluation.compare_learning_effect",
+                return_value=report,
+            ):
+                with redirect_stderr(io.StringIO()):
+                    with patch("sys.stdout", stdout):
+                        status = main(
+                            ["evaluate", "--mode", "fixture", "--compare-learnings"]
+                        )
+        return status, stdout.getvalue()
+
+    def test_evaluate_compare_learnings_preserves_fixture_pass_fail(self):
+        status, rendered = self._run_compare_learnings(passed=True)
+        self.assertEqual(status, 0)
+        self.assertTrue(json.loads(rendered)["with_learnings_passed"])
+
+        # Adding the flag must not mask failing fixture cases with exit 0.
+        status, rendered = self._run_compare_learnings(passed=False)
+        self.assertEqual(status, 1)
+        self.assertFalse(json.loads(rendered)["with_learnings_passed"])
+
+    def test_evaluate_compare_learnings_is_fixture_only(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "evaluate",
+                    "--mode",
+                    "live",
+                    "--compare-learnings",
+                    "--allow-live-model",
+                    "--provider-version",
+                    "local",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--compare-learnings is only valid with --mode fixture",
+            stderr.getvalue(),
+        )
 
 
 class PromotionCliTests(unittest.TestCase):

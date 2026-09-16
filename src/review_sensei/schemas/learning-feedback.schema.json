@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/learning-feedback.schema.json",
+  "title": "ReviewSensei learning feedback v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "records"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "records": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["learning_id", "finding_id", "outcome"],
+        "properties": {
+          "learning_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*$"
+          },
+          "finding_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "\\S",
+            "description": "Must contain a non-whitespace character. maxLength counts characters; the loader additionally enforces an authoritative 256 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["useful", "incorrect", "obsolete", "unverified"]
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S",
+            "description": "Must contain a non-whitespace character. maxLength counts characters; the loader additionally enforces an authoritative 512 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "records": [
+        {
+          "learning_id": "provider-boundary",
+          "finding_id": "finding-1",
+          "outcome": "useful"
+        }
+      ]
+    }
+  ]
+}

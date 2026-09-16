@@ -403,6 +403,33 @@ must be a checkout of the target branch or target commit, not the untrusted
 head checkout. This prevents a pull request from changing its own review
 context before it is merged.
 
+Existing files may omit lifecycle metadata. Optional bounded fields include
+`owner`, `provenance`, `reviewed_at`, `expires_at`, `supersedes`, and
+`superseded_by`. Status may be `active`, `retired`, or `superseded`.
+Superseded and retired entries stay on disk for provenance and Git rollback,
+but they are not selected for later prompts. Diagnostics for stale,
+conflicting, missing-superseder, or cyclic entries are advisory; ReviewSensei
+never deletes or rewrites approved knowledge automatically.
+
+```bash
+review-sensei learnings diagnose --learning-root /path/to/target-branch --json
+```
+
+Opt-in finding feedback is a separate `learning-feedback` document with
+outcomes `useful`, `incorrect`, `obsolete`, and `unverified`. Absence of
+feedback is not approval, and feedback never becomes trusted review context.
+
+Fixture evaluation can compare the same cases with and without selected
+approved learnings. The report records precision/recall/false-positive deltas
+as estimates, not causal proof:
+
+```bash
+review-sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json \
+  --compare-learnings --learning-root /path/to/target-branch
+```
+
+See [ADR 0036](docs/adr/0036-learning-lifecycle-diagnostics-and-feedback.md).
+
 ## Local Ollama
 
 ```bash

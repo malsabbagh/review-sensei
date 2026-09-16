@@ -374,6 +374,53 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIsNone(cache.get(first))
         self.assertEqual(cache.get(second), ("second",))
 
+    def test_cache_key_changes_when_learning_digest_changes(self):
+        from review_sensei.learnings import learning_digest
+
+        first_entries = (
+            LearningEntry(
+                id="one",
+                title="One",
+                rule="Use A",
+            ),
+        )
+        second_entries = (
+            LearningEntry(
+                id="one",
+                title="One",
+                rule="Use B",
+            ),
+        )
+        first = ReviewContextCacheKey(
+            "o/r",
+            1,
+            "a" * 40,
+            "b" * 40,
+            "e",
+            "m",
+            "p",
+            "a" * 64,
+            "b" * 64,
+            learning_digest(first_entries),
+        )
+        second = ReviewContextCacheKey(
+            "o/r",
+            1,
+            "a" * 40,
+            "b" * 40,
+            "e",
+            "m",
+            "p",
+            "a" * 64,
+            "b" * 64,
+            learning_digest(second_entries),
+        )
+        cache = ReviewContextCache()
+        cache.put(first, ("kept",))
+        self.assertNotEqual(first.digest(), second.digest())
+        self.assertEqual(cache.get(first), ("kept",))
+        self.assertIsNone(cache.get(second))
+
     def test_learning_diagnostics_accept_naive_expiry_timestamps(self):
         store = LearningStore(
             (

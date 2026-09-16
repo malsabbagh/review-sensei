@@ -3,13 +3,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
+    COMPARISON_DELTA_KEYS,
     ExpectedFinding,
     MeasuredProvider,
     _one_to_one_matches,
     build_report,
+    compare_learning_effect,
     endpoint_scope,
     engine_digest,
     evaluate_fixture,
@@ -20,7 +23,8 @@ from review_sensei.evaluation import (
     require_supported_promotion,
     run_case,
 )
-from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.learnings import LearningStore
+from review_sensei.models import LearningEntry, ReviewComment, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.stages import ReviewCategory, Stage
 from review_sensei.validation import ReviewLimits
@@ -427,6 +431,118 @@ class EvaluationTests(unittest.TestCase):
             promotion_record_from_reports(reports, status="supported", **kwargs)
         with self.assertRaises(ReviewInputError):
             require_supported_promotion(minted, reports)
+
+    def test_compare_learning_effect_reports_estimates_not_causal_proof(self) -> None:
+        learning = LearningEntry(
+            id="provider-boundary",
+            title="Provider boundary",
+            rule="Keep provider calls behind adapters.",
+            scope=("src/**",),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            comparison = compare_learning_effect(corpus, (learning,))
+
+        self.assertFalse(comparison["causal_claim"])
+        self.assertIn("not causal proof", comparison["disclaimer"])
+        self.assertEqual(comparison["selected_learning_ids"], ["provider-boundary"])
+        self.assertEqual(len(comparison["learning_digest"]), 64)
+        self.assertIn("actionable_precision", comparison["delta"])
+
+    def test_compare_learning_effect_excludes_superseded_entries(self) -> None:
+        active = LearningEntry(
+            id="provider-boundary",
+            title="Provider boundary",
+            rule="Keep provider calls behind adapters.",
+            scope=("src/**",),
+        )
+        superseded_status = LearningEntry(
+            id="retired-boundary",
+            title="Retired boundary",
+            rule="Old rule.",
+            scope=("src/**",),
+            status="superseded",
+            superseded_by="provider-boundary",
+        )
+        # Active status but a superseder set must also stay out of the estimate.
+        active_but_superseded = LearningEntry(
+            id="shadowed-boundary",
+            title="Shadowed boundary",
+            rule="Shadowed rule.",
+            scope=("src/**",),
+            superseded_by="provider-boundary",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            comparison = compare_learning_effect(
+                corpus,
+                (active, superseded_status, active_but_superseded),
+            )
+
+        self.assertEqual(comparison["selected_learning_ids"], ["provider-boundary"])
+
+    def test_compare_learning_effect_delta_keys_are_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            comparison = compare_learning_effect(corpus)
+
+        self.assertEqual(
+            set(comparison["delta"]),
+            set(COMPARISON_DELTA_KEYS),
+        )
+        # A future numeric field in the fixture report must not widen the
+        # comparison's public contract.
+        self.assertNotIn("elapsed_total_ms", comparison["delta"])
+
+    def test_compare_learning_effect_fails_loudly_on_renamed_quality_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            report = evaluate_fixture(corpus)
+            renamed = json.loads(json.dumps(report))
+            renamed["quality"].pop("actionable_precision")
+
+            with patch(
+                "review_sensei.evaluation.evaluate_fixture", return_value=renamed
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "actionable_precision"):
+                    compare_learning_effect(corpus)
+
+    def test_evaluate_fixture_applies_the_shared_selection_rule(self) -> None:
+        shadowed = LearningEntry(
+            id="shadowed-boundary",
+            title="Shadowed boundary",
+            rule="Shadowed rule.",
+            scope=("src/**",),
+            superseded_by="provider-boundary",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            # Passed directly rather than pre-selected, so the store rule must
+            # still exclude it here.
+            report = evaluate_fixture(corpus, learnings=(shadowed,))
+
+        self.assertTrue(report["passed"])
+
+    def test_compare_learning_effect_accepts_a_learning_store(self) -> None:
+        learning = LearningEntry(
+            id="provider-boundary",
+            title="Provider boundary",
+            rule="Keep provider calls behind adapters.",
+            scope=("src/**",),
+        )
+        store = LearningStore((learning,))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            from_store = compare_learning_effect(corpus, store)
+            from_sequence = compare_learning_effect(corpus, (learning,))
+
+        self.assertEqual(
+            from_store["selected_learning_ids"],
+            from_sequence["selected_learning_ids"],
+        )
+        self.assertEqual(
+            from_store["learning_digest"], from_sequence["learning_digest"]
+        )
 
 
 if __name__ == "__main__":

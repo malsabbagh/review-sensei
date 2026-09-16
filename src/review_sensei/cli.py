@@ -11,7 +11,14 @@ from pathlib import Path
 from .context import RepositoryContextStore, build_review_context_selection
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
-from .learnings import DEFAULT_LEARNING_DIRECTORY, load_repository_learnings
+from .learnings import (
+    DEFAULT_LEARNING_DIRECTORY,
+    LearningStore,
+    build_learning_diagnostic_report,
+    load_learning_feedback,
+    load_repository_learnings,
+    summarize_learning_feedback,
+)
 from .models import LearningEntry, ReviewRequest
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
@@ -522,6 +529,31 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Acknowledge that synthetic corpus data may leave the machine.",
     )
+    parser.add_argument(
+        "--learning-root",
+        type=Path,
+        help="Trusted target-branch checkout used for --compare-learnings",
+    )
+    parser.add_argument(
+        "--learning-directory",
+        type=Path,
+        default=DEFAULT_LEARNING_DIRECTORY,
+        help="Repository-relative learnings directory for --compare-learnings",
+    )
+    parser.add_argument(
+        "--learning-id",
+        action="append",
+        default=[],
+        help="Limit --compare-learnings to selected approved learning ids",
+    )
+    parser.add_argument(
+        "--compare-learnings",
+        action="store_true",
+        help=(
+            "Compare fixture cases with and without selected approved learnings. "
+            "Reports estimates, not causal proof."
+        ),
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -570,8 +602,51 @@ def _plan_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _learnings_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei learnings",
+        description=(
+            "Inspect approved learning lifecycle diagnostics or opt-in finding "
+            "feedback without mutating trusted knowledge."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    diagnose = subparsers.add_parser(
+        "diagnose",
+        help="Report stale, conflicting, or untraceable approved learnings",
+    )
+    # ADR 0005 forbids implicitly scanning the current working directory, so
+    # the trusted target/base checkout must be supplied explicitly.
+    diagnose.add_argument(
+        "--learning-root",
+        type=Path,
+        required=True,
+        help="Explicit trusted target/base checkout root to inspect",
+    )
+    diagnose.add_argument(
+        "--learning-directory",
+        type=Path,
+        default=DEFAULT_LEARNING_DIRECTORY,
+    )
+    diagnose.add_argument("--json", action="store_true", dest="as_json")
+    feedback = subparsers.add_parser(
+        "feedback",
+        help="Summarize opt-in finding feedback without treating silence as approval",
+    )
+    feedback.add_argument("--file", type=Path, required=True)
+    feedback.add_argument("--learning-root", type=Path)
+    feedback.add_argument(
+        "--learning-directory",
+        type=Path,
+        default=DEFAULT_LEARNING_DIRECTORY,
+    )
+    feedback.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
 def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .evaluation import (
+        compare_learning_effect,
         endpoint_scope,
         evaluate_fixture,
         evaluate_live,
@@ -584,8 +659,34 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
         if args.allow_data_egress:
             raise ReviewInputError("--allow-data-egress is only valid with --mode live")
         corpus = load_corpus(args.corpus)
+        if args.compare_learnings:
+            store = (
+                load_repository_learnings(
+                    args.learning_root, directory=args.learning_directory
+                )
+                if args.learning_root
+                else LearningStore()
+            )
+            selected = store.selectable_entries
+            if args.learning_id:
+                wanted = set(args.learning_id)
+                selected = tuple(entry for entry in selected if entry.id in wanted)
+            report = compare_learning_effect(corpus, selected)
+            rendered = json.dumps(report, indent=2) + "\n"
+            if args.output:
+                args.output.write_text(rendered, encoding="utf-8")
+            else:
+                sys.stdout.write(rendered)
+            # The comparison already ran the fixture evaluation with the
+            # selected learnings, so adding this flag must not drop the
+            # fixture pass/fail contract callers depend on.
+            return 0 if report["with_learnings_passed"] else 1
         report = evaluate_fixture(corpus)
     else:
+        if args.compare_learnings:
+            raise ReviewInputError(
+                "--compare-learnings is only valid with --mode fixture"
+            )
         if not args.allow_live_model:
             raise ReviewInputError("--mode live requires --allow-live-model")
         if not args.provider_version:
@@ -1064,17 +1165,88 @@ def _run_plan_command(arguments: list[str]) -> int:
         return 2
 
 
+def _run_learnings_command(arguments: list[str]) -> int:
+    args = _learnings_parser().parse_args(arguments)
+    try:
+        if args.command == "diagnose":
+            store = load_repository_learnings(
+                args.learning_root, directory=args.learning_directory
+            )
+            report = build_learning_diagnostic_report(store)
+            if args.as_json:
+                sys.stdout.write(json.dumps(report, indent=2) + "\n")
+            else:
+                diagnostics = report["diagnostics"]
+                if not isinstance(diagnostics, list) or not diagnostics:
+                    sys.stdout.write("No learning lifecycle diagnostics.\n")
+                else:
+                    for item in diagnostics:
+                        if not isinstance(item, dict):
+                            continue
+                        related = item.get("related_ids") or []
+                        detail = item.get("detail") or ""
+                        suffix = f" {detail}".rstrip() if detail else ""
+                        related_text = (
+                            f" related={','.join(str(value) for value in related)}"
+                            if related
+                            else ""
+                        )
+                        sys.stdout.write(
+                            f"{item.get('code')} {item.get('entry_id')}"
+                            f"{related_text}{suffix}\n"
+                        )
+                sys.stdout.write(
+                    "Diagnostics are advisory; approved entries are unchanged.\n"
+                )
+            return 0
+        records = load_learning_feedback(args.file)
+        known_ids: tuple[str, ...] | None = None
+        if args.learning_root:
+            store = load_repository_learnings(
+                args.learning_root, directory=args.learning_directory
+            )
+            known_ids = tuple(entry.id for entry in store.all_entries)
+        summary = summarize_learning_feedback(records, known_learning_ids=known_ids)
+        if args.as_json:
+            sys.stdout.write(json.dumps(summary, indent=2) + "\n")
+        else:
+            by_outcome = summary["by_outcome"]
+            sys.stdout.write(f"records {summary['record_count']}\n")
+            if isinstance(by_outcome, dict):
+                for outcome, count in by_outcome.items():
+                    sys.stdout.write(f"{outcome} {count}\n")
+            without_feedback = summary["known_learning_ids_without_feedback"]
+            if summary["known_learning_ids_scope"] == "unset":
+                sys.stdout.write(
+                    "known learnings without feedback (not enumerated: no "
+                    "approved store loaded; pass --learning-root)\n"
+                )
+            elif isinstance(without_feedback, list):
+                # Shown so text readers can tell an empty list apart from an
+                # unavailable one.
+                sys.stdout.write(
+                    "known learnings without feedback "
+                    f"{', '.join(str(value) for value in without_feedback) or 'none'}\n"
+                )
+            sys.stdout.write("Absence of feedback is not approval.\n")
+        return 0
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 1
+
+
 _OFFLINE_COMMANDS = {
     "doctor": _run_doctor_command,
     "plan": _run_plan_command,
+    "learnings": _run_learnings_command,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
-    # required argparse subparsers. doctor/plan use the same first-token
-    # command map as prepare-diff, evaluate, github, and promotion.
+    # required argparse subparsers. doctor/plan/learnings use the same
+    # first-token command map as prepare-diff, evaluate, github, and promotion.
     if args_list and args_list[0] in _OFFLINE_COMMANDS:
         return _OFFLINE_COMMANDS[args_list[0]](args_list[1:])
     if args_list and args_list[0] == "promotion":

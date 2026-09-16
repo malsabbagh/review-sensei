@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -10,12 +11,21 @@ from typing import Iterable
 
 from .errors import LearningLoadError, ReviewInputError
 from .models import LearningEntry
+from .schemas import validate_public_document
+from .validation import read_bounded_utf8
 
 DEFAULT_LEARNING_DIRECTORY = Path(".github/review-sensei/learnings")
 MAX_LEARNING_FILES = 100
 MAX_LEARNING_FILE_BYTES = 64 * 1024
+MAX_FEEDBACK_FILE_BYTES = 256 * 1024
+MAX_FEEDBACK_RECORDS = 256
+MAX_FEEDBACK_FINDING_ID_BYTES = 256
+MAX_FEEDBACK_NOTE_BYTES = 512
 MAX_SCOPE_WITNESSES = 256
+FEEDBACK_SCHEMA_VERSION = "1.0"
+FEEDBACK_OUTCOMES = ("useful", "incorrect", "obsolete", "unverified")
 _GLOB_TOKEN = re.compile(r"\*|\?|\[[^\]]*\]")
+_LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -27,10 +37,26 @@ class LearningDiagnostic:
     related_ids: tuple[str, ...] = ()
     detail: str = ""
 
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {"code": self.code, "entry_id": self.entry_id}
+        if self.related_ids:
+            value["related_ids"] = list(self.related_ids)
+        if self.detail:
+            value["detail"] = self.detail
+        return value
+
 
 @dataclass(frozen=True)
 class LearningFeedback:
-    """Opt-in, non-authoritative finding feedback for evaluation."""
+    """Opt-in, non-authoritative finding feedback for evaluation.
+
+    Construction validates eagerly and raises `LearningLoadError` (a
+    `ReviewSenseiError`) for both type and value violations, including direct
+    construction rather than only the loader path. This is deliberate: the
+    schema path and direct construction then fail closed identically instead of
+    coercing values. Non-CLI hosts that construct this type from untrusted
+    input should catch `LearningLoadError`.
+    """
 
     learning_id: str
     finding_id: str
@@ -38,8 +64,64 @@ class LearningFeedback:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"useful", "incorrect", "obsolete", "unverified"}:
+        if not isinstance(self.learning_id, str) or not _LEARNING_ID.fullmatch(
+            self.learning_id
+        ):
+            raise LearningLoadError("learning feedback learning_id is invalid")
+        if not isinstance(self.finding_id, str) or not self.finding_id.strip():
+            raise LearningLoadError("learning feedback finding_id is invalid")
+        # The byte bound is authoritative; the schema's maxLength counts
+        # characters, so a multibyte value can satisfy the schema and fail here.
+        if len(self.finding_id.encode("utf-8")) > MAX_FEEDBACK_FINDING_ID_BYTES:
+            raise LearningLoadError(
+                "learning feedback finding_id exceeds "
+                f"{MAX_FEEDBACK_FINDING_ID_BYTES} UTF-8 bytes"
+            )
+        # Typed before the membership test so a hostile value cannot reach it.
+        if not isinstance(self.outcome, str) or self.outcome not in FEEDBACK_OUTCOMES:
             raise LearningLoadError("learning feedback outcome is invalid")
+        if self.note is not None:
+            if not isinstance(self.note, str) or not self.note.strip():
+                raise LearningLoadError("learning feedback note is invalid")
+            if len(self.note.encode("utf-8")) > MAX_FEEDBACK_NOTE_BYTES:
+                raise LearningLoadError(
+                    "learning feedback note exceeds "
+                    f"{MAX_FEEDBACK_NOTE_BYTES} UTF-8 bytes"
+                )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "LearningFeedback":
+        """Build a record from a raw mapping, raising `LearningLoadError`.
+
+        Non-string field values are neither coerced nor dropped; they reach
+        `__post_init__` and are rejected there.
+        """
+
+        if not isinstance(value, dict):
+            raise LearningLoadError("learning feedback record must be a JSON object")
+        allowed = {"learning_id", "finding_id", "outcome", "note"}
+        if any(key not in allowed for key in value):
+            raise LearningLoadError(
+                "learning feedback record contains an unsupported field"
+            )
+        # Raw values reach __post_init__ so direct construction fails closed the
+        # same way as the schema path instead of being coerced or dropped.
+        return cls(
+            learning_id=value.get("learning_id", ""),
+            finding_id=value.get("finding_id", ""),
+            outcome=value.get("outcome", ""),
+            note=value.get("note"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "learning_id": self.learning_id,
+            "finding_id": self.finding_id,
+            "outcome": self.outcome,
+        }
+        if self.note is not None:
+            value["note"] = self.note
+        return value
 
 
 def _aware_utc(value: str) -> datetime:
@@ -135,6 +217,25 @@ class LearningStore:
         self.entries = tuple(
             entry for entry in sorted_entries if entry.status == "active"
         )
+        # The one lifecycle selection rule for entries that may reach a review
+        # or an evaluation comparison. Stated independently of `entries` so
+        # relaxing that filter cannot silently widen this set.
+        self.selectable_entries = tuple(
+            entry
+            for entry in sorted_entries
+            if entry.status == "active" and entry.superseded_by is None
+        )
+
+    @property
+    def selection_digest(self) -> str:
+        """Canonical digest of the review-time selection for cache keys.
+
+        Bound to ``selectable_entries``, so edits to retired or superseded
+        entries do not invalidate incremental state and edits to entries that
+        can reach a review always do.
+        """
+
+        return learning_digest(self.selectable_entries)
 
     def for_paths(
         self,
@@ -147,10 +248,8 @@ class LearningStore:
         changed_paths = tuple(path for path in paths if path)
         selected = tuple(
             entry
-            for entry in self.entries
-            if entry.status == "active"
-            and entry.superseded_by is None
-            and (
+            for entry in self.selectable_entries
+            if (
                 (not changed_paths and "*" in entry.scope)
                 or any(
                     fnmatchcase(path, pattern)
@@ -256,6 +355,102 @@ class LearningStore:
             (item.code, item.entry_id, item.related_ids): item for item in diagnostics
         }
         return tuple(unique[key] for key in sorted(unique)[:MAX_LEARNING_FILES])
+
+
+def learning_digest(entries: Iterable[LearningEntry]) -> str:
+    """Return a SHA-256 digest of exactly the entries supplied.
+
+    This is a scope-agnostic primitive: the caller owns the selection set, so
+    two callers passing different sets get different digests. Incremental cache
+    keys bind the review-time set, so use ``LearningStore.selection_digest``
+    rather than digesting an arbitrary mix of active and retired entries.
+    """
+
+    payload = [entry.to_dict() for entry in sorted(entries, key=lambda item: item.id)]
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def load_learning_feedback(path: Path) -> tuple[LearningFeedback, ...]:
+    """Load opt-in finding feedback; records never become trusted review context."""
+
+    try:
+        text = read_bounded_utf8(
+            path, maximum=MAX_FEEDBACK_FILE_BYTES, label="learning feedback"
+        )
+        value = json.loads(text)
+    except (OSError, UnicodeError, ValueError, ReviewInputError) as exc:
+        raise LearningLoadError("learning feedback could not be loaded") from exc
+    try:
+        validate_public_document(value, "learning-feedback")
+    except ReviewInputError as exc:
+        raise LearningLoadError("learning feedback failed schema validation") from exc
+    if not isinstance(value, dict):
+        raise LearningLoadError("learning feedback must be a JSON object")
+    # Intentionally redundant with the schema's `const`, and must stay: it is
+    # the only version guard if the schema layer is ever changed, stubbed, or
+    # bypassed. `test_schema_version_recheck_holds_without_the_schema_layer`
+    # covers this branch, so it is not dead code.
+    if value.get("schema_version") != FEEDBACK_SCHEMA_VERSION:
+        raise LearningLoadError("learning feedback schema_version is unsupported")
+    records = value.get("records")
+    if not isinstance(records, list) or len(records) > MAX_FEEDBACK_RECORDS:
+        raise LearningLoadError("learning feedback records are invalid")
+    return tuple(LearningFeedback.from_dict(item) for item in records)
+
+
+def summarize_learning_feedback(
+    records: Iterable[LearningFeedback],
+    *,
+    known_learning_ids: Iterable[str] | None = None,
+) -> dict[str, object]:
+    """Count feedback outcomes without treating silence as approval.
+
+    ``known_learning_ids`` of ``None`` means no approved store was loaded. The
+    summary then reports ``known_learning_ids_scope="unset"`` so an empty
+    ``known_learning_ids_without_feedback`` cannot be read as "every known
+    learning has feedback".
+    """
+
+    items = tuple(records)
+    by_outcome = {outcome: 0 for outcome in FEEDBACK_OUTCOMES}
+    seen_ids: set[str] = set()
+    for item in items:
+        by_outcome[item.outcome] += 1
+        seen_ids.add(item.learning_id)
+    known = tuple(dict.fromkeys(known_learning_ids or ()))
+    without_feedback = [
+        identifier for identifier in known if identifier not in seen_ids
+    ]
+    return {
+        "record_count": len(items),
+        "by_outcome": by_outcome,
+        "absence_is_not_approval": True,
+        "known_learning_ids_scope": "unset" if known_learning_ids is None else "store",
+        "known_learning_ids_without_feedback": without_feedback,
+        "trusted_for_review": False,
+    }
+
+
+def build_learning_diagnostic_report(
+    store: LearningStore,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Serialize bounded lifecycle diagnostics for maintainer review."""
+
+    diagnostics = store.diagnostics(now=now)
+    return {
+        "schema_version": "1.0",
+        "entry_count": len(store.all_entries),
+        "active_count": len(store.entries),
+        "learning_digest": learning_digest(store.all_entries),
+        "diagnostics": [item.to_dict() for item in diagnostics],
+        "automatic_mutation": False,
+        "human_decision_required": bool(diagnostics),
+    }
 
 
 def load_repository_learnings(

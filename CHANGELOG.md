@@ -54,6 +54,26 @@
   PR-scoped reusable workflow concurrency group (`max_active=1`,
   cancel-in-progress for reviews). Logs for admission/cancellation stay
   metadata-only.
+- Added issue #41 learning lifecycle diagnostics, opt-in finding feedback, and
+  fixture with/without-learnings comparison. Existing learning files continue
+  to load without the new metadata; superseded/retired entries stay off the
+  prompt; diagnostics never mutate approved knowledge; absence of feedback is
+  not approval; comparison reports estimates rather than causal proof.
+  `LearningFeedback.from_dict` no longer coerces or drops non-string fields,
+  `load_learning_feedback` re-checks `schema_version` independent of the schema
+  layer, learning selection is shared through `LearningStore.selectable_entries`,
+  and `learnings feedback` reports `known_learning_ids_scope` so an empty
+  absence list cannot be read as approval. `evaluate --mode fixture
+  --compare-learnings` keeps the fixture pass/fail exit contract instead of
+  always exiting `0`, comparison deltas are restricted to an allowlist of
+  quality keys, and `LearningStore.selection_digest` is the canonical
+  review-time digest for incremental cache keys. `learnings diagnose` now
+  requires an explicit `--learning-root` instead of defaulting to the current
+  directory, per ADR 0005; the lifecycle selection rule is stated once in
+  `LearningStore.selectable_entries` and reused by `for_paths`,
+  `evaluate_fixture`, and the comparison; a renamed fixture quality key now
+  fails the comparison loudly; and the feedback text output reports whether
+  the absence list was enumerated.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/
