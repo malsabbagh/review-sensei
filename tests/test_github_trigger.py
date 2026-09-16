@@ -1,9 +1,14 @@
+import json
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from review_sensei.hosting.github.setup import _tagged_workflow
 from review_sensei.hosting.github.trigger import (
     TriggerResolution,
     choose_head_sha,
@@ -15,6 +20,17 @@ from review_sensei.hosting.github.trigger import (
     resolve_review_comment_event,
     write_github_output,
 )
+from review_sensei.hosting.github.trigger import (
+    main as trigger_main,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+REPO_CALLER = ROOT / ".github" / "workflows" / "review-sensei-review.yml"
+EXAMPLE_CALLER = ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+INLINE_RESOLVER_START = (
+    'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY" <<\'PY\'\n'
+)
+INLINE_RESOLVER_END = "\n          PY\n"
 
 
 def _pull(*, head_sha: str = "b" * 40, base_sha: str = "a" * 40) -> dict[str, object]:
@@ -39,6 +55,17 @@ def _resolution(**overrides: str) -> TriggerResolution:
     }
     values.update(overrides)
     return TriggerResolution(**values)
+
+
+def inline_resolver_script(text: str) -> str:
+    start = text.find(INLINE_RESOLVER_START)
+    if start < 0:
+        raise AssertionError("caller is missing the inline trigger resolver")
+    start += len(INLINE_RESOLVER_START)
+    end = text.find(INLINE_RESOLVER_END, start)
+    if end < 0:
+        raise AssertionError("inline trigger resolver terminator is missing")
+    return textwrap.dedent(text[start:end] + "\n")
 
 
 class GitHubTriggerTests(unittest.TestCase):
@@ -201,6 +228,72 @@ class GitHubTriggerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "GITHUB_OUTPUT is unavailable"):
                 write_github_output(resolution)
+
+
+class InlineCallerResolverTests(unittest.TestCase):
+    def test_generated_callers_embed_the_same_inline_resolver(self):
+        repo = REPO_CALLER.read_text(encoding="utf-8")
+        example = EXAMPLE_CALLER.read_text(encoding="utf-8")
+        generated = _tagged_workflow("v4")
+        self.assertEqual(inline_resolver_script(repo), inline_resolver_script(example))
+        self.assertEqual(
+            inline_resolver_script(repo), inline_resolver_script(generated)
+        )
+
+    def test_inline_fallback_matches_trigger_module_outputs(self):
+        script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
+        pull = _pull(head_sha="016017b" + ("0" * 33))
+        cases = (
+            ("issue_comment", "@sensei please re-scan commit 016017b", "false"),
+            ("issue_comment", "@sensei what changed?", "false"),
+            ("pull_request", "", "true"),
+            ("pull_request_review_comment", "@sensei fixed?", "false"),
+            ("workflow_dispatch", "", "false"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pull_path = root / "pull.json"
+            pull_path.write_text(json.dumps(pull), encoding="utf-8")
+            for event, body, auto_review in cases:
+                with self.subTest(event=event, body=body):
+                    module_output = root / f"{event}-module.out"
+                    inline_output = root / f"{event}-inline.out"
+                    with mock.patch.dict(
+                        os.environ, {"GITHUB_OUTPUT": str(module_output)}
+                    ):
+                        status = trigger_main(
+                            [
+                                "--event",
+                                event,
+                                "--comment-body",
+                                body,
+                                "--pull-json",
+                                str(pull_path),
+                                "--auto-review",
+                                auto_review,
+                            ]
+                        )
+                    self.assertEqual(status, 0)
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-",
+                            str(pull_path),
+                            auto_review,
+                            event,
+                            body,
+                        ],
+                        input=script,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env={**os.environ, "GITHUB_OUTPUT": str(inline_output)},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        module_output.read_text(encoding="utf-8"),
+                        inline_output.read_text(encoding="utf-8"),
+                    )
 
 
 if __name__ == "__main__":
