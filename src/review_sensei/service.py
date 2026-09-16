@@ -287,10 +287,10 @@ class ReviewService:
         self, result: ReviewResult, coverage: CoverageManifest
     ) -> ReviewResult:
         status = result.review_status
-        if not coverage.fully_reviewed:
+        if status == "complete" and not coverage.fully_reviewed:
             if not coverage.enumeration_complete:
                 status = "incomplete"
-            elif status in {"complete", "incomplete"}:
+            else:
                 status = "partial"
         return replace(result, coverage=coverage, review_status=status)
 
@@ -313,7 +313,34 @@ class ReviewService:
         coverage = plan.coverage
         last_status = "incomplete"
         last_model = request.model
+
+        def tracker_exhausted() -> bool:
+            return (
+                tracker.elapsed_ms() >= tracker.budget.timeout_ms
+                or tracker.provider_calls >= tracker.budget.max_provider_calls
+            )
+
         for chunk in plan.reviewable_chunks:
+            if tracker_exhausted() or budgeted.exhausted:
+                coverage = apply_chunk_outcomes(
+                    coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    outcome="budget-exhausted",
+                    reason="provider-call-budget",
+                    limits=request.limits,
+                )
+                for item in plan.reviewable_chunks:
+                    if item.index > chunk.index:
+                        coverage = apply_chunk_outcomes(
+                            coverage,
+                            paths=item.paths,
+                            hunk_indexes=item.hunk_indexes,
+                            outcome="budget-exhausted",
+                            reason="provider-call-budget",
+                            limits=request.limits,
+                        )
+                break
             related = ", ".join(chunk.related_paths)
             note = (
                 "This chunk is part of a larger change. Related changed paths "

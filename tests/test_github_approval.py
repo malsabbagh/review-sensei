@@ -1,12 +1,17 @@
 import unittest
 
-from review_sensei.coverage import CoverageManifest
+from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.hosting.github.approval import evaluate_auto_approval
 from review_sensei.models import ReviewComment, ReviewResult
 
 
 def complete_coverage() -> CoverageManifest:
-    return CoverageManifest(files=(), hunks=(), enumeration_complete=True)
+    return CoverageManifest(
+        files=(FileCoverage(path="src/app.py", outcome="reviewed"),),
+        hunks=(),
+        enumeration_complete=True,
+        enumerated_paths=("src/app.py",),
+    )
 
 
 def clean_result() -> ReviewResult:
@@ -310,6 +315,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     ),
                 ),
                 enumeration_complete=False,
+                enumerated_paths=("src/a.py", "src/b.py"),
             ),
         )
         decision = evaluate_auto_approval(
@@ -358,6 +364,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     ),
                 ),
                 enumeration_complete=True,
+                enumerated_paths=("src/app.py",),
             ),
         )
         blocked = evaluate_auto_approval(

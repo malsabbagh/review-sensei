@@ -311,18 +311,10 @@ def plan_change(
     file_outcomes: dict[str, tuple[str, str | None]] = {}
     hunk_outcomes: dict[int, tuple[str, str | None]] = {}
     reviewable: list[DiffFileRecord] = []
-    records = analysis.file_records or (
-        DiffFileRecord(
-            old_path=None,
-            new_path=analysis.changed_paths[0] if analysis.changed_paths else None,
-            text=diff if diff.endswith("\n") else f"{diff}\n",
-            header="",
-            added_lines=frozenset(),
-            deleted_lines=frozenset(),
-            hunks=analysis.hunk_records,
-            binary=bool(analysis.binary_paths),
-        ),
-    )
+    records = analysis.file_records
+    if not records and analysis.changed_paths:
+        raise ReviewInputError("diff file records are incomplete")
+    records = records or ()
 
     for record in records:
         outcome, reason = _classify_file(record, analysis=analysis)
@@ -449,11 +441,15 @@ def apply_chunk_outcomes(
         raise ReviewInputError("coverage outcome is invalid")
     _validate_reason(reason)
     files: list[FileCoverage] = []
+    updated_paths = set(paths)
     for file_entry in coverage.files:
-        if file_entry.path in paths:
+        if file_entry.path in updated_paths:
             files.append(replace(file_entry, outcome=outcome, reason=reason))
+            updated_paths.discard(file_entry.path)
         else:
             files.append(file_entry)
+    for path in sorted(updated_paths):
+        files.append(FileCoverage(path=path, outcome=outcome, reason=reason))
     hunks: list[HunkCoverage] = []
     for hunk_entry in coverage.hunks:
         if hunk_entry.index in hunk_indexes:

@@ -322,6 +322,7 @@ class CoveragePlanningTests(unittest.TestCase):
                     FileCoverage(path="src/b.py", outcome="reviewed"),
                 ),
                 enumeration_complete=True,
+                enumerated_paths=("src/a.py", "src/b.py"),
             ),
         )
         chunked = ReviewResult(
@@ -335,6 +336,7 @@ class CoveragePlanningTests(unittest.TestCase):
                     FileCoverage(path="src/b.py", outcome="reviewed"),
                 ),
                 enumeration_complete=True,
+                enumerated_paths=("src/a.py", "src/b.py"),
             ),
         )
         report = compare_chunked_against_baseline(

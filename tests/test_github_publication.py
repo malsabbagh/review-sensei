@@ -2039,6 +2039,7 @@ deleted file mode 100644
             coverage=CoverageManifest(
                 files=(FileCoverage(path="src/app.py", outcome="reviewed"),),
                 enumeration_complete=True,
+                enumerated_paths=("src/app.py",),
             ),
         )
         http, _calls = make_http(

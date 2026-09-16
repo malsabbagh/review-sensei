@@ -193,6 +193,10 @@ class CoverageManifest:
         hunk_keys = [(entry.index, entry.path) for entry in self.hunks]
         if len(hunk_keys) != len(set(hunk_keys)):
             raise ReviewInputError("coverage hunks must be unique")
+        if self.enumeration_complete and not self.files:
+            raise ReviewInputError(
+                "coverage enumeration_complete requires file outcomes"
+            )
         if self.enumerated_paths:
             if len(self.enumerated_paths) != len(set(self.enumerated_paths)):
                 raise ReviewInputError("coverage enumerated_paths must be unique")
@@ -215,7 +219,7 @@ class CoverageManifest:
 
     @property
     def fully_reviewed(self) -> bool:
-        if not self.enumeration_complete:
+        if not self.enumeration_complete or not self.files:
             return False
         return all(entry.outcome == "reviewed" for entry in self.files) and all(
             entry.outcome == "reviewed" for entry in self.hunks
@@ -272,8 +276,8 @@ class CoverageManifest:
             raise ReviewInputError("coverage fully_reviewed must be a boolean")
         raw_enumerated_paths = value.get("enumerated_paths")
         if raw_enumerated_paths is None:
-            enumerated_paths = tuple(entry.path for entry in parsed_files)
-        elif not isinstance(raw_enumerated_paths, list) or any(
+            raise ReviewInputError("coverage enumerated_paths is required")
+        if not isinstance(raw_enumerated_paths, list) or any(
             not isinstance(path, str) or not path for path in raw_enumerated_paths
         ):
             raise ReviewInputError("coverage enumerated_paths must be a string array")
