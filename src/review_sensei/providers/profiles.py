@@ -8,7 +8,7 @@ and endpoint.  No environment lookup happens in this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Mapping
 
 from ..errors import ProviderError
@@ -34,6 +34,7 @@ class ProviderProfile:
     structured_output: StructuredOutput = "json_object"
     permitted_fallback: FallbackPolicy = "none"
     stage_models: tuple[tuple[str, str], ...] = ()
+    _stage_models_map: dict[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.provider.strip() or not self.model.strip():

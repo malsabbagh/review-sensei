@@ -131,6 +131,9 @@ class ProviderRoutingTests(unittest.TestCase):
         with patch(
             "review_sensei.providers.routing.get_provider_profile",
             side_effect=profile_lookup,
+        ), patch(
+            "review_sensei.providers.registry.get_provider_profile",
+            side_effect=profile_lookup,
         ):
             run_provider, mapping = bind_stage_providers(
                 registry=default_registry(),
