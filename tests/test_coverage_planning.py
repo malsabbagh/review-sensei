@@ -20,7 +20,9 @@ from review_sensei.models import (
 from review_sensei.planning import (
     TotalWorkBudget,
     _classify_file,
+    _coverage_for,
     is_generated_path,
+    merge_chunk_coverage,
     plan_change,
 )
 from review_sensei.schemas import validate_public_document
@@ -313,6 +315,59 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertNotIn("side", result.comments[0].to_dict())
         validate_public_document(result.to_dict(), "review-result")
         self.assertEqual(coverage_approval_state(result.coverage), "unknown")
+
+    def test_missing_hunk_outcome_does_not_inherit_reviewed_file_status(self):
+        analysis = analyze_diff(MULTI_HUNK)
+        coverage = _coverage_for(
+            analysis,
+            file_outcomes={"src/a.py": ("reviewed", None)},
+            hunk_outcomes={1: ("reviewed", None)},
+            limits=ReviewLimits(),
+        )
+        outcomes = {entry.index: entry.outcome for entry in coverage.hunks}
+        self.assertEqual(outcomes[1], "reviewed")
+        self.assertEqual(outcomes[2], "unsupported")
+
+    def test_merge_chunk_coverage_keeps_worse_outcome(self):
+        aggregate = CoverageManifest(
+            files=(
+                FileCoverage(path="src/a.py", outcome="reviewed"),
+                FileCoverage(path="src/b.py", outcome="reviewed"),
+            ),
+            enumerated_paths=("src/a.py", "src/b.py"),
+        )
+        chunk = CoverageManifest(
+            files=(
+                FileCoverage(
+                    path="src/a.py",
+                    outcome="partially-reviewed",
+                    reason="cross-file-relationship",
+                ),
+            ),
+            enumerated_paths=("src/a.py",),
+        )
+        merged = merge_chunk_coverage(
+            aggregate,
+            chunk,
+            paths=("src/a.py",),
+            hunk_indexes=(),
+        )
+        outcomes = {entry.path: (entry.outcome, entry.reason) for entry in merged.files}
+        self.assertEqual(
+            outcomes["src/a.py"],
+            ("partially-reviewed", "cross-file-relationship"),
+        )
+        self.assertEqual(outcomes["src/b.py"], ("reviewed", None))
+
+    def test_chunk_subruns_do_not_attach_per_chunk_coverage(self):
+        one_file = TWO_FILES.split("diff --git a/src/b.py")[0]
+        provider = FakeProvider(['{"summary":"one","comments":[]}'])
+        run = ReviewService(provider).run(
+            ReviewRequest(diff=one_file, orchestrate_large_changes=False),
+            attach_change_coverage=False,
+        )
+        self.assertIsNotNone(run.result)
+        self.assertIsNone(run.result.coverage)
 
     def test_chunk_failure_keeps_valid_findings(self):
         limits = ReviewLimits(max_diff_files=1)

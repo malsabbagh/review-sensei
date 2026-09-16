@@ -264,10 +264,10 @@ def _coverage_for(
         path = hunk.new_path or hunk.old_path
         if path is None:
             continue
-        outcome, reason = hunk_outcomes.get(
-            hunk.index,
-            file_outcomes.get(path, ("unsupported", "incomplete-enumeration")),
-        )
+        if hunk.index in hunk_outcomes:
+            outcome, reason = hunk_outcomes[hunk.index]
+        else:
+            outcome, reason = ("unsupported", "incomplete-enumeration")
         hunks.append(
             HunkCoverage(index=hunk.index, path=path, outcome=outcome, reason=reason)
         )
@@ -429,6 +429,77 @@ def plan_change(
     )
 
 
+_COVERAGE_OUTCOME_RANK = {
+    "reviewed": 0,
+    "excluded-by-policy": 1,
+    "partially-reviewed": 2,
+    "unsupported": 3,
+    "budget-exhausted": 4,
+}
+
+
+def _worse_coverage_outcome(
+    left: tuple[str, str | None],
+    right: tuple[str, str | None],
+) -> tuple[str, str | None]:
+    left_rank = _COVERAGE_OUTCOME_RANK.get(left[0], len(_COVERAGE_OUTCOME_RANK))
+    right_rank = _COVERAGE_OUTCOME_RANK.get(right[0], len(_COVERAGE_OUTCOME_RANK))
+    if left_rank >= right_rank:
+        return left
+    return right
+
+
+def merge_chunk_coverage(
+    aggregate: CoverageManifest,
+    chunk: CoverageManifest,
+    *,
+    paths: tuple[str, ...],
+    hunk_indexes: tuple[int, ...],
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> CoverageManifest:
+    """Merge chunk-scoped coverage into an aggregate manifest conservatively."""
+
+    path_set = set(paths)
+    hunk_set = set(hunk_indexes)
+    chunk_files = {
+        entry.path: (entry.outcome, entry.reason)
+        for entry in chunk.files
+        if entry.path in path_set
+    }
+    chunk_hunks = {
+        entry.index: (entry.outcome, entry.reason)
+        for entry in chunk.hunks
+        if entry.index in hunk_set
+    }
+    files: list[FileCoverage] = []
+    for entry in aggregate.files:
+        if entry.path in chunk_files:
+            outcome, reason = _worse_coverage_outcome(
+                (entry.outcome, entry.reason),
+                chunk_files[entry.path],
+            )
+            files.append(replace(entry, outcome=outcome, reason=reason))
+        else:
+            files.append(entry)
+    hunks: list[HunkCoverage] = []
+    for hunk_entry in aggregate.hunks:
+        if hunk_entry.index in chunk_hunks:
+            outcome, reason = _worse_coverage_outcome(
+                (hunk_entry.outcome, hunk_entry.reason),
+                chunk_hunks[hunk_entry.index],
+            )
+            hunks.append(replace(hunk_entry, outcome=outcome, reason=reason))
+        else:
+            hunks.append(hunk_entry)
+    return CoverageManifest(
+        files=tuple(files),
+        hunks=tuple(hunks),
+        enumeration_complete=aggregate.enumeration_complete,
+        enumerated_paths=aggregate.enumerated_paths,
+        limits=limits,
+    )
+
+
 def apply_chunk_outcomes(
     coverage: CoverageManifest,
     *,
@@ -475,5 +546,6 @@ __all__ = [
     "TotalWorkBudget",
     "apply_chunk_outcomes",
     "is_generated_path",
+    "merge_chunk_coverage",
     "plan_change",
 ]

@@ -44,7 +44,12 @@ from .outcomes import (
     RunOutcome,
     sanitize_diagnostic,
 )
-from .planning import LargeChangePlan, apply_chunk_outcomes, plan_change
+from .planning import (
+    LargeChangePlan,
+    apply_chunk_outcomes,
+    merge_chunk_coverage,
+    plan_change,
+)
 from .providers.base import ReviewProvider
 from .stages import (
     ReviewCategory,
@@ -322,7 +327,7 @@ class ReviewService:
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
         coverage = plan.coverage
-        last_status = "incomplete"
+        chunks_completed = 0
         last_model = request.model
 
         def tracker_exhausted() -> bool:
@@ -375,6 +380,7 @@ class ReviewService:
                     profile=profile,
                     tracker=tracker,
                     provider_override=budgeted,
+                    attach_change_coverage=False,
                 )
             except (ReviewInputError, ContextLoadError, ReviewFormatError) as exc:
                 if (
@@ -448,6 +454,7 @@ class ReviewService:
                     break
                 continue
             chunk_result = chunk_run.result
+            chunks_completed += 1
             accumulated_summary = (
                 f"{accumulated_summary}\n\n{chunk_result.summary}"
                 if accumulated_summary
@@ -455,7 +462,6 @@ class ReviewService:
             )
             accumulated_comments.extend(chunk_result.comments)
             accumulated_proposals.extend(chunk_result.learning_proposals)
-            last_status = chunk_result.review_status
             last_model = chunk_result.model
             if chunk_result.review_status != "complete":
                 coverage = apply_chunk_outcomes(
@@ -466,8 +472,23 @@ class ReviewService:
                     reason="cross-file-relationship",
                     limits=request.limits,
                 )
+            elif chunk_result.coverage is not None:
+                coverage = merge_chunk_coverage(
+                    coverage,
+                    chunk_result.coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    limits=request.limits,
+                )
             if budgeted.exhausted:
                 break
+        planned_chunks = len(plan.reviewable_chunks)
+        if chunks_completed == 0:
+            review_status = "incomplete"
+        elif chunks_completed < planned_chunks or not coverage.fully_reviewed:
+            review_status = "partial"
+        else:
+            review_status = "complete"
         try:
             result = ReviewResult(
                 summary=accumulated_summary
@@ -477,7 +498,7 @@ class ReviewService:
                 model=last_model,
                 learning_proposals=tuple(accumulated_proposals),
                 limits=request.limits,
-                review_status=last_status,
+                review_status=review_status,
                 source_context_coverage=self._source_context_coverage(request),
             )
         except ReviewInputError as exc:
@@ -547,6 +568,7 @@ class ReviewService:
         budget: ResourceBudget | None = None,
         tracker: ResourceBudgetTracker | None = None,
         provider_override: ReviewProvider | None = None,
+        attach_change_coverage: bool = True,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
@@ -1022,7 +1044,8 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
-        result = self._attach_coverage(result, change_plan.coverage)
+        if attach_change_coverage:
+            result = self._attach_coverage(result, change_plan.coverage)
         status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
             tracker=tracker,
