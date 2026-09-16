@@ -68,9 +68,20 @@ diff changed paths --> active lens selection
                            |
                            v
                     GitHub or other publisher adapters
+                           |
+                           v
+                      structured RunOutcome
 
 ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
+ReviewService.run ----> ResourceBudget admission ----> RunOutcome
 ```
+
+`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
+cap provider calls, transport retries, prompt/output bytes, and elapsed time.
+One structural-correction retry remains distinct from transport retry. Opt-in
+`RecoveryArtifact` values can republish a validated result without invoking a
+model or rewriting trusted learnings or configuration. See
+[ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub

@@ -51,6 +51,7 @@ Process: `docs/process/adr-process.md`
 | [0040](0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89 | Preserve MIT Community source; official ops ≠ proprietary code; future commercial layer is separate |
 | [0041](0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42 | openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 | [0042](0042-incremental-reviews-and-finding-lifecycle.md) | Proposed | Incremental reviews and stable finding lifecycle identities | #38 | Coverage modes, fingerprint lifecycle, optional in-memory cache, no omission-as-fixed |
+| [0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36 | Machine-readable outcomes, hard admission budgets, publication-only recovery |
 
 ## Policy
 

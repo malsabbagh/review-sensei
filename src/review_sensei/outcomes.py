@@ -9,15 +9,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 import unicodedata
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Mapping
 
 from .errors import ReviewInputError
 from .schemas import validate_public_document
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
+from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, utf8_size
 
 RUN_STATUSES = frozenset(
     {
@@ -43,7 +47,54 @@ DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS = 2
 DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS = 120_000
 DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES = 1_048_576
 DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES = 1_048_576
+DEFAULT_RECOVERY_TTL_SECONDS = 6 * 60 * 60
+MAX_RECOVERY_TTL_SECONDS = 24 * 60 * 60
 PUBLIC_SCHEMA_VERSION = "1.0"
+FAILURE_RUN_STATUSES = frozenset(
+    {"provider_failed", "budget_exhausted", "publication_failed"}
+)
+PUBLIC_DIAGNOSTICS = frozenset(
+    {
+        "already_published",
+        "cancelled",
+        "deadline_exceeded",
+        "draft_pr",
+        "fork_not_allowed",
+        "invalid_provider_output",
+        "output_budget",
+        "partial_coverage",
+        "pr_not_open",
+        "prompt_budget",
+        "provider_call_limit",
+        "provider_failed",
+        "publication_ambiguous",
+        "publication_failed",
+        "recovery_artifact_expired",
+        "recovery_artifact_identity_mismatch",
+        "recovery_artifact_incomplete",
+        "recovery_artifact_missing",
+        "recovery_artifact_stale",
+        "recovery_artifact_tampered",
+        "secret_redacted",
+        "skipped_pr_state",
+        "skipped_repository_mismatch",
+        "skipped_stale_base",
+        "skipped_stale_head",
+        "stage_failed",
+        "transport_retry_exhausted",
+        "writes_disabled",
+    }
+)
+_ACTIONS_SUMMARY_TITLES = {
+    "reviewed": "Review completed",
+    "partial": "Review completed with partial coverage",
+    "skipped_stale": "Review skipped because the pull request is stale",
+    "skipped_policy": "Review skipped by policy",
+    "provider_failed": "Review failed during provider execution",
+    "budget_exhausted": "Review stopped after exhausting a resource budget",
+    "publication_failed": "Review publication failed",
+    "already_published": "Review already published for this head",
+}
 
 
 def _digest(value: str) -> str:
@@ -199,10 +250,10 @@ class ResourceBudget:
     """Declarative wire contract for one run's resource ceilings.
 
     Embedders publish these bounds alongside ``RunOutcome`` so callers can
-    reason about budget exhaustion consistently.  Planned enforcement lives in
-    ``ReviewService``'s provider-call loop (tracked with the outcomes/evidence
-    contract slices in issues #36 and #37); this PR publishes the wire shape
-    only and does not wire runtime enforcement yet.
+    reason about budget exhaustion consistently.  ``ReviewService.run``
+    enforces the ceilings: transport retries stay distinct from the one
+    structural-correction attempt, and a hard deadline/admission check happens
+    before each provider call.
 
     Defaults are public downward-only ceilings.  Direct construction validates
     field types only; ``create(limits=...)`` is the fail-closed entry point that
@@ -272,6 +323,23 @@ class ResourceBudget:
         )
         budget.validate_against_limits(limits)
         return budget
+
+    @classmethod
+    def for_limits(
+        cls, limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    ) -> "ResourceBudget":
+        """Return the public budget profile clamped to ``limits``."""
+
+        return cls.create(
+            limits=limits,
+            max_prompt_bytes=min(
+                DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES, limits.max_prompt_bytes
+            ),
+            max_output_bytes=min(
+                DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES,
+                limits.max_provider_response_bytes,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -478,3 +546,216 @@ class RecoveryArtifact:
         }
         validate_public_document(value, "recovery-artifact")
         return value
+
+
+def sanitize_diagnostic(value: str | None) -> str | None:
+    """Return a closed diagnostic token, never caller or provider text."""
+
+    if value is None:
+        return None
+    if value in PUBLIC_DIAGNOSTICS:
+        return value
+    return "secret_redacted"
+
+
+def run_outcome_exit_code(status: str) -> int:
+    """Return the CLI exit status for one structured run outcome."""
+
+    return 1 if status in FAILURE_RUN_STATUSES else 0
+
+
+def render_actions_summary(outcome: RunOutcome) -> str:
+    """Return a human-readable Actions summary without source or secrets."""
+
+    title = _ACTIONS_SUMMARY_TITLES.get(outcome.status, "Review run finished")
+    lines = [
+        f"## {title}",
+        f"- status: `{outcome.status}`",
+        f"- provider_calls: {outcome.provider_calls}",
+        f"- retry_attempts: {outcome.retry_attempts}",
+        f"- prompt_bytes: {outcome.prompt_bytes}",
+        f"- response_bytes: {outcome.response_bytes}",
+        f"- elapsed_ms: {outcome.elapsed_ms}",
+    ]
+    if outcome.pull_request_number is not None:
+        lines.append(f"- pull_request: {outcome.pull_request_number}")
+    if outcome.diagnostic:
+        lines.append(f"- diagnostic: `{sanitize_diagnostic(outcome.diagnostic)}`")
+    if outcome.stage_summary:
+        lines.append("- stages:")
+        for name, status in outcome.stage_summary.items():
+            lines.append(f"  - `{name}`: {status}")
+    return "\n".join(lines) + "\n"
+
+
+def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -> None:
+    """Write the machine-readable outcome and optional Actions annotations."""
+
+    outcome = replace(outcome, diagnostic=sanitize_diagnostic(outcome.diagnostic))
+    document = json.dumps(outcome.to_dict(), indent=2) + "\n"
+    if output_path is not None:
+        output_path.write_text(document, encoding="utf-8")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with Path(summary_path).open("a", encoding="utf-8") as handle:
+            handle.write(render_actions_summary(outcome))
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with Path(github_output).open("a", encoding="utf-8") as handle:
+            handle.write(f"outcome_status={outcome.status}\n")
+
+
+def recovery_expires_at(
+    *,
+    ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
+    now: datetime | None = None,
+) -> str:
+    """Return an aware ISO-8601 expiry no later than the public TTL ceiling."""
+
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        raise ReviewInputError("recovery ttl_seconds must be an integer")
+    if ttl_seconds < 1 or ttl_seconds > MAX_RECOVERY_TTL_SECONDS:
+        raise ReviewInputError("recovery ttl_seconds exceeds the configured ceiling")
+    created = _aware_now(now).replace(microsecond=0)
+    return (created + timedelta(seconds=ttl_seconds)).isoformat()
+
+
+def load_recovery_artifact(path: Path) -> RecoveryArtifact:
+    """Load one identity-bound recovery artifact from disk."""
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ReviewInputError("recovery artifact is missing") from exc
+    except OSError as exc:
+        raise ReviewInputError("recovery artifact could not be read") from exc
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ReviewInputError("recovery artifact integrity check failed") from exc
+    if not isinstance(document, Mapping):
+        raise ReviewInputError("recovery artifact integrity check failed")
+    payload = dict(document)
+    payload.pop("schema_version", None)
+    try:
+        result = payload.get("result")
+        if not isinstance(result, Mapping):
+            raise ReviewInputError("recovery artifact integrity check failed")
+        return RecoveryArtifact(
+            repository=payload.get("repository"),  # type: ignore[arg-type]
+            pull_request_number=payload.get("pull_request_number"),  # type: ignore[arg-type]
+            base_sha=payload.get("base_sha"),  # type: ignore[arg-type]
+            head_sha=payload.get("head_sha"),  # type: ignore[arg-type]
+            result=result,
+            created_at=payload.get("created_at"),  # type: ignore[arg-type]
+            expires_at=payload.get("expires_at"),  # type: ignore[arg-type]
+            result_sha256=payload.get("result_sha256"),  # type: ignore[arg-type]
+        )
+    except (KeyError, TypeError, ValueError, ReviewInputError) as exc:
+        if isinstance(exc, ReviewInputError):
+            raise
+        raise ReviewInputError("recovery artifact integrity check failed") from exc
+
+
+def diagnostic_for_recovery_error(exc: BaseException) -> str:
+    """Map a recovery validation failure to a closed diagnostic token."""
+
+    message = str(exc)
+    if "is missing" in message:
+        return "recovery_artifact_missing"
+    if "has expired" in message:
+        return "recovery_artifact_expired"
+    if "identity does not match" in message:
+        return "recovery_artifact_identity_mismatch"
+    if "incomplete" in message:
+        return "recovery_artifact_incomplete"
+    if "integrity" in message or "could not be read" in message:
+        return "recovery_artifact_tampered"
+    return "recovery_artifact_tampered"
+
+
+def outcome_for_skip_reason(
+    skip_reason: str | None,
+    *,
+    repository: str | None = None,
+    pull_request_number: int | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> RunOutcome:
+    """Return a skip outcome for an ineligible execution plan."""
+
+    status = (
+        "skipped_stale" if skip_reason and "stale" in skip_reason else "skipped_policy"
+    )
+    diagnostic = sanitize_diagnostic(skip_reason) if skip_reason else "skipped_pr_state"
+    return RunOutcome(
+        status,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        diagnostic=diagnostic,
+    )
+
+
+@dataclass
+class ResourceBudgetTracker:
+    """Mutable admission counters for one ``ResourceBudget`` envelope."""
+
+    budget: ResourceBudget
+    monotonic: Callable[[], float] = time.monotonic
+    sleeper: Callable[[float], None] = time.sleep
+    started: float = field(init=False)
+    provider_calls: int = 0
+    transport_retries: int = 0
+    structural_retries: int = 0
+    prompt_bytes: int = 0
+    response_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        self.started = self.monotonic()
+
+    def elapsed_ms(self) -> int:
+        return max(0, int((self.monotonic() - self.started) * 1000))
+
+    def remaining_seconds(self) -> float:
+        remaining_ms = self.budget.timeout_ms - self.elapsed_ms()
+        return max(0.0, remaining_ms / 1000)
+
+    def admit_call(self, prompt: str) -> str | None:
+        """Return a diagnostic token when a provider call cannot start."""
+
+        if self.elapsed_ms() >= self.budget.timeout_ms:
+            return "deadline_exceeded"
+        if self.provider_calls >= self.budget.max_provider_calls:
+            return "provider_call_limit"
+        size = utf8_size(prompt, label="review prompt")
+        if size > self.budget.max_prompt_bytes:
+            return "prompt_budget"
+        return None
+
+    def record_call(self, prompt: str, response_text: str = "") -> None:
+        self.provider_calls += 1
+        self.prompt_bytes += utf8_size(prompt, label="review prompt")
+        if response_text:
+            self.response_bytes += utf8_size(response_text, label="provider response")
+
+    def admit_transport_retry(self, retry_after_seconds: float | None) -> str | None:
+        if self.transport_retries >= self.budget.max_retry_attempts:
+            return "transport_retry_exhausted"
+        if self.elapsed_ms() >= self.budget.timeout_ms:
+            return "deadline_exceeded"
+        wait = 0.0 if retry_after_seconds is None else float(retry_after_seconds)
+        if wait > self.remaining_seconds():
+            return "deadline_exceeded"
+        return None
+
+    def sleep_transport_retry(self, retry_after_seconds: float | None) -> None:
+        wait = (
+            0.0
+            if not retry_after_seconds
+            else min(float(retry_after_seconds), self.remaining_seconds())
+        )
+        if wait > 0:
+            self.sleeper(wait)
+        self.transport_retries += 1

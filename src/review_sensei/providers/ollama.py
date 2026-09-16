@@ -21,7 +21,11 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body, urllib_error_is_transient
+from .transport import (
+    parse_retry_after_seconds,
+    read_bounded_body,
+    urllib_error_is_transient,
+)
 
 MAX_API_KEY_BYTES = 4_096
 
@@ -190,6 +194,7 @@ class OllamaProvider:
             raise ProviderError(
                 f"Ollama request failed with HTTP {exc.code}",
                 transient=transient,
+                retry_after_seconds=parse_retry_after_seconds(exc),
             ) from exc
         except ProviderError as exc:
             # Keep errors from an injected transport from reflecting a bearer

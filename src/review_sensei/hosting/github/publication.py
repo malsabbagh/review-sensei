@@ -13,6 +13,7 @@ from ...context import finding_lifecycle_for_comment
 from ...diff import analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewComment, ReviewResult
+from ...outcomes import RunOutcome, sanitize_diagnostic
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, prepare_publishable_review
@@ -324,6 +325,53 @@ def finding_declares_blocking(body: object) -> bool:
 class PublicationResult:
     status: str
     review_id: int | None = None
+
+
+_PUBLICATION_TO_RUN_STATUS = {
+    "published": "reviewed",
+    "already_published": "already_published",
+    "skipped_stale_head": "skipped_stale",
+    "skipped_stale_base": "skipped_stale",
+    "skipped_pr_state": "skipped_policy",
+    "skipped_repository_mismatch": "skipped_policy",
+    "disabled": "skipped_policy",
+}
+
+
+def outcome_from_publication(
+    result: PublicationResult,
+    *,
+    repository: str | None = None,
+    pull_request_number: int | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+    diagnostic: str | None = None,
+) -> RunOutcome:
+    """Project a GitHub publication result onto the public run-outcome contract."""
+
+    status = _PUBLICATION_TO_RUN_STATUS.get(result.status, "publication_failed")
+    token = diagnostic
+    if token is None and result.status != "published":
+        token = "writes_disabled" if result.status == "disabled" else result.status
+        if token not in {
+            "already_published",
+            "skipped_stale_head",
+            "skipped_stale_base",
+            "skipped_pr_state",
+            "skipped_repository_mismatch",
+            "writes_disabled",
+            "publication_failed",
+            "publication_ambiguous",
+        }:
+            token = "publication_failed"
+    return RunOutcome(
+        status,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        diagnostic=sanitize_diagnostic(token),
+    )
 
 
 @dataclass(frozen=True)

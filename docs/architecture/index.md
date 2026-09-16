@@ -95,6 +95,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0040`](../adr/0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89; MIT Community source preserved; official ops distinct from copyright; future commercial layer separate |
 | [`0041`](../adr/0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42; openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 | [`0042`](../adr/0042-incremental-reviews-and-finding-lifecycle.md) | Proposed | Incremental reviews and stable finding lifecycle identities | #38; coverage modes, fingerprint lifecycle, optional in-memory metadata cache |
+| [`0043`](../adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36; `ReviewService.run`, hard budgets, publication-only recovery |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

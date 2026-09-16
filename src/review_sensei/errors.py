@@ -33,9 +33,16 @@ class ProviderError(ReviewSenseiError):
 
     error_category = "provider"
 
-    def __init__(self, message: str = "", *, transient: bool = False) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        transient: bool = False,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.transient = bool(transient)
+        self.retry_after_seconds = _bounded_retry_after(retry_after_seconds)
 
 
 class UnknownProviderProfileError(ProviderError):
@@ -58,3 +65,16 @@ class AdmissionCancelled(ReviewSenseiError):
     """Raised when in-process admission waits are cancelled before a lease."""
 
     error_category = "concurrency"
+
+
+def _bounded_retry_after(value: object) -> float | None:
+    """Return a finite retry delay, or ``None`` when the hint is unusable."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    seconds = float(value)
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return None
+    return min(seconds, 60.0)

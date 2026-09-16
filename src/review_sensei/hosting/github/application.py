@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 
 from ...conversation import ConversationService
 from ...models import ReviewResult
+from ...outcomes import RecoveryArtifact
 from ...providers.base import ReviewProvider
 from ...verifier import CandidateFinding
 from .broker_client import BrokerClient
@@ -110,6 +111,54 @@ class GitHubApplication:
             snapshot=snapshot,
             snapshot_sha256=snapshot_sha256,
             evidence_policy=evidence_policy,
+        )
+
+    def recover_review(
+        self,
+        *,
+        options: GitHubWriteOptions,
+        oidc_token: str | None,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
+        artifact: RecoveryArtifact,
+        diff: str,
+        app_slug: str,
+        now=None,
+    ) -> PublicationResult:
+        """Publish a retained result without invoking a model or writing learnings."""
+
+        if not options.github_writes or not options.auto_review:
+            return PublicationResult(status="disabled")
+        artifact.validate(
+            repository=repository,
+            pull_request_number=pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            now=now,
+        )
+        result = ReviewResult.from_dict(artifact.result)
+        if result.review_status == "incomplete":
+            raise GitHubPublicationError("recovery artifact result is incomplete")
+        token = self.broker.exchange(
+            oidc_token or self.broker.request_oidc_token(),
+            capability="review_publish",
+        )
+        return self.reviewer.publish(
+            token=token,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            result=result,
+            diff=diff,
+            app_slug=app_slug,
+            auto_approve=options.auto_approve,
         )
 
     def publish_learning(

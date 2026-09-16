@@ -16,6 +16,7 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
         errno.ENETUNREACH,
     }
 )
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:
@@ -36,6 +37,28 @@ def urllib_error_is_transient(exc: URLError) -> bool:
     ):
         return True
     return False
+
+
+def parse_retry_after_seconds(error: Any) -> float | None:
+    """Return a bounded Retry-After delay from a transport error.
+
+    Only integer or decimal second hints are honored. HTTP-date values are
+    ignored so retry timing stays deterministic and clock-independent.
+    """
+
+    headers = getattr(error, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if isinstance(raw, bool) or value <= 0 or value != value or value == float("inf"):
+        return None
+    return min(value, MAX_RETRY_AFTER_SECONDS)
 
 
 def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:

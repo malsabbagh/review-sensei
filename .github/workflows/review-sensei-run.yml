@@ -492,6 +492,9 @@ jobs:
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
           LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
+          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
         run: |
           if [[ -z "$OLLAMA_API_KEY" ]]; then
             echo '::error::OLLAMA_API_KEY is required for cloud mode' >&2
@@ -511,9 +514,15 @@ jobs:
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
           if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
+          if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
+          if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
+            review_args+=(--recovery-artifact recovery-artifact.json)
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
+            --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" \
+            --output review.json --outcome outcome.json
 
       # success() && !cancelled() skips a pointless API call after a failed
       # provider step or cancelled run. Publish still has its own cancellation
@@ -600,7 +609,7 @@ jobs:
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --allow-write "${review_args[@]}"
+            --outcome publication-outcome.json --allow-write "${review_args[@]}"
 
       - name: Generate and publish cloud mention reply
         id: reply
@@ -676,7 +685,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
-          path: review.json
+          path: |
+            review.json
+            outcome.json
+            recovery-artifact.json
           if-no-files-found: error
           retention-days: 7
 
@@ -820,6 +832,9 @@ jobs:
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
           LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
+          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
         run: |
           args=()
           if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
@@ -843,9 +858,15 @@ jobs:
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
           if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
+          if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
+          if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
+            review_args+=(--recovery-artifact recovery-artifact.json)
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" --output review.json
+            --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" \
+            --output review.json --outcome outcome.json
 
       # success() && !cancelled() skips a pointless API call after a failed
       # provider step or cancelled run. Publish still has its own cancellation
@@ -932,7 +953,7 @@ jobs:
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --allow-write "${review_args[@]}"
+            --outcome publication-outcome.json --allow-write "${review_args[@]}"
 
       - name: Generate and publish trusted local mention reply
         id: reply
@@ -1004,6 +1025,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
-          path: review.json
+          path: |
+            review.json
+            outcome.json
+            recovery-artifact.json
           if-no-files-found: error
           retention-days: 7
