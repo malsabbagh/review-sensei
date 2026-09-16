@@ -388,6 +388,62 @@ class RepositoryLearningTests(unittest.TestCase):
                 }
             )
 
+    def test_non_string_outcome_fails_closed_with_learning_load_error(self):
+        # Hostile values must surface as LearningLoadError, never TypeError.
+        for outcome in ({"nested": "value"}, ["useful"], 7, None):
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(LearningLoadError):
+                    LearningFeedback.from_dict(
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": "finding-1",
+                            "outcome": outcome,
+                        }
+                    )
+
+    def test_missing_fields_fail_closed_without_the_schema_layer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "1.0",
+                    "records": [{"finding_id": "finding-1", "outcome": "useful"}],
+                },
+            )
+            with patch(
+                "review_sensei.learnings.validate_public_document",
+                return_value=None,
+            ):
+                with self.assertRaises(LearningLoadError):
+                    load_learning_feedback(path)
+
+    def test_whitespace_only_values_are_rejected_by_schema_and_class(self):
+        # The schema's pattern and the class check must agree, so neither
+        # layer accepts a value the other rejects.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "1.0",
+                    "records": [
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": "finding-1",
+                            "outcome": "useful",
+                            "note": "   ",
+                        }
+                    ],
+                },
+            )
+            with self.assertRaises(LearningLoadError):
+                load_learning_feedback(path)
+            with patch(
+                "review_sensei.learnings.validate_public_document",
+                return_value=None,
+            ):
+                with self.assertRaises(LearningLoadError):
+                    load_learning_feedback(path)
+
     def test_feedback_summary_marks_known_id_scope_when_no_store_loaded(self):
         records = (LearningFeedback("provider-boundary", "finding-1", "useful"),)
         unset = summarize_learning_feedback(records)
@@ -431,6 +487,29 @@ class RepositoryLearningTests(unittest.TestCase):
         self.assertNotEqual(baseline.selection_digest, changed.selection_digest)
         self.assertEqual(
             baseline.selection_digest, learning_digest(baseline.selectable_entries)
+        )
+
+    def test_selectable_entries_state_the_lifecycle_rule_directly(self):
+        # Stated independently of `entries`, so relaxing that filter cannot
+        # silently widen the review-time selection.
+        active = LearningEntry(id="active", title="Active", rule="Rule")
+        retired = LearningEntry(
+            id="retired",
+            title="Retired",
+            rule="Rule",
+            status="superseded",
+            superseded_by="active",
+        )
+        shadowed = LearningEntry(
+            id="shadowed", title="Shadowed", rule="Rule", superseded_by="active"
+        )
+        store = LearningStore((active, retired, shadowed))
+        self.assertEqual([entry.id for entry in store.selectable_entries], ["active"])
+        self.assertEqual([entry.id for entry in store.entries], ["active", "shadowed"])
+        # for_paths consumes the same rule instead of re-deriving it.
+        self.assertEqual(
+            [entry.id for entry in store.for_paths([])],
+            ["active"],
         )
 
     def test_diagnostic_report_is_advisory_and_does_not_mutate(self):

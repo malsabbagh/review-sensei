@@ -1080,7 +1080,9 @@ def evaluate_fixture(
 
     cases: list[dict[str, Any]] = []
     measured = MeasuredProvider(None)
-    selected = tuple(entry for entry in learnings if entry.status == "active")
+    # Routed through the single selection seam rather than re-filtering, so the
+    # lifecycle rule is not duplicated in this module.
+    selected = LearningStore(learnings).selectable_entries
     for case in corpus.document["cases"]:
         response_path = corpus.asset_path(str(case["response_path"]))
         fixture = FixtureProvider(response_path, model="fixture-v1")
@@ -1142,11 +1144,17 @@ def compare_learning_effect(
     without_quality = dict(without_learnings["quality"])
     # Allowlisted so a future numeric field in the fixture report cannot widen
     # the comparison's public contract or be reported as a quality estimate.
+    # A renamed or retyped quality key fails loudly here rather than silently
+    # narrowing the reported deltas.
+    for key in COMPARISON_DELTA_KEYS:
+        if not isinstance(with_quality.get(key), (int, float)) or not isinstance(
+            without_quality.get(key), (int, float)
+        ):
+            raise ReviewInputError(
+                f"fixture quality metric {key} is missing or not numeric"
+            )
     delta = {
-        key: with_quality[key] - without_quality[key]
-        for key in COMPARISON_DELTA_KEYS
-        if isinstance(with_quality.get(key), (int, float))
-        and isinstance(without_quality.get(key), (int, float))
+        key: with_quality[key] - without_quality[key] for key in COMPARISON_DELTA_KEYS
     }
     return {
         "schema_version": "1.0",

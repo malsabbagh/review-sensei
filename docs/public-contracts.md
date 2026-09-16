@@ -344,6 +344,18 @@ are superseded stay out of both. Reported precision/recall/false-positive
 deltas are estimates from the same synthetic cases with and without selected
 approved learnings, not causal proof from production feedback.
 
+The `--compare-learnings` exit code is the with-learnings fixture result
+(`with_learnings_passed`), matching plain `evaluate --mode fixture`.
+`without_learnings_passed` is reported in the document but deliberately does
+not affect the exit code: the without-learnings arm is a baseline that may
+legitimately fail, and failing the command on it would block the very
+comparison an operator runs to judge a learning. Read both fields when using
+the comparison as promotion evidence.
+
+`learnings diagnose` requires an explicit `--learning-root`. Per
+[ADR 0005](adr/0005-lens-context-sources.md) the trusted target/base checkout
+is always supplied; the CLI never implicitly scans the current directory.
+
 `learnings feedback` reports `known_learning_ids_scope`. It is `store` when
 `--learning-root` supplied an approved store and `unset` otherwise; when it is
 `unset`, `known_learning_ids_without_feedback` is empty because no store was

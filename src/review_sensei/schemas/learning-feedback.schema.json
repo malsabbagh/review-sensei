@@ -23,7 +23,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 256,
-            "description": "maxLength counts characters; the loader additionally enforces an authoritative 256 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
+            "pattern": "\\S",
+            "description": "Must contain a non-whitespace character. maxLength counts characters; the loader additionally enforces an authoritative 256 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
           },
           "outcome": {
             "type": "string",
@@ -33,7 +34,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "description": "maxLength counts characters; the loader additionally enforces an authoritative 512 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
+            "pattern": "\\S",
+            "description": "Must contain a non-whitespace character. maxLength counts characters; the loader additionally enforces an authoritative 512 UTF-8 byte bound, so a multibyte value can satisfy this schema and still be rejected."
           }
         }
       }

@@ -615,7 +615,14 @@ def _learnings_parser() -> argparse.ArgumentParser:
         "diagnose",
         help="Report stale, conflicting, or untraceable approved learnings",
     )
-    diagnose.add_argument("--learning-root", type=Path, default=Path("."))
+    # ADR 0005 forbids implicitly scanning the current working directory, so
+    # the trusted target/base checkout must be supplied explicitly.
+    diagnose.add_argument(
+        "--learning-root",
+        type=Path,
+        required=True,
+        help="Explicit trusted target/base checkout root to inspect",
+    )
     diagnose.add_argument(
         "--learning-directory",
         type=Path,
@@ -1208,10 +1215,18 @@ def _run_learnings_command(arguments: list[str]) -> int:
             if isinstance(by_outcome, dict):
                 for outcome, count in by_outcome.items():
                     sys.stdout.write(f"{outcome} {count}\n")
+            without_feedback = summary["known_learning_ids_without_feedback"]
             if summary["known_learning_ids_scope"] == "unset":
                 sys.stdout.write(
-                    "No approved store loaded; pass --learning-root to list "
-                    "known learnings without feedback.\n"
+                    "known learnings without feedback (not enumerated: no "
+                    "approved store loaded; pass --learning-root)\n"
+                )
+            elif isinstance(without_feedback, list):
+                # Shown so text readers can tell an empty list apart from an
+                # unavailable one.
+                sys.stdout.write(
+                    "known learnings without feedback "
+                    f"{', '.join(str(value) for value in without_feedback) or 'none'}\n"
                 )
             sys.stdout.write("Absence of feedback is not approval.\n")
         return 0

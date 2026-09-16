@@ -67,7 +67,13 @@
   --compare-learnings` keeps the fixture pass/fail exit contract instead of
   always exiting `0`, comparison deltas are restricted to an allowlist of
   quality keys, and `LearningStore.selection_digest` is the canonical
-  review-time digest for incremental cache keys.
+  review-time digest for incremental cache keys. `learnings diagnose` now
+  requires an explicit `--learning-root` instead of defaulting to the current
+  directory, per ADR 0005; the lifecycle selection rule is stated once in
+  `LearningStore.selectable_entries` and reused by `for_paths`,
+  `evaluate_fixture`, and the comparison; a renamed fixture quality key now
+  fails the comparison loudly; and the feedback text output reports whether
+  the absence list was enumerated.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

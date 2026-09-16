@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
@@ -492,6 +493,35 @@ class EvaluationTests(unittest.TestCase):
         # A future numeric field in the fixture report must not widen the
         # comparison's public contract.
         self.assertNotIn("elapsed_total_ms", comparison["delta"])
+
+    def test_compare_learning_effect_fails_loudly_on_renamed_quality_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            report = evaluate_fixture(corpus)
+            renamed = json.loads(json.dumps(report))
+            renamed["quality"].pop("actionable_precision")
+
+            with patch(
+                "review_sensei.evaluation.evaluate_fixture", return_value=renamed
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "actionable_precision"):
+                    compare_learning_effect(corpus)
+
+    def test_evaluate_fixture_applies_the_shared_selection_rule(self) -> None:
+        shadowed = LearningEntry(
+            id="shadowed-boundary",
+            title="Shadowed boundary",
+            rule="Shadowed rule.",
+            scope=("src/**",),
+            superseded_by="provider-boundary",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            # Passed directly rather than pre-selected, so the store rule must
+            # still exclude it here.
+            report = evaluate_fixture(corpus, learnings=(shadowed,))
+
+        self.assertTrue(report["passed"])
 
     def test_compare_learning_effect_accepts_a_learning_store(self) -> None:
         learning = LearningEntry(

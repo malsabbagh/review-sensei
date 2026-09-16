@@ -1430,6 +1430,12 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(feedback.command, "feedback")
         self.assertEqual(str(feedback.file), "feedback.json")
 
+    def test_learnings_diagnose_requires_an_explicit_trusted_root(self):
+        # ADR 0005 forbids implicitly scanning the current working directory.
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                _learnings_parser().parse_args(["diagnose", "--json"])
+
     def test_learnings_diagnose_cli_is_advisory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1487,7 +1493,55 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("Absence of feedback is not approval.", stdout.getvalue())
         self.assertIn("unverified 1", stdout.getvalue())
-        self.assertIn("No approved store loaded", stdout.getvalue())
+        # Text mode must distinguish "no store loaded" from "all have feedback".
+        self.assertIn("not enumerated: no approved store loaded", stdout.getvalue())
+
+    def test_learnings_feedback_cli_text_lists_learnings_without_feedback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / ".github" / "review-sensei" / "learnings"
+            directory.mkdir(parents=True)
+            (directory / "rule.json").write_text(
+                json.dumps(
+                    {
+                        "id": "unused-rule",
+                        "title": "Unused",
+                        "rule": "Keep adapters isolated.",
+                        "scope": ["*"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path = root / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "useful",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "learnings",
+                        "feedback",
+                        "--file",
+                        str(path),
+                        "--learning-root",
+                        str(root),
+                    ]
+                )
+        self.assertEqual(status, 0)
+        self.assertIn("known learnings without feedback unused-rule", stdout.getvalue())
 
     def test_learnings_feedback_cli_marks_known_id_scope_unset(self):
         with tempfile.TemporaryDirectory() as temporary:

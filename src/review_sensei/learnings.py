@@ -77,7 +77,8 @@ class LearningFeedback:
                 "learning feedback finding_id exceeds "
                 f"{MAX_FEEDBACK_FINDING_ID_BYTES} UTF-8 bytes"
             )
-        if self.outcome not in FEEDBACK_OUTCOMES:
+        # Typed before the membership test so a hostile value cannot reach it.
+        if not isinstance(self.outcome, str) or self.outcome not in FEEDBACK_OUTCOMES:
             raise LearningLoadError("learning feedback outcome is invalid")
         if self.note is not None:
             if not isinstance(self.note, str) or not self.note.strip():
@@ -216,10 +217,13 @@ class LearningStore:
         self.entries = tuple(
             entry for entry in sorted_entries if entry.status == "active"
         )
-        # Single selection rule for entries that may reach a review or an
-        # evaluation comparison, so those paths cannot drift apart.
+        # The one lifecycle selection rule for entries that may reach a review
+        # or an evaluation comparison. Stated independently of `entries` so
+        # relaxing that filter cannot silently widen this set.
         self.selectable_entries = tuple(
-            entry for entry in self.entries if entry.superseded_by is None
+            entry
+            for entry in sorted_entries
+            if entry.status == "active" and entry.superseded_by is None
         )
 
     @property
@@ -385,7 +389,10 @@ def load_learning_feedback(path: Path) -> tuple[LearningFeedback, ...]:
         raise LearningLoadError("learning feedback failed schema validation") from exc
     if not isinstance(value, dict):
         raise LearningLoadError("learning feedback must be a JSON object")
-    # Re-checked here so the loader stays fail-closed independent of the schema.
+    # Intentionally redundant with the schema's `const`, and must stay: it is
+    # the only version guard if the schema layer is ever changed, stubbed, or
+    # bypassed. `test_schema_version_recheck_holds_without_the_schema_layer`
+    # covers this branch, so it is not dead code.
     if value.get("schema_version") != FEEDBACK_SCHEMA_VERSION:
         raise LearningLoadError("learning feedback schema_version is unsupported")
     records = value.get("records")
