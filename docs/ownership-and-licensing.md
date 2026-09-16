@@ -39,7 +39,7 @@ corporate entity or assume copyright assignment.
 
 | Area | Paths (representative) | Current license treatment |
 | --- | --- | --- |
-| Review engine, CLI, providers, schemas, packaging | `src/review_sensei/`, `setup.py`, `pyproject.toml`, `packaging/` | MIT via root [`LICENSE`](../LICENSE); Python metadata `license = "MIT"` |
+| Review engine, CLI, providers, schemas, packaging | `src/review_sensei/`, `setup.py`, `pyproject.toml`, `packaging/` | MIT via root [`LICENSE`](../LICENSE). Verified in [`pyproject.toml`](../pyproject.toml): `license = "MIT"` and `license-files = ["LICENSE"]` (PEP 621 SPDX string form, not a `{ text = ... }` table). |
 | Example workflows | `examples/github-actions/` | MIT with the Software (documentation/examples shipped in the tree) |
 | GitHub App hosting helpers | `src/review_sensei/hosting/` | MIT (same root license) |
 | Cloudflare Worker / Durable Object App + OIDC broker package | `deploy/cloudflare/` | MIT with the repository Software; package is `private` npm metadata and has no separate LICENSE file—root MIT applies. Dependency licenses remain those of the locked packages in `package-lock.json` and are **not** redeclared as MIT. |
