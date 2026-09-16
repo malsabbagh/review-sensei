@@ -2,6 +2,7 @@ import hashlib
 import json
 import unittest
 
+from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.hosting.github import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
@@ -1985,6 +1986,49 @@ deleted file mode 100644
         self.assertEqual(body["comments"][0]["subject_type"], "file")
         self.assertNotIn("line", body["comments"][0])
         self.assertNotIn("side", body["comments"][0])
+
+    def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):
+        head = "b" * 40
+        huge_body = "x" * 400
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=None,
+                    body=huge_body,
+                    side="FILE",
+                ),
+            ),
+            provider="ollama",
+            limits=ReviewLimits(max_summary_bytes=128, max_comment_body_bytes=512),
+            coverage=CoverageManifest(
+                files=(FileCoverage(path="src/app.py", outcome="reviewed"),),
+                enumeration_complete=True,
+            ),
+        )
+        http, _calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+            ]
+        )
+        with self.assertRaises(GitHubPublicationError):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=result,
+                diff=DIFF,
+                app_slug="review-sensei[bot]",
+                auto_approve=False,
+            )
 
     def test_unanchored_findings_escape_marker_injection(self):
         rendered = format_unanchored_findings(

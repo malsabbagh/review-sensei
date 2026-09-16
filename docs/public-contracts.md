@@ -269,8 +269,9 @@ threads exist.
 ### Coverage and finding locations
 
 `ReviewResult.coverage` is an optional additive v1 object. `ReviewService`
-always emits it. Legacy documents without the field have unknown coverage and
-cannot be auto-approved. Every enumerated changed path has one outcome:
+always emits it. Legacy or third-party results that omit the field keep the
+compatible approval path and are not blocked solely for missing coverage; once
+`coverage` is present, incomplete or partial states block auto-approval. Every enumerated changed path has one outcome:
 `reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
 `budget-exhausted`. Incomplete enumeration marks the plan incomplete and is
 never fully reviewed. When enumeration is incomplete, ``ReviewService`` sets
@@ -287,9 +288,11 @@ the review body instead of dropping them.
 
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
-`TotalWorkBudget` (default 8 chunks and 8 provider calls). Related changed
-paths are named in chunk instructions; trusted context and write permissions
-are not expanded.
+`TotalWorkBudget` (default 8 chunks and 8 provider calls). The CLI and
+`plan_change` read ceiling widens to `TotalWorkBudget.max_total_diff_bytes`
+(8 MiB) in orchestration mode; the default single-request path remains bounded
+by `ReviewLimits.max_diff_bytes` (1 MiB). Related changed paths are named in
+chunk instructions; trusted context and write permissions are not expanded.
 
 ### Finding classification and presentation
 

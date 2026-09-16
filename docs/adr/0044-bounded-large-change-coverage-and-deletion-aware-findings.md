@@ -66,8 +66,12 @@ Positive:
 
 Tradeoffs:
 
-- Results that omit coverage cannot be auto-approved
-- Opt-in orchestration can use more provider calls than a single request, bounded by the total-work budget
+- Results that include coverage cannot be auto-approved while enumeration or
+  per-path outcomes remain incomplete; legacy results without the field keep
+  the compatible approval path
+- Opt-in orchestration can use more provider calls than a single request,
+  bounded by the total-work budget, and widens the CLI preflight read ceiling
+  to `TotalWorkBudget.max_total_diff_bytes`
 - Generated-file policy is an explicit suffix/name/prefix list, not a learned classifier
 
 ## Alternatives considered

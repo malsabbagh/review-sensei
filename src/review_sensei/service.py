@@ -217,8 +217,10 @@ class ReviewService:
         if not isinstance(self.budget, ResourceBudget):
             raise ReviewInputError("review budget must be a ResourceBudget value")
 
-    def _provider_for_stage(self, stage: Stage) -> ReviewProvider:
-        return self.stage_providers.get(stage.name, self.provider)
+    def _provider_for_stage(
+        self, stage: Stage, *, default: ReviewProvider | None = None
+    ) -> ReviewProvider:
+        return self.stage_providers.get(stage.name, default or self.provider)
 
     def _stage_attempt_limit(self) -> int:
         return max(
@@ -285,106 +287,102 @@ class ReviewService:
         incremental: IncrementalReviewPlan | None,
         profile: str,
     ) -> ReviewRun:
-        """Run bounded chunk orchestration against one shared resource budget.
-
-        This method temporarily replaces ``self.provider`` with a call-counting
-        wrapper and is not reentrant on the same ``ReviewService`` instance.
-        """
+        """Run bounded chunk orchestration against one shared resource budget."""
         budgeted = _BudgetedProvider(
             self.provider, max_calls=request.work_budget.max_provider_calls
         )
-        original = self.provider
         accumulated_summary = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
         coverage = plan.coverage
         last_status = "incomplete"
         last_model = request.model
-        try:
-            self.provider = budgeted
-            for chunk in plan.reviewable_chunks:
-                related = ", ".join(chunk.related_paths)
-                note = (
-                    "This chunk is part of a larger change. Related changed paths "
-                    f"not in this chunk: {related}."
-                    if related
-                    else "This chunk is part of a larger change."
+        for chunk in plan.reviewable_chunks:
+            related = ", ".join(chunk.related_paths)
+            note = (
+                "This chunk is part of a larger change. Related changed paths "
+                f"not in this chunk: {related}."
+                if related
+                else "This chunk is part of a larger change."
+            )
+            instructions = (
+                f"{request.instructions}\n\n{note}" if request.instructions else note
+            )
+            chunk_request = replace(
+                request,
+                diff=chunk.diff,
+                instructions=instructions,
+                orchestrate_large_changes=False,
+            )
+            try:
+                chunk_run = self.run(
+                    chunk_request,
+                    incremental=incremental,
+                    profile=profile,
+                    tracker=tracker,
+                    provider_override=budgeted,
                 )
-                instructions = (
-                    f"{request.instructions}\n\n{note}"
-                    if request.instructions
-                    else note
+            except ReviewInputError as exc:
+                if str(exc) != "diff failed bounded preflight":
+                    raise
+                coverage = apply_chunk_outcomes(
+                    coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    outcome="unsupported",
+                    reason="chunk-preflight-failed",
+                    limits=request.limits,
                 )
-                chunk_request = replace(
-                    request,
-                    diff=chunk.diff,
-                    instructions=instructions,
-                    orchestrate_large_changes=False,
+                continue
+            if chunk_run.error is not None or chunk_run.result is None:
+                chunk_outcome = (
+                    "budget-exhausted" if budgeted.exhausted else "partially-reviewed"
                 )
-                try:
-                    chunk_run = self.run(
-                        chunk_request,
-                        incremental=incremental,
-                        profile=profile,
-                        tracker=tracker,
-                    )
-                except ReviewInputError as exc:
-                    if str(exc) != "diff failed bounded preflight":
-                        raise
-                    coverage = apply_chunk_outcomes(
-                        coverage,
-                        paths=chunk.paths,
-                        hunk_indexes=chunk.hunk_indexes,
-                        outcome="unsupported",
-                        reason="chunk-preflight-failed",
-                        limits=request.limits,
-                    )
-                    continue
-                if chunk_run.error is not None or chunk_run.result is None:
-                    coverage = apply_chunk_outcomes(
-                        coverage,
-                        paths=chunk.paths,
-                        hunk_indexes=chunk.hunk_indexes,
-                        outcome="partially-reviewed",
-                        reason="chunk-failed",
-                        limits=request.limits,
-                    )
-                    if budgeted.exhausted:
-                        for item in plan.reviewable_chunks:
-                            if item.index > chunk.index:
-                                coverage = apply_chunk_outcomes(
-                                    coverage,
-                                    paths=item.paths,
-                                    hunk_indexes=item.hunk_indexes,
-                                    outcome="budget-exhausted",
-                                    reason="provider-call-budget",
-                                    limits=request.limits,
-                                )
-                        break
-                    continue
-                chunk_result = chunk_run.result
-                accumulated_summary = (
-                    f"{accumulated_summary}\n\n{chunk_result.summary}"
-                    if accumulated_summary
-                    else chunk_result.summary
+                chunk_reason = (
+                    "provider-call-budget" if budgeted.exhausted else "chunk-failed"
                 )
-                accumulated_comments.extend(chunk_result.comments)
-                accumulated_proposals.extend(chunk_result.learning_proposals)
-                last_status = chunk_result.review_status
-                last_model = chunk_result.model
-                if chunk_result.review_status != "complete":
-                    coverage = apply_chunk_outcomes(
-                        coverage,
-                        paths=chunk.paths,
-                        hunk_indexes=chunk.hunk_indexes,
-                        outcome="partially-reviewed",
-                        reason="cross-file-relationship",
-                        limits=request.limits,
-                    )
+                coverage = apply_chunk_outcomes(
+                    coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    outcome=chunk_outcome,
+                    reason=chunk_reason,
+                    limits=request.limits,
+                )
                 if budgeted.exhausted:
+                    for item in plan.reviewable_chunks:
+                        if item.index > chunk.index:
+                            coverage = apply_chunk_outcomes(
+                                coverage,
+                                paths=item.paths,
+                                hunk_indexes=item.hunk_indexes,
+                                outcome="budget-exhausted",
+                                reason="provider-call-budget",
+                                limits=request.limits,
+                            )
                     break
-        finally:
-            self.provider = original
+                continue
+            chunk_result = chunk_run.result
+            accumulated_summary = (
+                f"{accumulated_summary}\n\n{chunk_result.summary}"
+                if accumulated_summary
+                else chunk_result.summary
+            )
+            accumulated_comments.extend(chunk_result.comments)
+            accumulated_proposals.extend(chunk_result.learning_proposals)
+            last_status = chunk_result.review_status
+            last_model = chunk_result.model
+            if chunk_result.review_status != "complete":
+                coverage = apply_chunk_outcomes(
+                    coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    outcome="partially-reviewed",
+                    reason="cross-file-relationship",
+                    limits=request.limits,
+                )
+            if budgeted.exhausted:
+                break
         try:
             result = ReviewResult(
                 summary=accumulated_summary
@@ -464,11 +462,13 @@ class ReviewService:
         profile: str = "default",
         budget: ResourceBudget | None = None,
         tracker: ResourceBudgetTracker | None = None,
+        provider_override: ReviewProvider | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
         """Execute one review and always return a structured ``RunOutcome``."""
 
+        active_provider = provider_override or self.provider
         if tracker is None:
             effective_budget = budget if budget is not None else self.budget
             tracker = ResourceBudgetTracker(
@@ -480,7 +480,7 @@ class ReviewService:
         accumulated_summary: str = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
-        last_provider: str = self.provider.name
+        last_provider: str = active_provider.name
         last_model: str | None = request.model
         skipped_stages = 0
         omitted_inline_comments = 0
@@ -603,7 +603,7 @@ class ReviewService:
             stage_proposals: tuple[LearningProposal, ...] = ()
             response_provider = last_provider
             response_model = last_model
-            stage_provider = self._provider_for_stage(stage)
+            stage_provider = self._provider_for_stage(stage, default=active_provider)
             stage_completed = False
             for attempt in range(_MAX_PROVIDER_OUTPUT_ATTEMPTS):
                 while True:

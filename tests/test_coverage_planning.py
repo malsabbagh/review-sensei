@@ -279,7 +279,22 @@ class CoveragePlanningTests(unittest.TestCase):
         )
         self.assertEqual(len(provider.requests), 1)
         outcomes = {entry.path: entry.outcome for entry in result.coverage.files}
-        self.assertIn(outcomes["src/b.py"], {"budget-exhausted", "partially-reviewed"})
+        self.assertEqual(outcomes["src/a.py"], "reviewed")
+        self.assertEqual(outcomes["src/b.py"], "budget-exhausted")
+
+    def test_chunk_orchestration_does_not_mutate_service_provider(self):
+        limits = ReviewLimits(max_diff_files=1)
+        provider = FakeProvider(['{"summary":"one","comments":[]}'])
+        service = ReviewService(provider)
+        service.review(
+            ReviewRequest(
+                diff=TWO_FILES,
+                limits=limits,
+                orchestrate_large_changes=True,
+                work_budget=TotalWorkBudget(max_provider_calls=1, max_chunks=2),
+            )
+        )
+        self.assertIs(service.provider, provider)
 
     def test_chunked_evaluation_reports_cross_boundary_misses(self):
         baseline = ReviewResult(

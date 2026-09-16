@@ -266,9 +266,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     has_open_review_threads=False,
                 )
                 self.assertFalse(decision.approved)
-                self.assertEqual(
-                    decision.blockers, (f"review-{status}", "coverage-unknown")
-                )
+                self.assertEqual(decision.blockers, (f"review-{status}",))
 
     def test_incomplete_thread_sweep_fails_closed(self):
         decision = evaluate_auto_approval(
@@ -293,7 +291,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             has_open_review_threads=False,
         )
         self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("review-incomplete", "coverage-unknown"))
+        self.assertEqual(decision.blockers, ("review-incomplete",))
 
     def test_incomplete_enumeration_blocks_with_review_and_coverage_blockers(self):
         from review_sensei.coverage import FileCoverage
@@ -326,8 +324,8 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ("review-incomplete", "coverage-incomplete"),
         )
 
-    def test_unknown_and_partial_coverage_block_complete_reviews(self):
-        unknown = ReviewResult(
+    def test_legacy_complete_results_without_coverage_remain_approvable(self):
+        legacy = ReviewResult(
             summary="Summary.",
             comments=(),
             provider="fixture",
@@ -336,11 +334,13 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         decision = evaluate_auto_approval(
             enabled=True,
             app_authored=False,
-            result=unknown,
+            result=legacy,
             has_open_review_threads=False,
         )
-        self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("coverage-unknown",))
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.blockers, ())
+
+    def test_partial_coverage_blocks_complete_reviews(self):
 
         from review_sensei.coverage import FileCoverage
 

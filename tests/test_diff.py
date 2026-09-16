@@ -255,3 +255,19 @@ rename to new b/with b/new.txt
     def test_unstructured_text_is_not_accepted_as_a_diff(self):
         with self.assertRaises(ReviewInputError):
             analyze_diff("not a unified diff")
+
+    def test_incomplete_hunk_close_does_not_pollute_the_next_hunk(self):
+        diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1,1 +1,2 @@
+ a
++b
+@@ -5,1 +5,2 @@
+ e
++f
+"""
+        analysis = analyze_diff(diff, allow_incomplete=True, max_hunks=1)
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertEqual(len(analysis.hunk_records), 1)
+        self.assertEqual(analysis.hunk_records[0].added_lines, frozenset({2}))

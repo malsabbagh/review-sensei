@@ -372,6 +372,8 @@ def analyze_diff(
             if allow_incomplete and not require_complete:
                 hunk_state = None
                 current_hunk_lines = []
+                current_hunk_added.clear()
+                current_hunk_deleted.clear()
                 return
             raise _invalid("diff hunk body does not match its header")
         text = "\n".join(current_hunk_lines) + "\n"

@@ -75,9 +75,10 @@ def evaluate_auto_approval(
         # gated partial coverage from other partial reviews.
         elif policy == "confirmed" and status != "complete":
             blockers.append("review-unverified")
-    coverage_state = coverage_approval_state(getattr(result, "coverage", None))
-    if coverage_state != "reviewed":
-        blockers.append(f"coverage-{coverage_state}")
+    if isinstance(result, ReviewResult) and result.coverage is not None:
+        coverage_state = coverage_approval_state(result.coverage)
+        if coverage_state != "reviewed":
+            blockers.append(f"coverage-{coverage_state}")
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 

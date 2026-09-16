@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from .coverage import CoverageManifest, FileCoverage, HunkCoverage
+from .coverage import (
+    COVERAGE_OUTCOMES,
+    CoverageManifest,
+    FileCoverage,
+    HunkCoverage,
+    _validate_reason,
+)
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
 from .validation import (
@@ -433,6 +439,9 @@ def apply_chunk_outcomes(
 ) -> CoverageManifest:
     """Return a copy of ``coverage`` with the selected files/hunks updated."""
 
+    if outcome not in COVERAGE_OUTCOMES:
+        raise ReviewInputError("coverage outcome is invalid")
+    _validate_reason(reason)
     files: list[FileCoverage] = []
     for file_entry in coverage.files:
         if file_entry.path in paths:
