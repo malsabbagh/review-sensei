@@ -24,7 +24,12 @@ from review_sensei.evaluation import (
     run_case,
 )
 from review_sensei.learnings import LearningStore
-from review_sensei.models import LearningEntry, ReviewComment, ReviewResult
+from review_sensei.models import (
+    FindingLifecycleRecord,
+    LearningEntry,
+    ReviewComment,
+    ReviewResult,
+)
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.stages import ReviewCategory, Stage
 from review_sensei.validation import ReviewLimits
@@ -314,6 +319,35 @@ class EvaluationTests(unittest.TestCase):
             report = evaluate_fixture(corpus)
 
         self.assertTrue(report["passed"])
+
+    def test_legacy_fixture_tolerates_derived_lifecycle_metadata(self) -> None:
+        """Lifecycle records are derived, so a legacy fixture still matches."""
+
+        class LifecycleService:
+            def review(self, _request):
+                return ReviewResult(
+                    summary="ok",
+                    comments=(),
+                    provider="fixture",
+                    model="fixture-v1",
+                    review_status="complete",
+                    finding_lifecycles=(
+                        FindingLifecycleRecord("a" * 64, "still-present"),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            measured = MeasuredProvider(None)
+
+            outcome = run_case(
+                corpus,
+                corpus.document["cases"][0],
+                LifecycleService(),
+                measured,
+            )
+
+        self.assertEqual(outcome["status"], "passed")
 
     def test_degraded_report_fails_named_thresholds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -259,6 +259,27 @@ same validated result.
   one group in-process for tests and local hosts, with bounded waiters and
   lease release. GitHub-hosted runs use reusable workflow `concurrency`
   groups instead.
+- `ReviewResult.coverage_mode` is `full`, `incremental`, or `fallback-full`.
+  The review service emits it on every validated aggregate. Incremental mode
+  re-reviews caller-supplied changed paths plus related dependency paths;
+  incompatible base, learnings, model, or configuration, missing cache state,
+  or incomplete related context falls back to a full bounded review.
+- `ReviewResult.finding_lifecycles` records stable fingerprints and states
+  (`new`, `still-present`, `fixed`, `outdated`, `uncertain`). A later pass
+  that omits a finding does not mark it fixed. Exact `(path, line, body)`
+  duplicates remain first-wins.
+- Optional `ReviewComment.symbol`, `defect_kind`, and `evidence_id` feed the
+  fingerprint. Line number, `category`, and exact prose are not the identity;
+  an absent `defect_kind` buckets under the canonical `unknown` kind.
+- `ReviewContextCache` is an optional in-memory, repository/PR-scoped metadata
+  adapter. It is not a hosted service and never stores prompts or raw
+  provider responses.
+- GitHub publication keeps one review per exact head, writes v2 finding
+  markers with fingerprints, and does not open a second ReviewSensei thread
+  for an already published fingerprint. Any review carrying inline findings
+  reads existing markers through one bounded GraphQL review-thread sweep
+  before the write, on every coverage mode including `full`. Human comments
+  and resolutions are left intact.
 - `ReviewComment` must use a repository-relative path and a positive line.
 - `ReviewComment` and `ReviewResult` reject bodies, lines, counts, proposals,
   and serialized output above the selected `ReviewLimits` profile. Exact

@@ -148,6 +148,9 @@ These imports are public and stable within a major version:
 - `review_sensei.AdmissionRejected`
 - `review_sensei.AdmissionCancelled`
 - `review_sensei.ReviewService`
+- `review_sensei.FindingLifecycle`
+- `review_sensei.IncrementalReviewPlan`
+- `review_sensei.ReviewContextCache`
 - `review_sensei.RunOutcome`
 - `review_sensei.ResourceBudget`
 - `review_sensei.RecoveryArtifact`
@@ -220,6 +223,24 @@ A second model's agreement is not proof and is not part of this contract.
 Production enablement still depends on the evaluation policy in issue #33 and
 the run/budget contract in issue #36. Automatic approval remains unchanged
 except that an incompletely verified `confirmed` review cannot be approved.
+
+`coverage_mode` is an additive v1 field (`full`, `incremental`, or
+`fallback-full`) and is omitted for the default `full` mode.
+`finding_lifecycles` is an optional array of `{fingerprint, state}` objects
+and is serialized whenever records exist, including on a `full` review, so a
+round trip does not reset lifecycle state. `ReviewComment` may include
+`symbol`, `defect_kind`, and `evidence_id` for stable concern identity.
+`category` is a presentation lens and is not part of that identity, so
+reclassifying a finding does not open a second discussion; a comment without
+`defect_kind` buckets under the canonical `unknown` kind. Legacy documents
+without those keys remain valid.
+
+An incremental pass whose reviewed set is empty returns without calling a
+provider. Its `summary` is engine-authored rather than provider output and
+carries no findings, and the pass charges no provider call to the resource
+budget. Approval is unchanged: the shared finalizer remains the sole approval
+writer and still refuses to approve while unresolved blocking ReviewSensei
+threads exist.
 
 ### Finding classification and presentation
 

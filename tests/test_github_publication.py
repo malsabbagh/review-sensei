@@ -13,6 +13,7 @@ from review_sensei.hosting.github.publication import (
     changes_requested_marker,
     finding_blocks_approval,
     finding_declares_blocking,
+    finding_fingerprint_from_body,
     finding_marker,
     review_marker,
 )
@@ -639,6 +640,7 @@ class ReviewPublisherTests(unittest.TestCase):
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -656,9 +658,11 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.review_id, 5)
-        post = calls[3]
+        post = calls[4]
         body = __import__("json").loads(post[2].decode("utf-8"))
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
+        self.assertIn("coverage=full", body["body"])
+        self.assertIn("<!-- reviewsensei:finding:v2", body["comments"][0]["body"])
         self.assertIn(
             "To discuss this finding, reply with @sensei followed by your question.",
             body["body"],
@@ -671,12 +675,450 @@ class ReviewPublisherTests(unittest.TestCase):
             body["comments"][0]["body"],
         )
 
+    def test_existing_fingerprint_is_not_republished_across_heads(self):
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha="c" * 40,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "human discussion",
+                                        "author": {"login": "alice"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        # Duplicate suppression is a property of publication, not of incremental
+        # mode: a plain full review is the common re-review case.
+        self.assertEqual(current.coverage_mode, "full")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
+        self.assertTrue(finding_declares_blocking(existing))
+
+    def test_all_fingerprints_already_published_on_same_head_requests_no_changes(self):
+        """A same-head re-review must not emit an empty REQUEST_CHANGES."""
+
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ],
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertIn("Summary.", body["body"])
+        finalizer = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(finalizer["event"], "REQUEST_CHANGES")
+
+    def test_legacy_v1_marker_suppresses_by_inline_location(self):
+        """Legacy v1 roots without fingerprints still participate in dedupe."""
+
+        head = "b" * 40
+        current = result()
+        legacy = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": legacy,
+                                        "path": "src/app.py",
+                                        "line": 2,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertEqual(body["event"], "COMMENT")
+
+    def test_changed_blocking_classification_is_not_suppressed(self):
+        """A reclassified finding must publish even when the fingerprint matches."""
+
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=current,
+            blocking=False,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "path": "src/app.py",
+                                        "line": 2,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+
+    def test_fingerprint_sweep_matches_app_slug_case_insensitively(self):
+        """GitHub logins are case-insensitive, so the slug must match anyway."""
+
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha="c" * 40,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {"login": "ReviewSensei[BOT]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+
+    def test_fingerprint_sweep_fails_closed_on_an_unreadable_root_author(self):
+        head = "b" * 40
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [{"body": "root", "author": "reviewsensei"}]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        with self.assertRaises(GitHubPublicationError):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertFalse(
+            any(
+                method == "POST" and url.endswith("/pulls/2/reviews")
+                for method, url, _ in calls
+            )
+        )
+
+    def test_fingerprint_sweep_degrades_when_graphql_is_not_permitted(self):
+        """Publication continues without suppression when GraphQL is blocked."""
+
+        head = "b" * 40
+        for status in (401, 403):
+            with self.subTest(status=status):
+                outcome, calls = self.publish(
+                    [
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response({}, status),
+                        json_response({"id": 5}, 200),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response({"id": 9}, 200),
+                    ]
+                )
+                self.assertEqual(outcome.status, "published")
+                body = __import__("json").loads(calls[4][2].decode("utf-8"))
+                self.assertEqual(len(body["comments"]), 1)
+
+    def test_skipped_incremental_pass_cannot_approve_with_blocking_roots(self):
+        """A skip carries no findings, so only the finalizer decides approval."""
+
+        head = "b" * 40
+        skipped = ReviewResult(
+            summary="Incremental review: no changed paths since the last accepted review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+            coverage_mode="incremental",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                *request_changes_write_responses(head),
+            ],
+            result=skipped,
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        events = [
+            __import__("json").loads(payload.decode("utf-8")).get("event")
+            for method, url, payload in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews") and payload
+        ]
+        self.assertNotIn("APPROVE", events)
+        self.assertIn("REQUEST_CHANGES", events)
+
+    def test_skipped_incremental_pass_does_not_self_approve_with_a_clean_sweep(
+        self,
+    ):
+        """An empty-path skip must not satisfy approval on its own."""
+
+        head = "b" * 40
+        skipped = ReviewResult(
+            summary="Incremental review: no changed paths since the last accepted review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+            coverage_mode="incremental",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=()),
+                json_response({"id": 6}, 200),
+            ],
+            result=skipped,
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        events = [
+            __import__("json").loads(payload.decode("utf-8")).get("event")
+            for method, url, payload in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews") and payload
+        ]
+        self.assertNotIn("APPROVE", events)
+
+    def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
+        """An uncertain sweep must not publish a possible duplicate."""
+
+        head = "b" * 40
+        for sweep, expected in (
+            (json_response({}, 500), GitHubPublicationTransientError),
+            (
+                graphql_review_threads_response(nodes=({"isResolved": "no"},)),
+                GitHubPublicationError,
+            ),
+        ):
+            with self.subTest(sweep=expected.__name__):
+                http, calls = make_http(
+                    [
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response(pr_payload(head_sha=head)),
+                        sweep,
+                        json_response({"id": 5}, 200),
+                    ]
+                )
+                with self.assertRaises(expected):
+                    ReviewPublisher(http=http).publish(
+                        token="token",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=2,
+                        head_sha=head,
+                        base_branch="main",
+                        base_sha="a" * 40,
+                        result=result(),
+                        diff=DIFF,
+                        app_slug="reviewsensei[bot]",
+                    )
+                self.assertFalse(
+                    any(
+                        method == "POST" and url.endswith("/pulls/2/reviews")
+                        for method, url, _ in calls
+                    )
+                )
+
     def test_publishes_classification_metadata_without_changing_identity_fields(self):
         head = "b" * 40
         responses = [
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -693,7 +1135,7 @@ class ReviewPublisherTests(unittest.TestCase):
             app_slug="review-sensei[bot]",
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertIn("Review classification:", body["body"])
         self.assertIn(
             "[🚫 Blocking] [🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
@@ -710,6 +1152,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
@@ -733,7 +1176,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[8][2].decode("utf-8"))
+        body = __import__("json").loads(calls[9][2].decode("utf-8"))
         self.assertEqual(body["event"], "APPROVE")
         self.assertNotIn("comments", body)
 
@@ -1082,17 +1525,22 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
             ],
             auto_approve=False,
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertNotEqual(body["event"], "REQUEST_CHANGES")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(
-            sum(1 for method, url, _ in calls if method == "POST"),
+            sum(
+                1
+                for method, url, _ in calls
+                if method == "POST" and url.endswith("/pulls/2/reviews")
+            ),
             1,
         )
 
@@ -1111,6 +1559,7 @@ class ReviewPublisherTests(unittest.TestCase):
                     [published_review(marker=prior, head_sha=head, state="APPROVED")]
                 ),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
             ]
         )
@@ -1819,6 +2268,7 @@ class ReviewPublisherTests(unittest.TestCase):
                             json_response(pr_payload(head_sha=head)),
                             json_response([]),
                             json_response(pr_payload(head_sha=head)),
+                            graphql_review_threads_response(),
                             json_response({}, status),
                         ]
                     )
@@ -1830,6 +2280,7 @@ class ReviewPublisherTests(unittest.TestCase):
                             json_response(pr_payload(head_sha=head)),
                             json_response([]),
                             json_response(pr_payload(head_sha=head)),
+                            graphql_review_threads_response(),
                             json_response({}, status),
                             json_response([]),
                         ]
@@ -1841,6 +2292,7 @@ class ReviewPublisherTests(unittest.TestCase):
                         json_response(pr_payload(head_sha=head)),
                         json_response([]),
                         json_response(pr_payload(head_sha=head)),
+                        graphql_review_threads_response(),
                         response,
                     ]
                 )
@@ -1886,6 +2338,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha="b" * 40)),
                 json_response([]),
                 json_response(pr_payload(head_sha="b" * 40)),
+                graphql_review_threads_response(),
                 json_response({"id": 9}, 200),
             ],
             result=unverified,
@@ -1896,7 +2349,7 @@ class ReviewPublisherTests(unittest.TestCase):
             auto_approve=False,
         )
         self.assertEqual(outcome.status, "published")
-        body = json.loads(calls[3][2].decode("utf-8"))
+        body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("Added line is unbounded.", body["comments"][0]["body"])
         self.assertNotIn("unverified finding", body["comments"][0]["body"])
