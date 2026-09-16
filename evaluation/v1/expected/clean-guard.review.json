@@ -3,5 +3,6 @@
   "comments": [],
   "provider": "fixture",
   "model": "fixture-v1",
-  "learning_proposals": []
+  "learning_proposals": [],
+  "evidence_policy": "legacy"
 }

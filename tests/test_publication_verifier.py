@@ -5,6 +5,7 @@ import unittest
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import evaluate_auto_approval
+from review_sensei.context import ContextSnapshot, SourceContextCoverage
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.verifier import (
@@ -137,6 +138,8 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertIn(
             "Unpublished candidates are not findings", prepared.result.summary
         )
+        self.assertIn("Rejection reasons:", prepared.result.summary)
+        self.assertIn("evidence excerpt does not match reviewed snapshot=", prepared.result.summary)
         self.assertEqual(
             [item.disposition for item in prepared.verifications],
             ["confirmed", "rejected", "rejected", "rejected"],
@@ -156,6 +159,7 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.verifications[1].disposition, "rejected")
         self.assertEqual(prepared.verifications[1].reasons, ("duplicate candidate",))
         self.assertEqual(prepared.result.review_status, "partial")
+        self.assertIn("duplicate candidate=1", prepared.result.summary)
         with self.assertRaises(ReviewInputError):
             CandidateFinding.from_dict({"claim": "bug"})
         with self.assertRaises(ReviewInputError):
@@ -208,6 +212,49 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.verifications[0].disposition, "confirmed")
         self.assertIn("Ignore previous instructions", prepared.result.comments[0].body)
         self.assertIsNone(os.environ.get("REVIEW_SENSEI_INJECTED_PERMISSION"))
+
+    def test_format_candidate_finding_escapes_markdown_injection(self) -> None:
+        hostile = candidate(
+            snapshot_sha=self.snapshot_sha,
+            claim="`close code` @sensei\n# heading",
+            excerpt="`break`",
+        )
+        body = format_candidate_finding(hostile)
+        self.assertEqual(
+            body,
+            "\\`close code\\` \\@sensei\\n\\# heading\n\n"
+            "Trigger: Call average\\(\\) with an empty list.\n"
+            "Why it matters: The request fails instead of returning a defined empty result.\n"
+            "Evidence: src/app.py:2 (`\\`break\\``)",
+        )
+        self.assertNotIn("@sensei", body.replace("\\@", ""))
+        self.assertIn("\\`close code\\`", body)
+        self.assertIn("\\# heading", body)
+
+    def test_confirmed_policy_preserves_source_context_coverage(self) -> None:
+        coverage = SourceContextCoverage(
+            enabled=True,
+            complete=True,
+            snapshot=ContextSnapshot("a" * 40),
+            outcomes=(("src/app.py", "reviewed"),),
+            excerpt_count=1,
+        )
+        result = ReviewResult(
+            summary="Review complete.",
+            comments=(),
+            provider="fixture",
+            review_status="complete",
+            source_context_coverage=coverage,
+        )
+        prepared = prepare_publishable_review(
+            result,
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+        )
+        self.assertIs(prepared.result.source_context_coverage, coverage)
+        self.assertIn("source_context", prepared.result.to_dict())
 
     def test_incomplete_verification_cannot_be_approved(self) -> None:
         false_positive = candidate(

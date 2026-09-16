@@ -24,8 +24,11 @@ import re
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from collections import Counter
+
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
+from .presentation import _escape_markdown_label
 from .schemas import validate_public_document
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
@@ -429,6 +432,18 @@ class PublishableReview:
     unpublished: int
 
 
+def _escape_published_text(value: str) -> str:
+    """Escape untrusted candidate text before it becomes a published comment body."""
+
+    return _escape_markdown_label(value.strip()).replace("@", "\\@")
+
+
+def _escape_inline_excerpt(value: str) -> str:
+    """Keep excerpt text inside one inline-code span."""
+
+    return value.replace("\\", "\\\\").replace("`", "\\`")
+
+
 def format_candidate_finding(candidate: CandidateFinding) -> str:
     """Render a candidate as concise published reasoning, never a raw transcript."""
 
@@ -438,22 +453,27 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
     for reference in candidate.evidence:
         location = f"{reference.path}:{reference.line}"
         if reference.excerpt:
-            evidence_parts.append(f"{location} (`{reference.excerpt}`)")
+            excerpt = _escape_inline_excerpt(reference.excerpt)
+            evidence_parts.append(f"{location} (`{excerpt}`)")
         else:
             evidence_parts.append(location)
     lines = [
-        candidate.claim.strip(),
+        _escape_published_text(candidate.claim),
         "",
-        f"Trigger: {candidate.triggering_conditions.strip()}",
-        f"Why it matters: {candidate.severity_rationale.strip()}",
+        f"Trigger: {_escape_published_text(candidate.triggering_conditions)}",
+        f"Why it matters: {_escape_published_text(candidate.severity_rationale)}",
         f"Evidence: {'; '.join(evidence_parts)}",
     ]
     if candidate.assumptions:
-        lines.append("Assumptions: " + "; ".join(candidate.assumptions))
+        escaped = "; ".join(_escape_published_text(assumption) for assumption in candidate.assumptions)
+        lines.append(f"Assumptions: {escaped}")
     return "\n".join(lines)
 
 
 def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
+    # Anchor the finding at the first evidence reference on impacted_path when
+    # present; otherwise fall back to the primary reference. Publishers may
+    # still reject the location against the diff if it is outside hunks.
     located = next(
         (
             reference
@@ -462,13 +482,8 @@ def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
         ),
         candidate.evidence[0],
     )
-    path = (
-        candidate.impacted_path
-        if located.path == candidate.impacted_path
-        else located.path
-    )
     return ReviewComment(
-        path=path,
+        path=located.path,
         line=located.line,
         body=format_candidate_finding(candidate),
     )
@@ -476,13 +491,26 @@ def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
 
 def _verification_coverage(verifications: Sequence[VerificationResult]) -> str:
     counts = {"confirmed": 0, "rejected": 0, "insufficient-evidence": 0}
+    reason_counts: Counter[str] = Counter()
     for item in verifications:
         counts[item.disposition] += 1
-    return (
-        f"Verification coverage: confirmed={counts['confirmed']}, "
+        if item.disposition != "confirmed":
+            for reason in item.reasons:
+                reason_counts[reason] += 1
+    parts = [
+        "Verification coverage: "
+        f"confirmed={counts['confirmed']}, "
         f"rejected={counts['rejected']}, "
-        f"insufficient-evidence={counts['insufficient-evidence']}. {_COVERAGE_NOTE}"
-    )
+        f"insufficient-evidence={counts['insufficient-evidence']}."
+    ]
+    if reason_counts:
+        breakdown = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(reason_counts.items())
+        )
+        parts.append(f"Rejection reasons: {breakdown}.")
+    parts.append(_COVERAGE_NOTE)
+    return " ".join(parts)
 
 
 def _downgrade_incomplete_status(status: str) -> str:
@@ -524,6 +552,7 @@ def prepare_publishable_review(
                 learning_proposals=result.learning_proposals,
                 review_status=result.review_status,
                 limits=result.limits,
+                source_context_coverage=result.source_context_coverage,
                 evidence_policy="legacy",
             )
         return PublishableReview(result, (), "legacy", 0)
@@ -563,6 +592,7 @@ def prepare_publishable_review(
         learning_proposals=result.learning_proposals,
         review_status=status,
         limits=review_limits,
+        source_context_coverage=result.source_context_coverage,
         evidence_policy="confirmed",
     )
     return PublishableReview(prepared, verifications, "confirmed", unpublished)
