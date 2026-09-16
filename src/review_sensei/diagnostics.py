@@ -467,6 +467,13 @@ def run_doctor(
         )
     else:
         checks.append(DiagnosticCheck("context", "pass", "context root is readable"))
+    checks.append(
+        DiagnosticCheck(
+            "symbol-context",
+            "pass",
+            "opt-in trusted-base symbol context is disabled by default",
+        )
+    )
     manifest_path = compatibility_manifest
     if manifest_path is None:
         configured_manifest = os.getenv(

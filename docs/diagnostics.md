@@ -7,7 +7,8 @@ use the same catalog selection as review: the category catalog stays unset
 unless `--categories-dir` is supplied. Stages that declare `category_ids`
 therefore require `--categories-dir`. Malformed configuration, empty
 directories, and symlinked assets are reported as `action` rather than
-silently treated as available.
+silently treated as available. Doctor also records that symbol-aware source
+context is an opt-in trusted-base policy that stays disabled by default.
 It never calls a model, mints a broker token, or writes to GitHub.
 
 Offline runs do not open sockets. Passing `--network` enables read-only probes

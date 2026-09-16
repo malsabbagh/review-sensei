@@ -92,6 +92,26 @@ class PublicSchemaTests(unittest.TestCase):
         )
         validate_public_document(result.to_dict(), "review-result")
 
+    def test_review_result_source_context_coverage_is_optional(self) -> None:
+        from review_sensei.context import ContextSnapshot, SourceContextCoverage
+
+        result = ReviewResult(
+            summary="ok",
+            comments=(),
+            provider="ollama",
+            source_context_coverage=SourceContextCoverage(
+                enabled=True,
+                complete=False,
+                snapshot=ContextSnapshot("a" * 40),
+                outcomes=(("src/app.py", "unsupported-language"),),
+                excerpt_count=1,
+            ),
+        )
+        document = result.to_dict()
+        validate_public_document(document, "review-result")
+        restored = ReviewResult.from_dict(document)
+        self.assertIsNotNone(restored.source_context_coverage)
+
     def test_conversation_reply_resolution_flag_is_optional_boolean(self) -> None:
         validate_public_document({"body": "ok"}, "conversation-reply")
         validate_public_document({"body": "ok", "resolve": True}, "conversation-reply")

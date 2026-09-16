@@ -151,6 +151,10 @@ These imports are public and stable within a major version:
 - `review_sensei.LearningDiagnostic`
 - `review_sensei.load_review_categories_from_dir`
 - `review_sensei.load_stages_from_dir`
+- `review_sensei.SymbolAwareContextSelector`
+- `review_sensei.SymbolAwareContextPolicy`
+- `review_sensei.SourceContextSelection`
+- `review_sensei.SourceContextCoverage`
 - `review_sensei.errors.ReviewSenseiError`
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
@@ -162,6 +166,12 @@ its stage aggregate `complete`. Results parsed from legacy JSON without the
 key are classified as `incomplete` and serialize explicitly, so approval paths
 fail closed. Consumers that enforce the original v1 shape should treat this
 additive field as an optional extension during the deprecation window.
+
+When `--enable-symbol-context` is set, results may also include optional
+`source_context` coverage (enabled flag, completeness, trusted-base snapshot,
+languages, excerpt counts, and per-path outcomes). This field is omitted on
+the default document/learning path. It never includes source text and does not
+change GitHub write, egress, or approval defaults.
 
 ### Finding classification and presentation
 
@@ -242,6 +252,13 @@ The command is `review-sensei`. Supported flags are:
 | `--learning-root` | none | Trusted target-branch checkout root |
 | `--learning-directory` | none | Repository-relative learnings directory |
 | `--context-root` | `REVIEWSENSEI_CONTEXT_ROOT` | Trusted target-branch context root |
+| `--enable-symbol-context` | `REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT` | Opt in to bounded Python symbol-aware source context from trusted base |
+| `--base-sha` | none | Trusted base commit SHA required when symbol-aware context is enabled |
+| `--head-sha` | none | Untrusted head SHA recorded only as coverage metadata |
+| `--symbol-context-allowed-path` | none | Allowed repository-relative path pattern for symbol-aware context |
+| `--symbol-context-max-files` | none | Maximum files selected by symbol-aware context (default 16) |
+| `--symbol-context-max-bytes` | none | Maximum total bytes selected by symbol-aware context (default 131072) |
+| `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |

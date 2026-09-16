@@ -220,6 +220,138 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertEqual(dict(result.outcomes)["main.py"], "partially-reviewed")
 
+    def test_symbol_selection_is_deterministic_and_records_blob_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.py").write_text("import helper\nVALUE = 1\n")
+            (root / "helper.py").write_text("VALUE = 2\n")
+            snapshot = ContextSnapshot("b" * 40)
+            first = SymbolAwareContextSelector(root, snapshot=snapshot).select(
+                ("main.py",)
+            )
+            second = SymbolAwareContextSelector(root, snapshot=snapshot).select(
+                ("main.py",)
+            )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.excerpts)
+        for excerpt in first.excerpts:
+            self.assertEqual(excerpt.snapshot.revision, "b" * 40)
+            self.assertEqual(excerpt.snapshot.kind, "base")
+            self.assertRegex(excerpt.blob_oid, r"^[a-f0-9]{40}$")
+            self.assertRegex(excerpt.sha256, r"^[a-f0-9]{64}$")
+
+    def test_enclosing_symbol_and_interface_and_caller_relationships(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "api.py").write_text(
+                "from typing import Protocol\n\n"
+                "class Greeter(Protocol):\n"
+                "    def greet(self) -> str: ...\n"
+            )
+            (root / "main.py").write_text(
+                "from api import Greeter\n\n"
+                "class Unused:\n"
+                "    value = 1\n\n"
+                "def run(greeter: Greeter) -> str:\n"
+                "    return greeter.greet()\n"
+            )
+            (root / "caller.py").write_text("from main import run\n")
+            result = SymbolAwareContextSelector(root, max_depth=1).select(
+                ("main.py",),
+                changed_lines={"main.py": frozenset({7})},
+            )
+
+        by_path = {item.path: item for item in result.excerpts}
+        self.assertEqual(by_path["main.py"].reason, "enclosing-symbol")
+        self.assertIn("def run", by_path["main.py"].content)
+        self.assertNotIn("class Unused", by_path["main.py"].content)
+        self.assertEqual(by_path["api.py"].reason, "interface")
+        self.assertIn("class Greeter", by_path["api.py"].content)
+        self.assertEqual(by_path["caller.py"].reason, "direct-caller")
+
+    def test_js_fallback_is_unsupported_language_not_complete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "app.js").write_text("export const value = 1;\n")
+            result = SymbolAwareContextSelector(root).select(("app.js",))
+
+        self.assertEqual([item.path for item in result.excerpts], ["app.js"])
+        self.assertEqual(dict(result.outcomes)["app.js"], "unsupported-language")
+        self.assertFalse(result.complete)
+
+    def test_rename_and_deletion_paths_use_base_snapshot_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "old.py").write_text("VALUE = 1\n")
+            result = SymbolAwareContextSelector(root).select(
+                ("old.py", "new.py", "deleted.py")
+            )
+
+        paths = {item.path for item in result.excerpts}
+        self.assertEqual(paths, {"old.py"})
+        outcomes = dict(result.outcomes)
+        self.assertEqual(outcomes["new.py"], "unsupported")
+        self.assertEqual(outcomes["deleted.py"], "unsupported")
+        self.assertFalse(result.complete)
+
+    def test_malicious_paths_and_secret_files_are_unsupported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "secrets.py").write_text("TOKEN = 'x'\n")
+            (root / ".env").write_text("SECRET=1\n")
+            result = SymbolAwareContextSelector(root).select(
+                ("../outside.py", "secrets.py", ".env", "src/../secrets.py")
+            )
+
+        outcomes = dict(result.outcomes)
+        self.assertEqual(outcomes["../outside.py"], "unsupported")
+        self.assertEqual(outcomes["secrets.py"], "unsupported")
+        self.assertEqual(outcomes[".env"], "unsupported")
+        self.assertFalse(result.complete)
+        self.assertEqual(result.excerpts, ())
+
+    def test_malicious_allowed_path_configuration_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(ContextLoadError):
+                SymbolAwareContextSelector(root, allowed_paths=("../secret/**",))
+
+    def test_excessive_graph_fan_out_is_bounded_and_incomplete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            imports = "\n".join(f"import mod{index:03d}" for index in range(80))
+            (root / "main.py").write_text(imports + "\n")
+            for index in range(80):
+                (root / f"mod{index:03d}.py").write_text("VALUE = 1\n")
+            result = SymbolAwareContextSelector(root, max_files=16, max_depth=1).select(
+                ("main.py",)
+            )
+
+        self.assertLessEqual(len(result.excerpts), 16)
+        self.assertFalse(result.complete)
+        self.assertIn(
+            dict(result.outcomes)["main.py"],
+            {"partially-reviewed", "reviewed"},
+        )
+
+    def test_selector_parses_statically_and_does_not_execute_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sentinel = root / "executed.flag"
+            (root / "main.py").write_text(
+                "open('executed.flag', 'w').write('pwned')\nimport helper\n"
+            )
+            (root / "helper.py").write_text(
+                "open('executed.flag', 'w').write('pwned')\nVALUE = 1\n"
+            )
+            result = SymbolAwareContextSelector(root).select(("main.py",))
+
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(
+            {item.path for item in result.excerpts}, {"main.py", "helper.py"}
+        )
+
     def test_fingerprint_ignores_line_and_prose(self):
         one = stable_finding_fingerprint(
             path="src/a.py", symbol="run", defect_kind="Race"
