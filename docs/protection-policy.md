@@ -9,7 +9,11 @@ GitHub and retain the authoritative API response as evidence.
 
 - `main` requires pull requests, one approval, code-owner review, stale-review
   dismissal, conversation resolution, latest-push approval, and the `Required
-  checks` status with strict/up-to-date semantics.
+  checks` status with strict/up-to-date semantics. That aggregate includes the
+  CodeQL findings gate for Python and JavaScript/TypeScript; a seeded or
+  malformed SARIF report fails the gate, and a failed CodeQL job fails
+  `Required checks`. Live ruleset attachment of the aggregate remains
+  administrator evidence, not a CI inference.
 - Bypass is limited to the repository owner `@malsabbagh` (user ID `13791232`)
   for pull-request recovery (`max_bypass_actors: 1`). The identity is explicit
   so a future maintainer or collaborator cannot inherit break-glass authority

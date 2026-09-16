@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "CodeQL",
+          "organization": "GitHub",
+          "rules": []
+        }
+      },
+      "properties": {
+        "language": "python"
+      },
+      "automationDetails": {
+        "id": "/language:python"
+      },
+      "results": [
+        {
+          "ruleId": "py/test",
+          "level": "warning",
+          "message": {
+            "text": "seeded isolated fixture finding"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "tests/fixtures/codeql/seeded-warning/example.py"
+                },
+                "region": {
+                  "startLine": 3
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

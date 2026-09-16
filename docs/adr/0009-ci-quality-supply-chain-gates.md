@@ -110,3 +110,13 @@ enabled. CodeQL artifact review and ruleset enforcement still require hosted
 evidence; local gates do not substitute for those checks. GitHub Code Scanning
 upload remains a documented follow-up once the repository is eligible for that
 feature.
+
+## Amendment (2026-09-16) — public repository findings gate
+
+The original decision text assumed a private repository without GitHub Code
+Scanning. This repository is public. CodeQL still does not use code-scanning
+upload as enforcement (`upload: never`); the deterministic SARIF gate and the
+`Required checks` aggregate remain the merge control. JavaScript/TypeScript
+Worker and npm launcher sources are included alongside Python. Stale "private
+repository" wording in the Decision section is historical; do not infer
+reduced public-repo permissions from it.

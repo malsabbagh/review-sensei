@@ -36,3 +36,21 @@ pull-request CI check validates the policy document only;
 the manual ruleset-readback workflow compares an administrator-captured API
 response and reports live drift. Maintainers must still run disposable
 behavioral tests before applying settings.
+
+## Amendment (2026-09-16) — issue #32 fixture proof
+
+Keep ADR 0033 Proposed until a maintainer accepts it. This amendment records
+the remaining findings-gate evidence that does not require GitHub code-scanning
+upload:
+
+- CI analyzes Python and JavaScript/TypeScript with pinned CodeQL actions and
+  `contents: read` / `actions: read` only. Fork pull requests use `pull_request`,
+  not `pull_request_target`, and the CodeQL job never references `secrets.*`.
+- Enforcement remains the local SARIF gate. Upload stays `never` and is not
+  treated as a merge control.
+- Committed fixtures under `tests/fixtures/codeql/` prove three outcomes in the
+  `Schemas and Action pins` job and in unit tests: clean reports pass; a seeded
+  warning fails the gate; malformed SARIF fails closed. The `Required checks`
+  aggregate already depends on the live CodeQL matrix, so a gate failure fails
+  the merge-policy job. Live GitHub ruleset attachment of that aggregate is
+  still operator evidence under #26.
