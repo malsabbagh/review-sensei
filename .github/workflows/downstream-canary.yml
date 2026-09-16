@@ -7,6 +7,11 @@
 # disposable repository that uses reviewed synthetic data, bounded privileges,
 # and cleanup.
 #
+# This workflow does NOT create the `downstream-canary` environment or its
+# protection rules. GitHub creates an unprotected environment on first use, so
+# dispatching before an operator has added required reviewers runs the job
+# unguarded. Treat it as unsafe to dispatch until those rules are configured.
+#
 # The job inherits the repository-wide runner selector, so it uses the private
 # `ubicloud-standard-2` runner when `ENABLE_UBICLOUD_HOSTED` is `true` and
 # `ubuntu-latest` otherwise. The selector is required for every job by

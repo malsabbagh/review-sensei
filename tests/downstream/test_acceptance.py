@@ -340,10 +340,17 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
         self.assertNotEqual(review.workflow_key, skipped.workflow_key)
         self.assertIsNone(skipped.provider)
 
-    def test_negative_skip_and_disabled_writes_assert_zero_model_and_github_calls(
+    def test_ineligible_plan_with_disabled_writes_makes_no_github_calls(
         self,
     ) -> None:
-        provider = FakeProvider()
+        """Cover the GitHub-write half only.
+
+        ``plan_review_execution`` is a pure helper, so asserting an unwired
+        provider saw no requests would be vacuous here. That the gate precedes
+        the model call is covered by
+        ``test_stale_and_ineligible_inputs_skip_without_provider_calls``.
+        """
+
         http, calls = make_http([RuntimeError("GitHub must not be contacted")])
         application, _ = _make_application(http)
         application.http = http
@@ -360,9 +367,6 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
         )
         self.assertFalse(plan.eligible)
         self.assertEqual(plan.skip_reason, "pr_not_open")
-        # The plan gates the provider call, so a closed pull request must reach
-        # publication without any model request having been made.
-        self.assertEqual(provider.requests, [])
         outcome = application.publish_review(
             options=GitHubWriteOptions(auto_review=True),
             oidc_token=None,
@@ -375,7 +379,6 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
         )
         self.assertEqual(outcome.status, "disabled")
-        self.assertEqual(provider.requests, [])
         self.assertEqual(application.broker.exchanges, [])
         self.assertEqual(application.reviewer.calls, [])
         self.assertEqual(calls, [])

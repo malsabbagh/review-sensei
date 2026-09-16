@@ -14,6 +14,7 @@ import argparse
 import json
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,18 @@ CONTRACT_PATH = ROOT / "tests" / "fixtures" / "distribution-contract.json"
 
 def load_contract(path: Path = CONTRACT_PATH) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def project_version() -> str:
+    """Return the version declared in ``pyproject.toml``.
+
+    Pinning the archive to this version means an explicitly passed archive, which
+    skips the single-match glob resolution, still cannot be a stale build from an
+    earlier version.
+    """
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return pyproject["project"]["version"]
 
 
 def resolve_archive(contract: dict, archive: Path | None) -> Path:
@@ -56,8 +69,12 @@ def archive_entries(archive: Path) -> set[str]:
             f"found {roots}"
         )
     root = roots[0]
-    if not root.startswith("review_sensei-"):
-        raise SystemExit(f"{archive.name}: unexpected sdist root directory {root!r}")
+    expected = f"review_sensei-{project_version()}"
+    if root != expected:
+        raise SystemExit(
+            f"{archive.name}: sdist root is {root!r}, expected {expected!r}; "
+            "the archive does not match the version in pyproject.toml"
+        )
     entries: set[str] = set()
     for name in names:
         _, separator, relative = name.partition("/")

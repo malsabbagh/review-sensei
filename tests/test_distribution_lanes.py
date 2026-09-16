@@ -8,12 +8,16 @@ import shlex
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
 CONTRACT = json.loads(
     (ROOT / "tests" / "fixtures" / "distribution-contract.json").read_text(
         encoding="utf-8"
@@ -278,17 +282,29 @@ class DistributionLaneTests(unittest.TestCase):
             )
             with self.assertRaises(SystemExit) as rejected:
                 verifier.archive_entries(renamed)
-            self.assertIn("unexpected sdist root", str(rejected.exception))
+            self.assertIn("expected", str(rejected.exception))
+            # An explicit archive skips glob resolution, so the version is what
+            # keeps a stale build from satisfying the contract.
+            stale = self._write_archive(
+                root / "stale.tar.gz",
+                ["tests/packaging_guard.py"],
+                prefix="review_sensei-0.0.0",
+            )
+            with self.assertRaises(SystemExit) as mismatched:
+                verifier.archive_entries(stale)
+            self.assertIn("does not match the version", str(mismatched.exception))
 
     def _write_archive(
         self,
         path: Path,
         entries: list[str],
         *,
-        prefix: str = "review_sensei-0.0.0",
+        prefix: str | None = None,
         extra_members: list[str] | None = None,
     ) -> Path:
         payload = b"placeholder\n"
+        if prefix is None:
+            prefix = f"review_sensei-{PROJECT_VERSION}"
         members = [f"{prefix}/{relative}" for relative in entries]
         members.extend(extra_members or [])
         with tarfile.open(path, "w:gz") as tar:
