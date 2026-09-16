@@ -249,6 +249,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
+                _provider_parity_workflow_before_draft_skip(tag_matches[0]),
                 _historical_tagged_v4_workflow(tag_matches[0]),
                 _previous_provider_parity_workflow(tag_matches[0]),
                 _historical_provider_parity_workflow(tag_matches[0]),
@@ -649,6 +650,7 @@ jobs:
     if: >-
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch' ||
       ((github.event_name == 'issue_comment' &&
@@ -701,17 +703,30 @@ jobs:
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
+_PROVIDER_PARITY_DRAFT_SKIP = "      github.event.pull_request.draft != true &&\n"
+
+
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
     """Return the current setup-v4 caller following the public git tag."""
 
     return _provider_parity_workflow(public_workflow_tag)
 
 
+def _provider_parity_workflow_before_draft_skip(public_workflow_tag: str) -> str:
+    """Return the released provider-parity caller before draft PRs were skipped."""
+
+    current = _provider_parity_workflow(public_workflow_tag)
+    previous = current.replace(_PROVIDER_PARITY_DRAFT_SKIP, "", 1)
+    if previous == current:
+        raise GitHubSetupError("draft skip gate is missing from the current caller")
+    return previous
+
+
 def _previous_provider_parity_workflow(public_workflow_tag: str) -> str:
     """Return the pre-write-permission provider-parity caller."""
 
     return (
-        _provider_parity_workflow(public_workflow_tag)
+        _provider_parity_workflow_before_draft_skip(public_workflow_tag)
         .replace("  pull-requests: write\n", "  pull-requests: read\n", 1)
         .replace("  issues: write\n", "  issues: read\n", 1)
     )

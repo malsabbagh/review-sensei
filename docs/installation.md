@@ -93,7 +93,8 @@ and are migrated only when their managed content matches exactly.
 The App does not create a placeholder secret or overwrite an existing variable.
 
 To enable automatic same-repository analysis, set
-`REVIEWSENSEI_AUTO_REVIEW=true`. Set `REVIEWSENSEI_GITHUB_WRITES=true`
+`REVIEWSENSEI_AUTO_REVIEW=true`. Draft pull requests skip that automatic run
+until they are marked ready for review. Set `REVIEWSENSEI_GITHUB_WRITES=true`
 separately when the validated result may publish to GitHub; analysis remains
 provider-only while writes are disabled. Set
 `REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated

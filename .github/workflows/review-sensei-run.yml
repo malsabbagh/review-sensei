@@ -118,6 +118,10 @@ concurrency:
 
 jobs:
   validate-provider-mode:
+    # opened/synchronize/reopened still fire for drafts. Skip those review runs
+    # so they are not failed by later eligibility checks; ready_for_review and
+    # non-pull_request operations continue.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     permissions: {}
     steps:

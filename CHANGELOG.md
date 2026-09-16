@@ -9,6 +9,10 @@
 
 ## Unreleased
 
+- Skip automatic ReviewSensei runs on draft pull requests instead of failing
+  preflight with "pull request is not eligible for review". Review starts when
+  a draft is marked ready for review.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/
