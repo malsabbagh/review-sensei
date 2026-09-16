@@ -73,17 +73,67 @@ deletion terms before sending source data.
 
 Corpus, matching, threshold, and report-schema changes require maintainer
 review. Fixture runs are deterministic engine checks only and can never approve
-a real model, prompt, generation-setting, or routing promotion. Such a
-promotion requires a validated `promotion-record` document (the packaged
-`promotion-record` schema) binding engine, prompt, configuration, and corpus
-digests; provider/model identity or observed revision; at least three repeated
-runs; date; and reproducibility settings. The record must include an explicit
-`supported`, `insufficient`, or `unsupported` status and rollback decision.
-The record is metadata about the evaluation, not the run evidence itself:
-operators must retain exact run outputs and provider terms/egress approval
-separately. Every status still records at least one run and its reproducibility
-settings; only `supported` can authorize promotion, and it requires at least
-three runs.
+a real model, prompt, generation-setting, or routing promotion. Rerunning
+fixture evaluation after failing live evidence cannot convert that failure into
+approval.
+
+Such a promotion requires a validated `promotion-record` document (the packaged
+`promotion-record` schema) bound to passing live evaluation reports. The record
+carries:
+
+- `engine_digest`: SHA-256 of package identity, `ReviewService` identity,
+  matching algorithm, output-correction attempt budget, location enforcement,
+  and `ReviewLimits` ceilings
+- `prompt_digest`: SHA-256 of packaged or custom stage templates
+- `configuration_digest` and `corpus_digest` copied from the reports
+- provider/model identity or observed revision
+- `run_count`, `evaluated_at`, and reproducibility settings
+- explicit `supported`, `insufficient`, or `unsupported` status
+- a rollback decision (`revert-to-baseline`, `hold`, or `none`)
+
+Only `status=supported` can authorize promotion, and it requires at least three
+independent live runs that passed the corpus quality thresholds. Fixture
+provider aliases cannot produce `supported`. Incomplete records (missing
+rollback decision, missing status, `run_count < 3` with `supported`, digest
+mismatch, or missing reproducibility) fail closed.
+
+`require_supported_promotion(record, reports)` is the documented, fail-closed
+gate for release and documentation workflows that promote a model, prompt,
+generation setting, or routing configuration. Ordinary CI must not call it to
+mint approval, and it never contacts a live provider.
+
+### Operator commands
+
+Collect at least three independent live reports outside CI, then emit or
+validate the promotion record. These commands read report files only; they do
+not add live-model or secret flags to CI:
+
+```bash
+review-sensei evaluate --mode live --corpus evaluation/v1/corpus.json \
+  --provider ollama --base-url http://127.0.0.1:11434/api \
+  --model qwen3.5:4b --provider-version local-ollama-1 \
+  --allow-live-model --output live-report-1.json
+
+review-sensei promotion emit \
+  --report live-report-1.json \
+  --report live-report-2.json \
+  --report live-report-3.json \
+  --observed-revision local-ollama-1 \
+  --evaluated-at 2026-09-16T00:00:00Z \
+  --reproducibility-json '{"seed":"fixed","temperature":0}' \
+  --output promotion-record.json
+
+review-sensei promotion validate --require-supported \
+  --record promotion-record.json \
+  --report live-report-1.json \
+  --report live-report-2.json \
+  --report live-report-3.json
+```
+
+The same emit/validate flow is available from
+`python scripts/validate_promotion_record.py`. The record is metadata about the
+evaluation, not the run evidence itself: operators must retain exact run outputs
+and provider terms/egress approval separately.
 
 CI remains fixture-only. Live runs are gated, non-secret, and performed outside
 the CI workflow against reviewed synthetic or explicitly authorized data. The

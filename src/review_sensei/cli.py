@@ -373,8 +373,8 @@ def _parser() -> argparse.ArgumentParser:
         description="Run a provider-neutral AI review against a unified diff.",
         epilog=(
             "Additional commands use the same first-token dispatch as "
-            "prepare-diff, evaluate, and github: doctor, plan, prepare-diff, "
-            "evaluate, github."
+            "prepare-diff, evaluate, github, and promotion: doctor, plan, "
+            "prepare-diff, evaluate, github, promotion."
         ),
     )
     parser.add_argument(
@@ -617,6 +617,99 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
     else:
         sys.stdout.write(rendered)
     return 0 if report["passed"] else 1
+
+
+def _parse_reproducibility_json(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ReviewInputError("reproducibility must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise ReviewInputError("reproducibility must be a JSON object")
+    return parsed
+
+
+def _promotion_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei promotion",
+        description=(
+            "Emit or validate a promotion-record from evaluation report files. "
+            "This command never calls a live provider."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    emit = subparsers.add_parser(
+        "emit",
+        help="Build a promotion-record from independent evaluation reports",
+    )
+    emit.add_argument("--report", type=Path, action="append", required=True)
+    emit.add_argument("--observed-revision", required=True)
+    emit.add_argument("--evaluated-at", required=True)
+    emit.add_argument("--reproducibility-json", required=True)
+    emit.add_argument(
+        "--rollback-decision",
+        choices=("revert-to-baseline", "hold", "none"),
+        default="revert-to-baseline",
+    )
+    emit.add_argument(
+        "--status",
+        choices=("supported", "insufficient", "unsupported"),
+    )
+    emit.add_argument("--output", type=Path)
+
+    validate = subparsers.add_parser(
+        "validate",
+        help="Validate a promotion-record against evaluation reports",
+    )
+    validate.add_argument("--record", type=Path, required=True)
+    validate.add_argument("--report", type=Path, action="append", required=True)
+    validate.add_argument(
+        "--require-supported",
+        action="store_true",
+        help="Fail unless the record is a validated supported promotion.",
+    )
+    return parser
+
+
+def _run_promotion(argv: list[str]) -> int:
+    from .evaluation import (
+        load_evaluation_report,
+        promotion_record_from_reports,
+        require_supported_promotion,
+        validate_promotion_against_report,
+        validate_promotion_record,
+    )
+
+    args = _promotion_parser().parse_args(argv)
+    reports = [load_evaluation_report(path) for path in args.report]
+    if args.command == "emit":
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision=args.observed_revision,
+            reproducibility=_parse_reproducibility_json(args.reproducibility_json),
+            evaluated_at=args.evaluated_at,
+            rollback_decision=args.rollback_decision,
+            status=args.status,
+        )
+        rendered = json.dumps(record.to_dict(), indent=2) + "\n"
+        if args.output:
+            args.output.write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
+        return 0
+    record = validate_promotion_record(
+        json.loads(
+            read_bounded_utf8(args.record, maximum=262144, label="promotion record")
+        )
+    )
+    if args.require_supported:
+        require_supported_promotion(record, reports)
+    else:
+        for report in reports:
+            validate_promotion_against_report(record, report)
+    sys.stdout.write(json.dumps(record.to_dict(), indent=2) + "\n")
+    return 0
 
 
 def _github_parser() -> argparse.ArgumentParser:
@@ -967,9 +1060,15 @@ def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
     # required argparse subparsers. doctor/plan use the same first-token
-    # command map as prepare-diff, evaluate, and github.
+    # command map as prepare-diff, evaluate, github, and promotion.
     if args_list and args_list[0] in _OFFLINE_COMMANDS:
         return _OFFLINE_COMMANDS[args_list[0]](args_list[1:])
+    if args_list and args_list[0] == "promotion":
+        try:
+            return _run_promotion(args_list[1:])
+        except (OSError, ValueError, ReviewSenseiError) as exc:
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            return 1
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
         if args.version:

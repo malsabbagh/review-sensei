@@ -1417,5 +1417,129 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", stderr.getvalue())
 
 
+class PromotionCliTests(unittest.TestCase):
+    def test_promotion_cli_emits_supported_record_from_live_reports(self):
+        from test_promotion_release import _make_report
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports = []
+            for index in (1, 2, 3):
+                path = root / f"live-{index}.json"
+                path.write_text(
+                    json.dumps(_make_report(elapsed_total_ms=index)),
+                    encoding="utf-8",
+                )
+                reports.append(path)
+            output = root / "promotion.json"
+            status = main(
+                [
+                    "promotion",
+                    "emit",
+                    "--report",
+                    str(reports[0]),
+                    "--report",
+                    str(reports[1]),
+                    "--report",
+                    str(reports[2]),
+                    "--observed-revision",
+                    "local-ollama-1",
+                    "--evaluated-at",
+                    "2026-09-16T00:00:00Z",
+                    "--reproducibility-json",
+                    '{"seed":"fixed"}',
+                    "--output",
+                    str(output),
+                ]
+            )
+            self.assertEqual(status, 0)
+            record = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "supported")
+            validate_status = main(
+                [
+                    "promotion",
+                    "validate",
+                    "--require-supported",
+                    "--record",
+                    str(output),
+                    "--report",
+                    str(reports[0]),
+                    "--report",
+                    str(reports[1]),
+                    "--report",
+                    str(reports[2]),
+                ]
+            )
+            self.assertEqual(validate_status, 0)
+
+    def test_promotion_cli_rejects_fixture_reports_for_supported_status(self):
+        from test_promotion_release import _make_report
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports = []
+            for index in (1, 2, 3):
+                path = root / f"fixture-{index}.json"
+                path.write_text(
+                    json.dumps(
+                        _make_report(
+                            mode="fixture",
+                            provider="fixture",
+                            model="fixture-v1",
+                            provider_version=None,
+                            endpoint_scope="none",
+                            elapsed_total_ms=index,
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                reports.append(path)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "promotion",
+                        "emit",
+                        "--report",
+                        str(reports[0]),
+                        "--report",
+                        str(reports[1]),
+                        "--report",
+                        str(reports[2]),
+                        "--observed-revision",
+                        "fixture-v1",
+                        "--evaluated-at",
+                        "2026-01-01T00:00:00Z",
+                        "--reproducibility-json",
+                        '{"seed":"fixed"}',
+                        "--status",
+                        "supported",
+                    ]
+                )
+            self.assertEqual(status, 1)
+            self.assertIn("supported promotion requires", stderr.getvalue())
+
+    def test_promotion_cli_does_not_accept_live_model_flags(self):
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(stderr):
+                main(
+                    [
+                        "promotion",
+                        "emit",
+                        "--allow-live-model",
+                        "--report",
+                        "missing.json",
+                        "--observed-revision",
+                        "r1",
+                        "--evaluated-at",
+                        "2026-01-01",
+                        "--reproducibility-json",
+                        '{"seed":"fixed"}',
+                    ]
+                )
+        self.assertIn("unrecognized arguments", stderr.getvalue())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

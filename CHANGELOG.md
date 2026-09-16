@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Bound model, prompt, and routing promotions to real-provider evaluation
+  evidence. `engine_digest` and `prompt_digest` are now computed from package
+  identity, engine limits, and stage templates; `promotion_record_from_reports`
+  requires at least three independent live runs for `status=supported`; and
+  `require_supported_promotion` is the fail-closed release/docs gate. Fixture
+  reports cannot mint supported promotions. Operators can emit or validate
+  records with `review-sensei promotion` or
+  `scripts/validate_promotion_record.py` without adding live or secret flags to
+  CI.
+
 ## 0.1.1 - 2026-09-08
 
 - Fixed standalone HTTPS provider calls by bundling and using a trusted CA

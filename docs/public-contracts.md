@@ -97,7 +97,14 @@ expected findings match one actual comment by canonical path, changed line,
 category, and normalized body terms. Quality metrics are actionable precision,
 false-positive rate, expected-finding recall, location validity, and category
 coverage. Byte counts, provider calls, elapsed time, and `ceil(bytes / 4)` are
-non-monetary performance proxies.
+non-monetary performance proxies. Reports also emit bounded `engine_digest` and
+`prompt_digest` values used by promotion evidence.
+
+`review-sensei promotion emit|validate` reads evaluation report files and
+promotion records only. It never constructs a provider, never accepts live-model
+or egress flags, and cannot mint `status=supported` from fixture reports.
+`require_supported_promotion` is the fail-closed Python gate for promoting a
+model, prompt, generation setting, or routing configuration.
 
 ## Stable Python Imports
 
@@ -123,6 +130,13 @@ These imports are public and stable within a major version:
 - `review_sensei.VerificationResult`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
+- `review_sensei.PromotionRecord`
+- `review_sensei.engine_digest`
+- `review_sensei.prompt_digest`
+- `review_sensei.promotion_record_from_reports`
+- `review_sensei.validate_promotion_against_report`
+- `review_sensei.require_supported_promotion`
+- `review_sensei.validate_promotion_record`
 - `review_sensei.load_repository_learnings`
 - `review_sensei.load_review_categories_from_dir`
 - `review_sensei.load_stages_from_dir`

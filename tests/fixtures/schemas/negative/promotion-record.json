@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "engine_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "prompt_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "corpus_digest": "not-a-digest",
+  "provider": "ollama",
+  "model": "qwen3.5:4b",
+  "observed_revision": "local-ollama-1",
+  "run_count": 3,
+  "evaluated_at": "2026-09-16T00:00:00Z",
+  "reproducibility": {"seed": "fixed"},
+  "status": "supported",
+  "rollback_decision": "revert-to-baseline"
+}

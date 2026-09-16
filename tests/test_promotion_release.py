@@ -1,10 +1,19 @@
+import importlib.util
+import json
+import tempfile
 import unittest
 from collections import UserDict
+from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
     PromotionRecord,
     _is_fixture_alias,
+    engine_digest,
+    promotion_record_from_reports,
+    prompt_digest,
+    require_supported_promotion,
+    validate_promotion_against_report,
     validate_promotion_record,
 )
 from review_sensei.release_manifest import (
@@ -289,6 +298,329 @@ class PromotionAndReleaseTests(unittest.TestCase):
         }
         with self.assertRaises(ReviewInputError):
             validate_compatibility_manifest(value)
+
+
+def _make_report(
+    *,
+    mode: str = "live",
+    provider: str = "ollama",
+    model: str = "qwen3.5:4b",
+    passed: bool = True,
+    elapsed_total_ms: int = 1,
+    provider_version: str | None = "local-ollama-1",
+    engine: str | None = None,
+    prompt: str | None = None,
+    configuration: str | None = None,
+    corpus: str | None = None,
+    endpoint_scope: str = "loopback",
+) -> dict:
+    prompt_value = prompt if prompt is not None else prompt_digest()
+    failures = [] if passed else ["actionable_precision_minimum"]
+    return {
+        "schema_version": "1.0",
+        "corpus": {
+            "id": "review-sensei-synthetic-v1",
+            "version": "1.0",
+            "sha256": corpus if corpus is not None else "d" * 64,
+        },
+        "run": {
+            "mode": mode,
+            "review_sensei_version": "0.1.1",
+            "provider": provider,
+            "provider_version": provider_version,
+            "model": model,
+            "endpoint_scope": endpoint_scope,
+            "engine_digest": engine if engine is not None else engine_digest(),
+            "prompt_digest": prompt_value,
+            "package_stage_digest": prompt_value,
+            "configuration_digest": (
+                configuration if configuration is not None else "c" * 64
+            ),
+        },
+        "configuration": {"review_configuration_id": "packaged-defaults-v1"},
+        "privacy": {"status": "clean", "scanned_inventory_count": 1},
+        "cases": [
+            {
+                "id": "example",
+                "kind": "quality",
+                "category": "correctness",
+                "status": "passed" if passed else "failed",
+                "expected_matches": 1,
+                "actual_matches": 1 if passed else 0,
+                "false_positives": 0 if passed else 1,
+                "location_valid": True,
+                "category_valid": True,
+                "elapsed_ms": elapsed_total_ms,
+                "provider_calls": 1,
+                "prompt_bytes": 0,
+                "response_bytes": 0,
+            }
+        ],
+        "metrics": {
+            "provider_calls": 1,
+            "prompt_bytes": 0,
+            "response_bytes": 0,
+            "token_proxy_4_bytes": 0,
+            "elapsed_total_ms": elapsed_total_ms,
+            "elapsed_mean_ms": float(elapsed_total_ms),
+            "elapsed_p95_ms": float(elapsed_total_ms),
+        },
+        "deterministic": {
+            "exact_fixture_result_rate": 1.0 if passed else 0.0,
+            "expected_contract_rejection_rate": 1.0,
+        },
+        "quality": {
+            "actionable_precision": 1.0 if passed else 0.0,
+            "false_positive_rate": 0.0 if passed else 1.0,
+            "expected_finding_recall": 1.0 if passed else 0.0,
+            "location_validity": 1.0,
+            "category_coverage": 1.0,
+        },
+        "threshold_failures": failures,
+        "passed": passed,
+    }
+
+
+class PromotionEvidenceBindingTests(unittest.TestCase):
+    def test_incomplete_records_fail_closed(self) -> None:
+        complete = {
+            "schema_version": "1.0",
+            "engine_digest": SHA,
+            "prompt_digest": SHA,
+            "configuration_digest": SHA,
+            "corpus_digest": SHA,
+            "provider": "ollama",
+            "model": "model",
+            "observed_revision": "r1",
+            "run_count": 3,
+            "evaluated_at": "2026-01-01",
+            "reproducibility": {"seed": "fixed"},
+            "status": "supported",
+            "rollback_decision": "revert-to-baseline",
+        }
+        for missing in ("rollback_decision", "status", "reproducibility"):
+            with self.subTest(missing=missing):
+                value = dict(complete)
+                value.pop(missing)
+                with self.assertRaises(ReviewInputError):
+                    validate_promotion_record(value)
+        with self.assertRaises(ReviewInputError):
+            PromotionRecord(
+                SHA,
+                SHA,
+                SHA,
+                SHA,
+                "ollama",
+                "model",
+                "r1",
+                2,
+                "2026-01-01",
+                {"seed": "fixed"},
+                status="supported",
+            )
+        with self.assertRaises(ReviewInputError):
+            PromotionRecord(
+                "not-a-digest",
+                SHA,
+                SHA,
+                SHA,
+                "ollama",
+                "model",
+                "r1",
+                3,
+                "2026-01-01",
+                {"seed": "fixed"},
+            )
+
+    def test_three_live_reports_mint_supported_promotion(self) -> None:
+        reports = [_make_report(elapsed_total_ms=index) for index in (1, 2, 3)]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed", "temperature": 0},
+            evaluated_at="2026-09-16T00:00:00Z",
+        )
+        self.assertEqual(record.status, "supported")
+        self.assertEqual(record.run_count, 3)
+        self.assertEqual(record.engine_digest, engine_digest())
+        self.assertEqual(record.prompt_digest, prompt_digest())
+        self.assertEqual(record.provider, "ollama")
+        self.assertEqual(record.model, "qwen3.5:4b")
+        for report in reports:
+            validate_promotion_against_report(record, report)
+        self.assertEqual(
+            require_supported_promotion(record, reports).status, "supported"
+        )
+
+    def test_constructed_fixture_reports_cannot_mint_supported(self) -> None:
+        reports = [
+            _make_report(
+                mode="fixture",
+                provider="fixture",
+                model="fixture-v1",
+                provider_version=None,
+                endpoint_scope="none",
+                elapsed_total_ms=index,
+            )
+            for index in (1, 2, 3)
+        ]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="fixture-v1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.status, "insufficient")
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                reports,
+                observed_revision="fixture-v1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+                status="supported",
+            )
+        with self.assertRaises(ReviewInputError):
+            require_supported_promotion(record, reports)
+
+    def test_failing_live_reports_are_unsupported(self) -> None:
+        reports = [
+            _make_report(passed=False, elapsed_total_ms=index) for index in (1, 2, 3)
+        ]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.status, "unsupported")
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                reports,
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+                status="supported",
+            )
+
+    def test_duplicate_reports_are_not_independent(self) -> None:
+        report = _make_report(elapsed_total_ms=4)
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                (report, report, report),
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+            )
+
+    def test_digest_or_identity_mismatch_fails_closed(self) -> None:
+        reports = [_make_report(elapsed_total_ms=index) for index in (1, 2, 3)]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        tampered = json.loads(json.dumps(reports[0]))
+        tampered["run"]["engine_digest"] = "e" * 64
+        with self.assertRaises(ReviewInputError):
+            validate_promotion_against_report(record, tampered)
+        other = _make_report(elapsed_total_ms=9, configuration="f" * 64)
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                [*reports[:2], other],
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+            )
+        with self.assertRaises(ReviewInputError):
+            require_supported_promotion(record, reports[:2])
+
+    def test_two_live_reports_are_insufficient(self) -> None:
+        reports = [_make_report(elapsed_total_ms=index) for index in (1, 2)]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.status, "insufficient")
+        self.assertEqual(record.run_count, 2)
+
+    def test_missing_report_engine_digest_fails_closed(self) -> None:
+        report = _make_report(elapsed_total_ms=1)
+        report["run"].pop("engine_digest")
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                [report],
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+            )
+
+    def test_operator_script_emits_and_validates_without_live_flags(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "validate_promotion_record.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "validate_promotion_record_script", script
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            report_paths = []
+            for index in (1, 2, 3):
+                path = root / f"live-{index}.json"
+                path.write_text(
+                    json.dumps(_make_report(elapsed_total_ms=index)), encoding="utf-8"
+                )
+                report_paths.append(path)
+            output = root / "promotion.json"
+            self.assertEqual(
+                module.main(
+                    [
+                        "emit",
+                        "--report",
+                        str(report_paths[0]),
+                        "--report",
+                        str(report_paths[1]),
+                        "--report",
+                        str(report_paths[2]),
+                        "--observed-revision",
+                        "local-ollama-1",
+                        "--evaluated-at",
+                        "2026-09-16T00:00:00Z",
+                        "--reproducibility-json",
+                        '{"seed":"fixed"}',
+                        "--output",
+                        str(output),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8"))["status"], "supported"
+            )
+            self.assertEqual(
+                module.main(
+                    [
+                        "validate",
+                        "--require-supported",
+                        "--record",
+                        str(output),
+                        "--report",
+                        str(report_paths[0]),
+                        "--report",
+                        str(report_paths[1]),
+                        "--report",
+                        str(report_paths[2]),
+                    ]
+                ),
+                0,
+            )
 
 
 if __name__ == "__main__":

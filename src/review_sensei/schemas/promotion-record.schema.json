@@ -18,5 +18,22 @@
     "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32, "description": "Reproducibility settings are required for every status."},
     "status": {"enum": ["supported", "insufficient", "unsupported"], "description": "Only supported with at least three runs can authorize promotion."},
     "rollback_decision": {"enum": ["revert-to-baseline", "hold", "none"]}
-  }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "engine_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "prompt_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "corpus_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "provider": "ollama",
+      "model": "qwen3.5:4b",
+      "observed_revision": "local-ollama-1",
+      "run_count": 3,
+      "evaluated_at": "2026-09-16T00:00:00Z",
+      "reproducibility": {"seed": "fixed", "temperature": 0},
+      "status": "supported",
+      "rollback_decision": "revert-to-baseline"
+    }
+  ]
 }

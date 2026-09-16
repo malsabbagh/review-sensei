@@ -75,6 +75,14 @@
         "endpoint_scope": {
           "enum": ["none", "loopback", "remote"]
         },
+        "engine_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "prompt_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
         "package_stage_digest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
@@ -317,6 +325,8 @@
         "provider_version": null,
         "model": "fixture-v1",
         "endpoint_scope": "none",
+        "engine_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "prompt_digest": "0000000000000000000000000000000000000000000000000000000000000000",
         "package_stage_digest": "0000000000000000000000000000000000000000000000000000000000000000",
         "configuration_digest": "0000000000000000000000000000000000000000000000000000000000000000"
       },

@@ -18,7 +18,15 @@ from .context import (
 )
 from .conversation import ConversationService
 from .diagnostics import build_plan, run_doctor
-from .evaluation import PromotionRecord, validate_promotion_record
+from .evaluation import (
+    PromotionRecord,
+    engine_digest,
+    promotion_record_from_reports,
+    prompt_digest,
+    require_supported_promotion,
+    validate_promotion_against_report,
+    validate_promotion_record,
+)
 from .learnings import (
     LearningDiagnostic,
     LearningFeedback,
@@ -116,6 +124,11 @@ __all__ = [
     "load_stages_from_dir",
     "plan_review_execution",
     "PromotionRecord",
+    "engine_digest",
+    "prompt_digest",
+    "promotion_record_from_reports",
+    "require_supported_promotion",
+    "validate_promotion_against_report",
     "validate_promotion_record",
     "RecoveryArtifact",
     "ResourceBudget",
