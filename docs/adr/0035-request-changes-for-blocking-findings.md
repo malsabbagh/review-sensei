@@ -41,10 +41,17 @@ Same-head last-write policy:
 - A later blocking result still posts `REQUEST_CHANGES` with its inline
   comments even if another execution already approved or commented that head.
 - A later clean execution does not approve over an existing
-  `CHANGES_REQUESTED` review unless the sweep observes ReviewSensei finding
-  roots and none of them are still classified blocking.
-- If `CHANGES_REQUESTED` exists and the sweep has not yet observed those roots,
-  keep the change request in force.
+  `CHANGES_REQUESTED` review while the sweep still sees unresolved blocking
+  ReviewSensei roots.
+- Deleted or resolved blocking roots do not deadlock that change request; the
+  later clean run may `APPROVE`.
+- Reviews are re-read immediately before `APPROVE`, and again after a second
+  sweep when a change request was already visible, so a racy later change
+  request is not dismissed unless that later sweep also proves no open
+  blocking roots remain.
+- Idempotent finalizer `REQUEST_CHANGES` writes own a
+  `reviewsensei:changes-requested` marker; an unmarked App change request does
+  not count as already published.
 
 `REVIEWSENSEI_AUTO_APPROVE=false` remains comment-only: no `APPROVE` and no
 `REQUEST_CHANGES`.

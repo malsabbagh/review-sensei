@@ -226,12 +226,6 @@ class _FinalizationPreflight:
     app_authored: bool = False
 
 
-@dataclass(frozen=True)
-class _ThreadBlockingScan:
-    open_blocking: bool
-    saw_app_finding: bool
-
-
 class ReviewApprovalFinalizer:
     """Converge an eligible exact-head PR to one App approval or change request.
 
@@ -277,18 +271,14 @@ class ReviewApprovalFinalizer:
         if preflight.app_authored:
             return PublicationResult(status="skipped_app_authored")
         assert preflight.repository_id is not None and preflight.base_sha is not None
-        scan = (
-            _ThreadBlockingScan(open_blocking=True, saw_app_finding=True)
-            if known_blocking_finding
-            else self._scan_blocking_threads(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                repository_id=preflight.repository_id,
-                head_sha=head_sha,
-                base_sha=preflight.base_sha,
-                app_slug=app_slug,
-            )
+        open_blocking = known_blocking_finding or self._scan_blocking_threads(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=preflight.repository_id,
+            head_sha=head_sha,
+            base_sha=preflight.base_sha,
+            app_slug=app_slug,
         )
         # The thread scan can paginate, so bind the write to the same exact PR
         # identity immediately before emitting APPROVE or REQUEST_CHANGES.
@@ -308,25 +298,24 @@ class ReviewApprovalFinalizer:
             or write_preflight.base_sha != preflight.base_sha
         ):
             return PublicationResult(status="skipped_stale_base")
-        blocking = scan.open_blocking
-        if blocking:
-            reviews = self._load_head_reviews(
-                token=token, repository=repository, pull_request=pull_request
-            )
-            has_changes_requested = self._reviews_have_app_head_state(
-                reviews,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                state="CHANGES_REQUESTED",
-            )
-            if has_changes_requested:
-                return PublicationResult(status="already_changes_requested")
+        if open_blocking:
             marker = changes_requested_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 base_sha=preflight.base_sha,
             )
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            if self._reviews_have_app_head_state(
+                reviews,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                state="CHANGES_REQUESTED",
+                body_contains=marker,
+            ):
+                return PublicationResult(status="already_changes_requested")
             return self._post_head_review(
                 token=token,
                 repository=repository,
@@ -339,6 +328,7 @@ class ReviewApprovalFinalizer:
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
+                    marker=marker,
                     app_slug=app_slug,
                 ),
                 success_status="changes_requested",
@@ -352,39 +342,42 @@ class ReviewApprovalFinalizer:
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
+        kept = self._keep_existing_change_request(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            repository_id=preflight.repository_id,
+            base_sha=preflight.base_sha,
+            reviews=reviews,
+        )
+        if kept is not None:
+            return kept
         if self._reviews_have_app_head_state(
             reviews,
             head_sha=head_sha,
             app_slug=app_slug,
             state="CHANGES_REQUESTED",
         ):
-            scan = self._scan_blocking_threads(
+            # A concurrent blocking run may POST REQUEST_CHANGES during the
+            # second sweep. Re-read immediately before APPROVE and keep that
+            # change request when newly visible roots are still open.
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            kept = self._keep_existing_change_request(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
                 repository_id=preflight.repository_id,
-                head_sha=head_sha,
                 base_sha=preflight.base_sha,
-                app_slug=app_slug,
+                reviews=reviews,
             )
-            write_preflight = self._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
-            if write_preflight.result is not None:
-                return write_preflight.result
-            if write_preflight.app_authored:
-                return PublicationResult(status="skipped_app_authored")
-            if (
-                write_preflight.repository_id != preflight.repository_id
-                or write_preflight.base_sha != preflight.base_sha
-            ):
-                return PublicationResult(status="skipped_stale_base")
-            if scan.open_blocking:
-                return PublicationResult(status="already_changes_requested")
+            if kept is not None:
+                return kept
         marker = approval_marker(
             repository_id=preflight.repository_id,
             pull_request=pull_request,
@@ -420,6 +413,54 @@ class ReviewApprovalFinalizer:
             permission="approval finalization lacks permission",
             transient="approval finalization failed temporarily",
         )
+
+    def _keep_existing_change_request(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        repository_id: int,
+        base_sha: str,
+        reviews: list[Any],
+    ) -> PublicationResult | None:
+        if not self._reviews_have_app_head_state(
+            reviews,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            state="CHANGES_REQUESTED",
+        ):
+            return None
+        open_blocking = self._scan_blocking_threads(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            app_slug=app_slug,
+        )
+        write_preflight = self._preflight(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if write_preflight.result is not None:
+            return write_preflight.result
+        if write_preflight.app_authored:
+            return PublicationResult(status="skipped_app_authored")
+        if (
+            write_preflight.repository_id != repository_id
+            or write_preflight.base_sha != base_sha
+        ):
+            return PublicationResult(status="skipped_stale_base")
+        if open_blocking:
+            return PublicationResult(status="already_changes_requested")
+        return None
 
     def _post_head_review(
         self,
@@ -570,7 +611,7 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             base_sha=base_sha,
             app_slug=app_slug,
-        ).open_blocking
+        )
 
     def _scan_blocking_threads(
         self,
@@ -582,12 +623,11 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         base_sha: str,
         app_slug: str,
-    ) -> _ThreadBlockingScan:
+    ) -> bool:
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
             raise GitHubPublicationError("review thread repository is invalid")
         after: str | None = None
-        saw_app_finding = False
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
                 status, payload = self.http.request(
@@ -637,14 +677,6 @@ class ReviewApprovalFinalizer:
                 comments = node.get("comments")
                 roots = comments.get("nodes") if isinstance(comments, dict) else None
                 if node["isResolved"]:
-                    if (
-                        isinstance(roots, list)
-                        and len(roots) == 1
-                        and isinstance(roots[0], dict)
-                    ):
-                        author = roots[0].get("author")
-                        if isinstance(author, dict) and author.get("login") == app_slug:
-                            saw_app_finding = True
                     continue
                 if (
                     not isinstance(roots, list)
@@ -656,7 +688,6 @@ class ReviewApprovalFinalizer:
                 author = root.get("author")
                 if not isinstance(author, dict) or author.get("login") != app_slug:
                     continue
-                saw_app_finding = True
                 blocking = finding_blocks_approval(
                     body=root.get("body"),
                     repository_id=repository_id,
@@ -665,14 +696,12 @@ class ReviewApprovalFinalizer:
                     base_sha=base_sha,
                 )
                 if blocking is not False:
-                    return _ThreadBlockingScan(open_blocking=True, saw_app_finding=True)
+                    return True
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return _ThreadBlockingScan(
-                    open_blocking=False, saw_app_finding=saw_app_finding
-                )
+                return False
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")
@@ -709,6 +738,7 @@ class ReviewApprovalFinalizer:
         repository: str,
         pull_request: int,
         head_sha: str,
+        marker: str,
         app_slug: str,
     ) -> bool:
         return self._has_app_head_review(
@@ -718,7 +748,7 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             app_slug=app_slug,
             state="CHANGES_REQUESTED",
-            body=None,
+            body_contains=marker,
             transient="change-request reconciliation failed temporarily",
             failed="change-request reconciliation failed",
         )
@@ -731,17 +761,23 @@ class ReviewApprovalFinalizer:
         app_slug: str,
         state: str,
         body: str | None = None,
+        body_contains: str | None = None,
     ) -> bool:
         for review in reviews:
             if not isinstance(review, dict):
                 continue
             user = review.get("user")
+            review_body = review.get("body")
             if (
                 review.get("commit_id") == head_sha
                 and review.get("state") == state
                 and isinstance(user, dict)
                 and user.get("login") == app_slug
-                and (body is None or review.get("body") == body)
+                and (body is None or review_body == body)
+                and (
+                    body_contains is None
+                    or (isinstance(review_body, str) and body_contains in review_body)
+                )
             ):
                 return True
         return False
@@ -755,7 +791,8 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         state: str,
-        body: str | None,
+        body: str | None = None,
+        body_contains: str | None = None,
         transient: str,
         failed: str,
     ) -> bool:
@@ -776,6 +813,7 @@ class ReviewApprovalFinalizer:
             app_slug=app_slug,
             state=state,
             body=body,
+            body_contains=body_contains,
         )
 
 
@@ -983,7 +1021,7 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._finalize_after_findings(
+                self._handle_after_findings(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
@@ -1001,7 +1039,7 @@ class ReviewPublisher:
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
-                self._finalize_after_findings(
+                self._handle_after_findings(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
@@ -1028,7 +1066,7 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._finalize_after_findings(
+                self._handle_after_findings(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
@@ -1051,7 +1089,7 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._finalize_after_findings(
+                self._handle_after_findings(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
@@ -1068,7 +1106,7 @@ class ReviewPublisher:
             )
         raise GitHubPublicationError("review publication was rejected")
 
-    def _finalize_after_findings(
+    def _handle_after_findings(
         self,
         *,
         token: str,
@@ -1081,9 +1119,11 @@ class ReviewPublisher:
         app_authored: bool,
         finding_event: str,
     ) -> None:
-        # The finding review already submitted REQUEST_CHANGES. Calling the
-        # finalizer here would only duplicate that event; a later execution or
-        # resolved-root pass is what may APPROVE.
+        # App-authored PRs stay on the skipped_app_authored preflight path:
+        # never APPROVE or REQUEST_CHANGES from the finalizer.
+        # A finding review that already submitted REQUEST_CHANGES must not
+        # post a second identical event; a later execution or resolved-root
+        # pass is what may APPROVE.
         if app_authored or finding_event == "REQUEST_CHANGES":
             return
         self.finalizer.finalize(
