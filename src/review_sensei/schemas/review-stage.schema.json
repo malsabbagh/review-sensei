@@ -44,8 +44,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
-      "description": "Canonical named provider profile for this stage. Local/private runs cannot select a remote profile."
+      "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*|local/private)$",
+      "description": "Named provider profile for this stage. Accepts canonical names and the local/private alias. Local/private runs cannot select a remote profile."
     }
   },
   "not": {

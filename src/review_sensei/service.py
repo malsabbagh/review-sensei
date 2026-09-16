@@ -133,12 +133,13 @@ class ReviewService:
     def _complete(
         self, provider: ReviewProvider, provider_request: ProviderRequest
     ) -> ProviderResponse:
-        """Call a provider and count only successful completions toward the budget.
+        """Call a provider and count every invocation toward the budget.
 
-        Failed attempts, including transient transport errors, do not consume
-        ``max_provider_calls``; only responses returned from ``complete`` do.
-        Structural output retries within a stage are bounded separately by
-        ``max_retry_attempts`` via ``_stage_attempt_limit``.
+        Each provider call consumes one ``max_provider_calls`` slot whether or
+        not the adapter returns a response, so transient transport failures
+        cannot bypass the deterministic call ceiling. Structural output retries
+        within a stage remain bounded separately by ``max_retry_attempts`` via
+        ``_stage_attempt_limit``.
         """
         if self._provider_calls >= self.budget.max_provider_calls:
             raise ProviderError(
@@ -146,9 +147,8 @@ class ReviewService:
                 f"({self._provider_calls}/{self.budget.max_provider_calls} "
                 "provider calls)"
             )
-        response = provider.complete(provider_request)
         self._provider_calls += 1
-        return response
+        return provider.complete(provider_request)
 
     @staticmethod
     def _source_context_coverage(request: ReviewRequest) -> object | None:

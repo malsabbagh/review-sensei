@@ -682,13 +682,6 @@ def validate_profile_promotion(
                 raise ReviewInputError(
                     "promotion live report provider does not match record"
                 )
-            if (
-                fields["model"] != record.model
-                and fields["model"] not in profile.allowed_models()
-            ):
-                raise ReviewInputError(
-                    "promotion live report model does not match record"
-                )
             if _report_endpoint_scope(report) not in expected:
                 raise ReviewInputError(
                     "promotion record endpoint scope does not match profile"

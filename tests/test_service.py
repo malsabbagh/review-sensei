@@ -596,18 +596,11 @@ class ReviewServiceTests(unittest.TestCase):
                 stage_providers={"": FakeProvider('{"summary":"ok"}')},
             )
 
-    def test_failed_provider_call_does_not_consume_call_budget(self):
+    def test_failed_provider_call_consumes_call_budget(self):
         class FailProvider(FakeProvider):
-            def __init__(self, response_text: str) -> None:
-                super().__init__(response_text)
-                self.attempts = 0
-
             def complete(self, request):
-                self.attempts += 1
-                if self.attempts == 1:
-                    self.requests.append(request)
-                    raise ProviderError("transient provider failure", transient=True)
-                return super().complete(request)
+                self.requests.append(request)
+                raise ProviderError("transient provider failure", transient=True)
 
         provider = FailProvider('{"summary":"ok"}')
         service = ReviewService(
@@ -620,9 +613,9 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertTrue(raised.exception.transient)
         self.assertEqual(str(raised.exception), "transient provider failure")
         self.assertEqual(len(provider.requests), 1)
-        response = service._complete(provider, request)
-        self.assertEqual(response.text, '{"summary":"ok"}')
-        self.assertEqual(len(provider.requests), 2)
+        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
+            service._complete(provider, request)
+        self.assertEqual(len(provider.requests), 1)
 
     def test_structural_recovery_uses_retry_budget_not_provider_call_budget(self):
         class RecoveringProvider(FakeProvider):

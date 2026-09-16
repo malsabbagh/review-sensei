@@ -105,12 +105,22 @@ def _stage_provider_settings(
     resolved: str,
     model: str,
     run_settings: ProviderSettings,
+    run_profile_name: str | None,
 ) -> ProviderSettings:
     """Build canonical profile settings for one stage provider."""
 
     profile = get_provider_profile(resolved)
-    api_key = _api_key_for_stage_profile(resolved=resolved, run_settings=run_settings)
-    settings = ProviderSettings.for_profile(resolved, api_key=api_key)
+    if resolved != run_profile_name:
+        if profile.requires_api_key:
+            raise ProviderError(
+                "stage profile cannot reuse another profile's credential"
+            )
+        settings = ProviderSettings.for_profile(resolved)
+    else:
+        api_key = _api_key_for_stage_profile(
+            resolved=resolved, run_settings=run_settings
+        )
+        settings = ProviderSettings.for_profile(resolved, api_key=api_key)
     if model != profile.model:
         settings = replace(settings, model=model)
     return settings
@@ -157,15 +167,11 @@ def bind_stage_providers(
         default_model = default_provider.model or profile.model
         if resolved == run_profile_name and model == default_model:
             continue
-        if resolved != run_profile_name:
-            mapping[stage.name] = registry.create(
-                ProviderSettings.for_profile(resolved)
-            )
-            continue
         stage_settings = _stage_provider_settings(
             resolved=resolved,
             model=model,
             run_settings=settings,
+            run_profile_name=run_profile_name,
         )
         if model != profile.model:
             mapping[stage.name] = registry.create_for_stage(stage_settings)
