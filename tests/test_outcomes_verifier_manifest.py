@@ -56,6 +56,7 @@ class ContractsTests(unittest.TestCase):
             stage_summary={"stage": "complete"},
             provider_calls=2,
             retry_attempts=1,
+            structural_retries=0,
             prompt_bytes=128,
             response_bytes=256,
             elapsed_ms=900,
@@ -107,6 +108,7 @@ class ContractsTests(unittest.TestCase):
         for field in (
             "provider_calls",
             "retry_attempts",
+            "structural_retries",
             "prompt_bytes",
             "response_bytes",
             "elapsed_ms",

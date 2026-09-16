@@ -379,6 +379,7 @@ function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 4
 name: ReviewSensei review
+run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
 # The installer and this example follow the operator-managed v4 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs

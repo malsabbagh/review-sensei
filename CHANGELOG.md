@@ -127,6 +127,14 @@
   optional evidence id, so reclassifying a lens does not open a second
   discussion. Cache state is optional, in-memory, and metadata-only.
 
+- Wired structured `RunOutcome` envelopes, hard `ResourceBudget` enforcement,
+  and publication-only `RecoveryArtifact` recovery through `ReviewService`, the
+  CLI, and GitHub publication. Every run now distinguishes a clean review,
+  partial coverage, an intentional skip, provider/budget failure, and
+  publication failure without logging prompts, responses, or source text.
+  Recovery republishes a retained validated result and cannot rewrite trusted
+  learnings or configuration.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

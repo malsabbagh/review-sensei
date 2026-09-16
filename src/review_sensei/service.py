@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,12 @@ from .models import (
     ReviewRequest,
     ReviewResult,
 )
-from .outcomes import ResourceBudget
+from .outcomes import (
+    ResourceBudget,
+    ResourceBudgetTracker,
+    RunOutcome,
+    sanitize_diagnostic,
+)
 from .providers.base import ReviewProvider
 from .stages import (
     ReviewCategory,
@@ -43,7 +49,7 @@ from .stages import (
     load_review_categories_from_dir,
     load_stages_from_dir,
 )
-from .validation import validate_bounded_text
+from .validation import utf8_size, validate_bounded_text
 
 DEFAULT_CATEGORY_CATALOG = load_review_categories_from_dir(
     Path(__file__).parent / "default_categories"
@@ -103,6 +109,20 @@ class _ValidatedStageOutput:
     comments: tuple[ReviewComment, ...]
     proposals: tuple[LearningProposal, ...]
     omitted_inline_comments: int = 0
+
+
+@dataclass(frozen=True)
+class ReviewRun:
+    """Structured outcome for one ``ReviewService`` attempt.
+
+    ``result`` is present only when a publisher-ready aggregate was produced.
+    ``error`` preserves the original fail-closed exception for callers of
+    ``review()``; logs and ``outcome.diagnostic`` never include that text.
+    """
+
+    outcome: RunOutcome
+    result: ReviewResult | None = None
+    error: BaseException | None = None
 
 
 class ReviewService:
@@ -209,8 +229,50 @@ class ReviewService:
         *,
         incremental: IncrementalReviewPlan | None = None,
         profile: str = "default",
+        budget: ResourceBudget | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> ReviewResult:
-        # Multi-stage execution
+        """Return a validated review result or raise on failure.
+
+        Raises ``ReviewInputError`` when resource budgets are exhausted.
+        Other failures surface as ``ReviewFormatError`` or ``ProviderError``.
+        """
+
+        run = self.run(
+            request,
+            incremental=incremental,
+            profile=profile,
+            budget=budget,
+            monotonic=monotonic,
+            sleeper=sleeper,
+        )
+        if run.error is not None:
+            raise run.error
+        if run.result is None:
+            if run.outcome.status == "budget_exhausted":
+                raise ReviewInputError("resource budget exhausted")
+            raise ReviewFormatError("provider request failed")
+        return run.result
+
+    def run(
+        self,
+        request: ReviewRequest,
+        *,
+        incremental: IncrementalReviewPlan | None = None,
+        profile: str = "default",
+        budget: ResourceBudget | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> ReviewRun:
+        """Execute one review and always return a structured ``RunOutcome``."""
+
+        effective_budget = budget if budget is not None else self.budget
+        tracker = ResourceBudgetTracker(
+            effective_budget,
+            monotonic=monotonic or time.monotonic,
+            sleeper=sleeper or time.sleep,
+        )
         accumulated_summary: str = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
@@ -220,6 +282,7 @@ class ReviewService:
         omitted_inline_comments = 0
         executed_comment_stage = False
         self._provider_calls = 0
+        stage_summary: dict[str, str] = {}
 
         # Preflight the complete diff exactly once, before the first provider
         # construction/call.  The parser owns byte, line, file, hunk, marker,
@@ -247,16 +310,47 @@ class ReviewService:
             # below is engine-authored rather than provider output, and the pass
             # carries no findings, so approval still depends entirely on the
             # finalizer's unresolved-blocking-root check.
-            return self._finalize_result(
-                request,
-                summary="Incremental review: no changed paths since the last accepted review.",
-                comments=(),
-                proposals=(),
-                provider=last_provider,
-                model=last_model,
-                review_status="complete",
-                coverage=coverage,
+            try:
+                result = self._finalize_result(
+                    request,
+                    summary="Incremental review: no changed paths since the last accepted review.",
+                    comments=(),
+                    proposals=(),
+                    provider=last_provider,
+                    model=last_model,
+                    review_status="complete",
+                    coverage=coverage,
+                )
+            except ReviewInputError as exc:
+                error = ReviewFormatError(
+                    "provider output exceeds the configured result limits"
+                )
+                error.__cause__ = exc
+                return self._finish_run(
+                    tracker=tracker,
+                    status="provider_failed",
+                    stage_summary=stage_summary,
+                    diagnostic="invalid_provider_output",
+                    error=error,
+                    repository=request.repository,
+                    pull_request_number=request.pull_request_number,
+                )
+            return self._finish_run(
+                tracker=tracker,
+                status="reviewed",
+                stage_summary=stage_summary,
+                result=result,
+                repository=request.repository,
+                pull_request_number=request.pull_request_number,
             )
+
+        prompt_limit = min(
+            request.limits.max_prompt_bytes, effective_budget.max_prompt_bytes
+        )
+        response_limit = min(
+            request.limits.max_provider_response_bytes,
+            effective_budget.max_output_bytes,
+        )
 
         for stage in self.stages:
             active_categories = (
@@ -274,6 +368,7 @@ class ReviewService:
             # overall summary stage).
             if stage.categories and not active_categories:
                 skipped_stages += 1
+                stage_summary[stage.name] = "skipped"
                 continue
             executed_comment_stage = (
                 executed_comment_stage or "comments" in stage.outputs
@@ -286,43 +381,206 @@ class ReviewService:
                 reviewed_paths=coverage.reviewed_paths,
                 related_paths=coverage.related_paths,
             )
-            provider_request = self._provider_request(prompt, request=request)
-            stage_summary: str | None = None
+            current_prompt = prompt
+            stage_text: str | None = None
             stage_comments: tuple[ReviewComment, ...] = ()
             stage_proposals: tuple[LearningProposal, ...] = ()
             response_provider = last_provider
             response_model = last_model
             stage_provider = self._provider_for_stage(stage)
-            max_attempts = self._stage_attempt_limit()
-            for attempt in range(max_attempts):
-                try:
-                    response = self._complete(stage_provider, provider_request)
-                except ReviewFormatError:
-                    raise
-                except ReviewInputError as exc:
-                    raise ReviewFormatError("provider response failed") from exc
-                except ReviewSenseiError:
-                    raise
-                except Exception as exc:
-                    # Provider adapters should sanitize their own failures.  Keep
-                    # this fallback static so a third-party adapter cannot echo a
-                    # prompt, response body, or credential through the core.
-                    raise ReviewFormatError("provider request failed") from exc
+            stage_completed = False
+            for attempt in range(_MAX_PROVIDER_OUTPUT_ATTEMPTS):
+                while True:
+                    diagnostic = tracker.admit_call(current_prompt)
+                    if diagnostic:
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="budget_exhausted",
+                            stage_summary=stage_summary,
+                            diagnostic=diagnostic,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    try:
+                        provider_request = self._provider_request(
+                            current_prompt,
+                            request=request,
+                            max_prompt_bytes=prompt_limit,
+                            max_response_bytes=response_limit,
+                        )
+                    except ReviewInputError as exc:
+                        size = utf8_size(current_prompt, label="review prompt")
+                        if size > prompt_limit:
+                            if prompt_limit == effective_budget.max_prompt_bytes:
+                                return self._finish_run(
+                                    tracker=tracker,
+                                    status="budget_exhausted",
+                                    stage_summary=stage_summary,
+                                    diagnostic="prompt_budget",
+                                    repository=request.repository,
+                                    pull_request_number=request.pull_request_number,
+                                )
+                            return self._finish_run(
+                                tracker=tracker,
+                                status="provider_failed",
+                                stage_summary=stage_summary,
+                                diagnostic="invalid_provider_output",
+                                error=ReviewInputError(
+                                    "review prompt exceeds the configured limit"
+                                ),
+                                repository=request.repository,
+                                pull_request_number=request.pull_request_number,
+                            )
+                        raise ReviewInputError(
+                            "review prompt exceeds the configured limit"
+                        ) from exc
+                    try:
+                        tracker.record_prompt_attempt(current_prompt)
+                        response = stage_provider.complete(provider_request)
+                    except ReviewFormatError as exc:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="invalid_provider_output",
+                            error=exc,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    except ReviewInputError as exc:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        error = ReviewFormatError("provider response failed")
+                        error.__cause__ = exc
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="invalid_provider_output",
+                            error=error,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    except ProviderError as exc:
+                        if exc.transient:
+                            retry_diagnostic = tracker.admit_transport_retry(
+                                exc.retry_after_seconds
+                            )
+                            if retry_diagnostic is None:
+                                tracker.sleep_transport_retry(exc.retry_after_seconds)
+                                continue
+                            return self._finish_run(
+                                tracker=tracker,
+                                status="budget_exhausted",
+                                stage_summary=stage_summary,
+                                diagnostic=retry_diagnostic,
+                                error=exc,
+                                repository=request.repository,
+                                pull_request_number=request.pull_request_number,
+                            )
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="provider_failed",
+                            error=exc,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    except ReviewSenseiError as exc:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="provider_failed",
+                            error=exc,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    except Exception as exc:
+                        # Provider adapters should sanitize their own failures.
+                        # Keep this fallback static so a third-party adapter
+                        # cannot echo a prompt, response body, or credential.
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        error = ReviewFormatError("provider request failed")
+                        error.__cause__ = exc
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="provider_failed",
+                            error=error,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    else:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        if tracker.elapsed_ms() >= tracker.budget.timeout_ms:
+                            return self._finish_run(
+                                tracker=tracker,
+                                status="budget_exhausted",
+                                stage_summary=stage_summary,
+                                diagnostic="deadline_exceeded",
+                                repository=request.repository,
+                                pull_request_number=request.pull_request_number,
+                            )
+                        tracker.record_response(getattr(response, "text", "") or "")
+                        break
                 if not hasattr(response, "text") or not isinstance(response.text, str):
-                    raise ReviewFormatError(
+                    error = ReviewFormatError(
                         "provider response did not contain review text"
+                    )
+                    return self._finish_run(
+                        tracker=tracker,
+                        status="provider_failed",
+                        stage_summary=stage_summary,
+                        diagnostic="invalid_provider_output",
+                        error=error,
+                        repository=request.repository,
+                        pull_request_number=request.pull_request_number,
                     )
                 try:
                     validate_bounded_text(
                         response.text,
-                        request.limits.max_provider_response_bytes,
+                        response_limit,
                         label="provider response",
                         allow_empty=False,
                     )
                 except ReviewInputError as exc:
-                    raise ReviewFormatError(
+                    size = utf8_size(response.text, label="provider response")
+                    if (
+                        size > response_limit
+                        and response_limit == effective_budget.max_output_bytes
+                    ):
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="budget_exhausted",
+                            stage_summary=stage_summary,
+                            diagnostic="output_budget",
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    error = ReviewFormatError(
                         "provider response exceeds the configured limit"
-                    ) from exc
+                    )
+                    error.__cause__ = exc
+                    return self._finish_run(
+                        tracker=tracker,
+                        status="provider_failed",
+                        stage_summary=stage_summary,
+                        diagnostic="invalid_provider_output",
+                        error=error,
+                        repository=request.repository,
+                        pull_request_number=request.pull_request_number,
+                    )
                 try:
                     stage_output = self._validated_stage_output(
                         response.text,
@@ -331,29 +589,53 @@ class ReviewService:
                         active_categories=active_categories,
                         propose_learnings=request.propose_learnings,
                     )
-                    stage_summary = stage_output.summary
+                    stage_text = stage_output.summary
                     stage_comments = stage_output.comments
                     stage_proposals = stage_output.proposals
                     omitted_inline_comments += stage_output.omitted_inline_comments
-                except ReviewFormatError:
-                    if attempt + 1 >= max_attempts:
-                        raise
-                    provider_request = self._provider_request(
-                        f"{prompt}\n\n{_PROVIDER_OUTPUT_CORRECTION}",
-                        request=request,
-                    )
+                except ReviewFormatError as exc:
+                    if (
+                        attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS
+                        or tracker.structural_retries
+                        >= tracker.budget.max_retry_attempts
+                    ):
+                        stage_summary[stage.name] = "failed"
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="provider_failed",
+                            stage_summary=stage_summary,
+                            diagnostic="invalid_provider_output",
+                            error=exc,
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    tracker.structural_retries += 1
+                    current_prompt = f"{prompt}\n\n{_PROVIDER_OUTPUT_CORRECTION}"
                     continue
                 response_provider = response.provider
                 if response.model:
                     response_model = response.model
+                stage_completed = True
                 break
 
+            if not stage_completed:
+                stage_summary[stage.name] = "failed"
+                return self._finish_run(
+                    tracker=tracker,
+                    status="provider_failed",
+                    stage_summary=stage_summary,
+                    diagnostic="stage_failed",
+                    error=ReviewFormatError("provider output could not be validated"),
+                    repository=request.repository,
+                    pull_request_number=request.pull_request_number,
+                )
+
             candidate_summary = accumulated_summary
-            if stage_summary is not None:
+            if stage_text is not None:
                 candidate_summary = (
-                    f"{candidate_summary}\n\n{stage_summary}"
+                    f"{candidate_summary}\n\n{stage_text}"
                     if candidate_summary
-                    else stage_summary
+                    else stage_text
                 )
             candidate_comments = [*accumulated_comments, *stage_comments]
             candidate_proposals = [*accumulated_proposals, *stage_proposals]
@@ -382,14 +664,25 @@ class ReviewService:
                     source_context_coverage=self._source_context_coverage(request),
                 )
             except ReviewInputError as exc:
-                raise ReviewFormatError(
+                error = ReviewFormatError(
                     "provider output exceeds the configured result limits"
-                ) from exc
+                )
+                error.__cause__ = exc
+                return self._finish_run(
+                    tracker=tracker,
+                    status="provider_failed",
+                    stage_summary=stage_summary,
+                    diagnostic="invalid_provider_output",
+                    error=error,
+                    repository=request.repository,
+                    pull_request_number=request.pull_request_number,
+                )
             accumulated_summary = candidate_summary
             accumulated_comments = list(checkpoint.comments)
             accumulated_proposals = candidate_proposals
             last_provider = response_provider
             last_model = response_model
+            stage_summary[stage.name] = "complete"
 
         final_summary = accumulated_summary or "Review complete."
         review_status = (
@@ -400,7 +693,7 @@ class ReviewService:
             else "complete"
         )
         try:
-            return self._finalize_result(
+            result = self._finalize_result(
                 request,
                 summary=final_summary,
                 comments=tuple(accumulated_comments),
@@ -412,9 +705,60 @@ class ReviewService:
                 coverage=coverage,
             )
         except ReviewInputError as exc:
-            raise ReviewFormatError(
+            error = ReviewFormatError(
                 "provider output exceeds the configured result limits"
-            ) from exc
+            )
+            error.__cause__ = exc
+            return self._finish_run(
+                tracker=tracker,
+                status="provider_failed",
+                stage_summary=stage_summary,
+                diagnostic="invalid_provider_output",
+                error=error,
+                repository=request.repository,
+                pull_request_number=request.pull_request_number,
+            )
+        status = "partial" if review_status == "partial" else "reviewed"
+        diagnostic = "partial_coverage" if status == "partial" else None
+        return self._finish_run(
+            tracker=tracker,
+            status=status,
+            stage_summary=stage_summary,
+            diagnostic=diagnostic,
+            result=result,
+            repository=request.repository,
+            pull_request_number=request.pull_request_number,
+        )
+
+    def _finish_run(
+        self,
+        *,
+        tracker: ResourceBudgetTracker,
+        status: str,
+        stage_summary: dict[str, str],
+        diagnostic: str | None = None,
+        result: ReviewResult | None = None,
+        error: BaseException | None = None,
+        repository: str | None = None,
+        pull_request_number: int | None = None,
+    ) -> ReviewRun:
+        return ReviewRun(
+            RunOutcome(
+                status,
+                repository=repository,
+                pull_request_number=pull_request_number,
+                stage_summary=stage_summary,
+                provider_calls=tracker.provider_calls,
+                retry_attempts=tracker.transport_retries,
+                structural_retries=tracker.structural_retries,
+                prompt_bytes=tracker.prompt_bytes,
+                response_bytes=tracker.response_bytes,
+                elapsed_ms=tracker.elapsed_ms(),
+                diagnostic=sanitize_diagnostic(diagnostic),
+            ),
+            result=result,
+            error=error,
+        )
 
     def _coverage_decision(
         self,
@@ -659,14 +1003,30 @@ class ReviewService:
         )
 
     @staticmethod
-    def _provider_request(prompt: str, *, request: ReviewRequest) -> ProviderRequest:
+    def _provider_request(
+        prompt: str,
+        *,
+        request: ReviewRequest,
+        max_prompt_bytes: int | None = None,
+        max_response_bytes: int | None = None,
+    ) -> ProviderRequest:
+        prompt_limit = (
+            request.limits.max_prompt_bytes
+            if max_prompt_bytes is None
+            else min(max_prompt_bytes, request.limits.max_prompt_bytes)
+        )
+        response_limit = (
+            request.limits.max_provider_response_bytes
+            if max_response_bytes is None
+            else min(max_response_bytes, request.limits.max_provider_response_bytes)
+        )
         try:
             return ProviderRequest(
                 prompt=prompt,
                 model=request.model,
                 json_mode=True,
-                max_prompt_bytes=request.limits.max_prompt_bytes,
-                max_response_bytes=request.limits.max_provider_response_bytes,
+                max_prompt_bytes=prompt_limit,
+                max_response_bytes=response_limit,
                 limits=request.limits,
             )
         except ReviewInputError as exc:

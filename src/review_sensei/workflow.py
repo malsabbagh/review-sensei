@@ -18,6 +18,7 @@ from typing import Sequence, cast
 
 from .diff import analyze_diff
 from .errors import ReviewInputError
+from .outcomes import RunOutcome, outcome_for_skip_reason
 from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, read_bounded_utf8
 
 _REF = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -295,6 +296,20 @@ def plan_review_execution(
         title=title,
         eligible=reason is None,
         skip_reason=reason,
+    )
+
+
+def outcome_for_plan(plan: ReviewExecutionPlan) -> RunOutcome:
+    """Return the skip outcome for an ineligible execution plan."""
+
+    if plan.eligible:
+        raise ReviewInputError("eligible plans do not produce a skip outcome")
+    return outcome_for_skip_reason(
+        plan.skip_reason,
+        repository=plan.repository,
+        pull_request_number=plan.pull_request_number,
+        base_sha=plan.base_sha,
+        head_sha=plan.head_sha,
     )
 
 

@@ -338,6 +338,23 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
                     provider.complete(ProviderRequest(prompt="private"))
                 self.assertTrue(raised.exception.transient)
 
+    def test_http_429_honors_bounded_retry_after_seconds(self):
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        headers = Message()
+        headers["Retry-After"] = "8"
+        provider = OpenAICompatibleProvider(
+            api_key="secret",
+            opener=lambda request, timeout, context: (_ for _ in ()).throw(
+                HTTPError("https://api.openai.com/v1", 429, "err", headers, None)
+            ),
+        )
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(ProviderRequest(prompt="private"))
+        self.assertTrue(raised.exception.transient)
+        self.assertEqual(raised.exception.retry_after_seconds, 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()

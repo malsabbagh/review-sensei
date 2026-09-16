@@ -520,6 +520,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('case "$PROVIDER_MODE" in', text)
         self.assertEqual(text.count("github reply \\\n"), 2)
         self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertEqual(text.count("--outcome outcome.json"), 2)
+        self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
+        self.assertEqual(text.count("recovery-artifact.json"), 4)
         self.assertEqual(text.count("Publish or promote"), 2)
         self.assertNotIn("after AI resolution", text)
         self.assertIn("auto_approve_args", text)
@@ -874,6 +877,42 @@ class ActionPinPolicyTests(unittest.TestCase):
                         '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
                     ),
                 )
+
+    def test_setup_v4_run_name_matches_worker_template(self):
+        from review_sensei.hosting.github.setup import _resolve_trigger_workflow
+
+        root = Path(__file__).resolve().parents[1]
+        python_line = next(
+            line
+            for line in _resolve_trigger_workflow("v4").splitlines()
+            if line.startswith("run-name:")
+        )
+        worker_source = (
+            root / "deploy" / "cloudflare" / "src" / "setup-content.ts"
+        ).read_text(encoding="utf-8")
+        marker = 'run-name: "ReviewSensei @@{{ github.event.pull_request && format('
+        start = worker_source.index(marker)
+        end = worker_source.index('"', start + len('run-name: "'))
+        worker_line = worker_source[start : end + 1].replace("@@{{", "${{")
+        self.assertEqual(python_line, worker_line)
+
+    def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):
+        quoted = (
+            'run-name: "ReviewSensei ${{ github.event.pull_request && '
+            "format('PR #{0}', github.event.pull_request.number) || 'manual' }}\""
+        )
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            ".github/workflows/review-sensei-review.yml",
+            "examples/github-actions/review-sensei-review.yml",
+        ):
+            with self.subTest(relative=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn(quoted, text)
+                run_name_lines = [
+                    line for line in text.splitlines() if line.startswith("run-name:")
+                ]
+                self.assertEqual(run_name_lines, [quoted])
 
     def test_generated_dispatch_is_review_only(self):
         text = (

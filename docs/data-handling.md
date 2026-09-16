@@ -21,18 +21,23 @@ from context documents.
 ## Storage and logging
 
 The library does not persist review prompts or raw provider responses. The CLI
-writes only the validated result when `--output` is supplied. Repository
-learnings are ordinary files owned and retained by the repository; the core
-does not write proposals or create branches. Lens documents are read only for
-the current review and are not persisted by the core. The optional in-memory
-`ReviewContextCache` stores only bounded metadata such as coverage mode and
-generation; it is repository/PR-scoped, integrity-checked by
-base/engine/model/profile/stage/context/learning digests, deletable via
-`invalidate`/`clear`, and never a hosted service. Applications embedding
-the library are responsible for their own logs, queues, databases, and
-retention policies.
+writes the validated result when `--output` is supplied and the structured
+`RunOutcome` when `--outcome` or GitHub Actions summary/output files are
+present. An identity-bound `RecoveryArtifact` is written only when
+`--recovery-artifact` is explicit; it expires automatically, contains only a
+publisher-validated result, and is not uploaded unless the existing
+`upload_artifacts` opt-in is enabled. Repository learnings are ordinary files
+owned and retained by the repository; publication recovery never writes them.
+Lens documents are read only for the current review and are not persisted by
+the core. The optional in-memory `ReviewContextCache` stores only bounded
+metadata such as coverage mode and generation; it is repository/PR-scoped,
+integrity-checked by base/engine/model/profile/stage/context/learning
+digests, deletable via `invalidate`/`clear`, and never a hosted service.
+Applications embedding the library are responsible for their own logs,
+queues, databases, and retention policies.
 
 Do not log prompts, diffs, API keys, private keys, or raw provider responses.
+Run outcomes record only closed diagnostic tokens, identities, and counters.
 
 ## GitHub App authentication
 

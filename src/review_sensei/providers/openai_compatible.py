@@ -33,7 +33,11 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body, urllib_error_is_transient
+from .transport import (
+    parse_retry_after_seconds,
+    read_bounded_body,
+    urllib_error_is_transient,
+)
 
 # Provider credentials are untrusted configuration input.  Keep a generous
 # but finite ceiling so a malformed environment value cannot become an
@@ -374,6 +378,7 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 f"OpenAI-compatible request failed with HTTP {exc.code}",
                 transient=transient,
+                retry_after_seconds=parse_retry_after_seconds(exc),
             ) from exc
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, HTTPError):

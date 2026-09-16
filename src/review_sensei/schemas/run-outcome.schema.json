@@ -20,6 +20,7 @@
     },
     "provider_calls": {"type": "integer", "minimum": 0},
     "retry_attempts": {"type": "integer", "minimum": 0},
+    "structural_retries": {"type": "integer", "minimum": 0},
     "prompt_bytes": {"type": "integer", "minimum": 0},
     "response_bytes": {"type": "integer", "minimum": 0},
     "elapsed_ms": {"type": "integer", "minimum": 0},

@@ -574,7 +574,7 @@ class ReviewServiceTests(unittest.TestCase):
             Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
             Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
         ]
-        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
+        with self.assertRaisesRegex(ReviewInputError, "resource budget exhausted"):
             ReviewService(
                 provider,
                 stages=stages,

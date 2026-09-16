@@ -151,6 +151,7 @@ These imports are public and stable within a major version:
 - `review_sensei.FindingLifecycle`
 - `review_sensei.IncrementalReviewPlan`
 - `review_sensei.ReviewContextCache`
+- `review_sensei.ReviewRun`
 - `review_sensei.RunOutcome`
 - `review_sensei.ResourceBudget`
 - `review_sensei.RecoveryArtifact`
@@ -181,6 +182,8 @@ These imports are public and stable within a major version:
 - `review_sensei.SymbolAwareContextPolicy`
 - `review_sensei.SourceContextSelection`
 - `review_sensei.SourceContextCoverage`
+- `review_sensei.plan_review_execution`
+- `review_sensei.outcome_for_plan`
 - `review_sensei.errors.ReviewSenseiError`
 - `review_sensei.CompatibilityManifest`
 - `review_sensei.validate_compatibility_manifest`
@@ -188,6 +191,23 @@ These imports are public and stable within a major version:
 - `review_sensei.prove_release_identity`
 - `review_sensei.CanaryBinding`
 - `review_sensei.ChannelPromotionRecord`
+
+`RunOutcome.to_dict()` produces a JSON-compatible document that validates
+against `run-outcome.schema.json`. `ReviewService.run` always returns a
+`ReviewRun` with that envelope. `ReviewService.review` raises
+`ReviewInputError` when resource budgets are exhausted; other failures surface
+as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
+partial coverage, an intentional skip, provider or budget failure, publication
+failure, and an already-published head. Resource budgets cap provider calls,
+transport retries, structural retries, prompt/output bytes, and elapsed time.
+Closed diagnostic tokens are enumerated by `PUBLIC_DIAGNOSTICS` in
+`review_sensei.outcomes`; `cancelled` is reserved for host-layer cancellation
+and is not emitted by `ReviewService` today. Structural correction remains one
+bounded retry and is counted separately from transport retries via the
+`structural_retries` field. Publication recovery loads an opt-in
+`RecoveryArtifact`, revalidates
+identity, expiry, integrity, and current publication policy, and never invokes
+a model or writes trusted learnings or configuration.
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.

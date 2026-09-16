@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import re
 import socket
 from typing import Any
 from urllib.error import URLError
@@ -16,6 +17,8 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
         errno.ENETUNREACH,
     }
 )
+MAX_RETRY_AFTER_SECONDS = 60.0
+_DECIMAL_RETRY_AFTER = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:
@@ -36,6 +39,28 @@ def urllib_error_is_transient(exc: URLError) -> bool:
     ):
         return True
     return False
+
+
+def parse_retry_after_seconds(error: Any) -> float | None:
+    """Return a bounded Retry-After delay from a transport error.
+
+    Only integer or decimal second hints are honored. HTTP-date values are
+    ignored so retry timing stays deterministic and clock-independent.
+    """
+
+    headers = getattr(error, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not _DECIMAL_RETRY_AFTER.fullmatch(text):
+        return None
+    value = float(text)
+    if value <= 0:
+        return None
+    return min(value, MAX_RETRY_AFTER_SECONDS)
 
 
 def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:

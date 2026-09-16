@@ -93,7 +93,7 @@ from .release_manifest import (
     verify_artifact_digests,
     verify_worker_compatibility,
 )
-from .service import ReviewService
+from .service import ReviewRun, ReviewService
 from .stages import (
     ContextDocumentSource,
     ReviewCategory,
@@ -113,7 +113,7 @@ from .verifier import (
     verify_candidate,
     verify_candidates,
 )
-from .workflow import ReviewExecutionPlan, plan_review_execution
+from .workflow import ReviewExecutionPlan, outcome_for_plan, plan_review_execution
 
 __all__ = [
     "AdmissionCancelled",
@@ -162,6 +162,7 @@ __all__ = [
     "ReviewRequest",
     "ReviewResult",
     "ReviewService",
+    "ReviewRun",
     "stable_finding_fingerprint",
     "stable_concern_identity",
     "reconcile_finding_lifecycle",
@@ -181,6 +182,7 @@ __all__ = [
     "load_review_categories_from_dir",
     "load_stages_from_dir",
     "plan_review_execution",
+    "outcome_for_plan",
     "PromotionRecord",
     "engine_digest",
     "prompt_digest",

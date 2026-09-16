@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 
 from .context import (
@@ -25,6 +26,17 @@ from .learnings import (
     summarize_learning_feedback,
 )
 from .models import LearningEntry, ReviewRequest
+from .outcomes import (
+    DEFAULT_RECOVERY_TTL_SECONDS,
+    RecoveryArtifact,
+    ResourceBudget,
+    RunOutcome,
+    diagnostic_for_recovery_error,
+    emit_host_outcome,
+    load_recovery_artifact,
+    recovery_expires_at,
+    run_outcome_exit_code,
+)
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.profiles import get_provider_profile
@@ -436,6 +448,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--title")
     parser.add_argument("--instructions")
     parser.add_argument(
+        "--base-sha",
+        help=(
+            "Exact reviewed base commit SHA; also the trusted snapshot for "
+            "symbol-aware context"
+        ),
+    )
+    parser.add_argument(
+        "--head-sha",
+        help=(
+            "Exact reviewed head commit SHA; recorded only as coverage metadata "
+            "and never used as the context snapshot or trusted configuration"
+        ),
+    )
+    parser.add_argument(
         "--learning-root",
         type=Path,
         help=(
@@ -464,17 +490,6 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Opt in to bounded Python symbol-aware source context from the "
             "trusted base snapshot. Default remains documents and learnings only."
-        ),
-    )
-    parser.add_argument(
-        "--base-sha",
-        help="Trusted base commit SHA for symbol-aware context provenance",
-    )
-    parser.add_argument(
-        "--head-sha",
-        help=(
-            "Untrusted head commit SHA recorded only as coverage metadata; "
-            "never used as the context snapshot or trusted configuration"
         ),
     )
     parser.add_argument(
@@ -521,6 +536,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output", type=Path, help="Write JSON to a file instead of stdout"
+    )
+    parser.add_argument(
+        "--outcome",
+        type=Path,
+        help="Write the structured run-outcome JSON for this invocation",
+    )
+    parser.add_argument(
+        "--recovery-artifact",
+        type=Path,
+        help="Write an opt-in, identity-bound publication recovery artifact",
+    )
+    parser.add_argument(
+        "--recovery-ttl-seconds",
+        type=int,
+        default=DEFAULT_RECOVERY_TTL_SECONDS,
+        help="Expiry window for --recovery-artifact (max 86400 seconds)",
     )
     return parser
 
@@ -901,7 +932,8 @@ def _github_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     review = subparsers.add_parser("review", help="Publish a validated review result")
-    review.add_argument("--result", type=Path, required=True)
+    publication_source = review.add_mutually_exclusive_group()
+    publication_source.add_argument("--result", type=Path)
     review.add_argument("--diff", type=Path, required=True)
     review.add_argument("--repository", required=True)
     review.add_argument("--repository-id", type=int, required=True)
@@ -911,6 +943,16 @@ def _github_parser() -> argparse.ArgumentParser:
     review.add_argument("--base-sha")
     review.add_argument("--app-slug", default="reviewsensei[bot]")
     review.add_argument("--oidc-token")
+    review.add_argument(
+        "--outcome",
+        type=Path,
+        help="Write the structured run-outcome JSON for this publication",
+    )
+    publication_source.add_argument(
+        "--recover-from",
+        type=Path,
+        help="Publish a retained recovery artifact without invoking a model",
+    )
     review.add_argument(
         "--allow-write",
         action="store_true",
@@ -1014,6 +1056,11 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         LearningPRResult,
         ReviewPublisher,
     )
+    from .hosting.github.errors import (
+        GitHubPublicationError,
+        GitHubPublicationTransientError,
+    )
+    from .hosting.github.publication import outcome_from_publication
     from .models import ConversationReply, ReviewResult
 
     if not args.allow_write:
@@ -1028,33 +1075,140 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         replier=ConversationPublisher(http=http),
     )
     if args.command == "review":
-        result = ReviewResult.from_dict(
-            json.loads(
-                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
-            )
-        )
         diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
         if args.enable_review and (not args.base_branch or not args.base_sha):
             raise ReviewInputError(
                 "review publication requires --base-branch and --base-sha"
             )
-        review_outcome = application.publish_review(
-            options=GitHubWriteOptions(
-                github_writes=True,
-                auto_review=args.enable_review,
-                auto_approve=args.enable_auto_approve,
-            ),
-            oidc_token=args.oidc_token,
-            repository=args.repository,
-            repository_id=args.repository_id,
-            pull_request=args.pull_request,
-            head_sha=args.head_sha,
-            base_branch=args.base_branch,
-            base_sha=args.base_sha,
-            result=result,
-            diff=diff,
-            app_slug=args.app_slug,
+        identity = {
+            "repository": args.repository,
+            "pull_request_number": args.pull_request,
+            "base_sha": args.base_sha,
+            "head_sha": args.head_sha,
+        }
+        if args.recover_from and args.enable_learning_prs:
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="recovery_learning_prs_refused",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(
+                "review-sensei: publication recovery cannot write learning pull requests",
+                file=sys.stderr,
+            )
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
+        if args.recover_from:
+            try:
+                artifact = load_recovery_artifact(args.recover_from)
+                artifact.validate(
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=args.base_sha,
+                    head_sha=args.head_sha,
+                )
+                review_publication = application.recover_review(
+                    options=GitHubWriteOptions(
+                        github_writes=True,
+                        auto_review=args.enable_review,
+                    ),
+                    oidc_token=args.oidc_token,
+                    repository=args.repository,
+                    repository_id=args.repository_id,
+                    pull_request=args.pull_request,
+                    head_sha=args.head_sha,
+                    base_branch=args.base_branch,
+                    base_sha=args.base_sha,
+                    artifact=artifact,
+                    diff=diff,
+                    app_slug=args.app_slug,
+                )
+            except (GitHubPublicationTransientError, GitHubPublicationError) as exc:
+                diagnostic = (
+                    "publication_ambiguous"
+                    if isinstance(exc, GitHubPublicationTransientError)
+                    else "publication_failed"
+                )
+                outcome = RunOutcome(
+                    "publication_failed",
+                    diagnostic=diagnostic,
+                    **identity,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(f"review-sensei: {exc}", file=sys.stderr)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
+            except ReviewInputError as exc:
+                outcome = RunOutcome(
+                    "publication_failed",
+                    diagnostic=diagnostic_for_recovery_error(exc),
+                    **identity,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(f"review-sensei: {exc}", file=sys.stderr)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
+            outcome = outcome_from_publication(review_publication, **identity)
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(review_publication.status)
+            return run_outcome_exit_code(outcome.status)
+        if args.result is None:
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="publication_failed",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(
+                "review-sensei: review publication requires --result or --recover-from",
+                file=sys.stderr,
+            )
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
+        result = ReviewResult.from_dict(
+            json.loads(
+                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
+            )
         )
+        try:
+            review_outcome = application.publish_review(
+                options=GitHubWriteOptions(
+                    github_writes=True,
+                    auto_review=args.enable_review,
+                    auto_approve=args.enable_auto_approve,
+                ),
+                oidc_token=args.oidc_token,
+                repository=args.repository,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                base_branch=args.base_branch,
+                base_sha=args.base_sha,
+                result=result,
+                diff=diff,
+                app_slug=args.app_slug,
+            )
+        except GitHubPublicationTransientError as exc:
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="publication_ambiguous",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
+        except GitHubPublicationError as exc:
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="publication_failed",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(f"review-sensei: {exc}", file=sys.stderr)
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
         learning_outcomes: tuple[LearningPRResult, ...] = ()
         review_allows_learning = not args.enable_review or review_outcome.status in {
             "published",
@@ -1079,10 +1233,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 base_sha=args.base_sha,
                 result=result,
             )
+        outcome = outcome_from_publication(review_outcome, **identity)
+        emit_host_outcome(outcome, output_path=args.outcome)
         statuses = [review_outcome.status]
-        statuses.extend(outcome.status for outcome in learning_outcomes)
+        statuses.extend(item.status for item in learning_outcomes)
         print(" ".join(statuses))
-        return 0
+        return run_outcome_exit_code(outcome.status)
     if args.generate:
         if not args.enable_reply:
             print("disabled")
@@ -1482,7 +1638,7 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
-        result = service.review(
+        run = service.run(
             ReviewRequest(
                 diff=diff,
                 repository=args.repository,
@@ -1497,14 +1653,48 @@ def main(argv: list[str] | None = None) -> int:
                 limits=limits,
                 source_context=context_selection.source_context,
                 untrusted_head_sha=untrusted_head_sha,
-            )
+            ),
+            budget=ResourceBudget.for_limits(limits),
         )
-        rendered = json.dumps(result.to_dict(), indent=2) + "\n"
+        outcome = replace(
+            run.outcome,
+            base_sha=(args.base_sha or "").strip().lower() or None,
+            head_sha=(args.head_sha or "").strip().lower() or None,
+        )
+        emit_host_outcome(outcome, output_path=args.outcome)
+        if run.result is None:
+            if run.error is not None:
+                print(f"review-sensei: {run.error}", file=sys.stderr)
+            else:
+                print(f"review-sensei: {outcome.status}", file=sys.stderr)
+            return run_outcome_exit_code(outcome.status)
+        rendered = json.dumps(run.result.to_dict(), indent=2) + "\n"
         if args.output:
             args.output.write_text(rendered, encoding="utf-8")
         else:
             sys.stdout.write(rendered)
-        return 0
+        if args.recovery_artifact:
+            if not args.repository or args.pull_request is None:
+                raise ReviewInputError(
+                    "recovery artifacts require --repository and --pull-request"
+                )
+            if not outcome.base_sha or not outcome.head_sha:
+                raise ReviewInputError(
+                    "recovery artifacts require --base-sha and --head-sha"
+                )
+            artifact = RecoveryArtifact.create(
+                repository=args.repository,
+                pull_request_number=args.pull_request,
+                base_sha=outcome.base_sha,
+                head_sha=outcome.head_sha,
+                result=run.result.to_dict(),
+                expires_at=recovery_expires_at(ttl_seconds=args.recovery_ttl_seconds),
+            )
+            args.recovery_artifact.write_text(
+                json.dumps(artifact.to_dict(), indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return run_outcome_exit_code(outcome.status)
     except (OSError, ValueError, ReviewSenseiError) as exc:
         print(f"review-sensei: {exc}", file=sys.stderr)
         return 1

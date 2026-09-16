@@ -130,6 +130,22 @@ class OllamaProviderTests(unittest.TestCase):
         self.assertNotIn(secret, str(raised.exception))
         self.assertNotIn(secret.lower(), str(raised.exception))
 
+    def test_http_rate_limit_is_transient_and_honors_retry_after(self):
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        headers = Message()
+        headers["Retry-After"] = "4"
+        provider = OllamaProvider(
+            opener=lambda request, timeout, context: (_ for _ in ()).throw(
+                HTTPError("http://127.0.0.1/api/generate", 429, "err", headers, None)
+            )
+        )
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(ProviderRequest(prompt="review"))
+        self.assertTrue(raised.exception.transient)
+        self.assertEqual(raised.exception.retry_after_seconds, 4.0)
+
     def test_sends_non_streaming_json_review_request(self):
         captured = {}
         raw_response = FakeResponse(
