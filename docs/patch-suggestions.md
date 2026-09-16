@@ -8,4 +8,6 @@ snapshot. Mode provenance must cover every changed path and identify a regular
 Git file; this prevents a mode-less patch from being applied to an existing
 symlink. Suggestions are never self-accepted and have no commit, publish, or
 execution operation; a separate human-authorized workflow must apply one after
-revalidating the identities, scope, and modes.
+Suggestions never implicitly expand their scope: `allowed_paths` and the
+patch's changed paths must exactly match the finding's declared path set.
+A suggestion that includes any path outside that finding scope is rejected.

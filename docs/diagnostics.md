@@ -15,9 +15,12 @@ never probes an endpoint.
 
 `review-sensei plan --diff <path>` validates a supplied diff with the same
 bounded `analyze_diff` path used by review. It prints the selected stages,
-budgets, identity fields, skip reasons, and a zero-call/zero-write operation
-summary. Without a diff, the plan is explicitly incomplete. Use `--json` for
-the versioned machine-readable contract.
+packaged default category ids, budgets, identity fields, skip reasons, and a
+zero-call/zero-write operation summary. `plan` does not accept
+`--categories-dir`; custom catalogs are diagnosed by `doctor` and used by
+review when `--categories-dir` is supplied. Without a diff, the plan is
+explicitly incomplete. Use `--json` for the versioned machine-readable
+contract.
 
 Exit codes:
 

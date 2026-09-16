@@ -20,6 +20,7 @@ from .errors import ReviewInputError, ReviewSenseiError
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
 from .stages import (
     MAX_STAGE_FILES,
+    category_catalog_for_configured_stages,
     load_review_categories_from_dir,
     load_stages_from_dir,
 )
@@ -71,6 +72,7 @@ def run_doctor(
     categories_dir: Path | None = None,
     context_root: Path | None = None,
     include_network: bool = False,
+    provider_mode: str | None = None,
 ) -> dict[str, Any]:
     """Return bounded, side-effect-free installation diagnostics.
 
@@ -82,6 +84,10 @@ def run_doctor(
     category catalog stays unset unless ``categories_dir`` is supplied.
     Stages that declare ``category_ids`` therefore require ``--categories-dir``,
     matching the review runner.
+
+    ``provider_mode`` reports operator configuration only.  When omitted, doctor
+    reads ``REVIEWSENSEI_PROVIDER_MODE`` as a diagnostic default; this is not a
+    review-time trust boundary and does not authorize provider calls.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -126,7 +132,15 @@ def run_doctor(
             ),
         )
     )
-    mode = os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local").strip().lower()
+    mode = (
+        (
+            provider_mode
+            if provider_mode is not None
+            else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
+        )
+        .strip()
+        .lower()
+    )
     if mode not in {"local", "cloud"}:
         checks.append(
             DiagnosticCheck(
@@ -149,7 +163,7 @@ def run_doctor(
             configured_categories_error = "configured directory is empty"
         else:
             try:
-                configured_category_catalog = load_review_categories_from_dir(
+                configured_category_catalog = category_catalog_for_configured_stages(
                     categories_dir
                 )
             except (OSError, ReviewSenseiError) as exc:
@@ -210,7 +224,9 @@ def run_doctor(
                 else:
                     load_stages_from_dir(
                         configured,
-                        category_catalog=configured_category_catalog,
+                        category_catalog=category_catalog_for_configured_stages(
+                            categories_dir
+                        ),
                     )
             except (OSError, ReviewSenseiError) as exc:
                 configuration_error = str(exc)
@@ -247,15 +263,14 @@ def run_doctor(
         checks.append(
             DiagnosticCheck("network", "unknown", "not checked (offline mode)")
         )
-    status = "action" if any(check.status == "action" for check in checks) else "pass"
-    unknown_checks = [check for check in checks if check.status == "unknown"]
-    if status != "action" and unknown_checks:
-        # Offline doctor always records the network check as unknown so an
-        # unprobed prerequisite cannot look like a pass.  That sentinel must
-        # not hide a healthy installation: only an explicitly requested
-        # ``--network`` check (or any other unknown) keeps the report unknown.
-        if include_network or any(check.name != "network" for check in unknown_checks):
-            status = "unknown"
+    if any(check.status == "action" for check in checks):
+        status = "action"
+    elif include_network:
+        status = "unknown"
+    elif any(check.status == "unknown" and check.name != "network" for check in checks):
+        status = "unknown"
+    else:
+        status = "pass"
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,

@@ -78,14 +78,9 @@ def _finding_scope_paths(finding: Mapping[str, object]) -> tuple[str, ...]:
                 "verified finding must declare affected repository paths"
             )
         raw_paths = (single,)
-    if isinstance(raw_paths, (str, bytes)):
+    if isinstance(raw_paths, (str, bytes)) or not isinstance(raw_paths, Iterable):
         raise ReviewInputError("finding path scope must be an iterable of paths")
-    try:
-        iterator = iter(raw_paths)
-    except (TypeError, AttributeError) as exc:
-        raise ReviewInputError(
-            "finding path scope must be an iterable of paths"
-        ) from exc
+    iterator = iter(raw_paths)
     scoped: dict[str, None] = {}
     for index, path in enumerate(iterator, start=1):
         if index > MAX_PATCH_FILES:
