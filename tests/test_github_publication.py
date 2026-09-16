@@ -1927,9 +1927,7 @@ class ReviewPublisherTests(unittest.TestCase):
             auto_approve=True,
         )
         self.assertEqual(blocking_outcome.status, "published")
-        blocking_body = __import__("json").loads(
-            blocking_calls[3][2].decode("utf-8")
-        )
+        blocking_body = __import__("json").loads(blocking_calls[3][2].decode("utf-8"))
         self.assertEqual(blocking_body["event"], "REQUEST_CHANGES")
 
     def test_deleted_line_comment_is_published_on_the_left_side(self):
