@@ -4,11 +4,12 @@
 
 - Bound model, prompt, and routing promotions to real-provider evaluation
   evidence. `engine_digest` and `prompt_digest` are now computed from package
-  identity, engine limits, and stage templates; `promotion_record_from_reports`
-  requires at least three independent live runs for `status=supported`; and
-  `require_supported_promotion` is the fail-closed release/docs gate. Fixture
-  reports cannot mint supported promotions. Operators can emit or validate
-  records with `review-sensei promotion` or
+  identity, engine limits, and stage templates including full category
+  definitions; `promotion_record_from_reports` requires at least three
+  independent live runs with unique `run.invocation_id` values for
+  `status=supported`; and `require_supported_promotion` is the fail-closed
+  release/docs gate. Fixture reports cannot mint supported promotions.
+  Operators can emit or validate records with `review-sensei promotion` or
   `scripts/validate_promotion_record.py` without adding live or secret flags to
   CI.
 

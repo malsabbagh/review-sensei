@@ -38,6 +38,18 @@ def _parse_reproducibility_json(value: str) -> dict[str, object]:
     return parsed
 
 
+def _load_reproducibility(args: argparse.Namespace) -> dict[str, object]:
+    if getattr(args, "reproducibility_file", None) is not None:
+        return _parse_reproducibility_json(
+            read_bounded_utf8(
+                args.reproducibility_file,
+                maximum=16 * 1024,
+                label="reproducibility",
+            )
+        )
+    return _parse_reproducibility_json(args.reproducibility_json)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -49,7 +61,9 @@ def _parser() -> argparse.ArgumentParser:
     emit.add_argument("--report", type=Path, action="append", required=True)
     emit.add_argument("--observed-revision", required=True)
     emit.add_argument("--evaluated-at", required=True)
-    emit.add_argument("--reproducibility-json", required=True)
+    reproducibility = emit.add_mutually_exclusive_group(required=True)
+    reproducibility.add_argument("--reproducibility-json")
+    reproducibility.add_argument("--reproducibility-file", type=Path)
     emit.add_argument(
         "--rollback-decision",
         choices=("revert-to-baseline", "hold", "none"),
@@ -83,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             record = promotion_record_from_reports(
                 reports,
                 observed_revision=args.observed_revision,
-                reproducibility=_parse_reproducibility_json(args.reproducibility_json),
+                reproducibility=_load_reproducibility(args),
                 evaluated_at=args.evaluated_at,
                 rollback_decision=args.rollback_decision,
                 status=args.status,
@@ -109,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 validate_promotion_against_report(record, report)
         sys.stdout.write(json.dumps(record.to_dict(), indent=2) + "\n")
         return 0
-    except (OSError, ValueError, ReviewSenseiError) as exc:
+    except (OSError, ValueError, KeyError, IndexError, ReviewSenseiError) as exc:
         print(f"promotion record validation failed: {exc}", file=sys.stderr)
         return 1
 

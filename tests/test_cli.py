@@ -1480,6 +1480,44 @@ class PromotionCliTests(unittest.TestCase):
             )
             self.assertEqual(validate_status, 0)
 
+    def test_promotion_cli_emits_from_reproducibility_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports = []
+            for index in (1, 2, 3):
+                path = root / f"live-{index}.json"
+                path.write_text(
+                    json.dumps(self._make_report(elapsed_total_ms=index)),
+                    encoding="utf-8",
+                )
+                reports.append(path)
+            settings = root / "reproducibility.json"
+            settings.write_text('{"seed":"file"}\n', encoding="utf-8")
+            output = root / "promotion.json"
+            status = main(
+                [
+                    "promotion",
+                    "emit",
+                    "--report",
+                    str(reports[0]),
+                    "--report",
+                    str(reports[1]),
+                    "--report",
+                    str(reports[2]),
+                    "--observed-revision",
+                    "local-ollama-1",
+                    "--evaluated-at",
+                    "2026-09-16T00:00:00Z",
+                    "--reproducibility-file",
+                    str(settings),
+                    "--output",
+                    str(output),
+                ]
+            )
+            self.assertEqual(status, 0)
+            record = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(record["reproducibility"], {"seed": "file"})
+
     def test_promotion_cli_rejects_fixture_reports_for_supported_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

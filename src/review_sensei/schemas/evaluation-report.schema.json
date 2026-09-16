@@ -75,6 +75,12 @@
         "endpoint_scope": {
           "enum": ["none", "loopback", "remote"]
         },
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique id for one evaluate invocation. Promotion evidence requires distinct values; elapsed-time metrics do not establish independence."
+        },
         "engine_digest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
@@ -325,6 +331,7 @@
         "provider_version": null,
         "model": "fixture-v1",
         "endpoint_scope": "none",
+        "invocation_id": "eval-fixture-example",
         "engine_digest": "0000000000000000000000000000000000000000000000000000000000000000",
         "prompt_digest": "0000000000000000000000000000000000000000000000000000000000000000",
         "package_stage_digest": "0000000000000000000000000000000000000000000000000000000000000000",

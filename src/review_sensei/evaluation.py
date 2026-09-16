@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib.metadata
 import json
 import math
 import re
+import secrets
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ from .models import ProviderRequest, ProviderResponse, ReviewComment, ReviewRequ
 from .providers.base import ReviewProvider
 from .schemas import validate_public_document
 from .service import ReviewService
-from .stages import Stage
+from .stages import ReviewCategory, Stage
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     ReviewLimits,
@@ -190,6 +192,7 @@ def validate_promotion_record(value: Mapping[str, Any]) -> PromotionRecord:
         raise ReviewInputError("promotion record is incomplete") from exc
 
 
+@functools.lru_cache(maxsize=1)
 def _installed_package_version() -> str:
     try:
         return importlib.metadata.version("review-sensei")
@@ -203,13 +206,44 @@ def _required_sha256(value: object, *, label: str) -> str:
     return value
 
 
+def _required_invocation_id(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewInputError("promotion reports require a unique run invocation_id")
+    invocation_id = value.strip()
+    if len(invocation_id) > 128:
+        raise ReviewInputError("run invocation_id exceeds the 128-character limit")
+    return invocation_id
+
+
+def _category_digest_payload(category: ReviewCategory) -> dict[str, Any]:
+    return {
+        "id": category.id,
+        "title": category.title,
+        "focus": list(category.focus),
+        "applies_to": list(category.applies_to),
+        "learning_categories": list(category.learning_categories),
+        "include_uncategorized_learnings": category.include_uncategorized_learnings,
+        "document_sources": [
+            {
+                "path": source.path,
+                "include": list(source.include),
+                "exclude": list(source.exclude),
+                "required": source.required,
+            }
+            for source in category.document_sources
+        ],
+    }
+
+
 def _stage_digest_payload(stages: Sequence[Stage]) -> list[dict[str, Any]]:
     return [
         {
             "name": stage.name,
             "prompt_template": stage.prompt_template,
             "outputs": list(stage.outputs),
-            "category_ids": [category.id for category in stage.categories],
+            "categories": [
+                _category_digest_payload(category) for category in stage.categories
+            ],
         }
         for stage in stages
     ]
@@ -290,36 +324,46 @@ def _report_promotion_fields(report: Mapping[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise ReviewInputError("evaluation report must be a JSON object") from exc
     validate_public_document(payload, "evaluation-report")
-    run = payload["run"]
-    corpus = payload["corpus"]
-    model = run.get("model")
-    if not isinstance(model, str) or not model.strip():
-        raise ReviewInputError("evaluation report model is required for promotion")
-    provider = run.get("provider")
-    if not isinstance(provider, str) or not provider.strip():
-        raise ReviewInputError("evaluation report provider is required for promotion")
-    prompt = run.get("prompt_digest")
-    if prompt is None:
-        prompt = run.get("package_stage_digest")
-    return {
-        "engine_digest": _required_sha256(
-            run.get("engine_digest"), label="report engine_digest"
-        ),
-        "prompt_digest": _required_sha256(prompt, label="report prompt_digest"),
-        "configuration_digest": _required_sha256(
-            run.get("configuration_digest"), label="report configuration_digest"
-        ),
-        "corpus_digest": _required_sha256(
-            corpus.get("sha256"), label="report corpus digest"
-        ),
-        "provider": provider.strip(),
-        "model": model.strip(),
-        "mode": run.get("mode"),
-        "passed": payload.get("passed") is True,
-        "threshold_failures": list(payload.get("threshold_failures") or []),
-        "provider_version": run.get("provider_version"),
-        "canonical": _json_digest(payload),
-    }
+    try:
+        run = payload["run"]
+        corpus = payload["corpus"]
+    except KeyError as exc:
+        raise ReviewInputError("evaluation report is incomplete") from exc
+    if not isinstance(run, Mapping) or not isinstance(corpus, Mapping):
+        raise ReviewInputError("evaluation report run and corpus must be objects")
+    try:
+        model = run.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ReviewInputError("evaluation report model is required for promotion")
+        provider = run.get("provider")
+        if not isinstance(provider, str) or not provider.strip():
+            raise ReviewInputError(
+                "evaluation report provider is required for promotion"
+            )
+        prompt = run.get("prompt_digest")
+        if prompt is None:
+            prompt = run.get("package_stage_digest")
+        return {
+            "engine_digest": _required_sha256(
+                run.get("engine_digest"), label="report engine_digest"
+            ),
+            "prompt_digest": _required_sha256(prompt, label="report prompt_digest"),
+            "configuration_digest": _required_sha256(
+                run.get("configuration_digest"), label="report configuration_digest"
+            ),
+            "corpus_digest": _required_sha256(
+                corpus.get("sha256"), label="report corpus digest"
+            ),
+            "provider": provider.strip(),
+            "model": model.strip(),
+            "mode": run.get("mode"),
+            "passed": payload.get("passed") is True,
+            "threshold_failures": list(payload.get("threshold_failures") or []),
+            "provider_version": run.get("provider_version"),
+            "invocation_id": _required_invocation_id(run.get("invocation_id")),
+        }
+    except (KeyError, IndexError, AttributeError, TypeError) as exc:
+        raise ReviewInputError("evaluation report is incomplete") from exc
 
 
 def _classify_promotion_evidence(extracted: Sequence[Mapping[str, Any]]) -> str:
@@ -341,8 +385,8 @@ def _classify_promotion_evidence(extracted: Sequence[Mapping[str, Any]]) -> str:
             "promotion reports must share engine, prompt, configuration, "
             "corpus, and provider identity"
         )
-    canonical = [str(item["canonical"]) for item in extracted]
-    if len(set(canonical)) != len(canonical):
+    invocation_ids = [str(item["invocation_id"]) for item in extracted]
+    if len(set(invocation_ids)) != len(invocation_ids):
         raise ReviewInputError("promotion reports must be independent")
     fixture = any(_is_fixture_alias(str(item["provider"])) for item in extracted)
     live = all(item["mode"] == "live" for item in extracted)
@@ -387,11 +431,18 @@ def promotion_record_from_reports(
         raise ReviewInputError("promotion reports must be iterable") from exc
     extracted = [_report_promotion_fields(report) for report in documents]
     inferred = _classify_promotion_evidence(extracted)
-    selected_status = inferred if status is None else status
-    if selected_status == "supported" and inferred != "supported":
+    if status is None:
+        selected_status = inferred
+    elif status == inferred:
+        selected_status = status
+    elif status == "supported":
         raise ReviewInputError(
             "supported promotion requires at least three independent live "
             "evaluation reports that passed quality thresholds"
+        )
+    else:
+        raise ReviewInputError(
+            "promotion status does not match the evaluation evidence"
         )
     first = extracted[0]
     provider_versions = {
@@ -450,6 +501,15 @@ def validate_promotion_against_report(
             raise ReviewInputError(
                 f"promotion record {name} does not match the evaluation report"
             )
+    provider_version = fields["provider_version"]
+    if (
+        isinstance(provider_version, str)
+        and provider_version.strip()
+        and provider_version.strip() != record.observed_revision
+    ):
+        raise ReviewInputError(
+            "promotion observed_revision does not match the report provider version"
+        )
     if record.status == "supported":
         if not fields["passed"] or fields["threshold_failures"]:
             raise ReviewInputError("evaluation report did not pass quality thresholds")
@@ -459,15 +519,6 @@ def validate_promotion_against_report(
             )
         if _is_fixture_alias(record.provider) or _is_fixture_alias(fields["provider"]):
             raise ReviewInputError("fixture-only evidence cannot support promotion")
-        provider_version = fields["provider_version"]
-        if (
-            isinstance(provider_version, str)
-            and provider_version.strip()
-            and provider_version.strip() != record.observed_revision
-        ):
-            raise ReviewInputError(
-                "promotion observed_revision does not match the report provider version"
-            )
     elif not fields["passed"] or fields["threshold_failures"]:
         raise ReviewInputError("evaluation report did not pass quality thresholds")
 
@@ -1144,6 +1195,7 @@ def build_report(
             "provider_version": provider_version,
             "model": model,
             "endpoint_scope": endpoint_scope,
+            "invocation_id": secrets.token_hex(16),
             "engine_digest": engine_digest(),
             "prompt_digest": prompt_digest(),
             "package_stage_digest": package_stage_digest(),

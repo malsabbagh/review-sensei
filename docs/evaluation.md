@@ -84,7 +84,8 @@ carries:
 - `engine_digest`: SHA-256 of package identity, `ReviewService` identity,
   matching algorithm, output-correction attempt budget, location enforcement,
   and `ReviewLimits` ceilings
-- `prompt_digest`: SHA-256 of packaged or custom stage templates
+- `prompt_digest`: SHA-256 of packaged or custom stage templates and the full
+  category definitions those templates interpolate
 - `configuration_digest` and `corpus_digest` copied from the reports
 - provider/model identity or observed revision
 - `run_count`, `evaluated_at`, and reproducibility settings
@@ -92,8 +93,10 @@ carries:
 - a rollback decision (`revert-to-baseline`, `hold`, or `none`)
 
 Only `status=supported` can authorize promotion, and it requires at least three
-independent live runs that passed the corpus quality thresholds. Fixture
-provider aliases cannot produce `supported`. Incomplete records (missing
+independent live runs that passed the corpus quality thresholds. Independence is
+the unique `run.invocation_id` stamped by each `evaluate` invocation; copies
+that only change elapsed-time metrics are not independent. Fixture provider
+aliases cannot produce `supported`. Incomplete records (missing
 rollback decision, missing status, `run_count < 3` with `supported`, digest
 mismatch, or missing reproducibility) fail closed.
 
@@ -131,9 +134,11 @@ review-sensei promotion validate --require-supported \
 ```
 
 The same emit/validate flow is available from
-`python scripts/validate_promotion_record.py`. The record is metadata about the
-evaluation, not the run evidence itself: operators must retain exact run outputs
-and provider terms/egress approval separately.
+`python scripts/validate_promotion_record.py`. Reproducibility settings may be
+passed inline with `--reproducibility-json` or loaded from a bounded JSON file
+with `--reproducibility-file`. The record is metadata about the evaluation, not
+the run evidence itself: operators must retain exact run outputs and provider
+terms/egress approval separately.
 
 CI remains fixture-only. Live runs are gated, non-secret, and performed outside
 the CI workflow against reviewed synthetic or explicitly authorized data. The

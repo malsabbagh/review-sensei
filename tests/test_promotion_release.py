@@ -313,6 +313,7 @@ def _make_report(
     configuration: str | None = None,
     corpus: str | None = None,
     endpoint_scope: str = "loopback",
+    invocation_id: str | None = None,
 ) -> dict:
     prompt_value = prompt if prompt is not None else prompt_digest()
     failures = [] if passed else ["actionable_precision_minimum"]
@@ -330,6 +331,7 @@ def _make_report(
             "provider_version": provider_version,
             "model": model,
             "endpoint_scope": endpoint_scope,
+            "invocation_id": invocation_id or f"run-{elapsed_total_ms}",
             "engine_digest": engine if engine is not None else engine_digest(),
             "prompt_digest": prompt_value,
             "package_stage_digest": prompt_value,
@@ -452,6 +454,25 @@ class PromotionEvidenceBindingTests(unittest.TestCase):
             require_supported_promotion(record, reports).status, "supported"
         )
 
+    def test_require_supported_promotion_reads_digests_from_reports(self) -> None:
+        digest = "e" * 64
+        prompt = "f" * 64
+        reports = [
+            _make_report(elapsed_total_ms=index, engine=digest, prompt=prompt)
+            for index in (1, 2, 3)
+        ]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.engine_digest, digest)
+        self.assertNotEqual(record.engine_digest, engine_digest())
+        self.assertEqual(
+            require_supported_promotion(record, reports).engine_digest, digest
+        )
+
     def test_constructed_fixture_reports_cannot_mint_supported(self) -> None:
         reports = [
             _make_report(
@@ -557,6 +578,85 @@ class PromotionEvidenceBindingTests(unittest.TestCase):
                 evaluated_at="2026-01-01T00:00:00Z",
             )
 
+    def test_elapsed_only_copies_are_not_independent(self) -> None:
+        reports = [
+            _make_report(elapsed_total_ms=index, invocation_id="same-run")
+            for index in (1, 2, 3)
+        ]
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                reports,
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+            )
+
+    def test_distinct_invocation_ids_are_independent_with_identical_timing(
+        self,
+    ) -> None:
+        reports = [
+            _make_report(elapsed_total_ms=7, invocation_id=f"live-{index}")
+            for index in (1, 2, 3)
+        ]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.status, "supported")
+        self.assertEqual(
+            require_supported_promotion(record, reports).status, "supported"
+        )
+
+    def test_missing_invocation_id_fails_closed(self) -> None:
+        report = _make_report(elapsed_total_ms=1)
+        report["run"].pop("invocation_id")
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                [report],
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+            )
+
+    def test_explicit_status_must_match_inferred_evidence(self) -> None:
+        reports = [_make_report(elapsed_total_ms=index) for index in (1, 2, 3)]
+        with self.assertRaises(ReviewInputError):
+            promotion_record_from_reports(
+                reports,
+                observed_revision="local-ollama-1",
+                reproducibility={"seed": "fixed"},
+                evaluated_at="2026-01-01T00:00:00Z",
+                status="insufficient",
+            )
+
+    def test_observed_revision_is_checked_for_non_supported_records(self) -> None:
+        reports = [_make_report(elapsed_total_ms=index) for index in (1, 2)]
+        record = promotion_record_from_reports(
+            reports,
+            observed_revision="local-ollama-1",
+            reproducibility={"seed": "fixed"},
+            evaluated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(record.status, "insufficient")
+        mismatched = PromotionRecord(
+            engine_digest=record.engine_digest,
+            prompt_digest=record.prompt_digest,
+            configuration_digest=record.configuration_digest,
+            corpus_digest=record.corpus_digest,
+            provider=record.provider,
+            model=record.model,
+            observed_revision="other-revision",
+            run_count=record.run_count,
+            evaluated_at=record.evaluated_at,
+            reproducibility=record.reproducibility,
+            status=record.status,
+            rollback_decision=record.rollback_decision,
+        )
+        with self.assertRaises(ReviewInputError):
+            validate_promotion_against_report(mismatched, reports[0])
+
     def test_operator_script_emits_and_validates_without_live_flags(self) -> None:
         script = (
             Path(__file__).resolve().parents[1]
@@ -620,6 +720,57 @@ class PromotionEvidenceBindingTests(unittest.TestCase):
                     ]
                 ),
                 0,
+            )
+
+    def test_operator_script_emits_from_reproducibility_file(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "validate_promotion_record.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "validate_promotion_record_script_file", script
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            report_paths = []
+            for index in (1, 2, 3):
+                path = root / f"live-{index}.json"
+                path.write_text(
+                    json.dumps(_make_report(elapsed_total_ms=index)), encoding="utf-8"
+                )
+                report_paths.append(path)
+            settings = root / "reproducibility.json"
+            settings.write_text('{"seed":"fixed","temperature":0}\n', encoding="utf-8")
+            output = root / "promotion.json"
+            self.assertEqual(
+                module.main(
+                    [
+                        "emit",
+                        "--report",
+                        str(report_paths[0]),
+                        "--report",
+                        str(report_paths[1]),
+                        "--report",
+                        str(report_paths[2]),
+                        "--observed-revision",
+                        "local-ollama-1",
+                        "--evaluated-at",
+                        "2026-09-16T00:00:00Z",
+                        "--reproducibility-file",
+                        str(settings),
+                        "--output",
+                        str(output),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8"))["reproducibility"],
+                {"seed": "fixed", "temperature": 0},
             )
 
 

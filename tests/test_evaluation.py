@@ -22,7 +22,7 @@ from review_sensei.evaluation import (
 )
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
-from review_sensei.stages import Stage
+from review_sensei.stages import ReviewCategory, Stage
 from review_sensei.validation import ReviewLimits
 
 
@@ -371,6 +371,29 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(prompt_digest((custom,)), prompt_digest((custom,)))
         self.assertNotEqual(prompt_digest((custom,)), prompt_digest((changed,)))
         self.assertNotEqual(packaged, prompt_digest((custom,)))
+        first_category = ReviewCategory(
+            id="correctness",
+            title="Correctness",
+            focus=("Find logic bugs",),
+        )
+        second_category = ReviewCategory(
+            id="correctness",
+            title="Correctness",
+            focus=("Find logic bugs", "Reject silent data loss"),
+        )
+        with_first = Stage(
+            name="custom",
+            prompt_template="Review {review_categories}\n{diff}",
+            outputs=("summary",),
+            categories=(first_category,),
+        )
+        with_second = Stage(
+            name="custom",
+            prompt_template="Review {review_categories}\n{diff}",
+            outputs=("summary",),
+            categories=(second_category,),
+        )
+        self.assertNotEqual(prompt_digest((with_first,)), prompt_digest((with_second,)))
 
     def test_fixture_report_includes_computed_engine_and_prompt_digests(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -381,6 +404,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(report["run"]["engine_digest"], engine_digest())
         self.assertEqual(report["run"]["prompt_digest"], prompt_digest())
         self.assertEqual(report["run"]["package_stage_digest"], package_stage_digest())
+        self.assertRegex(report["run"]["invocation_id"], r"^[0-9a-f]{32}$")
 
     def test_fixture_reports_cannot_mint_supported_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -389,6 +413,7 @@ class EvaluationTests(unittest.TestCase):
         reports = []
         for index in range(3):
             cloned = json.loads(json.dumps(report))
+            cloned["run"]["invocation_id"] = f"fixture-clone-{index}"
             cloned["metrics"]["elapsed_total_ms"] = index + 1
             reports.append(cloned)
         kwargs = {
