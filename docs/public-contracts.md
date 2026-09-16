@@ -279,7 +279,10 @@ review-sensei plan --diff pr.patch --repository owner/repo --json
 ```
 
 `plan` analyzes a supplied diff with the same bounded `analyze_diff` path as
-review. Without `--diff`, the plan is incomplete rather than ready.
+review. Without `--diff`, the plan is incomplete rather than ready. Optional
+`--base-sha` and `--head-sha` record snapshot identity when supplied.
+`doctor --network` performs read-only GET probes and never mints a token or
+sends a generation request.
 
 Exit codes are stable:
 
@@ -288,7 +291,7 @@ Exit codes are stable:
 | `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
 | `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
-| `3` | `doctor --network` (unprobed); `plan` incomplete (no diff) |
+| `3` | `doctor` requested probe unverifiable with current permissions; `plan` incomplete (no diff) |
 
 ## Error Categories
 

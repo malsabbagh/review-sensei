@@ -537,7 +537,16 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--network",
         action="store_true",
-        help="Report optional network checks as unknown (never probes).",
+        help="Run optional read-only probes (never generate, never mint tokens).",
+    )
+    parser.add_argument("--repository")
+    parser.add_argument("--base-url")
+    parser.add_argument("--model")
+    parser.add_argument("--compatibility-manifest", type=Path)
+    parser.add_argument(
+        "--allow-data-egress",
+        action="store_true",
+        help="Authorize read-only probes of a non-loopback provider endpoint.",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -554,6 +563,9 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title")
     parser.add_argument("--stage", action="append", default=[])
     parser.add_argument("--provider-mode")
+    parser.add_argument("--base-sha")
+    parser.add_argument("--head-sha")
+    parser.add_argument("--categories-dir", type=Path)
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -884,6 +896,11 @@ def _run_doctor_command(arguments: list[str]) -> int:
             context_root=args.context_root,
             include_network=args.network,
             provider_mode=os.getenv("REVIEWSENSEI_PROVIDER_MODE"),
+            repository=args.repository,
+            base_url=args.base_url,
+            model=args.model,
+            compatibility_manifest=args.compatibility_manifest,
+            allow_data_egress=args.allow_data_egress,
         )
         sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
         return (
@@ -924,6 +941,9 @@ def _run_plan_command(arguments: list[str]) -> int:
             title=args.title,
             stages=args.stage,
             provider_mode=args.provider_mode,
+            base_sha=args.base_sha,
+            head_sha=args.head_sha,
+            categories_dir=args.categories_dir,
         )
         sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
         return 0 if report["status"] == "ready" else 3

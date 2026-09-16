@@ -26,6 +26,54 @@ reinstall the exact launcher version; do not run a downloader or fall back to
 system Python. For a release incident, use a higher patch version rather than
 overwriting an npm tarball or moving a tag.
 
+## Diagnose installation and preview a review
+
+Offline doctor never opens sockets, mints tokens, or calls a model:
+
+```bash
+review-sensei doctor --json
+```
+
+Repair actions:
+
+| Check | Typical repair |
+| --- | --- |
+| `package` action | Reinstall the exact `review-sensei` version; do not mix checkout `src/` with a wheel. |
+| `packaged-assets` action | Reinstall the package so default stages/categories are present. |
+| `stages`/`categories` action | Point `--stages-dir`/`--categories-dir` at trusted-base directories that contain valid JSON, not a PR-head copy. |
+| `provider-mode` action | Set `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`. |
+| `endpoint` action | Start a local Ollama runner on loopback, or correct `OLLAMA_BASE_URL`. |
+| `model` action | `ollama pull` the configured model. |
+| `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
+| `compatibility` action | Supply a validated compatibility manifest path. |
+
+Optional `--network` probes are read-only GETs. Example local output:
+
+```text
+status: pass
+version: 0.1.1
+pass: package — 0.1.1
+pass: packaged-assets — default stages and categories available
+pass: provider-mode — local (offline check)
+pass: stages — packaged default stages selected
+pass: categories — packaged default categories selected
+pass: context — no supplemental context configured
+pass: endpoint — local runner endpoint reachable
+pass: model — configured model is installed
+unknown: repository-metadata — repository metadata not checked (repository not supplied)
+unknown: compatibility — compatibility evidence not supplied
+```
+
+Preview a review without provider or GitHub writes:
+
+```bash
+review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
+  --base-sha <base> --head-sha <head> --json
+```
+
+The plan always reports `provider_calls=0` and `github_writes=0`. See
+[`docs/diagnostics.md`](diagnostics.md) for exit codes.
+
 ## From source
 
 ```bash

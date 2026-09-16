@@ -17,6 +17,10 @@
   warning or malformed report fails the findings gate, while clean Python and
   JavaScript/TypeScript reports pass. Fork pull-request CodeQL remains
   read-only, with no secrets and no `pull_request_target`.
+- Extended `review-sensei doctor --network` with read-only loopback endpoint
+  and model probes, optional repository-metadata checks that reuse an existing
+  token, and compatibility-manifest validation. `plan` now records supplied
+  base/head snapshot SHAs and still performs zero provider or GitHub writes.
 
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
