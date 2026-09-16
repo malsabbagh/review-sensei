@@ -35,6 +35,10 @@ def resolve_stage_profile_name(
         run_profile = canonical_profile_name(run_profile)
     if stage_profile is None:
         return run_profile
+    if stage_profile.strip().lower() == "fixture":
+        raise ProviderError(
+            "fixture provider cannot be combined with stage provider_profile"
+        )
     selected = get_provider_profile(stage_profile)
     if run_profile is None:
         if selected.endpoint_scope == "remote":
@@ -73,15 +77,21 @@ def _api_key_for_stage_profile(
     """Return the credential permitted for a stage provider on ``resolved``."""
 
     profile = get_provider_profile(resolved)
+    run_profile = (
+        canonical_profile_name(run_settings.profile)
+        if run_settings.profile is not None
+        else None
+    )
+    if run_profile != profile.name:
+        raise ProviderError("stage profile cannot reuse another profile's credential")
+    if profile.endpoint_scope == "remote" and not profile.requires_api_key:
+        raise ProviderError("remote provider profile requires an explicit API key")
     if not profile.requires_api_key:
         return None
     if run_settings.profile is None:
         raise ProviderError(
             f"provider profile '{profile.name}' requires an explicit API key"
         )
-    run_profile = canonical_profile_name(run_settings.profile)
-    if run_profile != profile.name:
-        raise ProviderError("stage profile cannot reuse another profile's credential")
     api_key = run_settings.api_key
     if not isinstance(api_key, str) or not api_key.strip():
         raise ProviderError(
@@ -124,14 +134,6 @@ def bind_stage_providers(
 
     if _run_uses_fixture_provider(settings) and any(
         stage.provider_profile for stage in stages
-    ):
-        raise ProviderError(
-            "fixture provider cannot be combined with stage provider_profile"
-        )
-    if any(
-        stage.provider_profile is not None
-        and stage.provider_profile.strip().lower() == "fixture"
-        for stage in stages
     ):
         raise ProviderError(
             "fixture provider cannot be combined with stage provider_profile"

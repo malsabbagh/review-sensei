@@ -204,6 +204,50 @@ class PromotionAndReleaseTests(unittest.TestCase):
                 "fast-triage", live, [default_only, stage_report]
             )
 
+    def test_profile_promotion_rejects_off_scope_stage_model_evidence(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        default_only = json.loads(fixture_path.read_text(encoding="utf-8"))
+        default_only["run"]["mode"] = "live"
+        default_only["run"]["provider"] = "openai-compatible"
+        default_only["run"]["model"] = "gpt-4o-mini"
+        default_only["run"]["endpoint_scope"] = "remote"
+        default_only["run"]["invocation_id"] = "f" * 32
+        loopback_stage = json.loads(fixture_path.read_text(encoding="utf-8"))
+        loopback_stage["run"]["mode"] = "live"
+        loopback_stage["run"]["provider"] = "openai-compatible"
+        loopback_stage["run"]["model"] = "gpt-4o"
+        loopback_stage["run"]["endpoint_scope"] = "loopback"
+        loopback_stage["run"]["invocation_id"] = "g" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "declared stage model"):
+                validate_profile_promotion(
+                    "fast-triage", live, [default_only, loopback_stage]
+                )
+
     def test_invalid_reproducibility_shape_fails_with_review_input_error(self) -> None:
         with self.assertRaises(ReviewInputError):
             PromotionRecord(

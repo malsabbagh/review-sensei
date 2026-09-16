@@ -16,7 +16,6 @@ import ssl
 import stat
 import unicodedata
 from collections.abc import Callable
-from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -377,6 +376,12 @@ class OpenAICompatibleProvider:
                 transient=transient,
             ) from exc
         except (TimeoutError, URLError) as exc:
+            if isinstance(exc, HTTPError):
+                transient = exc.code == 429 or 500 <= exc.code < 600
+                raise ProviderError(
+                    f"OpenAI-compatible request failed with HTTP {exc.code}",
+                    transient=transient,
+                ) from exc
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
@@ -385,16 +390,6 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 "OpenAI-compatible request failed", transient=transient
             ) from exc
-        except HTTPException as exc:
-            if "timed out" in str(exc).lower():
-                raise ProviderError(
-                    "OpenAI-compatible request timed out", transient=True
-                ) from exc
-            if isinstance(exc, ConnectionError):
-                raise ProviderError(
-                    "OpenAI-compatible request failed", transient=True
-                ) from exc
-            raise ProviderError("OpenAI-compatible request failed") from exc
         except TypeError as exc:
             # Context-manager protocol and builtin opener TypeErrors only.
             # Custom opener TypeErrors are normalized in ``_call_custom_opener``;

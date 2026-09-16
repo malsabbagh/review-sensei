@@ -42,6 +42,14 @@ class ProviderRoutingTests(unittest.TestCase):
                 run_profile="local-private", stage_profile="fast-triage"
             )
 
+    def test_stage_fixture_profile_rejects_with_fixture_error(self) -> None:
+        with self.assertRaisesRegex(
+            ProviderError, "fixture provider cannot be combined"
+        ):
+            resolve_stage_profile_name(
+                run_profile="fast-triage", stage_profile="fixture"
+            )
+
     def test_remote_run_may_narrow_to_local_private(self) -> None:
         self.assertEqual(
             resolve_stage_profile_name(

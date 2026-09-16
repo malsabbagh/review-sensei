@@ -601,10 +601,13 @@ def _validate_profile_stage_model_evidence(
     if not profile.stage_models:
         return
     required_models = frozenset(model for _, model in profile.stage_models)
+    expected = _profile_report_endpoint_scopes(profile)
     live_models = {
         fields["model"]
         for report in reports
         if (fields := _report_promotion_fields(report))["mode"] == "live"
+        and fields["provider"] == profile.provider
+        and _report_endpoint_scope(report) in expected
     }
     if profile.endpoint_scope == "remote" and not live_models:
         raise ReviewInputError(

@@ -278,8 +278,12 @@ reads the environment or forwards a credential to a profile that disallows it.
 Ollama, fixture, and `openai-compatible` share a conformance suite covering
 request/result shape, malformed envelopes, resource limits, timeout/cancellation,
 redirects, missing credentials, rate limits, and sanitized errors. Observed
-provider/model values are recorded on `ProviderResponse`; a revision is recorded
-when the adapter can observe one (`system_fingerprint` or response model id).
+provider/model values are recorded on `ProviderResponse`; an optional
+`revision` is recorded when the adapter can observe one (`system_fingerprint` or
+response model id). `revision` is internal adapter metadata bounded by
+`ReviewLimits.max_revision_bytes`; it is not part of the public evaluation-report
+or `ReviewResult` schemas and is not persisted in run outcomes. Promotion flows
+may aggregate an observed revision separately as `observed_revision`.
 Fixture-only promotion records cannot certify a named profile;
 `validate_profile_promotion` requires supported live evidence that matches the
 profile's adapter and allowed models.

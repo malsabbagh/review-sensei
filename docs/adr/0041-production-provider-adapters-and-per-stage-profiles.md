@@ -25,7 +25,11 @@ output, and `permitted_fallback: none`.
 
 A stage may set canonical `provider_profile`. Unprofiled and `local-private`
 runs cannot select a remote stage profile. A remote run may narrow a stage to
-`local-private`. Routing never switches adapters or forwards one profile's
+`local-private`. At most one remote provider, endpoint, and credential set may
+participate in a run; remote profiles such as `fast-triage` and
+`deep-verification` cannot be mixed, and attempts to switch providers,
+endpoints, or credentials raise `stage profile cannot switch providers` or
+`stage profile cannot switch credentials`. Routing never forwards one profile's
 credential to another endpoint. Per-stage models stay inside a profile's
 closed allowlist.
 

@@ -192,6 +192,16 @@ class ProviderConformanceTests(unittest.TestCase):
                     self.assertTrue(raised.exception.transient)
                     self.assertIn(str(code), str(raised.exception))
 
+    def test_openai_http_error_subclass_is_classified_via_urlerror_path(self) -> None:
+        error = HTTPError("https://example.test", 503, "err", {}, None)
+        provider = _openai(
+            lambda request, timeout, context: (_ for _ in ()).throw(error)
+        )
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(ProviderRequest(prompt="private"))
+        self.assertTrue(raised.exception.transient)
+        self.assertIn("503", str(raised.exception))
+
     def test_network_failure_does_not_echo_secret(self) -> None:
         secret = "credential-value"
         for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
