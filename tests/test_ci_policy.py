@@ -871,14 +871,17 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self,
     ):
         text = _reusable_workflow_text()
-        publish_if = (
+        admission_if = (
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
-        self.assertEqual(text.count(publish_if), 4)
-        self.assertEqual(
-            text.count("Re-validate live pull-request head before publish"), 2
+        publish_if = (
+            admission_if + " && steps.publish-admission.outputs.status == 'current'"
         )
+        confirm_name = "Confirm live pull-request head is still current"
+        self.assertEqual(text.count(confirm_name), 2)
+        self.assertEqual(text.count(publish_if), 2)
+        self.assertEqual(text.count("id: publish-admission"), 2)
         self.assertNotIn(
             "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
             text,
@@ -892,15 +895,11 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 job = _job_section(text, job_id)
                 names = _named_steps(job)
                 publish_index = names.index(publish_name)
-                self.assertEqual(
-                    names[publish_index - 1],
-                    "Re-validate live pull-request head before publish",
-                )
-                revalidate = _step_block(
-                    job, "Re-validate live pull-request head before publish"
-                )
+                self.assertEqual(names[publish_index - 1], confirm_name)
+                revalidate = _step_block(job, confirm_name)
                 publish = _step_block(job, publish_name)
-                self.assertIn(publish_if, revalidate)
+                self.assertIn(admission_if, revalidate)
+                self.assertNotIn("steps.publish-admission.outputs.status", revalidate)
                 self.assertIn(publish_if, publish)
                 self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)
                 self.assertIn(
@@ -908,7 +907,11 @@ class ReusablePublishGuardTests(unittest.TestCase):
                     revalidate,
                 )
                 self.assertIn("--jq '.head.sha'", revalidate)
-                self.assertIn("echo 'skipped_stale'", revalidate)
+                self.assertIn("for attempt in 1 2 3", revalidate)
+                self.assertNotIn("2>/dev/null", revalidate)
+                self.assertEqual(revalidate.count("echo 'skipped_stale'"), 1)
+                self.assertIn("status=skipped_stale", revalidate)
+                self.assertIn("status=current", revalidate)
                 self.assertIn("refusing publish", revalidate)
                 self.assertNotIn("--allow-write", revalidate)
                 self.assertNotIn("github review", revalidate)

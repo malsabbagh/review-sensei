@@ -289,7 +289,9 @@ class AdmissionLease:
             if self._released:
                 return self._admission.snapshot(outcome)
             self._released = True
-        return self._admission._release(outcome)
+            # Decrement under the same lock as the _released flag so concurrent
+            # release() or context-manager __exit__ calls cannot drop active twice.
+            return self._admission._release(outcome)
 
     def __enter__(self) -> "AdmissionLease":
         return self

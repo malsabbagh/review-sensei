@@ -264,6 +264,45 @@ class ProviderAdmissionTests(unittest.TestCase):
         first.release()
         self.assertEqual(admission.active, 0)
 
+    def test_concurrent_release_is_idempotent(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:12")
+        admission = ProviderAdmission(group, max_waiters=0)
+        lease = admission.acquire()
+        errors: list[BaseException] = []
+
+        def release_once() -> None:
+            try:
+                lease.release()
+            except BaseException as exc:  # pragma: no cover - test diagnostics
+                errors.append(exc)
+
+        threads = [threading.Thread(target=release_once) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+        self.assertEqual(admission.active, 0)
+
+    def test_context_manager_release_after_manual_release_is_idempotent(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:13")
+        admission = ProviderAdmission(group, max_waiters=0)
+        with admission.acquire() as lease:
+            self.assertEqual(admission.active, 1)
+            lease.release()
+            self.assertEqual(admission.active, 0)
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+
     def test_cancelled_and_failed_work_release_the_slot(self):
         group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:8")
         admission = ProviderAdmission(group, max_waiters=1)

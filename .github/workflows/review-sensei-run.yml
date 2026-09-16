@@ -515,7 +515,11 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
 
-      - name: Re-validate live pull-request head before publish
+      # success() && !cancelled() skips a pointless API call after a failed
+      # provider step or cancelled run. Publish still has its own cancellation
+      # guard and requires status=current from this head check.
+      - name: Confirm live pull-request head is still current
+        id: publish-admission
         if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -527,24 +531,32 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          if ! live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>/dev/null)"; then
-            echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
-            exit 1
-          fi
+          live_sha=""
+          for attempt in 1 2 3; do
+            if live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha')"; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
+              exit 1
+            fi
+            sleep "$attempt"
+          done
           if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
             echo '::error::live pull-request head identity is invalid; refusing publish' >&2
-            echo 'skipped_stale'
             exit 1
           fi
           if [[ "$live_sha" != "$HEAD_SHA" ]]; then
             echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
             echo 'skipped_stale'
-            exit 1
+            echo 'status=skipped_stale' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo 'publish admission current'
+          echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -819,7 +831,11 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" --output review.json
 
-      - name: Re-validate live pull-request head before publish
+      # success() && !cancelled() skips a pointless API call after a failed
+      # provider step or cancelled run. Publish still has its own cancellation
+      # guard and requires status=current from this head check.
+      - name: Confirm live pull-request head is still current
+        id: publish-admission
         if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -831,24 +847,32 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          if ! live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>/dev/null)"; then
-            echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
-            exit 1
-          fi
+          live_sha=""
+          for attempt in 1 2 3; do
+            if live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha')"; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
+              exit 1
+            fi
+            sleep "$attempt"
+          done
           if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
             echo '::error::live pull-request head identity is invalid; refusing publish' >&2
-            echo 'skipped_stale'
             exit 1
           fi
           if [[ "$live_sha" != "$HEAD_SHA" ]]; then
             echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
             echo 'skipped_stale'
-            exit 1
+            echo 'status=skipped_stale' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo 'publish admission current'
+          echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote trusted local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}

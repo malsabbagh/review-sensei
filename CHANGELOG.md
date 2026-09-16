@@ -44,11 +44,13 @@
   reusable runner inputs, and custom stage JSON is loaded only from the
   reviewed trusted base.
 - Closed remaining issue #27 gaps: publish steps now require success and are
-  skipped when cancelled, re-validate the live pull-request head with a
-  read-only `gh api` check immediately before writes (`skipped_stale` fail-closed),
-  and expose an in-process bounded `ProviderAdmission` helper with lease
-  release after cancellation or failure. Hosted GitHub Actions admission
-  remains the PR-scoped reusable workflow concurrency group (`max_active=1`,
+  skipped when cancelled, confirm the live pull-request head with a bounded
+  read-only `gh api` retry immediately before writes (SHA mismatch records
+  `skipped_stale` and skips publish without failing the job; API unavailability
+  or a malformed live SHA fail closed and refuse publish), and expose an
+  in-process bounded `ProviderAdmission` helper with lease release after
+  cancellation or failure. Hosted GitHub Actions admission remains the
+  PR-scoped reusable workflow concurrency group (`max_active=1`,
   cancel-in-progress for reviews). Logs for admission/cancellation stay
   metadata-only.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target

@@ -109,10 +109,13 @@ repositories. GitHub Actions does not use this helper; hosted admission is
 native workflow `concurrency`.
 
 A cancelled or stale hosted run cannot publish even if the provider
-finished: publish steps require `success() && !cancelled()`, and a
-read-only live head SHA check immediately before publish fails closed with
-`skipped_stale` semantics. Exact-head publication preflight remains; the
-pre-publish check does not mint write tokens.
+finished: publish steps require `success() && !cancelled()` and a current
+live-head admission output. The read-only live head SHA check retries
+transient `gh api` failures, then fails closed (job failure, no publish)
+when the API is unavailable or the live SHA is malformed. A SHA mismatch
+records `skipped_stale` and skips publish without failing the job.
+Exact-head publication preflight remains; the pre-publish check does not
+mint write tokens.
 
 Admission and cancellation logs are metadata-only. They record group keys,
 counts, and closed-set statuses, never prompts, diffs, or source content.
