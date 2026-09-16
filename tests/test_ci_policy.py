@@ -232,6 +232,42 @@ class ActionPinPolicyTests(unittest.TestCase):
             "needs: [compatibility, quality, schemas, package, npm, workers, codeql]",
             text,
         )
+        self.assertIn('require_success "${{ needs.codeql.result }}"', text)
+
+    def test_codeql_job_is_read_only_and_not_pull_request_target(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("pull_request:", text)
+        self.assertNotIn("pull_request_target", text)
+        self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n")
+        codeql_job = text.split("  codeql:\n", 1)[1].split("\n  required-checks:", 1)[0]
+        self.assertNotIn("secrets.", codeql_job)
+        self.assertNotIn("security-events:", codeql_job)
+        self.assertIn("actions: read", codeql_job)
+        self.assertIn("contents: read", codeql_job)
+        self.assertIn("upload: never", codeql_job)
+        codeql_config = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "codeql"
+            / "codeql-config.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("deploy/cloudflare", codeql_config)
+        self.assertIn("packages/npm/cli", codeql_config)
+
+    def test_ci_proves_findings_gate_on_committed_fixtures(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("Prove CodeQL findings gate on committed fixtures", text)
+        proof = _run_block_containing(text, "tests/fixtures/codeql/seeded-warning")
+        self.assertIn("tests/fixtures/codeql/clean", proof)
+        self.assertIn("tests/fixtures/codeql/malformed", proof)
+        self.assertIn("seeded warning fixture must fail the findings gate", proof)
+        self.assertIn("malformed SARIF fixture must fail the findings gate", proof)
 
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (

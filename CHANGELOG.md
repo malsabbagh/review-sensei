@@ -13,6 +13,11 @@
   preflight with "pull request is not eligible for review". Review starts when
   a draft is marked ready for review.
 
+- Added committed CodeQL SARIF fixtures and a CI proof step so a seeded
+  warning or malformed report fails the findings gate, while clean Python and
+  JavaScript/TypeScript reports pass. Fork pull-request CodeQL remains
+  read-only, with no secrets and no `pull_request_target`.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

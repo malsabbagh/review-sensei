@@ -82,6 +82,34 @@ jobs:
         run: python scripts/validate_evaluation_corpus.py
       - name: Validate protection policy contract
         run: python scripts/check_protection_policy.py --policy .github/protection-policy.json
+      - name: Prove CodeQL findings gate on committed fixtures
+        run: |
+          python scripts/check_codeql_findings.py \
+            --sarif-dir tests/fixtures/codeql/clean \
+            --baseline security/codeql-baseline.json \
+            --expected-reports 0 \
+            --expected-languages python,javascript-typescript
+          set +e
+          python scripts/check_codeql_findings.py \
+            --sarif-dir tests/fixtures/codeql/seeded-warning \
+            --baseline security/codeql-baseline.json \
+            --expected-reports 0 \
+            --expected-languages python
+          seeded_status=$?
+          python scripts/check_codeql_findings.py \
+            --sarif-dir tests/fixtures/codeql/malformed \
+            --baseline security/codeql-baseline.json \
+            --expected-reports 1
+          malformed_status=$?
+          set -e
+          if [ "$seeded_status" -eq 0 ]; then
+            echo "seeded warning fixture must fail the findings gate" >&2
+            exit 1
+          fi
+          if [ "$malformed_status" -eq 0 ]; then
+            echo "malformed SARIF fixture must fail the findings gate" >&2
+            exit 1
+          fi
       - name: Run deterministic fixture evaluation
         run: |
           python -m review_sensei evaluate --mode fixture \

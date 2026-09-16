@@ -1049,3 +1049,84 @@ class ProtectionPolicyTests(unittest.TestCase):
         }
         errors = module.compare_readback(policy, readback)
         self.assertTrue(any("duplicate pull_request" in error for error in errors))
+
+
+class CommittedCodeQLFixtureTests(unittest.TestCase):
+    _FIXTURES = ROOT / "tests" / "fixtures" / "codeql"
+    _BASELINE = ROOT / "security" / "codeql-baseline.json"
+
+    def test_committed_clean_reports_pass_the_gate(self):
+        module = _load_script("check_codeql_findings.py")
+        self.assertEqual(
+            module.evaluate(
+                self._FIXTURES / "clean",
+                self._BASELINE,
+                expected_reports=0,
+                expected_languages=("python", "javascript-typescript"),
+            ),
+            [],
+        )
+        self.assertEqual(
+            module.main(
+                [
+                    "--sarif-dir",
+                    str(self._FIXTURES / "clean"),
+                    "--baseline",
+                    str(self._BASELINE),
+                    "--expected-reports",
+                    "0",
+                    "--expected-languages",
+                    "python,javascript-typescript",
+                ]
+            ),
+            0,
+        )
+
+    def test_committed_seeded_warning_fails_the_gate(self):
+        module = _load_script("check_codeql_findings.py")
+        violations = module.evaluate(
+            self._FIXTURES / "seeded-warning",
+            self._BASELINE,
+            expected_reports=0,
+            expected_languages=("python",),
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("warning finding", violations[0])
+        self.assertIn("py/test", violations[0])
+        self.assertEqual(
+            module.main(
+                [
+                    "--sarif-dir",
+                    str(self._FIXTURES / "seeded-warning"),
+                    "--baseline",
+                    str(self._BASELINE),
+                    "--expected-reports",
+                    "0",
+                    "--expected-languages",
+                    "python",
+                ]
+            ),
+            1,
+        )
+
+    def test_committed_malformed_report_fails_closed(self):
+        module = _load_script("check_codeql_findings.py")
+        violations = module.evaluate(
+            self._FIXTURES / "malformed",
+            self._BASELINE,
+            expected_reports=1,
+        )
+        self.assertTrue(violations)
+        self.assertEqual(
+            module.main(
+                [
+                    "--sarif-dir",
+                    str(self._FIXTURES / "malformed"),
+                    "--baseline",
+                    str(self._BASELINE),
+                    "--expected-reports",
+                    "1",
+                ]
+            ),
+            1,
+        )
