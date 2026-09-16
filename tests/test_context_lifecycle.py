@@ -593,8 +593,10 @@ class ContextLifecycleTests(unittest.TestCase):
             reviewed_paths=("src/b.py",),
             generation=3,
         )
-        self.assertEqual(result, (newer,))
+        self.assertEqual(len(result), 2)
         self.assertEqual(result[0].generation, 7)
+        self.assertEqual(result[1].fingerprint, current.fingerprint)
+        self.assertEqual(result[1].state, "new")
 
     def test_carried_records_do_not_lose_their_generation(self):
         older = FindingLifecycle(
@@ -896,15 +898,28 @@ class ContextLifecycleTests(unittest.TestCase):
 
     def test_cache_put_if_newer_does_not_regress_generation(self):
         cache = ReviewContextCache(max_entries=2)
+        newer = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "d" * 64
+        )
         older = ReviewContextCacheKey(
             "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
-        )
-        newer = ReviewContextCacheKey(
-            "o/r", 1, "a" * 40, "c" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
         )
         cache.put_if_newer(newer, (5, "incremental"), generation=5)
         self.assertFalse(cache.put_if_newer(older, (1, "full"), generation=1))
         self.assertEqual(cache.get(newer), (5, "incremental"))
+
+    def test_cache_put_if_newer_scopes_generation_by_head(self):
+        cache = ReviewContextCache(max_entries=4)
+        head_a = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        head_b = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "c" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        cache.put_if_newer(head_a, (5, "incremental"), generation=5)
+        self.assertTrue(cache.put_if_newer(head_b, (1, "full"), generation=1))
+        self.assertEqual(cache.get(head_a), (5, "incremental"))
+        self.assertEqual(cache.get(head_b), (1, "full"))
 
     def test_incremental_plan_rejects_invalid_paths(self):
         key = ReviewContextCacheKey(

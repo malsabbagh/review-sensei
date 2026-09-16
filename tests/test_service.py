@@ -980,6 +980,34 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertIsNone(cache.get(current_key))
 
+    def test_partial_pass_preserves_a_compatible_cache_entry(self):
+        """Partial passes must not evict an authoritative record without replacing it."""
+
+        provider = FakeProvider('{"summary":"Looks good."}')
+        cache = ReviewContextCache()
+        service = ReviewService(
+            provider,
+            stages=[Stage(name="one", prompt_template="{diff}", outputs=("summary",))],
+            cache=cache,
+        )
+        request = self._current_request()
+        current_key = build_review_context_cache_key(
+            request,
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert current_key is not None
+        cache.put_if_newer(current_key, (2, "incremental", 1), generation=2)
+        result = service.review(
+            request,
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                reviewed_paths=("src/app.py",),
+            ),
+        )
+        self.assertNotEqual(result.review_status, "complete")
+        self.assertEqual(cache.get(current_key), (2, "incremental", 1))
+
     def test_full_review_evicts_incompatible_cache_entries(self):
         """Eviction is not gated on an incremental plan."""
 

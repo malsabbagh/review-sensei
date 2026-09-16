@@ -793,6 +793,105 @@ class ReviewPublisherTests(unittest.TestCase):
         finalizer = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(finalizer["event"], "REQUEST_CHANGES")
 
+    def test_legacy_v1_marker_suppresses_by_inline_location(self):
+        """Legacy v1 roots without fingerprints still participate in dedupe."""
+
+        head = "b" * 40
+        current = result()
+        legacy = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": legacy,
+                                        "path": "src/app.py",
+                                        "line": 2,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertEqual(body["event"], "COMMENT")
+
+    def test_changed_blocking_classification_is_not_suppressed(self):
+        """A reclassified finding must publish even when the fingerprint matches."""
+
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+            result=current,
+            blocking=False,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "path": "src/app.py",
+                                        "line": 2,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+
     def test_fingerprint_sweep_matches_app_slug_case_insensitively(self):
         """GitHub logins are case-insensitive, so the slug must match anyway."""
 
@@ -882,35 +981,28 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         )
 
-    def test_fingerprint_sweep_reports_a_blocked_graphql_surface(self):
-        """A missing scope or policy block is distinct from a bad response."""
+    def test_fingerprint_sweep_degrades_when_graphql_is_not_permitted(self):
+        """Publication continues without suppression when GraphQL is blocked."""
 
         head = "b" * 40
         for status in (401, 403):
             with self.subTest(status=status):
-                http, _calls = make_http(
+                outcome, calls = self.publish(
                     [
                         json_response(pr_payload(head_sha=head)),
                         json_response([]),
                         json_response(pr_payload(head_sha=head)),
                         json_response({}, status),
                         json_response({"id": 5}, 200),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response({"id": 9}, 200),
                     ]
                 )
-                with self.assertRaises(GitHubPublicationError) as raised:
-                    ReviewPublisher(http=http).publish(
-                        token="token",
-                        repository="owner/repo",
-                        repository_id=1,
-                        pull_request=2,
-                        head_sha=head,
-                        base_branch="main",
-                        base_sha="a" * 40,
-                        result=result(),
-                        diff=DIFF,
-                        app_slug="reviewsensei[bot]",
-                    )
-                self.assertIn("was not permitted", str(raised.exception))
+                self.assertEqual(outcome.status, "published")
+                body = __import__("json").loads(calls[4][2].decode("utf-8"))
+                self.assertEqual(len(body["comments"]), 1)
 
     def test_skipped_incremental_pass_cannot_approve_with_blocking_roots(self):
         """A skip carries no findings, so only the finalizer decides approval."""

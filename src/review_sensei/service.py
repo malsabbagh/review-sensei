@@ -448,12 +448,6 @@ class ReviewService:
         previous_findings: tuple[FindingLifecycle, ...] = ()
         generation = 0
         evidence_confirmed: tuple[str, ...] = ()
-        # Stale same-PR entries are evicted on every run that can name a cache
-        # identity, not only on incremental runs, so a full pass cannot leave
-        # entries bound to a superseded base, model, or configuration behind for
-        # a later incremental pass to consider compatible.
-        if self.cache is not None and current_key is not None:
-            self.cache.invalidate_incompatible(current_key)
         if incremental is not None and current_key is not None:
             generation = incremental.generation
             previous_findings = incremental.previous_findings
@@ -555,17 +549,17 @@ class ReviewService:
                 for item in lifecycles
             ),
         )
-        # ``_coverage_decision`` already evicted same-PR entries incompatible
-        # with this key, so the write cannot land behind a stale entry that a
-        # later incremental pass would still read as compatible.  Only a
-        # validated complete pass may become the authoritative record: a partial
-        # or incomplete aggregate must not let a later incremental run treat its
-        # lifecycle set as verified or decide there is nothing left to review.
+        # Only a validated complete pass may become the authoritative cache
+        # record.  Eviction happens here rather than in ``_coverage_decision`` so
+        # a partial pass cannot drop a compatible entry and then skip writing a
+        # replacement, which would force the next incremental run to fall back
+        # to full with no prior state.
         if (
             self.cache is not None
             and coverage.current_key is not None
             and review_complete
         ):
+            self.cache.invalidate_incompatible(coverage.current_key)
             self.cache.put_if_newer(
                 coverage.current_key,
                 (coverage.generation, coverage.mode, len(lifecycles)),

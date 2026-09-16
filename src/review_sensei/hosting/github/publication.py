@@ -56,6 +56,8 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
           comments(first: 1) {
             nodes {
               body
+              path
+              line
               author { login }
             }
           }
@@ -160,6 +162,43 @@ def finding_fingerprint_from_body(body: object) -> str | None:
     if match is None:
         return None
     return match.group("fingerprint")
+
+
+def finding_blocking_from_body(body: object) -> bool | None:
+    """Return the persisted blocking bit from a v1 or v2 finding marker."""
+
+    if not isinstance(body, str):
+        return None
+    match = _FINDING_MARKER_V2_RE.search(body)
+    if match is None:
+        match = _FINDING_MARKER_RE.search(body)
+    if match is None:
+        return None
+    return match.group("blocking") == "true"
+
+
+@dataclass(frozen=True)
+class PublishedFindingSuppression:
+    """Indexes already-published findings for duplicate suppression."""
+
+    by_fingerprint: Mapping[str, bool]
+    by_location: Mapping[tuple[str, int], bool]
+
+
+def _should_suppress_published_finding(
+    comment: ReviewComment,
+    fingerprint: str,
+    suppression: PublishedFindingSuppression,
+) -> bool:
+    """Return whether an already-published root makes this inline comment redundant."""
+
+    existing = suppression.by_fingerprint.get(fingerprint)
+    if existing is not None:
+        return existing == comment.blocks_approval
+    location = suppression.by_location.get((comment.path, comment.line))
+    if location is not None:
+        return location == comment.blocks_approval
+    return False
 
 
 def approval_marker(
@@ -1104,17 +1143,24 @@ class ReviewPublisher:
             raise GitHubPublicationError(
                 "formatted review exceeds the configured publication limit"
             ) from exc
-        published_fingerprints: frozenset[str] = frozenset()
+        suppression = PublishedFindingSuppression({}, {})
         if prepared_comments:
-            published_fingerprints = self._published_finding_fingerprints(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                app_slug=app_slug,
-            )
+            try:
+                suppression = self._published_finding_suppression(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    app_slug=app_slug,
+                )
+            except GitHubPublicationError as exc:
+                # Installations without GraphQL thread access can still publish;
+                # duplicate suppression is skipped rather than blocking every
+                # review when the entitlement surface is unavailable.
+                if "was not permitted" not in str(exc):
+                    raise
         comments = []
         for comment, fingerprint, comment_body in prepared_comments:
-            if fingerprint in published_fingerprints:
+            if _should_suppress_published_finding(comment, fingerprint, suppression):
                 continue
             comments.append(
                 {
@@ -1283,26 +1329,27 @@ class ReviewPublisher:
             known_blocking_finding=has_blocking_findings(result),
         )
 
-    def _published_finding_fingerprints(
+    def _published_finding_suppression(
         self,
         *,
         token: str,
         repository: str,
         pull_request: int,
         app_slug: str,
-    ) -> frozenset[str]:
-        """Return App-authored finding fingerprints already on this pull request.
+    ) -> PublishedFindingSuppression:
+        """Return already-published finding indexes for duplicate suppression.
 
-        Human comments are ignored. Existing ReviewSensei roots keep their
-        discussion identity across heads so a moved or rephrased finding does
-        not open a duplicate thread. This lookup never resolves or edits a
-        thread.
+        Human comments are ignored. v2 markers index by fingerprint; legacy v1
+        markers index by inline path and line until installations roll forward.
+        Suppression applies only when the persisted blocking bit matches the
+        current comment, so a reclassification still publishes an update.
         """
 
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
             raise GitHubPublicationError("review thread repository is invalid")
-        fingerprints: set[str] = set()
+        by_fingerprint: dict[str, bool] = {}
+        by_location: dict[tuple[str, int], bool] = {}
         after: str | None = None
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
@@ -1383,14 +1430,28 @@ class ReviewPublisher:
                 # differs only in case must still match its own findings.
                 if login is None or login.casefold() != app_slug.casefold():
                     continue
-                fingerprint = finding_fingerprint_from_body(root.get("body"))
+                body = root.get("body")
+                blocking = finding_blocking_from_body(body)
+                if blocking is None:
+                    continue
+                fingerprint = finding_fingerprint_from_body(body)
                 if fingerprint is not None:
-                    fingerprints.add(fingerprint)
+                    by_fingerprint[fingerprint] = blocking
+                    continue
+                path = root.get("path")
+                line = root.get("line")
+                if (
+                    isinstance(path, str)
+                    and isinstance(line, int)
+                    and line > 0
+                    and _FINDING_MARKER_RE.search(body if isinstance(body, str) else "")
+                ):
+                    by_location[(path, line)] = blocking
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return frozenset(fingerprints)
+                return PublishedFindingSuppression(by_fingerprint, by_location)
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")

@@ -1853,8 +1853,14 @@ def reconcile_finding_set(
 
     previous_records = tuple(previous)
     current_records = tuple(current)
-    if any(item.generation > generation for item in previous_records):
-        return previous_records
+    protected = tuple(item for item in previous_records if item.generation > generation)
+    previous_records = tuple(
+        item for item in previous_records if item.generation <= generation
+    )
+    protected_fingerprints = {item.fingerprint for item in protected}
+    protected_concerns = {
+        item.concern for item in protected if item.concern is not None
+    }
 
     confirmed = {
         concern
@@ -1886,6 +1892,8 @@ def reconcile_finding_set(
     seen_fingerprints: set[str] = set()
 
     for item in current_records:
+        if item.concern is not None and item.concern in protected_concerns:
+            continue
         prior = previous_by_fingerprint.get(item.fingerprint)
         moved: FindingLifecycle | None = None
         if prior is None and item.concern is not None:
@@ -1941,6 +1949,8 @@ def reconcile_finding_set(
         seen_fingerprints.add(result.fingerprint)
 
     for prior in previous_records:
+        if prior.fingerprint in protected_fingerprints:
+            continue
         if prior.fingerprint in matched or prior.fingerprint in seen_fingerprints:
             continue
         if prior.state in {"fixed", "outdated"}:
@@ -1976,7 +1986,7 @@ def reconcile_finding_set(
                 carried_generation,
             )
         )
-    return tuple(reconciled)
+    return protected + tuple(reconciled)
 
 
 @dataclass(frozen=True)
@@ -2274,6 +2284,7 @@ class ReviewContextCache:
                 if (
                     existing_key.repository == key.repository
                     and existing_key.pull_request == key.pull_request
+                    and existing_key.head_sha == key.head_sha
                     and existing
                     and isinstance(existing[0], int)
                     and existing[0] > generation
