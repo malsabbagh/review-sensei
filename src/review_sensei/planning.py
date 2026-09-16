@@ -206,6 +206,7 @@ def _pack_records(
     current: tuple[DiffFileRecord, ...] = ()
     overflow: list[DiffFileRecord] = []
     overflow_reason: str | None = None
+    chunk_budget_exhausted = False
 
     def flush() -> None:
         nonlocal current
@@ -217,6 +218,9 @@ def _pack_records(
         current = ()
 
     for record in records:
+        if chunk_budget_exhausted:
+            overflow.append(record)
+            continue
         pieces: tuple[DiffFileRecord, ...]
         if _fits((), record, limits=limits):
             pieces = (record,)
@@ -234,7 +238,8 @@ def _pack_records(
             if not current and len(chunks) >= work_budget.max_chunks:
                 overflow_reason = "provider-call-budget"
                 overflow.append(piece)
-                continue
+                chunk_budget_exhausted = True
+                break
             current = current + (piece,)
     flush()
     return tuple(chunks), tuple(overflow), overflow_reason
@@ -272,6 +277,7 @@ def _coverage_for(
         files=files,
         hunks=tuple(hunks),
         enumeration_complete=complete,
+        enumerated_paths=analysis.changed_paths,
         limits=limits,
     )
 
@@ -458,6 +464,7 @@ def apply_chunk_outcomes(
         files=tuple(files),
         hunks=tuple(hunks),
         enumeration_complete=coverage.enumeration_complete,
+        enumerated_paths=coverage.enumerated_paths,
         limits=limits,
     )
 

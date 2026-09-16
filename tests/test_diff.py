@@ -271,3 +271,29 @@ rename to new b/with b/new.txt
         self.assertFalse(analysis.enumeration_complete)
         self.assertEqual(len(analysis.hunk_records), 1)
         self.assertEqual(analysis.hunk_records[0].added_lines, frozenset({2}))
+
+    def test_truncated_line_inventory_still_enumerates_tail_paths(self):
+        first_file = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ x
++y
+"""
+        second_file = """diff --git a/src/b.py b/src/b.py
+--- a/src/b.py
++++ b/src/b.py
+@@ -1 +1,2 @@
+ p
++q
+"""
+        diff = first_file + second_file
+        line_limit = len(first_file.splitlines())
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertIn("src/a.py", analysis.changed_paths)
+        self.assertIn("src/b.py", analysis.changed_paths)

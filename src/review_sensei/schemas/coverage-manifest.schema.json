@@ -8,6 +8,7 @@
     "schema_version",
     "enumeration_complete",
     "fully_reviewed",
+    "enumerated_paths",
     "files",
     "hunks"
   ],
@@ -15,6 +16,10 @@
     "schema_version": {"const": "1.0"},
     "enumeration_complete": {"type": "boolean"},
     "fully_reviewed": {"type": "boolean"},
+    "enumerated_paths": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
     "files": {
       "type": "array",
       "items": {

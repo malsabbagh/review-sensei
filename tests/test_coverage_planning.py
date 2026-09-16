@@ -137,7 +137,15 @@ class CoveragePlanningTests(unittest.TestCase):
                     "hunks": [],
                     "enumeration_complete": True,
                     "fully_reviewed": True,
+                    "enumerated_paths": ["src/a.py"],
                 }
+            )
+
+    def test_rejects_coverage_paths_outside_enumerated_set(self):
+        with self.assertRaises(ReviewInputError):
+            CoverageManifest(
+                files=(FileCoverage(path="src/other.py", outcome="reviewed"),),
+                enumerated_paths=("src/a.py",),
             )
 
     def test_chunk_order_is_deterministic(self):

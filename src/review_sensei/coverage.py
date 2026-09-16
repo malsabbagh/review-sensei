@@ -164,6 +164,7 @@ class CoverageManifest:
     files: tuple[FileCoverage, ...]
     hunks: tuple[HunkCoverage, ...] = ()
     enumeration_complete: bool = True
+    enumerated_paths: tuple[str, ...] = ()
     schema_version: str = PUBLIC_SCHEMA_VERSION
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
 
@@ -192,6 +193,24 @@ class CoverageManifest:
         hunk_keys = [(entry.index, entry.path) for entry in self.hunks]
         if len(hunk_keys) != len(set(hunk_keys)):
             raise ReviewInputError("coverage hunks must be unique")
+        if self.enumerated_paths:
+            if len(self.enumerated_paths) != len(set(self.enumerated_paths)):
+                raise ReviewInputError("coverage enumerated_paths must be unique")
+            enumerated = set(self.enumerated_paths)
+            file_paths = {entry.path for entry in self.files}
+            hunk_paths = {entry.path for entry in self.hunks}
+            if not file_paths.issubset(enumerated):
+                raise ReviewInputError(
+                    "coverage files contain paths outside the enumerated set"
+                )
+            if not hunk_paths.issubset(enumerated):
+                raise ReviewInputError(
+                    "coverage hunks contain paths outside the enumerated set"
+                )
+            if self.enumeration_complete and file_paths != enumerated:
+                raise ReviewInputError(
+                    "coverage enumeration_complete requires every enumerated path"
+                )
         validate_public_document(self.to_dict(), "coverage-manifest")
 
     @property
@@ -212,13 +231,15 @@ class CoverageManifest:
         return "partial"
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "enumeration_complete": self.enumeration_complete,
             "fully_reviewed": self.fully_reviewed,
             "files": [entry.to_dict() for entry in self.files],
             "hunks": [entry.to_dict() for entry in self.hunks],
         }
+        payload["enumerated_paths"] = list(self.enumerated_paths)
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "CoverageManifest":
@@ -249,10 +270,20 @@ class CoverageManifest:
             declared_fully_reviewed, bool
         ):
             raise ReviewInputError("coverage fully_reviewed must be a boolean")
+        raw_enumerated_paths = value.get("enumerated_paths")
+        if raw_enumerated_paths is None:
+            enumerated_paths = tuple(entry.path for entry in parsed_files)
+        elif not isinstance(raw_enumerated_paths, list) or any(
+            not isinstance(path, str) or not path for path in raw_enumerated_paths
+        ):
+            raise ReviewInputError("coverage enumerated_paths must be a string array")
+        else:
+            enumerated_paths = tuple(raw_enumerated_paths)
         manifest = cls(
             files=parsed_files,
             hunks=parsed_hunks,
             enumeration_complete=enumeration_complete,
+            enumerated_paths=enumerated_paths,
             schema_version=schema_version,
         )
         if (

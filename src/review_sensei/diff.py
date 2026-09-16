@@ -757,11 +757,28 @@ def analyze_diff(
     unique_renames: dict[tuple[str, str], None] = {}
     for pair in renamed_pairs:
         unique_renames.setdefault(pair, None)
+    total_lines = len(diff.splitlines())
+    if not enumeration_complete:
+
+        def note_unenumerated_path(path: str | None) -> None:
+            if path is None or path == "/dev/null" or path in paths:
+                return
+            paths[path] = None
+
+        for scan_line in diff.splitlines():
+            if scan_line.startswith("+++ "):
+                note_unenumerated_path(
+                    _decode_marker(scan_line, prefix="+++ ", side=True)
+                )
+            elif scan_line.startswith("--- "):
+                note_unenumerated_path(
+                    _decode_marker(scan_line, prefix="--- ", side=True)
+                )
     return DiffAnalysis(
         changed_lines={path: frozenset(values) for path, values in changed.items()},
         changed_paths=tuple(paths),
         diff_bytes=byte_count,
-        diff_lines=len(diff.splitlines()),
+        diff_lines=total_lines,
         diff_files=len(paths),
         diff_hunks=hunk_count,
         deleted_lines={path: frozenset(values) for path, values in deleted.items()},

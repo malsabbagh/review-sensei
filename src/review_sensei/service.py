@@ -23,6 +23,7 @@ from .context import (
 from .coverage import CoverageManifest
 from .diff import DiffAnalysis
 from .errors import (
+    ContextLoadError,
     ProviderError,
     ReviewFormatError,
     ReviewInputError,
@@ -128,25 +129,34 @@ class ReviewRun:
     error: BaseException | None = None
 
 
+@dataclass
+class _CallBudget:
+    max_calls: int
+    calls: int = 0
+    exhausted: bool = False
+
+
 class _BudgetedProvider:
     """Count provider calls against a total-work budget without raising per-request limits."""
 
     name: str
     model: str | None
 
-    def __init__(self, provider: ReviewProvider, *, max_calls: int) -> None:
+    def __init__(self, provider: ReviewProvider, *, budget: _CallBudget) -> None:
         self._provider = provider
         self.name = provider.name
         self.model = provider.model
-        self.max_calls = max_calls
-        self.calls = 0
-        self.exhausted = False
+        self._budget = budget
+
+    @property
+    def exhausted(self) -> bool:
+        return self._budget.exhausted
 
     def complete(self, request):
-        if self.calls >= self.max_calls:
-            self.exhausted = True
+        if self._budget.calls >= self._budget.max_calls:
+            self._budget.exhausted = True
             raise ReviewFormatError("provider call budget exhausted")
-        self.calls += 1
+        self._budget.calls += 1
         return self._provider.complete(request)
 
 
@@ -222,6 +232,13 @@ class ReviewService:
     ) -> ReviewProvider:
         return self.stage_providers.get(stage.name, default or self.provider)
 
+    def _budgeted_provider(
+        self, provider: ReviewProvider, budgeted: _BudgetedProvider
+    ) -> ReviewProvider:
+        if isinstance(provider, _BudgetedProvider):
+            return provider
+        return _BudgetedProvider(provider, budget=budgeted._budget)
+
     def _stage_attempt_limit(self) -> int:
         return max(
             1,
@@ -288,9 +305,8 @@ class ReviewService:
         profile: str,
     ) -> ReviewRun:
         """Run bounded chunk orchestration against one shared resource budget."""
-        budgeted = _BudgetedProvider(
-            self.provider, max_calls=request.work_budget.max_provider_calls
-        )
+        call_budget = _CallBudget(max_calls=request.work_budget.max_provider_calls)
+        budgeted = _BudgetedProvider(self.provider, budget=call_budget)
         accumulated_summary = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
@@ -322,17 +338,28 @@ class ReviewService:
                     tracker=tracker,
                     provider_override=budgeted,
                 )
-            except ReviewInputError as exc:
-                if str(exc) != "diff failed bounded preflight":
-                    raise
-                coverage = apply_chunk_outcomes(
-                    coverage,
-                    paths=chunk.paths,
-                    hunk_indexes=chunk.hunk_indexes,
-                    outcome="unsupported",
-                    reason="chunk-preflight-failed",
-                    limits=request.limits,
-                )
+            except (ReviewInputError, ContextLoadError, ReviewFormatError) as exc:
+                if (
+                    isinstance(exc, ReviewInputError)
+                    and str(exc) == "diff failed bounded preflight"
+                ):
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="unsupported",
+                        reason="chunk-preflight-failed",
+                        limits=request.limits,
+                    )
+                else:
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="partially-reviewed",
+                        reason="chunk-failed",
+                        limits=request.limits,
+                    )
                 continue
             if chunk_run.error is not None or chunk_run.result is None:
                 chunk_outcome = (
@@ -604,6 +631,10 @@ class ReviewService:
             response_provider = last_provider
             response_model = last_model
             stage_provider = self._provider_for_stage(stage, default=active_provider)
+            if isinstance(active_provider, _BudgetedProvider):
+                stage_provider = self._budgeted_provider(
+                    stage_provider, active_provider
+                )
             stage_completed = False
             for attempt in range(_MAX_PROVIDER_OUTPUT_ATTEMPTS):
                 while True:

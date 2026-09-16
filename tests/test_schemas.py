@@ -84,6 +84,13 @@ class PublicSchemaTests(unittest.TestCase):
                         schema_name,
                     )
 
+    def test_review_comment_schema_requires_line_or_file_side(self) -> None:
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                {"path": "src/app.py", "body": "Missing both line and side."},
+                "review-comment",
+            )
+
     def test_review_result_to_dict_validates_against_review_result_schema(self) -> None:
         result = ReviewResult(
             summary="ok",
