@@ -171,7 +171,8 @@ class ReviewServiceTests(unittest.TestCase):
         result = ReviewService(provider, stages=[stage]).review(
             ReviewRequest(diff=DIFF)
         )
-        self.assertEqual(result.comments, ())
+        self.assertEqual(result.comments[0].side, "FILE")
+        self.assertIsNone(result.comments[0].line)
         self.assertEqual(result.review_status, "partial")
 
     def test_renders_only_active_categories_and_their_structured_context(self):
@@ -299,13 +300,15 @@ class ReviewServiceTests(unittest.TestCase):
             result = ReviewService(provider).review(ReviewRequest(diff=DIFF))
 
         self.assertEqual(result.summary, "Review complete.")
-        self.assertEqual(result.comments, ())
+        self.assertEqual(len(result.comments), 1)
+        self.assertEqual(result.comments[0].side, "FILE")
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(
             logs.output,
             [
-                "WARNING:review_sensei.service:review-sensei: omitted inline "
-                "comment 0 because its target is not an added or modified diff line"
+                "WARNING:review_sensei.service:review-sensei: retained comment 0 "
+                "as a file-level finding because its inline target is not a "
+                "validated left or right diff line"
             ],
         )
 
@@ -339,15 +342,17 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(result.summary, "First attempt.")
         self.assertEqual(
             [comment.body for comment in result.comments],
-            ["Valid but must not leak from a failed attempt."],
+            ["Valid but must not leak from a failed attempt.", marker],
         )
+        self.assertEqual(result.comments[1].side, "FILE")
         self.assertEqual(len(provider.requests), 1)
         self.assertNotIn(marker, "\n".join(logs.output))
         self.assertEqual(
             logs.output,
             [
-                "WARNING:review_sensei.service:review-sensei: omitted inline "
-                "comment 1 because its target is not an added or modified diff line"
+                "WARNING:review_sensei.service:review-sensei: retained comment 1 "
+                "as a file-level finding because its inline target is not a "
+                "validated left or right diff line"
             ],
         )
 

@@ -1861,27 +1861,38 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "skipped_repository_mismatch")
         self.assertEqual(len(calls), 1)
 
-    def test_out_of_diff_comment_fails_closed_before_write(self):
+    def test_out_of_diff_comment_is_retained_in_the_summary(self):
         bad = ReviewResult(
             summary="done",
-            comments=(ReviewComment(path="src/app.py", line=1, body="unchanged"),),
+            comments=(ReviewComment(path="missing.py", line=1, body="unchanged"),),
             provider="ollama",
         )
-        http, calls = make_http([])
-        with self.assertRaises(GitHubPublicationError):
-            ReviewPublisher(http=http).publish(
-                token="token",
-                repository="owner/repo",
-                repository_id=1,
-                pull_request=2,
-                head_sha="b" * 40,
-                base_branch="main",
-                base_sha="a" * 40,
-                result=bad,
-                diff=DIFF,
-                app_slug="review-sensei[bot]",
-            )
-        self.assertEqual(calls, [])
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            json_response({"id": 5}, 200),
+        ]
+        http, calls = make_http(responses)
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=bad,
+            diff=DIFF,
+            app_slug="review-sensei[bot]",
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertIn("Findings without a publishable inline location", body["body"])
+        self.assertIn("unchanged", body["body"])
 
     def test_existing_approval_is_reconciled_before_post(self):
         head = "b" * 40

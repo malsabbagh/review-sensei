@@ -12,11 +12,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "line", "body"],
+        "required": ["path", "body"],
         "properties": {
           "path": {"type": "string", "minLength": 1},
           "line": {"type": "integer", "minimum": 1},
           "body": {"type": "string", "minLength": 1},
+          "side": {"type": "string", "enum": ["LEFT", "RIGHT", "FILE"]},
           "severity": {"type": "string", "minLength": 1},
           "fix_effort": {"type": "string", "minLength": 1},
           "blocking": {"type": "boolean"},
@@ -24,7 +25,21 @@
           "symbol": {"type": "string", "minLength": 1},
           "defect_kind": {"type": "string", "minLength": 1},
           "evidence_id": {"type": "string", "minLength": 1}
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"side": {"const": "FILE"}},
+              "required": ["side"]
+            },
+            "then": {
+              "not": {"required": ["line"]}
+            },
+            "else": {
+              "required": ["line"]
+            }
+          }
+        ]
       }
     },
     "provider": {"type": "string", "minLength": 1},
@@ -57,6 +72,9 @@
           }
         }
       }
+    },
+    "coverage": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/coverage-manifest.schema.json"
     },
     "model": {
       "anyOf": [

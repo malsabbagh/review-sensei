@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,8 @@ from .context import (
     finding_lifecycle_for_comment,
     reconcile_finding_set,
 )
-from .diff import analyze_diff
+from .coverage import CoverageManifest
+from .diff import DiffAnalysis, analyze_diff
 from .errors import (
     ProviderError,
     ReviewFormatError,
@@ -36,6 +37,7 @@ from .models import (
     ReviewRequest,
     ReviewResult,
 )
+from .planning import LargeChangePlan, apply_chunk_outcomes, plan_change
 from .outcomes import (
     ResourceBudget,
     ResourceBudgetTracker,
@@ -67,10 +69,11 @@ _PROVIDER_OUTPUT_CORRECTION = """
 
 <review-output-correction>
 Your previous response failed validation. Return a fresh response matching the
-requested JSON structure. Every inline comment must use the exact
-repository-relative path and new-file line number of an added or modified line
-in the diff. Do not target context or deleted lines. If a finding cannot be
-attached to a changed line, keep it in the summary and omit that inline comment.
+requested JSON structure. Every inline comment must use a validated location:
+a new-file line with side RIGHT (the default), a deleted old-file line with
+side LEFT, or a changed-path file-level finding with side FILE and no line.
+If a finding cannot be bound to a validated inline line, emit it as a FILE
+comment on the changed path rather than dropping the concern.
 For each actionable inline finding, classify the independent dimensions: whether
 it is merge-blocking (`blocking`: true or false), severity (`critical`, `high`,
 `medium`, or `low`), fix effort (`trivial`, `small`, `moderate`, `large`, or
@@ -123,6 +126,40 @@ class ReviewRun:
     outcome: RunOutcome
     result: ReviewResult | None = None
     error: BaseException | None = None
+
+
+class _BudgetedProvider:
+    """Count provider calls against a total-work budget without raising per-request limits."""
+
+    def __init__(self, provider, *, max_calls: int) -> None:
+        self._provider = provider
+        self.name = provider.name
+        self.max_calls = max_calls
+        self.calls = 0
+        self.exhausted = False
+
+    def complete(self, request):
+        if self.calls >= self.max_calls:
+            self.exhausted = True
+            raise ReviewFormatError("provider call budget exhausted")
+        self.calls += 1
+        return self._provider.complete(request)
+
+
+def _location_valid(comment: ReviewComment, analysis: DiffAnalysis) -> bool:
+    if comment.side == "FILE":
+        return comment.path in analysis.changed_paths
+    if comment.side == "LEFT":
+        return comment.line in analysis.deleted_lines.get(comment.path, frozenset())
+    return comment.line in analysis.changed_lines.get(comment.path, frozenset())
+
+
+def _retain_comment(comment: ReviewComment, analysis: DiffAnalysis) -> ReviewComment:
+    if _location_valid(comment, analysis):
+        return comment
+    if comment.path in analysis.changed_paths:
+        return replace(comment, line=None, side="FILE")
+    return comment
 
 
 class ReviewService:
@@ -223,6 +260,161 @@ class ReviewService:
             request, provider_name=self.provider.name
         )
 
+
+    def _attach_coverage(
+        self, result: ReviewResult, coverage: CoverageManifest
+    ) -> ReviewResult:
+        status = result.review_status
+        if not coverage.fully_reviewed:
+            if not coverage.enumeration_complete:
+                status = "incomplete"
+            elif status == "complete":
+                status = "partial"
+        return replace(result, coverage=coverage, review_status=status)
+
+    def _review_chunks_run(
+        self,
+        request: ReviewRequest,
+        plan: LargeChangePlan,
+        *,
+        tracker: ResourceBudgetTracker,
+        stage_summary: dict[str, str],
+        incremental: IncrementalReviewPlan | None,
+        profile: str,
+    ) -> ReviewRun:
+        budgeted = _BudgetedProvider(
+            self.provider, max_calls=request.work_budget.max_provider_calls
+        )
+        original = self.provider
+        accumulated_summary = ""
+        accumulated_comments: list[ReviewComment] = []
+        accumulated_proposals: list[LearningProposal] = []
+        coverage = plan.coverage
+        last_status = "incomplete"
+        last_model = request.model
+        try:
+            self.provider = budgeted
+            for chunk in plan.reviewable_chunks:
+                related = ", ".join(chunk.related_paths)
+                note = (
+                    "This chunk is part of a larger change. Related changed paths "
+                    f"not in this chunk: {related}."
+                    if related
+                    else "This chunk is part of a larger change."
+                )
+                instructions = (
+                    f"{request.instructions}\n\n{note}"
+                    if request.instructions
+                    else note
+                )
+                chunk_request = replace(
+                    request,
+                    diff=chunk.diff,
+                    instructions=instructions,
+                    orchestrate_large_changes=False,
+                )
+                try:
+                    chunk_run = self.run(
+                        chunk_request,
+                        incremental=incremental,
+                        profile=profile,
+                        budget=tracker.budget,
+                        monotonic=tracker.monotonic,
+                        sleeper=tracker.sleeper,
+                    )
+                except ReviewInputError:
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="unsupported",
+                        reason="chunk-preflight-failed",
+                        limits=request.limits,
+                    )
+                    continue
+                if chunk_run.error is not None or chunk_run.result is None:
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="partially-reviewed",
+                        reason="chunk-failed",
+                        limits=request.limits,
+                    )
+                    if budgeted.exhausted:
+                        for item in plan.reviewable_chunks:
+                            if item.index > chunk.index:
+                                coverage = apply_chunk_outcomes(
+                                    coverage,
+                                    paths=item.paths,
+                                    hunk_indexes=item.hunk_indexes,
+                                    outcome="budget-exhausted",
+                                    reason="provider-call-budget",
+                                    limits=request.limits,
+                                )
+                        break
+                    continue
+                chunk_result = chunk_run.result
+                accumulated_summary = (
+                    f"{accumulated_summary}\n\n{chunk_result.summary}"
+                    if accumulated_summary
+                    else chunk_result.summary
+                )
+                accumulated_comments.extend(chunk_result.comments)
+                accumulated_proposals.extend(chunk_result.learning_proposals)
+                last_status = chunk_result.review_status
+                last_model = chunk_result.model
+                if chunk_result.review_status != "complete":
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="partially-reviewed",
+                        reason="cross-file-relationship",
+                        limits=request.limits,
+                    )
+                if budgeted.exhausted:
+                    break
+        finally:
+            self.provider = original
+        try:
+            result = ReviewResult(
+                summary=accumulated_summary or "Review complete.",
+                comments=tuple(accumulated_comments),
+                provider=budgeted.name,
+                model=last_model,
+                learning_proposals=tuple(accumulated_proposals),
+                limits=request.limits,
+                review_status=last_status,
+                source_context_coverage=self._source_context_coverage(request),
+            )
+        except ReviewInputError as exc:
+            error = ReviewFormatError(
+                "provider output exceeds the configured result limits"
+            )
+            error.__cause__ = exc
+            return self._finish_run(
+                tracker=tracker,
+                status="provider_failed",
+                stage_summary=stage_summary,
+                diagnostic="invalid_provider_output",
+                error=error,
+                repository=request.repository,
+                pull_request_number=request.pull_request_number,
+            )
+        result = self._attach_coverage(result, coverage)
+        status = "partial" if result.review_status == "partial" else "reviewed"
+        diagnostic = "partial_coverage" if status == "partial" else None
+        return self._finish_run(
+            tracker=tracker,
+            status=status,
+            stage_summary=stage_summary,
+            diagnostic=diagnostic,
+            result=result,
+            repository=request.repository,
+            pull_request_number=request.pull_request_number,
+        )
+
     def review(
         self,
         request: ReviewRequest,
@@ -284,14 +476,25 @@ class ReviewService:
         self._provider_calls = 0
         stage_summary: dict[str, str] = {}
 
-        # Preflight the complete diff exactly once, before the first provider
-        # construction/call.  The parser owns byte, line, file, hunk, marker,
-        # and canonical path limits.
         try:
-            analysis = analyze_diff(request.diff, limits=request.limits)
+            change_plan = plan_change(
+                request.diff,
+                limits=request.limits,
+                work_budget=request.work_budget,
+                orchestrate=request.orchestrate_large_changes,
+            )
         except ReviewInputError as exc:
             raise ReviewInputError("diff failed bounded preflight") from exc
-        changed_lines = analysis.changed_lines
+        if request.orchestrate_large_changes:
+            return self._review_chunks_run(
+                request,
+                change_plan,
+                tracker=tracker,
+                stage_summary=stage_summary,
+                incremental=incremental,
+                profile=profile,
+            )
+        analysis = change_plan.analysis
         configured_category_ids = {category.id for category in self.review_categories}
         if request.active_category_ids is not None and not set(
             request.active_category_ids
@@ -335,6 +538,7 @@ class ReviewService:
                     repository=request.repository,
                     pull_request_number=request.pull_request_number,
                 )
+            result = self._attach_coverage(result, change_plan.coverage)
             return self._finish_run(
                 tracker=tracker,
                 status="reviewed",
@@ -585,7 +789,7 @@ class ReviewService:
                     stage_output = self._validated_stage_output(
                         response.text,
                         stage=stage,
-                        changed_lines=changed_lines,
+                        analysis=analysis,
                         active_categories=active_categories,
                         propose_learnings=request.propose_learnings,
                     )
@@ -718,6 +922,7 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
+        result = self._attach_coverage(result, change_plan.coverage)
         status = "partial" if review_status == "partial" else "reviewed"
         diagnostic = "partial_coverage" if status == "partial" else None
         return self._finish_run(
@@ -1039,7 +1244,7 @@ class ReviewService:
         text: str,
         *,
         stage: Stage,
-        changed_lines: dict[str, frozenset[int]],
+        analysis: DiffAnalysis,
         active_categories: tuple[ReviewCategory, ...],
         propose_learnings: bool,
     ) -> _ValidatedStageOutput:
@@ -1074,20 +1279,23 @@ class ReviewService:
                         category.id for category in active_categories
                     },
                 )
-                if self.enforce_locations and comment.line not in changed_lines.get(
-                    comment.path, frozenset()
-                ):
-                    # The provider has already supplied a valid, bounded comment
-                    # shape, but its target is not publishable as a GitHub inline
-                    # annotation. Do not make one bad coordinate discard the
-                    # independently valid summary or comments. Keep the log
-                    # intentionally free of provider-controlled path and body text.
-                    _LOGGER.warning(
-                        "review-sensei: omitted inline comment %d because its target "
-                        "is not an added or modified diff line",
-                        index,
-                    )
+                if self.enforce_locations and not _location_valid(comment, analysis):
+                    retained = _retain_comment(comment, analysis)
+                    if retained.side != comment.side or retained.line != comment.line:
+                        _LOGGER.warning(
+                            "review-sensei: retained comment %d as a file-level "
+                            "finding because its inline target is not a validated "
+                            "left or right diff line",
+                            index,
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "review-sensei: retained comment %d without an inline "
+                            "location because its target is not in the reviewed snapshot",
+                            index,
+                        )
                     omitted_inline_comments += 1
+                    stage_comments.append(retained)
                     continue
                 stage_comments.append(comment)
 
@@ -1145,8 +1353,9 @@ class ReviewService:
         try:
             comment = ReviewComment(
                 path=value["path"],
-                line=value["line"],
+                line=value.get("line"),
                 body=value["body"],
+                side=value.get("side", "RIGHT"),
                 severity=value.get("severity"),
                 category=value.get("category"),
                 fix_effort=value.get("fix_effort"),

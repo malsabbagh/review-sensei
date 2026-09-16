@@ -21,6 +21,7 @@ from .models import (
     ProviderResponse,
     ReviewComment,
     ReviewRequest,
+    ReviewResult,
 )
 from .providers.base import ReviewProvider
 from .providers.profiles import ProviderProfile, get_provider_profile
@@ -997,21 +998,24 @@ def endpoint_scope(base_url: str | None) -> str:
 @dataclass(frozen=True)
 class ExpectedFinding:
     path: str
-    line: int
+    line: int | None
     category: str | None
     body_terms: tuple[str, ...]
+    side: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ExpectedFinding":
+        line = value.get("line")
         return cls(
             path=str(value["path"]),
-            line=int(value["line"]),
+            line=int(line) if line is not None else None,
             category=value.get("category"),
             body_terms=tuple(
                 normalized
                 for term in value["body_terms"]
                 for normalized in _normalize_terms(str(term))
             ),
+            side=value.get("side") if isinstance(value.get("side"), str) else None,
         )
 
 
@@ -1041,9 +1045,16 @@ def _one_to_one_matches(
         found = None
         for index, candidate in enumerate(unmatched):
             terms = _normalize_terms(comment.body)
+            line_matches = (
+                candidate.line is None
+                or comment.line is None
+                or comment.line == candidate.line
+            )
+            side_matches = candidate.side is None or comment.side == candidate.side
             if (
                 comment.path == candidate.path
-                and comment.line == candidate.line
+                and line_matches
+                and side_matches
                 and (
                     candidate.category is None or comment.category == candidate.category
                 )
@@ -1057,6 +1068,44 @@ def _one_to_one_matches(
             unmatched.pop(found)
             actual_matches += 1
     return actual_matches, len(expected) - len(unmatched), false_positives
+
+
+def compare_chunked_against_baseline(
+    *,
+    baseline: ReviewResult,
+    chunked: ReviewResult,
+    baseline_usage: Mapping[str, int],
+    chunked_usage: Mapping[str, int],
+) -> dict[str, object]:
+    """Compare a chunked review with a complete small-change baseline.
+
+    Recall and precision use the baseline comments as the expected set, so a
+    defect split across chunk boundaries is a miss unless the chunked result
+    still reports it. Usage is compared as raw call and byte counts.
+    """
+
+    expected = tuple(
+        ExpectedFinding(
+            path=comment.path,
+            line=comment.line,
+            category=comment.category,
+            body_terms=tuple(_normalize_terms(comment.body)),
+            side=comment.side,
+        )
+        for comment in baseline.comments
+    )
+    matches, _, false_positives = _one_to_one_matches(chunked.comments, expected)
+    recall = _percent(matches, len(expected))
+    precision = _percent(matches, matches + false_positives)
+    return {
+        "recall": recall,
+        "precision": precision,
+        "baseline_calls": int(baseline_usage.get("calls", 0)),
+        "chunked_calls": int(chunked_usage.get("calls", 0)),
+        "baseline_prompt_bytes": int(baseline_usage.get("prompt_bytes", 0)),
+        "chunked_prompt_bytes": int(chunked_usage.get("prompt_bytes", 0)),
+        "cross_boundary_misses": len(expected) - matches,
+    }
 
 
 def _percent(numerator: int, denominator: int) -> float:
@@ -1196,6 +1245,9 @@ def run_case(
             # content; coverage defaults are normalized like review_status.
             expected_document = _without_derived_coverage(expected_document)
             actual_document = _without_derived_coverage(actual_document)
+            if "coverage" not in expected_document:
+                actual_document = dict(actual_document)
+                actual_document.pop("coverage", None)
             if "evidence_policy" not in expected_document:
                 status = "failed"
             elif expected_document.get("evidence_policy") != actual_document.get(
@@ -1207,7 +1259,8 @@ def run_case(
         else:
             status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(
-        comment.line > 0 and comment.path for comment in result.comments
+        comment.path and (comment.line is None or comment.line > 0)
+        for comment in result.comments
     )
     category_valid = all(
         comment.category

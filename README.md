@@ -22,7 +22,9 @@ providers later.
 - Sends a structured prompt to a replaceable provider adapter.
 - Requires provider output to be valid JSON.
 - Filters inline comments that target files or lines outside the supplied diff
-  while preserving independently valid findings.
+  while preserving independently valid findings, including deletions and
+  file-level concerns, and reports an explicit coverage outcome for every
+  changed file.
 - Supports local Ollama servers and Ollama Cloud through the same adapter.
 - Loads approved repository-local learnings and returns validated learning proposals.
 - Supports ordered review stages with structured categories and explicit focus

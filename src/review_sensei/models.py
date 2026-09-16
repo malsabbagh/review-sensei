@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Mapping, cast
 
+from .coverage import CoverageManifest
 from .errors import ReviewInputError
+from .planning import DEFAULT_TOTAL_WORK_BUDGET, TotalWorkBudget
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     ReviewLimits,
@@ -138,6 +140,8 @@ class ReviewRequest:
     untrusted_head_sha: str | None = None
     base_sha: str | None = None
     head_sha: str | None = None
+    orchestrate_large_changes: bool = False
+    work_budget: TotalWorkBudget = field(default_factory=lambda: DEFAULT_TOTAL_WORK_BUDGET)
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -148,6 +152,10 @@ class ReviewRequest:
         utf8_size(self.diff, label="diff")
         if not isinstance(self.limits, ReviewLimits):
             raise ReviewInputError("review limits must be a ReviewLimits value")
+        if not isinstance(self.orchestrate_large_changes, bool):
+            raise ReviewInputError("orchestrate_large_changes must be a boolean")
+        if not isinstance(self.work_budget, TotalWorkBudget):
+            raise ReviewInputError("work_budget must be a TotalWorkBudget value")
         for label, value, maximum in (
             ("repository", self.repository, self.limits.max_repository_bytes),
             ("title", self.title, self.limits.max_title_bytes),
@@ -509,12 +517,15 @@ class LearningProposal:
         )
 
 
+COMMENT_SIDES = frozenset({"LEFT", "RIGHT", "FILE"})
+
+
 @dataclass(frozen=True)
 class ReviewComment:
-    """A proposed inline review comment on an added or modified line."""
+    """A proposed review finding bound to a left, right, or file location."""
 
     path: str
-    line: int
+    line: int | None
     body: str
     blocking: bool | None = None
     severity: str | None = None
@@ -523,6 +534,7 @@ class ReviewComment:
     symbol: str | None = None
     defect_kind: str | None = None
     evidence_id: str | None = None
+    side: str = "RIGHT"
 
     @property
     def blocks_approval(self) -> bool:
@@ -542,14 +554,20 @@ class ReviewComment:
 
     def __post_init__(self) -> None:
         validate_repository_path(self.path, label="comment path")
-        if (
-            isinstance(self.line, bool)
-            or not isinstance(self.line, int)
-            or self.line < 1
-        ):
-            raise ReviewInputError("comment line must be a positive integer")
-        if self.line > DEFAULT_REVIEW_LIMITS.max_line_number:
-            raise ReviewInputError("comment line exceeds the configured limit")
+        if self.side not in COMMENT_SIDES:
+            raise ReviewInputError("comment side must be LEFT, RIGHT, or FILE")
+        if self.side == "FILE":
+            if self.line is not None:
+                raise ReviewInputError("file-level comments must omit line")
+        else:
+            if (
+                isinstance(self.line, bool)
+                or not isinstance(self.line, int)
+                or self.line < 1
+            ):
+                raise ReviewInputError("comment line must be a positive integer")
+            if self.line > DEFAULT_REVIEW_LIMITS.max_line_number:
+                raise ReviewInputError("comment line exceeds the configured limit")
         if not isinstance(self.body, str) or not self.body.strip():
             raise ReviewInputError("comment body must be a non-empty string")
         validate_bounded_text(
@@ -585,9 +603,14 @@ class ReviewComment:
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
             "path": self.path,
-            "line": self.line,
             "body": self.body,
         }
+        if self.side == "FILE":
+            value["side"] = "FILE"
+        else:
+            value["line"] = self.line
+            if self.side != "RIGHT":
+                value["side"] = self.side
         if self.severity is not None:
             value["severity"] = self.severity
         if self.fix_effort is not None:
@@ -644,6 +667,7 @@ class ReviewResult:
     source_context_coverage: object | None = None
     coverage_mode: str = "full"
     finding_lifecycles: tuple[FindingLifecycleRecord, ...] = ()
+    coverage: CoverageManifest | None = None
     # Directly constructed results are not proof that every configured stage
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
@@ -723,6 +747,8 @@ class ReviewResult:
             )
         if len(self.finding_lifecycles) > self.limits.max_comments:
             raise ReviewInputError("review contains too many finding lifecycles")
+        if self.coverage is not None and not isinstance(self.coverage, CoverageManifest):
+            raise ReviewInputError("review coverage must be a CoverageManifest value")
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
@@ -730,9 +756,9 @@ class ReviewResult:
         # occurrence in stage order while preserving distinct comments that
         # happen to share a path and line.
         unique_comments: list[ReviewComment] = []
-        seen: set[tuple[str, int, str]] = set()
+        seen: set[tuple[str, int | None, str, str]] = set()
         for comment in self.comments:
-            key = (comment.path, comment.line, comment.body)
+            key = (comment.path, comment.line, comment.side, comment.body)
             if key in seen:
                 continue
             seen.add(key)
@@ -741,7 +767,7 @@ class ReviewResult:
         if len(self.comments) > self.limits.max_comments:
             raise ReviewInputError("review contains too many comments")
         for comment in self.comments:
-            if comment.line > self.limits.max_line_number:
+            if comment.line is not None and comment.line > self.limits.max_line_number:
                 raise ReviewInputError(
                     "review comment line exceeds the configured limit"
                 )
@@ -811,6 +837,8 @@ class ReviewResult:
             value["finding_lifecycles"] = [
                 item.to_dict() for item in self.finding_lifecycles
             ]
+        if self.coverage is not None:
+            value["coverage"] = self.coverage.to_dict()
         return value
 
     @classmethod
@@ -861,11 +889,23 @@ class ReviewResult:
             path = comment.get("path")
             line = comment.get("line")
             body = comment.get("body")
-            if (
-                not isinstance(path, str)
-                or not isinstance(line, int)
-                or not isinstance(body, str)
-            ):
+            side = comment.get("side", "RIGHT")
+            if not isinstance(path, str) or not isinstance(body, str):
+                raise ReviewInputError(
+                    f"review result comment {index} has an invalid shape"
+                )
+            if side is None:
+                side = "RIGHT"
+            if not isinstance(side, str):
+                raise ReviewInputError(
+                    f"review result comment {index} side must be a string"
+                )
+            if side == "FILE":
+                if line is not None:
+                    raise ReviewInputError(
+                        f"review result comment {index} has an invalid shape"
+                    )
+            elif not isinstance(line, int) or isinstance(line, bool):
                 raise ReviewInputError(
                     f"review result comment {index} has an invalid shape"
                 )
@@ -897,8 +937,9 @@ class ReviewResult:
             comment_values.append(
                 ReviewComment(
                     path=path,
-                    line=line,
+                    line=line if isinstance(line, int) and not isinstance(line, bool) else None,
                     body=body,
+                    side=side,
                     severity=(
                         comment.get("severity")
                         if isinstance(comment.get("severity"), str)
@@ -923,15 +964,17 @@ class ReviewResult:
                     f"review result learning proposal {index} must be an object"
                 )
             parsed_proposals.append(LearningProposal.from_dict(proposal))
-        coverage = None
-        raw_coverage = value.get("source_context")
-        if raw_coverage is not None:
+        source_context_coverage = None
+        raw_source_context = value.get("source_context")
+        if raw_source_context is not None:
             from .context import ContextLoadError, SourceContextCoverage
 
             try:
-                if not isinstance(raw_coverage, Mapping):
+                if not isinstance(raw_source_context, Mapping):
                     raise ContextLoadError("source context coverage must be an object")
-                coverage = SourceContextCoverage.from_dict(raw_coverage)
+                source_context_coverage = SourceContextCoverage.from_dict(
+                    raw_source_context
+                )
             except ContextLoadError as exc:
                 raise ReviewInputError(
                     "review result source_context is invalid"
@@ -951,6 +994,14 @@ class ReviewResult:
             parsed_lifecycles.append(
                 FindingLifecycleRecord(fingerprint=fingerprint, state=state)
             )
+        coverage_value = value.get("coverage")
+        coverage = (
+            CoverageManifest.from_dict(coverage_value)
+            if isinstance(coverage_value, Mapping)
+            else None
+        )
+        if coverage_value is not None and coverage is None:
+            raise ReviewInputError("review result coverage must be an object")
         return cls(
             summary=summary,
             comments=tuple(comment_values),
@@ -958,10 +1009,11 @@ class ReviewResult:
             model=cast(str | None, model),
             learning_proposals=tuple(parsed_proposals),
             review_status=review_status,
-            source_context_coverage=coverage,
+            source_context_coverage=source_context_coverage,
             evidence_policy=evidence_policy,
             coverage_mode=coverage_mode,
             finding_lifecycles=tuple(parsed_lifecycles),
+            coverage=coverage,
         )
 
 

@@ -1,7 +1,12 @@
 import unittest
 
+from review_sensei.coverage import CoverageManifest
 from review_sensei.hosting.github.approval import evaluate_auto_approval
 from review_sensei.models import ReviewComment, ReviewResult
+
+
+def complete_coverage() -> CoverageManifest:
+    return CoverageManifest(files=(), hunks=(), enumeration_complete=True)
 
 
 def clean_result() -> ReviewResult:
@@ -10,6 +15,7 @@ def clean_result() -> ReviewResult:
         comments=(),
         provider="fixture",
         review_status="complete",
+        coverage=complete_coverage(),
     )
 
 
@@ -50,6 +56,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
             review_status="complete",
+            coverage=complete_coverage(),
         )
         decision = evaluate_auto_approval(
             enabled=True,
@@ -76,6 +83,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
             review_status="complete",
+            coverage=complete_coverage(),
         )
 
         decision = evaluate_auto_approval(
@@ -98,6 +106,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
             review_status="complete",
+            coverage=complete_coverage(),
         )
 
         decision = evaluate_auto_approval(
@@ -125,6 +134,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     ),
                     provider="fixture",
                     review_status="complete",
+                    coverage=complete_coverage(),
                 )
 
                 decision = evaluate_auto_approval(
@@ -147,6 +157,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
             review_status="complete",
+            coverage=complete_coverage(),
         )
 
         decision = evaluate_auto_approval(
@@ -167,6 +178,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             ),
             provider="fixture",
             review_status="complete",
+            coverage=complete_coverage(),
         )
 
         decision = evaluate_auto_approval(
@@ -194,6 +206,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     ),
                     provider="fixture",
                     review_status="complete",
+                    coverage=complete_coverage(),
                 )
 
                 decision = evaluate_auto_approval(
@@ -253,7 +266,9 @@ class AutoApprovalPolicyTests(unittest.TestCase):
                     has_open_review_threads=False,
                 )
                 self.assertFalse(decision.approved)
-                self.assertEqual(decision.blockers, (f"review-{status}",))
+                self.assertEqual(
+                    decision.blockers, (f"review-{status}", "coverage-unknown")
+                )
 
     def test_incomplete_thread_sweep_fails_closed(self):
         decision = evaluate_auto_approval(
@@ -278,7 +293,50 @@ class AutoApprovalPolicyTests(unittest.TestCase):
             has_open_review_threads=False,
         )
         self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("review-incomplete",))
+        self.assertEqual(decision.blockers, ("review-incomplete", "coverage-unknown"))
+
+    def test_unknown_and_partial_coverage_block_complete_reviews(self):
+        unknown = ReviewResult(
+            summary="Summary.",
+            comments=(),
+            provider="fixture",
+            review_status="complete",
+        )
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=unknown,
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("coverage-unknown",))
+
+        from review_sensei.coverage import FileCoverage
+
+        partial = ReviewResult(
+            summary="Summary.",
+            comments=(),
+            provider="fixture",
+            review_status="complete",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage(
+                        path="src/app.py",
+                        outcome="budget-exhausted",
+                        reason="provider-call-budget",
+                    ),
+                ),
+                enumeration_complete=True,
+            ),
+        )
+        blocked = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=partial,
+            has_open_review_threads=False,
+        )
+        self.assertFalse(blocked.approved)
+        self.assertEqual(blocked.blockers, ("coverage-partial",))
 
     def test_duck_typed_result_without_status_fails_closed(self):
         class DuckResult:

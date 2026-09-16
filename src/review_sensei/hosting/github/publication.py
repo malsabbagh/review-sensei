@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ...context import finding_lifecycle_for_comment
-from ...diff import analyze_diff
+from ...coverage import CoverageManifest
+from ...diff import DiffAnalysis, analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewComment, ReviewResult
 from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
@@ -88,6 +89,43 @@ _FINDING_MARKER_V2_RE = re.compile(
     r"blocking=(?P<blocking>true|false) -->"
 )
 
+
+
+
+def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
+    if comment.side == "RIGHT" and comment.line in analysis.changed_lines.get(
+        comment.path, frozenset()
+    ):
+        return "right"
+    if comment.side == "LEFT" and comment.line in analysis.deleted_lines.get(
+        comment.path, frozenset()
+    ):
+        return "left"
+    if comment.path in analysis.changed_paths:
+        return "file"
+    return "summary"
+
+
+def format_coverage_digest(coverage: CoverageManifest) -> str:
+    counts: dict[str, int] = {}
+    for entry in coverage.files:
+        counts[entry.outcome] = counts.get(entry.outcome, 0) + 1
+    parts = [
+        f"{counts.get('reviewed', 0)} reviewed",
+        f"{counts.get('partially-reviewed', 0)} partially-reviewed",
+        f"{counts.get('excluded-by-policy', 0)} excluded-by-policy",
+        f"{counts.get('unsupported', 0)} unsupported",
+        f"{counts.get('budget-exhausted', 0)} budget-exhausted",
+    ]
+    enumeration = "complete" if coverage.enumeration_complete else "incomplete"
+    return f"Coverage: {', '.join(parts)}. Enumeration {enumeration}."
+
+
+def format_unanchored_findings(comments: tuple[ReviewComment, ...]) -> str:
+    lines = ["## Findings without a publishable inline location"]
+    for comment in comments:
+        lines.append(f"- `{comment.path}`: {comment.body}")
+    return "\n".join(lines)
 
 def _with_discussion_instruction(text: str) -> str:
     return f"{text}\n\n{DISCUSSION_INSTRUCTION}"
@@ -1068,7 +1106,7 @@ class ReviewPublisher:
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc
         result = prepared.result
-        self._validate_locations(result, diff)
+        analysis = self._validate_locations(result, diff)
         marker = review_marker(
             repository_id=repository_id,
             pull_request=pull_request,
@@ -1163,23 +1201,13 @@ class ReviewPublisher:
             summary = format_review_summary(result.summary, result.comments)
             if result.coverage_mode != "full":
                 summary = f"{summary}\n\nCoverage mode: {result.coverage_mode}."
-            validate_bounded_text(
-                summary,
-                result.limits.max_summary_bytes,
-                label="published review summary",
-                allow_empty=False,
-            )
-            body = f"{_with_discussion_instruction(summary)}\n\n{marker}"
-            validate_bounded_text(
-                body,
-                MAX_PUBLISHED_REVIEW_BODY_BYTES,
-                label="published review body",
-                allow_empty=False,
-            )
+            if result.coverage is not None:
+                summary = f"{summary}\n\n{format_coverage_digest(result.coverage)}"
             lifecycle_by_fingerprint = {
                 item.fingerprint: item.state for item in result.finding_lifecycles
             }
-            prepared_comments: list[tuple[ReviewComment, str, str]] = []
+            prepared_comments: list[tuple[ReviewComment, str, str, str]] = []
+            unanchored: list[ReviewComment] = []
             for comment in result.comments:
                 lifecycle = finding_lifecycle_for_comment(comment)
                 state = lifecycle_by_fingerprint.get(lifecycle.fingerprint, "new")
@@ -1193,7 +1221,26 @@ class ReviewPublisher:
                     label="published comment body",
                     allow_empty=False,
                 )
-                prepared_comments.append((comment, lifecycle.fingerprint, comment_body))
+                anchor = _publication_anchor(comment, analysis)
+                if anchor == "summary":
+                    unanchored.append(comment)
+                    continue
+                prepared_comments.append((comment, lifecycle.fingerprint, comment_body, anchor))
+            if unanchored:
+                summary = f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
+            validate_bounded_text(
+                summary,
+                result.limits.max_summary_bytes,
+                label="published review summary",
+                allow_empty=False,
+            )
+            body = f"{_with_discussion_instruction(summary)}\n\n{marker}"
+            validate_bounded_text(
+                body,
+                MAX_PUBLISHED_REVIEW_BODY_BYTES,
+                label="published review body",
+                allow_empty=False,
+            )
         except ReviewInputError as exc:
             raise GitHubPublicationError(
                 "formatted review exceeds the configured publication limit"
@@ -1214,17 +1261,22 @@ class ReviewPublisher:
                 if "was not permitted" not in str(exc):
                     raise
         comments = []
-        for comment, fingerprint, comment_body in prepared_comments:
+        for comment, fingerprint, comment_body, anchor in prepared_comments:
             if _should_suppress_published_finding(comment, fingerprint, suppression):
                 continue
-            comments.append(
-                {
-                    "path": comment.path,
-                    "line": comment.line,
-                    "side": "RIGHT",
-                    "body": comment_body,
-                }
-            )
+            payload: dict[str, object] = {
+                "path": comment.path,
+                "body": comment_body,
+            }
+            if anchor == "file":
+                payload["subject_type"] = "file"
+            elif anchor == "left":
+                payload["line"] = comment.line
+                payload["side"] = "LEFT"
+            else:
+                payload["line"] = comment.line
+                payload["side"] = "RIGHT"
+            comments.append(payload)
         # Blocking findings request changes on this exact head. The shared
         # finalizer remains the sole APPROVE writer, and it re-asserts
         # REQUEST_CHANGES when a later execution still sees unresolved

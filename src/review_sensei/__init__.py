@@ -32,6 +32,7 @@ from .context import (
 )
 from .conversation import ConversationService
 from .diagnostics import build_plan, run_doctor
+from .coverage import CoverageManifest, coverage_approval_state
 from .errors import AdmissionCancelled, AdmissionRejected
 from .evaluation import (
     PromotionRecord,
@@ -67,6 +68,12 @@ from .models import (
     ReviewLensContext,
     ReviewRequest,
     ReviewResult,
+)
+from .planning import (
+    LargeChangePlan,
+    ReviewChunk,
+    TotalWorkBudget,
+    plan_change,
 )
 from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from .patches import PatchSuggestion, create_patch_suggestion
@@ -152,6 +159,12 @@ __all__ = [
     "FindingLifecycleRecord",
     "IncrementalReviewPlan",
     "ReviewContextSelection",
+    "CoverageManifest",
+    "coverage_approval_state",
+    "LargeChangePlan",
+    "ReviewChunk",
+    "TotalWorkBudget",
+    "plan_change",
     "ReviewComment",
     "ReviewDocument",
     "ReviewLensContext",

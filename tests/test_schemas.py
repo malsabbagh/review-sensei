@@ -33,6 +33,7 @@ SCHEMA_NAMES = (
     "recovery-artifact",
     "candidate-finding",
     "verification-result",
+    "coverage-manifest",
 )
 
 

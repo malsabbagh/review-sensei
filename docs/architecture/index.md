@@ -14,7 +14,7 @@ result before a future publisher can consume it.
 
 | Area | Purpose | Owner | Key paths | Notes |
 | --- | --- | --- | --- | --- |
-| Review core | Provider-neutral request, parsing, orchestration, and validated results | Maintainers | `src/review_sensei/{models,diff,service,stages}.py` | Must not import GitHub or provider SDKs |
+| Review core | Provider-neutral request, parsing, orchestration, and validated results | Maintainers | `src/review_sensei/{models,diff,service,stages,coverage,planning}.py` | Must not import GitHub or provider SDKs; coverage is explicit and chunking is opt-in |
 | Evaluation | Bounded corpus loading, fixture/live scoring, privacy scan, and report contracts | Maintainers | `src/review_sensei/evaluation.py`, `evaluation/v1/` | Fixture mode is offline; live egress is CLI-gated |
 | Validation boundary | Frozen downward-only limits, canonical paths, strict quoted-path decoding, and bounded file reads | Maintainers | `src/review_sensei/validation.py` | Shared by request, diff, stage, transport, and publisher contracts |
 | Portable workflow boundary | Ref/repository validation, bounded diff preparation, and installed-package workflow composition | Maintainers | `src/review_sensei/workflow.py`, `examples/github-actions/review-sensei-review.yml` | Must not execute head code or interpolate untrusted refs into shell commands |

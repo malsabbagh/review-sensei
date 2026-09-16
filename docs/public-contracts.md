@@ -62,6 +62,7 @@ containing `/v1/`.
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
+| `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited `v4` promotion or rollback record |
@@ -159,6 +160,9 @@ These imports are public and stable within a major version:
 - `review_sensei.EvidenceReference`
 - `review_sensei.VerificationResult`
 - `review_sensei.PublishableReview`
+- `review_sensei.CoverageManifest`
+- `review_sensei.TotalWorkBudget`
+- `review_sensei.plan_change`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
 - `review_sensei.PromotionRecord`
@@ -261,6 +265,27 @@ carries no findings, and the pass charges no provider call to the resource
 budget. Approval is unchanged: the shared finalizer remains the sole approval
 writer and still refuses to approve while unresolved blocking ReviewSensei
 threads exist.
+
+### Coverage and finding locations
+
+`ReviewResult.coverage` is an optional additive v1 object. `ReviewService`
+always emits it. Legacy documents without the field have unknown coverage and
+cannot be auto-approved. Every enumerated changed path has one outcome:
+`reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
+`budget-exhausted`. Incomplete enumeration marks the plan incomplete and is
+never fully reviewed.
+
+`ReviewComment.side` is optional. Omitted or `RIGHT` is a new-file line, the
+legacy right-side contract. `LEFT` is a deleted old-file line. `FILE` is a
+path-level concern and omits `line`. The GitHub publisher validates those
+locations against the exact snapshot and retains unrepresentable findings in
+the review body instead of dropping them.
+
+Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
+partitions a larger change into bounded chunks under a separate
+`TotalWorkBudget` (default 8 chunks and 8 provider calls). Related changed
+paths are named in chunk instructions; trusted context and write permissions
+are not expanded.
 
 ### Finding classification and presentation
 
@@ -368,6 +393,7 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-bytes` | none | Maximum total bytes selected by symbol-aware context (default 131072) |
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
+| `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
