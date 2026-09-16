@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 
 from review_sensei.context import (
     MAX_CALLER_DIRECTORY_ENTRIES,
+    UNKNOWN_DEFECT_KIND,
     ContextSnapshot,
     FindingLifecycle,
     IncrementalReviewPlan,
@@ -564,6 +565,198 @@ class ContextLifecycleTests(unittest.TestCase):
             generation=1,
         )
         self.assertEqual(result, (newer,))
+
+    def test_newer_generation_records_keep_their_own_generation(self):
+        """A stale pass must not rewrite the generation of newer records."""
+
+        newer = FindingLifecycle(
+            stable_finding_fingerprint(path="src/a.py", symbol="run"),
+            "still-present",
+            concern=stable_concern_identity(path="src/a.py", symbol="run"),
+            path="src/a.py",
+            generation=7,
+        )
+        current = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/b.py",
+                line=3,
+                body="null",
+                symbol="save",
+                defect_kind="null",
+            ),
+            generation=3,
+        )
+        result = reconcile_finding_set(
+            (newer,),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/b.py",),
+            generation=3,
+        )
+        self.assertEqual(result, (newer,))
+        self.assertEqual(result[0].generation, 7)
+
+    def test_carried_records_do_not_lose_their_generation(self):
+        older = FindingLifecycle(
+            stable_finding_fingerprint(path="src/a.py", symbol="run"),
+            "still-present",
+            concern=stable_concern_identity(path="src/a.py", symbol="run"),
+            path="src/a.py",
+            generation=2,
+        )
+        result = reconcile_finding_set(
+            (older,),
+            (),
+            review_complete=True,
+            reviewed_paths=("src/b.py",),
+            generation=4,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].state, "still-present")
+        self.assertEqual(result[0].generation, 4)
+
+    def test_reconcile_rejects_non_canonical_reviewed_paths(self):
+        """Reviewed scope decides retention, so it fails closed."""
+
+        current = finding_lifecycle_for_comment(
+            ReviewComment(path="src/a.py", line=2, body="race", symbol="run")
+        )
+        for path in ("..", "/src/a.py", "src/../../a.py"):
+            with self.subTest(path=path):
+                with self.assertRaises(ContextLoadError):
+                    reconcile_finding_set(
+                        (),
+                        (current,),
+                        review_complete=True,
+                        reviewed_paths=(path,),
+                    )
+
+    def test_moved_concern_keeps_one_record_under_current_identity(self):
+        comment = ReviewComment(
+            path="src/b.py",
+            line=4,
+            body="race",
+            symbol="run",
+            defect_kind="race",
+        )
+        current = finding_lifecycle_for_comment(comment, generation=3)
+        # An evidence-bearing prior fingerprint for the same concern is what a
+        # caller replays when the finding moved or was rephrased.
+        previous = FindingLifecycle(
+            stable_finding_fingerprint(
+                path="src/b.py",
+                symbol="run",
+                defect_kind="race",
+                evidence="earlier prose",
+            ),
+            "still-present",
+            "earlier prose",
+            current.concern,
+            "src/a.py",
+            generation=2,
+        )
+        self.assertNotEqual(previous.fingerprint, current.fingerprint)
+        result = reconcile_finding_set(
+            (previous,),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/b.py",),
+            generation=3,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].fingerprint, current.fingerprint)
+        self.assertEqual(result[0].state, "still-present")
+        self.assertEqual(result[0].path, "src/b.py")
+        self.assertEqual(result[0].concern, current.concern)
+        self.assertEqual(result[0].generation, 3)
+
+    def test_retired_concern_reported_again_is_a_new_finding(self):
+        comment = ReviewComment(
+            path="src/a.py",
+            line=2,
+            body="race",
+            symbol="run",
+            defect_kind="race",
+        )
+        current = finding_lifecycle_for_comment(comment)
+        previous = FindingLifecycle(
+            stable_finding_fingerprint(
+                path="src/a.py",
+                symbol="run",
+                defect_kind="race",
+                evidence="earlier prose",
+            ),
+            "fixed",
+            "earlier prose",
+            current.concern,
+            "src/a.py",
+        )
+        result = reconcile_finding_set(
+            (previous,),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/a.py",),
+        )
+        states = {item.fingerprint: item.state for item in result}
+        self.assertEqual(states[current.fingerprint], "new")
+        self.assertEqual(states[previous.fingerprint], "fixed")
+
+    def test_category_is_not_part_of_finding_identity(self):
+        """Reclassifying a lens must not fan a concern out into a new thread."""
+
+        correctness = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                defect_kind="race",
+                category="correctness",
+            )
+        )
+        maintainability = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=9,
+                body="race rephrased",
+                symbol="run",
+                defect_kind="race",
+                category="maintainability",
+            )
+        )
+        self.assertEqual(correctness.fingerprint, maintainability.fingerprint)
+        self.assertEqual(correctness.concern, maintainability.concern)
+
+    def test_missing_defect_kind_buckets_under_unknown(self):
+        unclassified = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                category="correctness",
+            )
+        )
+        bucketed = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                defect_kind=UNKNOWN_DEFECT_KIND,
+            )
+        )
+        declared = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                defect_kind="race",
+            )
+        )
+        self.assertEqual(unclassified.fingerprint, bucketed.fingerprint)
+        self.assertNotEqual(unclassified.fingerprint, declared.fingerprint)
 
     def test_distinct_defect_kinds_do_not_share_a_fingerprint(self):
         race = stable_finding_fingerprint(

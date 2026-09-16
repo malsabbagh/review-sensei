@@ -225,9 +225,14 @@ the run/budget contract in issue #36. Automatic approval remains unchanged
 except that an incompletely verified `confirmed` review cannot be approved.
 
 `coverage_mode` is an additive v1 field (`full`, `incremental`, or
-`fallback-full`). `finding_lifecycles` is an optional array of
-`{fingerprint, state}` objects. `ReviewComment` may include `symbol`,
-`defect_kind`, and `evidence_id` for stable concern identity. Legacy documents
+`fallback-full`) and is omitted for the default `full` mode.
+`finding_lifecycles` is an optional array of `{fingerprint, state}` objects
+and is serialized whenever records exist, including on a `full` review, so a
+round trip does not reset lifecycle state. `ReviewComment` may include
+`symbol`, `defect_kind`, and `evidence_id` for stable concern identity.
+`category` is a presentation lens and is not part of that identity, so
+reclassifying a finding does not open a second discussion; a comment without
+`defect_kind` buckets under the canonical `unknown` kind. Legacy documents
 without those keys remain valid.
 
 ### Finding classification and presentation

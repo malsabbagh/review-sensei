@@ -810,3 +810,141 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.coverage_mode, "fallback-full")
         self.assertTrue(provider.requests)
+
+    def _previous_key(self, service, provider, *, head_sha="b" * 40):
+        key = build_review_context_cache_key(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha=head_sha,
+                model="fake-model",
+            ),
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert key is not None
+        return key
+
+    @staticmethod
+    def _current_request():
+        return ReviewRequest(
+            diff=DIFF,
+            repository="owner/repo",
+            pull_request_number=3,
+            base_sha="a" * 40,
+            head_sha="c" * 40,
+            model="fake-model",
+        )
+
+    @staticmethod
+    def _previous_finding():
+        return finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/other.py",
+                line=2,
+                body="name it",
+                symbol="run",
+                defect_kind="naming",
+            )
+        )
+
+    def test_incomplete_context_fallback_keeps_priors_as_uncertain(self):
+        """A compatible prior key keeps its findings; omission is not a fix."""
+
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        previous = self._previous_finding()
+        result = service.review(
+            self._current_request(),
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                previous_findings=(previous,),
+                reviewed_paths=("src/app.py",),
+                context_complete=False,
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertTrue(provider.requests)
+        states = {item.fingerprint: item.state for item in result.finding_lifecycles}
+        self.assertEqual(states[previous.fingerprint], "uncertain")
+
+    def test_unverifiable_prior_key_discards_previous_findings(self):
+        """Without snapshot identity the prior findings cannot be trusted."""
+
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        result = service.review(
+            ReviewRequest(diff=DIFF, repository="owner/repo"),
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                previous_findings=(self._previous_finding(),),
+                reviewed_paths=("src/app.py",),
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertEqual(result.finding_lifecycles, ())
+
+    def test_missing_reviewed_paths_falls_back_to_full_review(self):
+        """Incremental coverage requires a caller-supplied changed-path list."""
+
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        previous = self._previous_finding()
+        result = service.review(
+            self._current_request(),
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                previous_findings=(previous,),
+                reviewed_paths=None,
+                context_complete=True,
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertTrue(provider.requests)
+        states = {item.fingerprint: item.state for item in result.finding_lifecycles}
+        self.assertEqual(states[previous.fingerprint], "uncertain")
+
+    def test_skipped_incremental_pass_charges_no_provider_call(self):
+        """A skipped pass makes no call, so a zero-call budget still succeeds."""
+
+        provider = FakeProvider('{"summary":"unused","comments":[]}')
+        service = ReviewService(
+            provider,
+            budget=ResourceBudget.create(max_provider_calls=0),
+        )
+        result = service.review(
+            self._current_request(),
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                previous_findings=(self._previous_finding(),),
+                reviewed_paths=(),
+                context_complete=True,
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "incremental")
+        self.assertEqual(provider.requests, [])
+
+    def test_full_review_evicts_incompatible_cache_entries(self):
+        """Eviction is not gated on an incremental plan."""
+
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        cache = ReviewContextCache()
+        service = ReviewService(provider, cache=cache)
+        stale_key = ReviewContextCacheKey(
+            "owner/repo",
+            3,
+            "a" * 40,
+            "b" * 40,
+            provider.name,
+            "old-model",
+            "default",
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+        )
+        cache.put(stale_key, (5, "incremental"))
+        result = service.review(self._current_request())
+        self.assertEqual(result.coverage_mode, "full")
+        self.assertIsNone(cache.get(stale_key))

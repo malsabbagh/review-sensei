@@ -801,8 +801,13 @@ class ReviewResult:
         # results serialize the policy so publishers cannot treat unverified
         # candidates as findings.
         value["evidence_policy"] = self.evidence_policy
+        # ``full`` is the legacy-compatible default and stays omitted, but
+        # lifecycle records are serialized whenever they exist: a full pass also
+        # carries finding identities, and dropping them here would silently
+        # reset the lifecycle on read-back.
         if self.coverage_mode != "full":
             value["coverage_mode"] = self.coverage_mode
+        if self.finding_lifecycles:
             value["finding_lifecycles"] = [
                 item.to_dict() for item in self.finding_lifecycles
             ]

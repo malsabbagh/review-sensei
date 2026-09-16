@@ -26,13 +26,33 @@ and `uncertain`. Omission on a later pass is `uncertain` unless independent
 evidence confirms the same concern is gone, or the path was not in this pass's
 reviewed set, in which case the finding stays `still-present`.
 
+Defect kind is part of that identity and `category` is not. `category` is a
+presentation lens, so reclassifying the same defect must not fan one concern
+out into a second thread. A comment without `defect_kind` buckets under the
+canonical `unknown` kind, so identity does not depend on whether the provider
+filled the field. Two comments on the same path and symbol that declare
+different defect kinds are therefore distinct concerns, and one that declares
+no defect kind shares identity with other unclassified comments on that
+symbol.
+
+A concern re-reported under a different fingerprint—a moved symbol or a
+refined defect kind—keeps one live record under the current pass's identity.
+A record carried over from an earlier pass keeps the newer of its own
+generation and the current one, so a late pass cannot downgrade lifecycle
+state it did not observe.
+
 `ReviewService` may accept an optional `IncrementalReviewPlan` and an
 in-memory `ReviewContextCache`. Cache keys bind repository, pull request,
 base SHA, head SHA, engine, model, profile, and stage/context/learning
 digests. Changed base, learnings, model, or configuration invalidate matching
-entries. Missing, stale, incomplete related context, or incompatible state
-falls back to a full bounded review. The cache stores only small metadata:
-never raw prompts or provider responses, and no hosted cache is required.
+entries on every run that can name a cache identity, not only on incremental
+runs. Missing, stale, incomplete related context, a missing caller-supplied
+changed-path list, or incompatible state falls back to a full bounded review.
+Prior findings stay in scope for a fallback only when this run verified the
+prior key is compatible; an incompatible or unverifiable key discards them.
+The cache stores only small metadata: never raw prompts or provider
+responses, and no hosted cache is required. A skipped incremental pass makes
+no provider call and therefore charges none to the resource budget.
 
 Publication emits an explicit `coverage_mode` on the review marker. Inline
 findings use a v2 marker that carries the fingerprint. Already published
@@ -40,6 +60,15 @@ ReviewSensei fingerprints are not posted again. Human comments and
 resolutions are ignored. Concurrent older generations cannot replace newer
 lifecycle state. Approvals, write permissions, egress, and trusted context
 are unchanged.
+
+Duplicate suppression is a property of publication, not of incremental mode:
+whenever a review has at least one inline finding to publish, publication
+reads existing App-authored finding markers through one bounded GraphQL
+review-thread sweep before the write, including on plain `full` reviews. A
+full re-review of a pull request is the common case that would otherwise
+duplicate threads, so the sweep is not gated on `coverage_mode`. It adds one
+GraphQL request to the publication path, and any pagination or transport
+uncertainty fails closed rather than publishing a possible duplicate.
 
 ## Alternatives considered
 
@@ -74,6 +103,8 @@ Tradeoffs:
   may share a fingerprint.
 - Cross-head fingerprint recovery depends on App-authored v2 markers already
   present on the pull request.
+- Every publication carrying inline findings performs one additional bounded
+  GraphQL review-thread sweep.
 
 ## Validation and rollback
 

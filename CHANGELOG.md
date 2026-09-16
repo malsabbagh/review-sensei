@@ -123,7 +123,9 @@
   [#38](https://github.com/malsabbagh/review-sensei/issues/38). Reviews can
   re-analyze changed and related paths, emit `coverage_mode`, and track
   new/still-present/fixed/outdated/uncertain findings without treating a later
-  omission as a fix. Cache state is optional, in-memory, and metadata-only.
+  omission as a fix. Finding identity uses path, symbol, defect kind, and
+  optional evidence id, so reclassifying a lens does not open a second
+  discussion. Cache state is optional, in-memory, and metadata-only.
 
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without

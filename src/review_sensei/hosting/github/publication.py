@@ -1338,9 +1338,11 @@ class ReviewPublisher:
                 if not isinstance(node, dict):
                     raise GitHubPublicationError("review thread response was invalid")
                 comments = node.get("comments")
-                roots = comments.get("nodes") if isinstance(comments, dict) else None
-                if roots is None:
-                    continue
+                if not isinstance(comments, dict):
+                    # An unreadable thread may already carry a finding marker,
+                    # so skipping it would risk publishing a duplicate.
+                    raise GitHubPublicationError("review thread response was invalid")
+                roots = comments.get("nodes")
                 if not isinstance(roots, list):
                     raise GitHubPublicationError("review thread response was invalid")
                 if not roots:

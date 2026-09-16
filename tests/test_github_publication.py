@@ -726,10 +726,54 @@ class ReviewPublisherTests(unittest.TestCase):
             ]
         )
         self.assertEqual(outcome.status, "published")
+        # Duplicate suppression is a property of publication, not of incremental
+        # mode: a plain full review is the common re-review case.
+        self.assertEqual(current.coverage_mode, "full")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
         self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
         self.assertTrue(finding_declares_blocking(existing))
+
+    def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
+        """An uncertain sweep must not publish a possible duplicate."""
+
+        head = "b" * 40
+        for sweep, expected in (
+            (json_response({}, 500), GitHubPublicationTransientError),
+            (
+                graphql_review_threads_response(nodes=({"isResolved": "no"},)),
+                GitHubPublicationError,
+            ),
+        ):
+            with self.subTest(sweep=expected.__name__):
+                http, calls = make_http(
+                    [
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response(pr_payload(head_sha=head)),
+                        sweep,
+                        json_response({"id": 5}, 200),
+                    ]
+                )
+                with self.assertRaises(expected):
+                    ReviewPublisher(http=http).publish(
+                        token="token",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=2,
+                        head_sha=head,
+                        base_branch="main",
+                        base_sha="a" * 40,
+                        result=result(),
+                        diff=DIFF,
+                        app_slug="reviewsensei[bot]",
+                    )
+                self.assertFalse(
+                    any(
+                        method == "POST" and url.endswith("/pulls/2/reviews")
+                        for method, url, _ in calls
+                    )
+                )
 
     def test_publishes_classification_metadata_without_changing_identity_fields(self):
         head = "b" * 40

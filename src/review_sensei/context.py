@@ -1678,6 +1678,7 @@ def stable_finding_fingerprint(
 FINDING_LIFECYCLE_STATES = frozenset(
     {"new", "still-present", "fixed", "outdated", "uncertain"}
 )
+UNKNOWN_DEFECT_KIND = "unknown"
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full"})
 _CACHE_COMPATIBILITY_FIELDS = (
     "repository",
@@ -1782,22 +1783,37 @@ def reconcile_finding_lifecycle(
     )
 
 
+def comment_defect_kind(comment: ReviewComment) -> str:
+    """Return the canonical defect kind used for finding identity.
+
+    ``category`` is a presentation lens, not a defect identity: a provider that
+    reclassifies the same defect under a different lens must not fan the concern
+    out into a second thread.  An absent ``defect_kind`` buckets under
+    ``UNKNOWN_DEFECT_KIND`` so identity is stable whether or not the provider
+    filled the field.
+    """
+
+    kind = (comment.defect_kind or "").strip()
+    return kind or UNKNOWN_DEFECT_KIND
+
+
 def finding_lifecycle_for_comment(
     comment: ReviewComment, *, generation: int = 0
 ) -> FindingLifecycle:
     """Build a new lifecycle record from a validated inline comment."""
 
+    defect_kind = comment_defect_kind(comment)
     fingerprint = stable_finding_fingerprint(
         evidence_id=comment.evidence_id,
         path=comment.path,
         symbol=comment.symbol,
-        defect_kind=comment.defect_kind or comment.category,
+        defect_kind=defect_kind,
     )
     concern = stable_concern_identity(
         evidence_id=comment.evidence_id,
         path=comment.path,
         symbol=comment.symbol,
-        defect_kind=comment.defect_kind or comment.category,
+        defect_kind=defect_kind,
     )
     return FindingLifecycle(
         fingerprint,
@@ -1819,10 +1835,16 @@ def reconcile_finding_set(
 ) -> tuple[FindingLifecycle, ...]:
     """Reconcile a finding set without treating omission as proof of a fix.
 
-    Concurrent older generations cannot replace newer lifecycle state. Findings
-    on paths this pass did not review stay ``still-present``. Findings a later
-    complete pass simply omitted become ``uncertain`` unless independent
+    Concurrent older generations cannot replace newer lifecycle state: a record
+    carried over from ``previous`` keeps the newer of its own generation and
+    ``generation``, so a late pass cannot downgrade state it did not observe.
+    Findings on paths this pass did not review stay ``still-present``. Findings
+    a later complete pass simply omitted become ``uncertain`` unless independent
     evidence confirms the same concern is gone.
+
+    ``reviewed_paths`` is a scope declaration that decides retention, so each
+    entry must be a canonical repository-relative path.  A non-canonical entry
+    fails closed rather than silently widening retention to every finding.
     """
 
     previous_records = tuple(previous)
@@ -1837,7 +1859,15 @@ def reconcile_finding_set(
     }
     reviewed: set[str] | None = None
     if reviewed_paths is not None:
-        reviewed = {path for path in reviewed_paths if isinstance(path, str) and path}
+        reviewed = set()
+        for path in reviewed_paths:
+            if not isinstance(path, str) or not path:
+                raise ContextLoadError("reconciled reviewed path must be a string")
+            try:
+                validate_repository_path(path, label="reconciled reviewed path")
+            except ReviewInputError as exc:
+                raise ContextLoadError("reconciled reviewed path is invalid") from exc
+            reviewed.add(path)
 
     previous_by_fingerprint = {item.fingerprint: item for item in previous_records}
     previous_by_concern = {
@@ -1849,26 +1879,50 @@ def reconcile_finding_set(
 
     for item in current_records:
         prior = previous_by_fingerprint.get(item.fingerprint)
+        moved: FindingLifecycle | None = None
         if prior is None and item.concern is not None:
-            prior = previous_by_concern.get(item.concern)
+            candidate = previous_by_concern.get(item.concern)
+            if candidate is not None and candidate.fingerprint != item.fingerprint:
+                moved = candidate
+            else:
+                prior = candidate
+        if moved is not None and moved.state not in {"fixed", "outdated"}:
+            # The same concern came back under a different fingerprint (a moved
+            # symbol or a refined defect kind).  This pass observed it, so the
+            # current identity is authoritative and the concern keeps a single
+            # live record instead of retiring the prior and dropping the new one.
+            record = FindingLifecycle(
+                item.fingerprint,
+                "still-present",
+                item.evidence if item.evidence is not None else moved.evidence,
+                item.concern,
+                item.path,
+                max(moved.generation, generation),
+            )
+            reconciled.append(record)
+            matched.add(moved.fingerprint)
+            seen_fingerprints.add(record.fingerprint)
+            continue
+        # A retired concern reported again under a new fingerprint is a new
+        # finding; the retired record is left for the tail pass to carry over.
         result = reconcile_finding_lifecycle(
-            prior,
+            None if moved is not None else prior,
             item.fingerprint,
             current_concern=item.concern,
             previous_concern=None if prior is None else prior.concern,
             evidence_confirmed=bool(item.concern and item.concern in confirmed),
             review_complete=review_complete,
         )
+        # ``prior`` here is either absent or the same fingerprint, so the current
+        # record always owns the authoritative concern and path for this pass.
         reconciled.append(
             FindingLifecycle(
                 result.fingerprint,
                 result.state,
                 result.evidence if result.evidence is not None else item.evidence,
-                item.concern
-                if result.fingerprint == item.fingerprint
-                else result.concern,
-                item.path if result.fingerprint == item.fingerprint else result.path,
-                generation,
+                item.concern,
+                item.path,
+                generation if prior is None else max(prior.generation, generation),
             )
         )
         if prior is not None:
@@ -1884,6 +1938,7 @@ def reconcile_finding_set(
         path_reviewed = reviewed is None or (
             prior.path is not None and prior.path in reviewed
         )
+        carried_generation = max(prior.generation, generation)
         if not path_reviewed:
             reconciled.append(
                 FindingLifecycle(
@@ -1892,7 +1947,7 @@ def reconcile_finding_set(
                     prior.evidence,
                     prior.concern,
                     prior.path,
-                    generation,
+                    carried_generation,
                 )
             )
             continue
@@ -1907,7 +1962,7 @@ def reconcile_finding_set(
                 prior.evidence,
                 prior.concern,
                 prior.path,
-                generation,
+                carried_generation,
             )
         )
     return tuple(reconciled)

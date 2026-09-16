@@ -241,6 +241,9 @@ class ReviewService:
         )
 
         if coverage.skip_provider:
+            # No provider call is made, so none is charged to the budget: the
+            # budget counts real provider invocations, and a skipped incremental
+            # pass must not consume a call a later pass may need.
             return self._finalize_result(
                 request,
                 summary="Incremental review: no changed paths since the last accepted review.",
@@ -417,6 +420,18 @@ class ReviewService:
         incremental: IncrementalReviewPlan | None,
         profile: str,
     ) -> _CoverageDecision:
+        """Resolve the coverage mode and the prior findings that stay in scope.
+
+        Prior findings are only reconciled when this run can verify that the
+        caller's prior cache key is compatible with the current snapshot and
+        configuration.  A ``fallback-full`` caused by incomplete related context
+        or a missing changed-path list keeps those verified priors, so a full
+        bounded re-review reports them as ``uncertain`` rather than dropping
+        them; omission still never counts as proof of a fix.  A ``fallback-full``
+        caused by an incompatible or unverifiable key discards them instead,
+        because their identities cannot be tied to this snapshot.
+        """
+
         current_key = build_review_context_cache_key(
             request,
             provider_name=self.provider.name,
@@ -430,16 +445,26 @@ class ReviewService:
         previous_findings: tuple[FindingLifecycle, ...] = ()
         generation = 0
         evidence_confirmed: tuple[str, ...] = ()
+        # Stale same-PR entries are evicted on every run that can name a cache
+        # identity, not only on incremental runs, so a full pass cannot leave
+        # entries bound to a superseded base, model, or configuration behind for
+        # a later incremental pass to consider compatible.
+        if self.cache is not None and current_key is not None:
+            self.cache.invalidate_incompatible(current_key)
         if incremental is not None and current_key is not None:
             generation = incremental.generation
             previous_findings = incremental.previous_findings
             evidence_confirmed = incremental.evidence_confirmed_concerns
             related_paths = incremental.related_paths
-            if self.cache is not None:
-                self.cache.invalidate_incompatible(current_key)
             if not cache_key_is_compatible(current_key, incremental.previous_key):
                 mode = "fallback-full"
                 previous_findings = ()
+            elif incremental.reviewed_paths is None:
+                # Incremental coverage is defined by the caller's changed-path
+                # list.  Without one there is no reviewed scope to reason about,
+                # so this is a full bounded review rather than an incremental
+                # pass that silently treats every prior path as reviewed.
+                mode = "fallback-full"
             elif not incremental.context_complete:
                 mode = "fallback-full"
             else:
@@ -447,8 +472,9 @@ class ReviewService:
                 reviewed_paths = incremental.reviewed_paths
                 skip_provider = incremental.reviewed_paths == ()
         elif incremental is not None:
+            # Without repository/PR/base/head identity the prior key cannot be
+            # checked for compatibility, so prior findings are not trusted.
             mode = "fallback-full"
-            previous_findings = incremental.previous_findings
             generation = incremental.generation
             evidence_confirmed = incremental.evidence_confirmed_concerns
             related_paths = incremental.related_paths
@@ -520,6 +546,9 @@ class ReviewService:
                 for item in lifecycles
             ),
         )
+        # ``_coverage_decision`` already evicted same-PR entries incompatible
+        # with this key, so the write cannot land behind a stale entry that a
+        # later incremental pass would still read as compatible.
         if self.cache is not None and coverage.current_key is not None:
             self.cache.put_if_newer(
                 coverage.current_key,
