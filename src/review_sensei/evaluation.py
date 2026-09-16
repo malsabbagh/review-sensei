@@ -23,6 +23,7 @@ from .models import (
     ReviewRequest,
 )
 from .providers.base import ReviewProvider
+from .providers.profiles import get_provider_profile
 from .schemas import validate_public_document
 from .service import ReviewService
 from .stages import ReviewCategory, Stage
@@ -582,6 +583,20 @@ def require_supported_promotion(
     for report in documents:
         validate_promotion_against_report(parsed, report)
     return parsed
+
+
+def validate_profile_promotion(profile_name: str, record: PromotionRecord) -> None:
+    """Reject fixture-only or mismatched evidence for a named provider profile."""
+
+    profile = get_provider_profile(profile_name)
+    if _is_fixture_alias(record.provider):
+        raise ReviewInputError("fixture-only evidence cannot support promotion")
+    if record.status != "supported":
+        raise ReviewInputError("profile promotion requires supported evidence")
+    if record.provider != profile.provider:
+        raise ReviewInputError("promotion record provider does not match profile")
+    if record.model not in profile.allowed_models():
+        raise ReviewInputError("promotion record model does not match profile")
 
 
 def _sha256_bytes(data: bytes) -> str:

@@ -33,6 +33,7 @@ from .evaluation import (
     promotion_record_from_reports,
     prompt_digest,
     require_supported_promotion,
+    validate_profile_promotion,
     validate_promotion_against_report,
     validate_promotion_record,
 )
@@ -173,6 +174,7 @@ __all__ = [
     "require_supported_promotion",
     "validate_promotion_against_report",
     "validate_promotion_record",
+    "validate_profile_promotion",
     "RecoveryArtifact",
     "ResourceBudget",
     "RunOutcome",

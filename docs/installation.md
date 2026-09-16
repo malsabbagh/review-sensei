@@ -151,6 +151,12 @@ selects `qwen3.5:4b`, points at a local Ollama API, and leaves
 is `deepseek-v4-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
 available as explicit overrides.
 
+Optional CLI `--profile` selects a named preset (`local-private`,
+`fast-triage`, `deep-verification`) without changing these workflow defaults.
+Installed GitHub workflows continue to use `REVIEWSENSEI_PROVIDER_MODE` and do
+not pass `--profile`. `fast-triage` is an explicit CLI/OpenAI path and requires
+`OPENAI_API_KEY`; it is not enabled by the reusable workflow.
+
 ## GitHub workflow example
 
 The setup-v4 caller example in

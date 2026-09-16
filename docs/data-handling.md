@@ -79,7 +79,8 @@ to `cloud`, review and conversation steps send their bounded diff, selected
 context, and authorized thread context to Ollama Cloud
 using `deepseek-v4-flash:cloud` by default and requires `OLLAMA_API_KEY` from
 secrets. The workflow does not accept an arbitrary provider URL input, so a
-dispatch-supplied URL cannot redirect the provider credential.
+dispatch-supplied URL cannot redirect the provider credential. Installed
+workflows do not pass `--profile` and do not send `OPENAI_API_KEY`.
 
 The workflow uploads `review.json` and `review-sensei-version.txt` as GitHub
 artifacts with a retention window. Artifact retention is controlled by the
@@ -87,6 +88,16 @@ workflow, not by ReviewSensei. Fork pull requests are not automatically
 triggered by this example; enabling fork-triggered automation requires a
 separate security review of secrets, untrusted head behavior, and provider data
 egress.
+
+## OpenAI-compatible adapter
+
+The `openai-compatible` adapter and `fast-triage` profile send the same
+provider-facing review payload to `https://api.openai.com/v1` using a bearer
+token from the caller-supplied `OPENAI_API_KEY` value. The adapter rejects
+redirects, requires HTTPS, and does not fall back to Ollama. Custom hosts
+require an explicit `allow_custom_endpoint` opt-in at the Python boundary and
+are rejected for named profiles. Review the current OpenAI retention, training,
+residency, and deletion terms before selecting this profile.
 
 ## Bounded transfer and failure contract
 

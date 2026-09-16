@@ -91,8 +91,11 @@ class ProviderRegistry:
             # A named profile is an immutable routing and budget policy.  None
             # means that the caller omitted a value; every explicit value must
             # match the canonical profile before the settings are replaced by
-            # the profile's complete, canonical values below.
-            if settings.model is not None and settings.model != profile.model:
+            # the profile's complete, canonical values below.  The only allowed
+            # model values are the profile default and its declared per-stage
+            # models; this is not a generic override or failover path.
+            allowed_models = profile.allowed_models()
+            if settings.model is not None and settings.model not in allowed_models:
                 raise ProviderError("provider profile model cannot be overridden")
             if settings.base_url is not None and settings.base_url != profile.base_url:
                 raise ProviderError("provider profile endpoint cannot be overridden")
@@ -111,7 +114,7 @@ class ProviderRegistry:
             settings = replace(
                 settings,
                 name=profile.provider,
-                model=profile.model,
+                model=settings.model if settings.model is not None else profile.model,
                 base_url=profile.base_url,
                 timeout_seconds=profile.timeout_seconds,
                 max_output_tokens=profile.max_output_tokens,

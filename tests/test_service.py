@@ -3,8 +3,9 @@ import json
 import unittest
 
 from review_sensei import ReviewCategory, ReviewDocument, ReviewLensContext, Stage
-from review_sensei.errors import ReviewFormatError, ReviewInputError
+from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
 from review_sensei.models import LearningEntry, ProviderResponse, ReviewRequest
+from review_sensei.outcomes import ResourceBudget
 from review_sensei.service import ReviewService
 from review_sensei.validation import ReviewLimits
 
@@ -530,4 +531,39 @@ class ReviewServiceTests(unittest.TestCase):
                 )
             )
         self.assertNotIn(marker, str(raised.exception))
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_stage_providers_are_used_without_switching_on_retry(self):
+        default = FakeProvider('{"summary":"default"}')
+        default.name = "default"
+        special = FakeProvider('{"summary":"special"}')
+        special.name = "special"
+        stages = [
+            Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
+            Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
+        ]
+        result = ReviewService(
+            default,
+            stages=stages,
+            stage_providers={"two": special},
+        ).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(len(default.requests), 1)
+        self.assertEqual(len(special.requests), 1)
+        self.assertEqual(result.provider, "special")
+        self.assertIn("special", result.summary)
+
+    def test_resource_budget_stops_further_provider_calls(self):
+        provider = FakeProvider('{"summary":"ok"}')
+        stages = [
+            Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
+            Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
+        ]
+        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
+            ReviewService(
+                provider,
+                stages=stages,
+                budget=ResourceBudget.create(
+                    max_provider_calls=1, max_retry_attempts=0
+                ),
+            ).review(ReviewRequest(diff=DIFF))
         self.assertEqual(len(provider.requests), 1)

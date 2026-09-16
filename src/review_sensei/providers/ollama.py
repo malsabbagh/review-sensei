@@ -186,7 +186,11 @@ class OllamaProvider:
                     label="Ollama response",
                 )
         except HTTPError as exc:
-            raise ProviderError(f"Ollama request failed with HTTP {exc.code}") from exc
+            transient = exc.code == 429 or 500 <= exc.code < 600
+            raise ProviderError(
+                f"Ollama request failed with HTTP {exc.code}",
+                transient=transient,
+            ) from exc
         except ProviderError as exc:
             # Keep errors from an injected transport from reflecting a bearer
             # token supplied by the caller.  The built-in redirect error is
@@ -234,9 +238,24 @@ class OllamaProvider:
                 "Ollama review response exceeded the configured size limit"
             ) from exc
 
+        revision = None
+        observed = data.get("model") if isinstance(data, dict) else None
+        if isinstance(observed, str) and observed.strip():
+            try:
+                validate_bounded_text(
+                    observed.strip(),
+                    request.limits.max_model_bytes,
+                    label="Ollama observed revision",
+                    allow_empty=False,
+                )
+                revision = observed.strip()
+            except ReviewInputError:
+                revision = None
+
         return ProviderResponse(
             text=text,
             provider=self.name,
             model=model,
             limits=request.limits,
+            revision=revision,
         )

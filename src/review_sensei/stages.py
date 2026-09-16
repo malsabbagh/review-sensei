@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .errors import ReviewInputError
+from .errors import ProviderError, ReviewInputError
 from .validation import validate_repository_path
 
 MAX_STAGE_FILES = 32
@@ -310,10 +310,30 @@ class Stage:
     prompt_template: str
     outputs: tuple[str, ...]
     categories: tuple[ReviewCategory, ...] = ()
+    provider_profile: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ReviewInputError("stage name must be a non-empty string")
+        if self.provider_profile is not None:
+            if (
+                not isinstance(self.provider_profile, str)
+                or not self.provider_profile.strip()
+            ):
+                raise ReviewInputError(
+                    "stage provider_profile must be a non-empty string"
+                )
+            from .providers.profiles import get_provider_profile
+
+            try:
+                selected = get_provider_profile(self.provider_profile)
+            except ProviderError as exc:
+                raise ReviewInputError(str(exc)) from exc
+            if selected.name != self.provider_profile.strip().lower():
+                raise ReviewInputError(
+                    "stage provider_profile must be a canonical profile name"
+                )
+            object.__setattr__(self, "provider_profile", selected.name)
         if (
             not isinstance(self.prompt_template, str)
             or not self.prompt_template.strip()
@@ -378,7 +398,14 @@ class Stage:
         _reject_unknown_fields(
             value,
             allowed=frozenset(
-                {"name", "prompt_template", "outputs", "categories", "category_ids"}
+                {
+                    "name",
+                    "prompt_template",
+                    "outputs",
+                    "categories",
+                    "category_ids",
+                    "provider_profile",
+                }
             ),
             label="stage configuration",
         )
@@ -394,6 +421,7 @@ class Stage:
         outputs_list = value.get("outputs")
         categories_list = value.get("categories", [])
         category_ids = value.get("category_ids", [])
+        provider_profile = value.get("provider_profile")
 
         if not isinstance(name, str):
             raise ReviewInputError("stage name must be a string")
@@ -417,6 +445,8 @@ class Stage:
             raise ReviewInputError(
                 "stage category_ids require a review category catalog"
             )
+        if provider_profile is not None and not isinstance(provider_profile, str):
+            raise ReviewInputError("stage provider_profile must be a string")
 
         categories = (
             category_catalog.resolve(category_ids)
@@ -429,6 +459,7 @@ class Stage:
             prompt_template=prompt_template,
             outputs=tuple(outputs_list),
             categories=categories,
+            provider_profile=provider_profile,
         )
 
 

@@ -13,6 +13,7 @@ from review_sensei.evaluation import (
     promotion_record_from_reports,
     prompt_digest,
     require_supported_promotion,
+    validate_profile_promotion,
     validate_promotion_against_report,
     validate_promotion_record,
 )
@@ -88,6 +89,40 @@ class PromotionAndReleaseTests(unittest.TestCase):
         )
         source["seed"] = "mutated"
         self.assertEqual(record.to_dict()["reproducibility"], {"seed": "fixed"})
+
+    def test_profile_promotion_rejects_fixture_and_mismatched_identity(self) -> None:
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        validate_profile_promotion("fast-triage", live)
+        with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
+            validate_profile_promotion("local-private", live)
+        with self.assertRaisesRegex(ReviewInputError, "fixture-only"):
+            validate_profile_promotion(
+                "local-private",
+                PromotionRecord(
+                    SHA,
+                    SHA,
+                    SHA,
+                    SHA,
+                    "fixture",
+                    "fixture-v1",
+                    "r1",
+                    1,
+                    "2026-01-01",
+                    {"seed": "fixed"},
+                    status="insufficient",
+                ),
+            )
 
     def test_invalid_reproducibility_shape_fails_with_review_input_error(self) -> None:
         with self.assertRaises(ReviewInputError):

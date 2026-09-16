@@ -1181,6 +1181,38 @@ class CliTests(unittest.TestCase):
         self.assertEqual(created, [])
         self.assertIn("--allow-data-egress", stderr.getvalue())
 
+    def test_evaluate_live_named_remote_profile_requires_data_egress(self):
+        created = []
+
+        class Registry:
+            def create(self, settings):
+                created.append(settings)
+                return FakeProvider()
+
+        stderr = io.StringIO()
+        with patch("review_sensei.cli.default_registry", return_value=Registry()):
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--corpus",
+                        "missing.json",
+                        "--provider-version",
+                        "1.0",
+                        "--allow-live-model",
+                        "--profile",
+                        "fast-triage",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(created, [])
+        self.assertIn("--allow-data-egress", stderr.getvalue())
+
     def test_evaluate_fixture_rejects_live_acknowledgement_flags(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):

@@ -440,6 +440,30 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 "OpenAI-compatible review response exceeded the configured size limit"
             ) from exc
+        revision = None
+        if isinstance(data, dict):
+            fingerprint = data.get("system_fingerprint")
+            observed_model = data.get("model")
+            candidate = (
+                fingerprint
+                if isinstance(fingerprint, str) and fingerprint.strip()
+                else observed_model
+            )
+            if isinstance(candidate, str) and candidate.strip():
+                try:
+                    validate_bounded_text(
+                        candidate.strip(),
+                        request.limits.max_model_bytes,
+                        label="OpenAI-compatible observed revision",
+                        allow_empty=False,
+                    )
+                    revision = candidate.strip()
+                except ReviewInputError:
+                    revision = None
         return ProviderResponse(
-            text=text, provider=self.name, model=model, limits=request.limits
+            text=text,
+            provider=self.name,
+            model=model,
+            limits=request.limits,
+            revision=revision,
         )

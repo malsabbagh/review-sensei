@@ -3,20 +3,28 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from .concurrency import ReviewConcurrencyPlan
 from .diff import analyze_diff
-from .errors import ReviewFormatError, ReviewInputError, ReviewSenseiError
+from .errors import (
+    ProviderError,
+    ReviewFormatError,
+    ReviewInputError,
+    ReviewSenseiError,
+)
 from .models import (
     LearningProposal,
     ProviderRequest,
+    ProviderResponse,
     ReviewComment,
     ReviewRequest,
     ReviewResult,
 )
+from .outcomes import ResourceBudget
 from .providers.base import ReviewProvider
 from .stages import (
     ReviewCategory,
@@ -73,10 +81,15 @@ class ReviewService:
         *,
         enforce_locations: bool = True,
         stages: Sequence[Stage] | None = None,
+        stage_providers: Mapping[str, ReviewProvider] | None = None,
+        budget: ResourceBudget | None = None,
     ) -> None:
         self.provider = provider
         self.enforce_locations = enforce_locations
         self.stages = tuple(stages) if stages is not None else DEFAULT_STAGES
+        self.stage_providers = dict(stage_providers or {})
+        self.budget = budget if budget is not None else ResourceBudget.create()
+        self._provider_calls = 0
         if not self.stages:
             raise ReviewInputError("review must contain at least one configured stage")
         if any(not isinstance(stage, Stage) for stage in self.stages):
@@ -93,6 +106,33 @@ class ReviewService:
                         "review category ids must have consistent definitions across stages"
                     )
         self.review_categories = tuple(category_definitions.values())
+        if any(
+            not isinstance(name, str) or not name.strip()
+            for name in self.stage_providers
+        ):
+            raise ReviewInputError("stage provider names must be non-empty strings")
+        unknown_stage_providers = set(self.stage_providers) - set(stage_names)
+        if unknown_stage_providers:
+            raise ReviewInputError("stage providers must match configured stage names")
+        if not isinstance(self.budget, ResourceBudget):
+            raise ReviewInputError("review budget must be a ResourceBudget value")
+
+    def _provider_for_stage(self, stage: Stage) -> ReviewProvider:
+        return self.stage_providers.get(stage.name, self.provider)
+
+    def _stage_attempt_limit(self) -> int:
+        return max(
+            1,
+            min(_MAX_PROVIDER_OUTPUT_ATTEMPTS, self.budget.max_retry_attempts + 1),
+        )
+
+    def _complete(
+        self, provider: ReviewProvider, provider_request: ProviderRequest
+    ) -> ProviderResponse:
+        if self._provider_calls >= self.budget.max_provider_calls:
+            raise ProviderError("resource budget exhausted")
+        self._provider_calls += 1
+        return provider.complete(provider_request)
 
     @staticmethod
     def _source_context_coverage(request: ReviewRequest) -> object | None:
@@ -122,6 +162,7 @@ class ReviewService:
         skipped_stages = 0
         omitted_inline_comments = 0
         executed_comment_stage = False
+        self._provider_calls = 0
 
         # Preflight the complete diff exactly once, before the first provider
         # construction/call.  The parser owns byte, line, file, hunk, marker,
@@ -170,9 +211,11 @@ class ReviewService:
             stage_proposals: tuple[LearningProposal, ...] = ()
             response_provider = last_provider
             response_model = last_model
-            for attempt in range(_MAX_PROVIDER_OUTPUT_ATTEMPTS):
+            stage_provider = self._provider_for_stage(stage)
+            max_attempts = self._stage_attempt_limit()
+            for attempt in range(max_attempts):
                 try:
-                    response = self.provider.complete(provider_request)
+                    response = self._complete(stage_provider, provider_request)
                 except ReviewFormatError:
                     raise
                 except ReviewInputError as exc:
@@ -212,7 +255,7 @@ class ReviewService:
                     stage_proposals = stage_output.proposals
                     omitted_inline_comments += stage_output.omitted_inline_comments
                 except ReviewFormatError:
-                    if attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS:
+                    if attempt + 1 >= max_attempts:
                         raise
                     provider_request = self._provider_request(
                         f"{prompt}\n\n{_PROVIDER_OUTPUT_CORRECTION}",

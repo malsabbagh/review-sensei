@@ -169,6 +169,13 @@ records distinguish useful, incorrect, obsolete, and unverified findings;
 absence of feedback is not counted as approval and cannot enter review
 prompts.
 
+Named provider profiles (`local-private`, `fast-triage`, `deep-verification`)
+follow the same rule: `validate_profile_promotion` rejects fixture aliases and
+requires a `supported` promotion record whose provider and model match the
+profile. Selecting `--profile fast-triage` or `--profile deep-verification` for
+`evaluate --mode live` is remote egress and requires `--allow-data-egress`
+even when `--base-url` still points at loopback.
+
 ## Rollback
 
 Rollback is code-only: revert the additive fixture provider, evaluator, CLI,
