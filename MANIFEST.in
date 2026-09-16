@@ -10,3 +10,9 @@ graft examples
 graft evaluation
 prune src/review_sensei.egg-info
 include src/review_sensei/schemas/*.json
+prune tests
+graft tests/dist_safe
+graft tests/downstream
+include tests/packaging_guard.py
+include tests/fake_github_http.py
+include tests/fixtures/distribution-contract.json

@@ -70,6 +70,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("graft docs", source)
         self.assertIn("graft examples", source)
         self.assertIn("prune src/review_sensei.egg-info", source)
+        self.assertIn("prune tests", source)
+        self.assertIn("graft tests/dist_safe", source)
+        self.assertIn("graft tests/downstream", source)
 
 
 class ReleaseVersionTests(unittest.TestCase):

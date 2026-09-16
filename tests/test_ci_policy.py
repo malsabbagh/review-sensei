@@ -993,6 +993,47 @@ class ActionPinPolicyTests(unittest.TestCase):
                     self.assertIn("vars.ENABLE_UBICLOUD_HOSTED", line)
                     self.assertIn("ubicloud-standard-2", line)
 
+    def test_package_job_records_digests_and_runs_packaged_dist_safe_tests(self):
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        )
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("sha256sum dist/*.tar.gz dist/*.whl", text)
+        self.assertIn("REVIEWSENSEI_DIST_SAFE_LANE=1", text)
+        self.assertIn('REVIEWSENSEI_CHECKOUT_ROOT="$GITHUB_WORKSPACE"', text)
+        self.assertIn("pip install dist/*.whl", text)
+        self.assertIn('unittest discover -s "$suite/dist_safe" -v', text)
+        self.assertIn('unittest discover -s "$suite/downstream" -v', text)
+        self.assertNotIn(
+            'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
+            text,
+        )
+        block = _run_block_containing(text, "REVIEWSENSEI_DIST_SAFE_LANE")
+        self.assertNotIn("requirements/ci.txt", block)
+        self.assertIn('test ! -e "$suite/test_ci_policy.py"', block)
+
+    def test_downstream_canary_is_operator_gated_and_excluded_from_required_checks(
+        self,
+    ):
+        root = Path(__file__).resolve().parents[1]
+        canary = (root / ".github" / "workflows" / "downstream-canary.yml").read_text(
+            encoding="utf-8"
+        )
+        ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", canary)
+        self.assertNotIn("pull_request:", canary)
+        self.assertIn("environment: downstream-canary", canary)
+        self.assertIn("contents: read", canary)
+        self.assertNotIn("OLLAMA_API_KEY", canary)
+        self.assertNotIn("secrets:", canary)
+        self.assertIn("Required checks", ci)
+        self.assertIn(
+            "needs: [compatibility, quality, schemas, package, npm, workers, codeql]",
+            ci,
+        )
+        self.assertNotIn("downstream-canary", ci)
+        self.assertNotIn("Downstream canary", ci)
+
 
 class ReusablePublishGuardTests(unittest.TestCase):
     def test_cloud_and_local_publish_require_success_and_reject_cancelled_stale_runs(

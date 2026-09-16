@@ -141,13 +141,38 @@ python -m pip install --upgrade build
 python scripts/check_release_version.py --tag v0.1.0
 rm -rf dist release
 python -m build --sdist --wheel --outdir dist
+sha256sum dist/*.tar.gz dist/*.whl
 python scripts/validate_release.py dist --version 0.1.0
 
 python -m venv /tmp/review-sensei-wheel-check
-/tmp/review-sensei-wheel-check/bin/python -m pip install --no-deps dist/*.whl
+/tmp/review-sensei-wheel-check/bin/python -m pip install dist/*.whl
 /tmp/review-sensei-wheel-check/bin/python -m pip check
 /tmp/review-sensei-wheel-check/bin/review-sensei --help
+sdist_root=/tmp/review-sensei-sdist
+rm -rf "$sdist_root"
+mkdir -p "$sdist_root"
+tar -xzf dist/*.tar.gz -C "$sdist_root"
+suite="$(printf '%s\n' "$sdist_root"/review_sensei-*/tests | head -n 1)"
+export REVIEWSENSEI_CHECKOUT_ROOT="$PWD"
+export REVIEWSENSEI_DIST_SAFE_LANE=1
+/tmp/review-sensei-wheel-check/bin/python -I -m unittest discover -s "$suite/dist_safe" -v
+/tmp/review-sensei-wheel-check/bin/python -I -m unittest discover -s "$suite/downstream" -v
 ```
+
+The dist-safe command, SHA-256 archive identification, and checkout-only lane
+are recorded in
+[`tests/fixtures/distribution-contract.json`](../tests/fixtures/distribution-contract.json).
+Do not run `unittest discover` against the developer `tests/` tree from the
+wheel environment: that lane can import checkout helpers and `src/`.
+
+The optional [`.github/workflows/downstream-canary.yml`](../.github/workflows/downstream-canary.yml)
+workflow is a protected-environment placeholder. It is not a required CI gate,
+contains no secrets, and does not call live providers. Remaining operator-only
+steps before any live canary: create the `downstream-canary` GitHub Environment
+with required reviewers; dispatch only against a disposable repository that
+uses reviewed synthetic data; bound privileges to that repository; retain
+sanitized outcomes bound to the exact workflow/package digest; and clean up.
+Flaky live canaries must not weaken deterministic required gates.
 
 The release workflow also writes `SHA256SUMS` and an SPDX JSON SBOM. Verify a
 downloaded bundle before installing it:

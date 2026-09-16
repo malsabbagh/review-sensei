@@ -1,0 +1,49 @@
+# Downstream consumer canary (operator-gated placeholder)
+#
+# This workflow is NOT a required CI gate and MUST NOT run on pull_request.
+# It contains no secrets and does not call live providers or mutate production
+# repositories. Dispatch it only after creating the protected GitHub
+# Environment `downstream-canary` with required reviewers, and only against a
+# disposable repository that uses reviewed synthetic data, bounded privileges,
+# and cleanup.
+#
+# The job inherits the repository-wide runner selector, so it uses the private
+# `ubicloud-standard-2` runner when `ENABLE_UBICLOUD_HOSTED` is `true` and
+# `ubuntu-latest` otherwise. The selector is required for every job by
+# tests/test_ci_policy.py, so this placeholder cannot pin `ubuntu-latest`.
+name: Downstream canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Disposable-repository pull request number (synthetic data only)
+        required: true
+      review_sensei_version:
+        description: Exact ReviewSensei package version to install
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Operator-gated placeholder
+    environment: downstream-canary
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    steps:
+      - name: Document remaining operator-only steps
+        run: |
+          cat <<'EOF'
+          Downstream canary is a protected-environment placeholder.
+          It does not install provider credentials, expand write permissions,
+          or call GitHub/model APIs.
+
+          Remaining operator-only steps before any live canary:
+          1. Create the protected GitHub Environment `downstream-canary`
+             with required reviewers. Do not store provider secrets there.
+          2. Choose a disposable repository and reviewed synthetic pull request.
+          3. Bound token privileges to that repository and clean up afterward.
+          4. Keep this workflow out of Required checks. Flaky live runs must
+             not weaken deterministic package or unit gates.
+          EOF

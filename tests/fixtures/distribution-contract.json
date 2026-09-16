@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "issue": 34,
+  "archive_identification": {
+    "algorithm": "sha256",
+    "command": "sha256sum dist/*.tar.gz dist/*.whl",
+    "sdist_glob": "dist/review_sensei-*.tar.gz",
+    "wheel_glob": "dist/review_sensei-*.whl"
+  },
+  "sdist_entries": {
+    "verifier": "scripts/check_sdist_contract.py",
+    "required": [
+      "src/review_sensei/schemas/review-category.schema.json",
+      "src/review_sensei/schemas/review-stage.schema.json",
+      "src/review_sensei/schemas/learning-entry.schema.json",
+      "src/review_sensei/schemas/evaluation-corpus.schema.json",
+      "src/review_sensei/schemas/evaluation-report.schema.json",
+      "src/review_sensei/schemas/promotion-record.schema.json",
+      "evaluation/v1/corpus.json"
+    ],
+    "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
+  },
+  "supported_command": {
+    "build": "python -m build --outdir dist",
+    "record_digests": "sha256sum dist/*.tar.gz dist/*.whl",
+    "install_wheel": "python -m pip install dist/*.whl",
+    "extract_sdist_tests": "tar -xzf dist/*.tar.gz",
+    "run_dist_safe": "python -I -m unittest discover -s tests/dist_safe -v",
+    "run_downstream": "python -I -m unittest discover -s tests/downstream -v"
+  },
+  "lanes": {
+    "dist_safe": {
+      "packaged": true,
+      "discover": ["tests/dist_safe", "tests/downstream"],
+      "helpers": [
+        "tests/packaging_guard.py",
+        "tests/fake_github_http.py",
+        "tests/fixtures/distribution-contract.json"
+      ],
+      "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
+    },
+    "checkout_only": {
+      "packaged": false,
+      "discover": ["tests"],
+      "description": "Developer checkout lane. Requires scripts/, .github/, packages/, deploy/, and checkout-only fixtures. Compatibility and quality CI continue to run this broader suite.",
+      "modules": [
+        "tests/test_ci_policy.py",
+        "tests/test_cloudflare_package.py",
+        "tests/test_github_conversation.py",
+        "tests/test_github_publication.py",
+        "tests/test_github_setup.py",
+        "tests/test_npm_distribution.py",
+        "tests/test_publication.py",
+        "tests/test_release.py",
+        "tests/test_security_gates.py"
+      ]
+    }
+  },
+  "import_guard": {
+    "environment": [
+      "REVIEWSENSEI_CHECKOUT_ROOT",
+      "REVIEWSENSEI_DIST_SAFE_LANE",
+      "REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT"
+    ],
+    "armed": "Armed by default, with no arming variable. REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1 is the only opt-out. The checkout lane is separated by test discovery rather than by disarming: unittest discover skips the non-package lane directories and tests/conftest.py makes pytest match it.",
+    "rule": "review_sensei.__file__ must resolve under sys.prefix. When REVIEWSENSEI_CHECKOUT_ROOT is set it adds a second rule, that the package must not resolve under that checkout's src/, and the variable must name a directory containing src/ so misconfiguration fails closed.",
+    "lane_marker": "REVIEWSENSEI_DIST_SAFE_LANE=1 marks the suite as the packaged one extracted from the sdist. It no longer arms the guard and is used only to assert checkout-only modules are absent."
+  },
+  "reproduction": {
+    "baseline_commit": "3f9ca4ecdd49a398645561daf403f0569b07ddcc",
+    "command": "python -m build --outdir dist && python -m venv /tmp/rs-sdist-venv && /tmp/rs-sdist-venv/bin/python -m pip install dist/review_sensei-0.1.1.tar.gz && tar -xzf dist/review_sensei-0.1.1.tar.gz && cd review_sensei-0.1.1 && python -I -m unittest discover -s tests -v",
+    "sdist_sha256": "36afc36f6fdf5a0df9e9826cfbc2e8738fe6a6639f53f36cc1dad051cfcdda92",
+    "wheel_sha256": "a7f38329842fc46f0715ade88d3184beb50e14248aca09601fe0baf13f1fa66a",
+    "result": "Loader and fixture errors in seven broader modules were caused by unavailable helpers/fixtures (scripts/, deploy/, tests/fake_github_http.py, tests/fixtures), not engine assertion failures.",
+    "failed_modules": [
+      "test_ci_policy",
+      "test_cloudflare_package",
+      "test_github_conversation",
+      "test_github_publication",
+      "test_npm_distribution",
+      "test_publication",
+      "test_release"
+    ]
+  },
+  "canary": {
+    "workflow": ".github/workflows/downstream-canary.yml",
+    "environment": "downstream-canary",
+    "ci": false,
+    "secrets": false
+  }
+}

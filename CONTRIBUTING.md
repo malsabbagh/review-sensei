@@ -52,22 +52,48 @@ output before any publisher can consume it. Treat diffs, source comments,
 repository context, configuration, and model output as untrusted input.
 
 The clean-wheel check is also required for package changes. It must run outside
-the checkout so the smoke test cannot import `src/`:
+the checkout so the smoke test cannot import `src/`. After building
+distributions, install **only** the wheel and run the packaged dist-safe suite
+extracted from the sdist:
 
 ```bash
 repository_root="$PWD"
+python -m build --outdir dist
+sha256sum dist/*.tar.gz dist/*.whl
 python -m venv /tmp/review-sensei-wheel-venv
-/tmp/review-sensei-wheel-venv/bin/python -m pip install -r "$repository_root/requirements/ci.txt"
 /tmp/review-sensei-wheel-venv/bin/python -m pip install dist/*.whl
 cd /tmp
+sdist_root=/tmp/review-sensei-sdist
+rm -rf "$sdist_root"
+mkdir -p "$sdist_root"
+tar -xzf "$repository_root"/dist/*.tar.gz -C "$sdist_root"
+suite="$(printf '%s\n' "$sdist_root"/review_sensei-*/tests | head -n 1)"
+export REVIEWSENSEI_CHECKOUT_ROOT="$repository_root"
+export REVIEWSENSEI_DIST_SAFE_LANE=1
 /tmp/review-sensei-wheel-venv/bin/python -I -m review_sensei --help
-/tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$repository_root/tests" -v
+/tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/dist_safe" -v
+/tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/downstream" -v
 /tmp/review-sensei-wheel-venv/bin/python -m pip check
 ```
 
-Do not make the clean-wheel environment import the checkout. Verify that
-`review_sensei.__file__` is beneath `sys.prefix` and that all packaged schemas
-are readable through `importlib.resources`.
+The supported command, archive SHA-256 identification, required sdist entries,
+and checkout-only lane are recorded in
+`tests/fixtures/distribution-contract.json`, which
+`scripts/check_sdist_contract.py` enforces against the built sdist. Declaring a
+new lane helper or fixture means editing that contract and `MANIFEST.in`; CI and
+the checkout lane tests read the contract rather than repeating the allowlist.
+
+Do not make the clean-wheel environment import the checkout. The import guard is
+armed by default rather than by environment variable: `review_sensei.__file__`
+must be beneath `sys.prefix`, and beneath `$REVIEWSENSEI_CHECKOUT_ROOT/src` is
+additionally rejected when that variable is set. Only
+`REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1` disarms it. All packaged schemas must stay
+readable through `importlib.resources`.
+
+Broad checkout tests remain `python -m unittest discover -s tests -v`, which
+skips `tests/dist_safe` and `tests/downstream` because they are not packages;
+`tests/conftest.py` makes `pytest` skip them too, so the packaged lanes only run
+the documented way, from an unpacked sdist against an installed wheel.
 
 ## Deterministic evaluation changes
 
