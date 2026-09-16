@@ -3,7 +3,7 @@
   "$id": "https://reviewsensei.dev/schemas/v1/run-outcome.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "status", "stage_summary", "provider_calls", "retry_attempts", "structural_retries", "prompt_bytes", "response_bytes", "elapsed_ms", "diagnostic"],
+  "required": ["schema_version", "status", "stage_summary", "provider_calls", "retry_attempts", "prompt_bytes", "response_bytes", "elapsed_ms", "diagnostic"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "status": {"enum": ["reviewed", "partial", "skipped_stale", "skipped_policy", "provider_failed", "budget_exhausted", "publication_failed", "already_published"]},

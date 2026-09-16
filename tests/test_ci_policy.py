@@ -878,6 +878,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                     ),
                 )
 
+    def test_setup_v4_run_name_matches_worker_template(self):
+        from review_sensei.hosting.github.setup import _resolve_trigger_workflow
+
+        root = Path(__file__).resolve().parents[1]
+        python_line = next(
+            line
+            for line in _resolve_trigger_workflow("v4").splitlines()
+            if line.startswith("run-name:")
+        )
+        worker_source = (
+            root / "deploy" / "cloudflare" / "src" / "setup-content.ts"
+        ).read_text(encoding="utf-8")
+        marker = 'run-name: "ReviewSensei @@{{ github.event.pull_request && format('
+        start = worker_source.index(marker)
+        end = worker_source.index('"', start + len('run-name: "'))
+        worker_line = worker_source[start:end + 1].replace("@@{{", "${{")
+        self.assertEqual(python_line, worker_line)
+
     def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):
         quoted = (
             'run-name: "ReviewSensei ${{ github.event.pull_request && '

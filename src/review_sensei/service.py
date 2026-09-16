@@ -252,6 +252,11 @@ class ReviewService:
         if run.result is None:
             if run.outcome.status == "budget_exhausted":
                 raise ReviewInputError("resource budget exhausted")
+            if (
+                run.outcome.status == "provider_failed"
+                and run.outcome.diagnostic == "provider_failed"
+            ):
+                raise ProviderError("provider request failed")
             raise ReviewFormatError("provider request failed")
         return run.result
 
@@ -401,7 +406,6 @@ class ReviewService:
                             repository=request.repository,
                             pull_request_number=request.pull_request_number,
                         )
-                    tracker.record_prompt_attempt(current_prompt)
                     try:
                         provider_request = self._provider_request(
                             current_prompt,
@@ -436,6 +440,7 @@ class ReviewService:
                             "review prompt exceeds the configured limit"
                         ) from exc
                     try:
+                        tracker.record_prompt_attempt(current_prompt)
                         response = stage_provider.complete(provider_request)
                     except ReviewFormatError as exc:
                         return self._finish_run(
@@ -607,6 +612,7 @@ class ReviewService:
                     status="provider_failed",
                     stage_summary=stage_summary,
                     diagnostic="stage_failed",
+                    error=ReviewFormatError("provider output could not be validated"),
                     repository=request.repository,
                     pull_request_number=request.pull_request_number,
                 )

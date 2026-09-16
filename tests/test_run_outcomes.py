@@ -180,6 +180,17 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertEqual(run.outcome.diagnostic, "deadline_exceeded")
         self.assertEqual(provider.requests, [])
 
+    def test_load_recovery_artifact_rejects_malformed_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "recovery.json"
+            path.write_text('{"result": []}', encoding="utf-8")
+            with self.assertRaises(ReviewInputError) as raised:
+                load_recovery_artifact(path)
+            self.assertEqual(
+                diagnostic_for_recovery_error(raised.exception),
+                "recovery_artifact_tampered",
+            )
+
     def test_transport_retry_is_distinct_from_structural_retry(self):
         clock = Clock()
         provider = SequenceProvider(

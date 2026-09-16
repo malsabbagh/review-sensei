@@ -132,8 +132,6 @@ class GitHubApplication:
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
-        if not options.github_writes or not options.auto_review:
-            return PublicationResult(status="disabled")
         artifact.validate(
             repository=repository,
             pull_request_number=pull_request,
@@ -141,6 +139,8 @@ class GitHubApplication:
             head_sha=head_sha,
             now=now,
         )
+        if not options.github_writes or not options.auto_review:
+            return PublicationResult(status="disabled")
         result = ReviewResult.from_dict(artifact.result)
         if result.review_status == "incomplete":
             raise ReviewInputError(

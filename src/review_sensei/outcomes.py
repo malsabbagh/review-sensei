@@ -634,6 +634,45 @@ def recovery_expires_at(
     return (created + timedelta(seconds=ttl_seconds)).isoformat()
 
 
+def _recovery_artifact_from_payload(payload: Mapping[str, object]) -> RecoveryArtifact:
+    """Build one recovery artifact after explicit field validation."""
+
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise ReviewInputError(
+            "recovery artifact integrity check failed",
+            diagnostic="recovery_artifact_tampered",
+        )
+    fields: tuple[tuple[str, type], ...] = (
+        ("repository", str),
+        ("pull_request_number", int),
+        ("base_sha", str),
+        ("head_sha", str),
+        ("created_at", str),
+        ("expires_at", str),
+        ("result_sha256", str),
+    )
+    values: dict[str, object] = {"result": result}
+    for name, expected in fields:
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, expected):
+            raise ReviewInputError(
+                "recovery artifact integrity check failed",
+                diagnostic="recovery_artifact_tampered",
+            )
+        values[name] = value
+    return RecoveryArtifact(
+        repository=values["repository"],  # type: ignore[arg-type]
+        pull_request_number=values["pull_request_number"],  # type: ignore[arg-type]
+        base_sha=values["base_sha"],  # type: ignore[arg-type]
+        head_sha=values["head_sha"],  # type: ignore[arg-type]
+        result=result,
+        created_at=values["created_at"],  # type: ignore[arg-type]
+        expires_at=values["expires_at"],  # type: ignore[arg-type]
+        result_sha256=values["result_sha256"],  # type: ignore[arg-type]
+    )
+
+
 def load_recovery_artifact(path: Path) -> RecoveryArtifact:
     """Load one identity-bound recovery artifact from disk."""
 
@@ -664,25 +703,10 @@ def load_recovery_artifact(path: Path) -> RecoveryArtifact:
     payload = dict(document)
     payload.pop("schema_version", None)
     try:
-        result = payload.get("result")
-        if not isinstance(result, Mapping):
-            raise ReviewInputError(
-                "recovery artifact integrity check failed",
-                diagnostic="recovery_artifact_tampered",
-            )
-        return RecoveryArtifact(
-            repository=payload.get("repository"),  # type: ignore[arg-type]
-            pull_request_number=payload.get("pull_request_number"),  # type: ignore[arg-type]
-            base_sha=payload.get("base_sha"),  # type: ignore[arg-type]
-            head_sha=payload.get("head_sha"),  # type: ignore[arg-type]
-            result=result,
-            created_at=payload.get("created_at"),  # type: ignore[arg-type]
-            expires_at=payload.get("expires_at"),  # type: ignore[arg-type]
-            result_sha256=payload.get("result_sha256"),  # type: ignore[arg-type]
-        )
+        return _recovery_artifact_from_payload(payload)
     except ReviewInputError:
         raise
-    except (KeyError, TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ReviewInputError(
             "recovery artifact integrity check failed",
             diagnostic="recovery_artifact_tampered",

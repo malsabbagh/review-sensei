@@ -1102,6 +1102,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
+                artifact.validate(
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=args.base_sha,
+                    head_sha=args.head_sha,
+                )
                 review_publication = application.recover_review(
                     options=GitHubWriteOptions(
                         github_writes=True,
@@ -1118,15 +1124,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     diff=diff,
                     app_slug=args.app_slug,
                 )
-            except FileNotFoundError:
-                outcome = RunOutcome(
-                    "publication_failed",
-                    diagnostic="recovery_artifact_missing",
-                    **identity,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
             except (GitHubPublicationTransientError, GitHubPublicationError) as exc:
                 diagnostic = (
                     "publication_ambiguous"
