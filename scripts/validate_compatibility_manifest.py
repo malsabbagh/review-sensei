@@ -11,7 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from review_sensei.errors import ReviewInputError  # noqa: E402
-from review_sensei.release_manifest import validate_compatibility_manifest  # noqa: E402
+from review_sensei.release_manifest import (  # noqa: E402
+    manifest_digest,
+    validate_compatibility_manifest,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,11 +23,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         value = json.loads(args.manifest.read_text(encoding="utf-8"))
-        validate_compatibility_manifest(value)
+        manifest = validate_compatibility_manifest(value)
     except (OSError, UnicodeError, json.JSONDecodeError, ReviewInputError) as exc:
         print(f"compatibility manifest validation failed: {exc}", file=sys.stderr)
         return 1
-    print("compatibility manifest validation passed")
+    print(
+        f"compatibility manifest validation passed (digest {manifest_digest(manifest)})"
+    )
     return 0
 
 

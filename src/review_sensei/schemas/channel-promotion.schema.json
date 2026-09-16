@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/channel-promotion.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "channel",
+    "action",
+    "status",
+    "previous_target",
+    "new_target",
+    "manifest_sha256",
+    "canary_manifest_sha256",
+    "publication_state",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "channel": {"const": "v4"},
+    "action": {"enum": ["promote", "rollback"]},
+    "status": {"enum": ["in-flight", "complete"]},
+    "previous_target": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "new_target": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "canary_manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "publication_state": {"enum": ["complete", "partial", "failed"]},
+    "recorded_at": {"type": "string", "minLength": 1, "maxLength": 64}
+  }
+}
