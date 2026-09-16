@@ -317,7 +317,14 @@ async function boundedBytes(response: Response, maximum: number): Promise<Uint8A
   return body;
 }
 
-function advertisedTagSha(bytes: Uint8Array, tag: string): string {
+export interface PublicWorkflowRuntimeShas {
+  /** Peeled commit SHA the configured tag ultimately references. */
+  commitSha: string;
+  /** Direct refs/tags/<tag> object SHA (commit for lightweight tags, tag object for annotated tags). */
+  refSha: string;
+}
+
+function advertisedTagShas(bytes: Uint8Array, tag: string): PublicWorkflowRuntimeShas {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const directRef = `refs/tags/${tag}`;
   const peeledRef = `${directRef}^{}`;
@@ -359,11 +366,15 @@ function advertisedTagSha(bytes: Uint8Array, tag: string): string {
       peeled = sha;
     }
   }
-  const resolved = peeled ?? direct;
-  if (!resolved) {
+  const commitSha = peeled ?? direct;
+  if (!commitSha || !direct) {
     throw new Error("github_workflow_tag_unavailable");
   }
-  return resolved;
+  return { commitSha, refSha: direct };
+}
+
+function advertisedTagSha(bytes: Uint8Array, tag: string): string {
+  return advertisedTagShas(bytes, tag).commitSha;
 }
 
 /** Shared bounded App-authenticated GitHub adapter used only by the broker. */
@@ -476,19 +487,23 @@ export class GitHubApi {
    * Git advertisement cannot be read or parsed.
    */
   async publicWorkflowSha(tag: string): Promise<string> {
+    return (await this.publicWorkflowRuntimeShas(tag)).commitSha;
+  }
+
+  async publicWorkflowRuntimeShas(tag: string): Promise<PublicWorkflowRuntimeShas> {
     const validatedTag = publicWorkflowTag(tag);
     if (this.apiUrl === "https://api.github.com") {
       try {
-        return await this.publicWorkflowShaFromGit(validatedTag);
+        return await this.publicWorkflowRuntimeShasFromGit(validatedTag);
       } catch {
         // Fall back to the bounded REST resolver below when the public Git
         // endpoint is unavailable or returns an unsupported advertisement.
       }
     }
-    return await this.publicWorkflowShaFromApi(validatedTag);
+    return await this.publicWorkflowRuntimeShasFromApi(validatedTag);
   }
 
-  private async publicWorkflowShaFromApi(tag: string): Promise<string> {
+  private async publicWorkflowRuntimeShasFromApi(tag: string): Promise<PublicWorkflowRuntimeShas> {
     let response = await this.request(
       "GET",
       `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(tag)}`,
@@ -502,8 +517,9 @@ export class GitHubApi {
       if (!isObject(object) || typeof object.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(object.sha)) {
         throw new Error("github_workflow_tag_invalid");
       }
+      const refSha = object.sha;
       if (object.type === "commit") {
-        return object.sha;
+        return { commitSha: refSha, refSha };
       }
       if (object.type !== "tag" || depth === MAX_TAG_DEREFERENCE_DEPTH) {
         throw new Error("github_workflow_tag_invalid");
@@ -513,12 +529,25 @@ export class GitHubApi {
         `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/tags/${encodeURIComponent(object.sha)}`,
         undefined,
       );
+      if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+        throw new Error(`github_workflow_tag_unavailable_${response.status}`);
+      }
+      const target = response.data.object;
+      if (
+        !isObject(target) ||
+        target.type !== "commit" ||
+        typeof target.sha !== "string" ||
+        !PUBLIC_WORKFLOW_SHA_PATTERN.test(target.sha)
+      ) {
+        throw new Error("github_workflow_tag_invalid");
+      }
+      return { commitSha: target.sha, refSha };
     }
     throw new Error("github_workflow_tag_invalid");
   }
 
   /** Resolve a public tag without consuming GitHub's anonymous REST quota. */
-  private async publicWorkflowShaFromGit(tag: string): Promise<string> {
+  private async publicWorkflowRuntimeShasFromGit(tag: string): Promise<PublicWorkflowRuntimeShas> {
     let response: Response;
     try {
       response = await fetch(
@@ -537,7 +566,7 @@ export class GitHubApi {
       throw new Error(`github_workflow_tag_unavailable_${response.status}`);
     }
     try {
-      return advertisedTagSha(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
+      return advertisedTagShas(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
     } catch (error) {
       if (error instanceof Error && /^github_workflow_tag_/.test(error.message)) {
         throw error;
