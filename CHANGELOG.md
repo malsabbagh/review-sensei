@@ -118,6 +118,13 @@
   schema's exact types instead of coercing malformed input to defaults.
   Evaluation under #33 is required before default enablement.
 
+- Added incremental review coverage and stable finding lifecycle identities
+  for issue
+  [#38](https://github.com/malsabbagh/review-sensei/issues/38). Reviews can
+  re-analyze changed and related paths, emit `coverage_mode`, and track
+  new/still-present/fixed/outdated/uncertain findings without treating a later
+  omission as a fix. Cache state is optional, in-memory, and metadata-only.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

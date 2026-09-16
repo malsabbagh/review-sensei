@@ -8,17 +8,21 @@ from review_sensei.context import (
     MAX_CALLER_DIRECTORY_ENTRIES,
     ContextSnapshot,
     FindingLifecycle,
+    IncrementalReviewPlan,
     ReviewContextCache,
     ReviewContextCacheKey,
     SourceContextExcerpt,
     SymbolAwareContextSelector,
+    cache_key_is_compatible,
+    finding_lifecycle_for_comment,
     reconcile_finding_lifecycle,
+    reconcile_finding_set,
     stable_concern_identity,
     stable_finding_fingerprint,
 )
 from review_sensei.errors import ContextLoadError
 from review_sensei.learnings import LearningStore
-from review_sensei.models import LearningEntry
+from review_sensei.models import LearningEntry, ReviewComment
 
 
 class ContextLifecycleTests(unittest.TestCase):
@@ -485,6 +489,126 @@ class ContextLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result.state, "fixed")
         self.assertEqual(result.fingerprint, previous)
+
+    def test_omitted_finding_is_uncertain_not_fixed(self):
+        previous = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                defect_kind="race",
+            )
+        )
+        result = reconcile_finding_set(
+            (
+                FindingLifecycle(
+                    previous.fingerprint,
+                    "still-present",
+                    concern=previous.concern,
+                    path="src/a.py",
+                ),
+            ),
+            (),
+            review_complete=True,
+            reviewed_paths=("src/a.py",),
+        )
+        self.assertEqual(result[0].state, "uncertain")
+
+    def test_unreviewed_path_stays_still_present(self):
+        previous = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/a.py",
+                line=2,
+                body="race",
+                symbol="run",
+                defect_kind="race",
+            )
+        )
+        current = finding_lifecycle_for_comment(
+            ReviewComment(
+                path="src/b.py",
+                line=3,
+                body="null",
+                symbol="save",
+                defect_kind="null",
+            )
+        )
+        result = reconcile_finding_set(
+            (
+                FindingLifecycle(
+                    previous.fingerprint,
+                    "still-present",
+                    concern=previous.concern,
+                    path="src/a.py",
+                ),
+            ),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/b.py",),
+        )
+        states = {item.fingerprint: item.state for item in result}
+        self.assertEqual(states[previous.fingerprint], "still-present")
+        self.assertEqual(states[current.fingerprint], "new")
+
+    def test_newer_generation_is_not_regressed(self):
+        newer = FindingLifecycle(
+            stable_finding_fingerprint(path="src/a.py", symbol="run"),
+            "still-present",
+            generation=2,
+        )
+        result = reconcile_finding_set(
+            (newer,),
+            (),
+            review_complete=True,
+            generation=1,
+        )
+        self.assertEqual(result, (newer,))
+
+    def test_distinct_defect_kinds_do_not_share_a_fingerprint(self):
+        race = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", defect_kind="race"
+        )
+        null = stable_finding_fingerprint(
+            path="src/a.py", symbol="run", defect_kind="null"
+        )
+        self.assertNotEqual(race, null)
+
+    def test_cache_invalidates_incompatible_base_and_learnings(self):
+        cache = ReviewContextCache(max_entries=4)
+        digest_a = "a" * 64
+        digest_b = "b" * 64
+        digest_c = "c" * 64
+        digest_d = "d" * 64
+        previous = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", digest_a, digest_b, digest_c
+        )
+        current = ReviewContextCacheKey(
+            "o/r", 1, "c" * 40, "d" * 40, "e", "m", "p", digest_a, digest_b, digest_d
+        )
+        cache.put(previous, ("old",))
+        self.assertFalse(cache_key_is_compatible(current, previous))
+        cache.invalidate_incompatible(current)
+        self.assertIsNone(cache.get(previous))
+
+    def test_cache_put_if_newer_does_not_regress_generation(self):
+        cache = ReviewContextCache(max_entries=2)
+        older = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        newer = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "c" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        cache.put_if_newer(newer, (5, "incremental"), generation=5)
+        self.assertFalse(cache.put_if_newer(older, (1, "full"), generation=1))
+        self.assertEqual(cache.get(newer), (5, "incremental"))
+
+    def test_incremental_plan_rejects_invalid_paths(self):
+        key = ReviewContextCacheKey(
+            "o/r", 1, "a" * 40, "b" * 40, "e", "m", "p", "a" * 64, "b" * 64, "c" * 64
+        )
+        with self.assertRaises(ContextLoadError):
+            IncrementalReviewPlan(previous_key=key, related_paths=("../secret.py",))
 
     def test_cache_key_accepts_repository_names_up_to_512_bytes(self):
         repository = "o/" + ("r" * 509)

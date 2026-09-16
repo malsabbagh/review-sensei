@@ -148,6 +148,9 @@ These imports are public and stable within a major version:
 - `review_sensei.AdmissionRejected`
 - `review_sensei.AdmissionCancelled`
 - `review_sensei.ReviewService`
+- `review_sensei.FindingLifecycle`
+- `review_sensei.IncrementalReviewPlan`
+- `review_sensei.ReviewContextCache`
 - `review_sensei.RunOutcome`
 - `review_sensei.ResourceBudget`
 - `review_sensei.RecoveryArtifact`
@@ -220,6 +223,12 @@ A second model's agreement is not proof and is not part of this contract.
 Production enablement still depends on the evaluation policy in issue #33 and
 the run/budget contract in issue #36. Automatic approval remains unchanged
 except that an incompletely verified `confirmed` review cannot be approved.
+
+`coverage_mode` is an additive v1 field (`full`, `incremental`, or
+`fallback-full`). `finding_lifecycles` is an optional array of
+`{fingerprint, state}` objects. `ReviewComment` may include `symbol`,
+`defect_kind`, and `evidence_id` for stable concern identity. Legacy documents
+without those keys remain valid.
 
 ### Finding classification and presentation
 

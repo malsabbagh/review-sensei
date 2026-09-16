@@ -3,11 +3,21 @@ import json
 import unittest
 
 from review_sensei import ReviewCategory, ReviewDocument, ReviewLensContext, Stage
+from review_sensei.context import (
+    FindingLifecycle,
+    IncrementalReviewPlan,
+    ReviewContextCache,
+    ReviewContextCacheKey,
+    build_review_context_cache_key,
+    finding_lifecycle_for_comment,
+    stable_finding_fingerprint,
+)
 from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
 from review_sensei.models import (
     LearningEntry,
     ProviderRequest,
     ProviderResponse,
+    ReviewComment,
     ReviewRequest,
 )
 from review_sensei.outcomes import ResourceBudget
@@ -648,3 +658,155 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(provider.attempts, 2)
         self.assertEqual(result.summary, "recovered")
         self.assertEqual(len(provider.requests), 2)
+
+    def test_full_review_emits_coverage_mode_and_finding_lifecycles(self):
+        provider = FakeProvider(
+            '{"summary":"Looks good.","comments":[{"path":"src/app.py","line":2,"body":"name it","symbol":"run","defect_kind":"naming","category":"maintainability"}]}'
+        )
+        result = ReviewService(provider).review(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                model="fake-model",
+            )
+        )
+        self.assertEqual(result.coverage_mode, "full")
+        self.assertEqual(result.finding_lifecycles[0].state, "new")
+        self.assertEqual(
+            result.finding_lifecycles[0].fingerprint,
+            finding_lifecycle_for_comment(result.comments[0]).fingerprint,
+        )
+
+    def test_incremental_skip_does_not_call_provider_or_mark_fixed(self):
+        previous_comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="name it",
+            symbol="run",
+            defect_kind="naming",
+        )
+        previous = finding_lifecycle_for_comment(previous_comment)
+        provider = FakeProvider('{"summary":"unused","comments":[]}')
+        cache = ReviewContextCache()
+        service = ReviewService(provider, cache=cache)
+        request = ReviewRequest(
+            diff=DIFF,
+            repository="owner/repo",
+            pull_request_number=3,
+            base_sha="a" * 40,
+            head_sha="c" * 40,
+            model="fake-model",
+        )
+        previous_key = build_review_context_cache_key(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                model="fake-model",
+            ),
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert previous_key is not None
+        result = service.review(
+            request,
+            incremental=IncrementalReviewPlan(
+                previous_key=previous_key,
+                previous_findings=(previous,),
+                reviewed_paths=(),
+                related_paths=("src/helper.py",),
+                context_complete=True,
+            ),
+        )
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(result.coverage_mode, "incremental")
+        self.assertEqual(result.finding_lifecycles[0].state, "still-present")
+        self.assertEqual(result.finding_lifecycles[0].fingerprint, previous.fingerprint)
+
+    def test_model_change_falls_back_to_full_review_and_invalidates_cache(self):
+        provider = FakeProvider(
+            '{"summary":"Looks good.","comments":[{"path":"src/app.py","line":2,"body":"name it","symbol":"run","defect_kind":"naming"}]}'
+        )
+        cache = ReviewContextCache()
+        service = ReviewService(provider, cache=cache)
+        previous_key = ReviewContextCacheKey(
+            "owner/repo",
+            3,
+            "a" * 40,
+            "b" * 40,
+            provider.name,
+            "old-model",
+            "default",
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+        )
+        cache.put(previous_key, (1, "incremental"))
+        result = service.review(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha="c" * 40,
+                model="fake-model",
+            ),
+            incremental=IncrementalReviewPlan(
+                previous_key=previous_key,
+                previous_findings=(
+                    FindingLifecycle(
+                        stable_finding_fingerprint(
+                            path="src/app.py", symbol="run", defect_kind="naming"
+                        ),
+                        "still-present",
+                        path="src/app.py",
+                    ),
+                ),
+                related_paths=("src/helper.py",),
+                context_complete=True,
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertTrue(provider.requests)
+        self.assertIsNone(cache.get(previous_key))
+        self.assertIn("Coverage mode: fallback-full", provider.requests[0].prompt)
+        self.assertIn("src/helper.py", provider.requests[0].prompt)
+
+    def test_incomplete_related_context_falls_back_to_full_review(self):
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        previous_key = build_review_context_cache_key(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                model="fake-model",
+            ),
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert previous_key is not None
+        result = service.review(
+            ReviewRequest(
+                diff=DIFF,
+                repository="owner/repo",
+                pull_request_number=3,
+                base_sha="a" * 40,
+                head_sha="c" * 40,
+                model="fake-model",
+            ),
+            incremental=IncrementalReviewPlan(
+                previous_key=previous_key,
+                context_complete=False,
+                related_paths=("src/helper.py",),
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertTrue(provider.requests)

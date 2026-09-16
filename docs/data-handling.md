@@ -24,7 +24,11 @@ The library does not persist review prompts or raw provider responses. The CLI
 writes only the validated result when `--output` is supplied. Repository
 learnings are ordinary files owned and retained by the repository; the core
 does not write proposals or create branches. Lens documents are read only for
-the current review and are not persisted by the core. Applications embedding
+the current review and are not persisted by the core. The optional in-memory
+`ReviewContextCache` stores only bounded metadata such as coverage mode and
+generation; it is repository/PR-scoped, integrity-checked by
+base/engine/model/profile/stage/context/learning digests, deletable via
+`invalidate`/`clear`, and never a hosted service. Applications embedding
 the library are responsible for their own logs, queues, databases, and
 retention policies.
 

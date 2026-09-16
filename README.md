@@ -238,7 +238,10 @@ tokens are allowed only in pattern fields; real Git paths may contain literal
 glob characters and are preserved without being interpreted. Git C-quoted
 paths are decoded as strict bytes before the same path checks. Exact duplicate
 comments identified by `(path, line, body)` use stable first-wins ordering;
-comments that differ in body remain distinct. Expected failures are sanitized
+comments that differ in body remain distinct. Across heads, findings also carry
+a stable fingerprint from path, symbol, defect kind, and optional evidence id
+so a moved or rephrased concern does not open a duplicate ReviewSensei thread,
+and a later pass that omits a finding is not treated as a fix. Expected failures are sanitized
 and never include a prompt, diff, provider body, credential, or supplied secret
 marker. Invalid structured provider output receives one fresh, sanitized
 correction attempt per stage; the rejected attempt is discarded completely and

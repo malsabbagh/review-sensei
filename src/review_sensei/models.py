@@ -18,6 +18,10 @@ from .validation import (
 _LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _GIT_SHA = re.compile(r"^[a-f0-9]{40}$")
+FINDING_LIFECYCLE_STATES = frozenset(
+    {"new", "still-present", "fixed", "outdated", "uncertain"}
+)
+COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full"})
 MAX_REVIEW_CONTEXT_FILES = 64
 MAX_REVIEW_DOCUMENT_BYTES = 128 * 1024
 MAX_REVIEW_CONTEXT_TOTAL_BYTES = 512 * 1024
@@ -132,6 +136,8 @@ class ReviewRequest:
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     source_context: object | None = None
     untrusted_head_sha: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -252,6 +258,14 @@ class ReviewRequest:
                 self.untrusted_head_sha
             ):
                 raise ReviewInputError("untrusted_head_sha must be a commit SHA")
+        if self.base_sha is not None and (
+            not isinstance(self.base_sha, str) or not _GIT_SHA.fullmatch(self.base_sha)
+        ):
+            raise ReviewInputError("review base_sha must be a Git commit sha")
+        if self.head_sha is not None and (
+            not isinstance(self.head_sha, str) or not _GIT_SHA.fullmatch(self.head_sha)
+        ):
+            raise ReviewInputError("review head_sha must be a Git commit sha")
 
 
 @dataclass(frozen=True)
@@ -506,6 +520,9 @@ class ReviewComment:
     severity: str | None = None
     category: str | None = None
     fix_effort: str | None = None
+    symbol: str | None = None
+    defect_kind: str | None = None
+    evidence_id: str | None = None
 
     @property
     def blocks_approval(self) -> bool:
@@ -545,6 +562,9 @@ class ReviewComment:
             ("severity", self.severity),
             ("category", self.category),
             ("fix_effort", self.fix_effort),
+            ("symbol", self.symbol),
+            ("defect_kind", self.defect_kind),
+            ("evidence_id", self.evidence_id),
         ):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ReviewInputError(f"comment {label} must be a non-empty string")
@@ -576,7 +596,34 @@ class ReviewComment:
             value["category"] = self.category
         if self.blocking is not None:
             value["blocking"] = self.blocking
+        if self.symbol is not None:
+            value["symbol"] = self.symbol
+        if self.defect_kind is not None:
+            value["defect_kind"] = self.defect_kind
+        if self.evidence_id is not None:
+            value["evidence_id"] = self.evidence_id
         return value
+
+
+@dataclass(frozen=True)
+class FindingLifecycleRecord:
+    """Publisher-facing finding identity and lifecycle state."""
+
+    fingerprint: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fingerprint, str) or not _SHA256.fullmatch(
+            self.fingerprint
+        ):
+            raise ReviewInputError(
+                "finding lifecycle fingerprint must be a SHA-256 digest"
+            )
+        if self.state not in FINDING_LIFECYCLE_STATES:
+            raise ReviewInputError("finding lifecycle state is invalid")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"fingerprint": self.fingerprint, "state": self.state}
 
 
 @dataclass(frozen=True)
@@ -595,6 +642,8 @@ class ReviewResult:
     review_status: str = "incomplete"
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     source_context_coverage: object | None = None
+    coverage_mode: str = "full"
+    finding_lifecycles: tuple[FindingLifecycleRecord, ...] = ()
     # Directly constructed results are not proof that every configured stage
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
@@ -661,6 +710,19 @@ class ReviewResult:
             "confirmed",
         }:
             raise ReviewInputError("evidence_policy must be legacy or confirmed")
+        if self.coverage_mode not in COVERAGE_MODES:
+            raise ReviewInputError(
+                "coverage_mode must be full, incremental, or fallback-full"
+            )
+        if not isinstance(self.finding_lifecycles, tuple) or any(
+            not isinstance(item, FindingLifecycleRecord)
+            for item in self.finding_lifecycles
+        ):
+            raise ReviewInputError(
+                "finding_lifecycles must be a tuple of FindingLifecycleRecord values"
+            )
+        if len(self.finding_lifecycles) > self.limits.max_comments:
+            raise ReviewInputError("review contains too many finding lifecycles")
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
@@ -739,6 +801,11 @@ class ReviewResult:
         # results serialize the policy so publishers cannot treat unverified
         # candidates as findings.
         value["evidence_policy"] = self.evidence_policy
+        if self.coverage_mode != "full":
+            value["coverage_mode"] = self.coverage_mode
+            value["finding_lifecycles"] = [
+                item.to_dict() for item in self.finding_lifecycles
+            ]
         return value
 
     @classmethod
@@ -756,6 +823,8 @@ class ReviewResult:
         # in publication/approval paths.
         review_status = value.get("review_status", "incomplete")
         evidence_policy = value.get("evidence_policy", "legacy")
+        coverage_mode = value.get("coverage_mode", "full")
+        lifecycles = value.get("finding_lifecycles", [])
         if not isinstance(summary, str):
             raise ReviewInputError("review result summary must be a string")
         if not isinstance(comments, list):
@@ -774,6 +843,10 @@ class ReviewResult:
             raise ReviewInputError(
                 "review result evidence_policy must be legacy or confirmed"
             )
+        if not isinstance(coverage_mode, str):
+            raise ReviewInputError("review result coverage_mode must be a string")
+        if not isinstance(lifecycles, list):
+            raise ReviewInputError("review result finding_lifecycles must be an array")
         comment_values: list[ReviewComment] = []
         for index, comment in enumerate(comments):
             if not isinstance(comment, Mapping):
@@ -818,6 +891,21 @@ class ReviewResult:
                     ),
                     fix_effort=fix_effort,
                     blocking=blocking,
+                    symbol=(
+                        comment.get("symbol")
+                        if isinstance(comment.get("symbol"), str)
+                        else None
+                    ),
+                    defect_kind=(
+                        comment.get("defect_kind")
+                        if isinstance(comment.get("defect_kind"), str)
+                        else None
+                    ),
+                    evidence_id=(
+                        comment.get("evidence_id")
+                        if isinstance(comment.get("evidence_id"), str)
+                        else None
+                    ),
                 )
             )
         parsed_proposals: list[LearningProposal] = []
@@ -840,6 +928,21 @@ class ReviewResult:
                 raise ReviewInputError(
                     "review result source_context is invalid"
                 ) from exc
+        parsed_lifecycles: list[FindingLifecycleRecord] = []
+        for index, item in enumerate(lifecycles):
+            if not isinstance(item, Mapping):
+                raise ReviewInputError(
+                    f"review result finding lifecycle {index} must be an object"
+                )
+            fingerprint = item.get("fingerprint")
+            state = item.get("state")
+            if not isinstance(fingerprint, str) or not isinstance(state, str):
+                raise ReviewInputError(
+                    f"review result finding lifecycle {index} has an invalid shape"
+                )
+            parsed_lifecycles.append(
+                FindingLifecycleRecord(fingerprint=fingerprint, state=state)
+            )
         return cls(
             summary=summary,
             comments=tuple(comment_values),
@@ -849,6 +952,8 @@ class ReviewResult:
             review_status=review_status,
             source_context_coverage=coverage,
             evidence_policy=evidence_policy,
+            coverage_mode=coverage_mode,
+            finding_lifecycles=tuple(parsed_lifecycles),
         )
 
 

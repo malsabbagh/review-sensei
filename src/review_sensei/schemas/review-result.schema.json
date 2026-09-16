@@ -20,7 +20,10 @@
           "severity": {"type": "string", "minLength": 1},
           "fix_effort": {"type": "string", "minLength": 1},
           "blocking": {"type": "boolean"},
-          "category": {"type": "string", "minLength": 1}
+          "category": {"type": "string", "minLength": 1},
+          "symbol": {"type": "string", "minLength": 1},
+          "defect_kind": {"type": "string", "minLength": 1},
+          "evidence_id": {"type": "string", "minLength": 1}
         }
       }
     },
@@ -32,6 +35,28 @@
     "evidence_policy": {
       "type": "string",
       "enum": ["legacy", "confirmed"]
+    },
+    "coverage_mode": {
+      "type": "string",
+      "enum": ["full", "incremental", "fallback-full"]
+    },
+    "finding_lifecycles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint", "state"],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["new", "still-present", "fixed", "outdated", "uncertain"]
+          }
+        }
+      }
     },
     "model": {
       "anyOf": [

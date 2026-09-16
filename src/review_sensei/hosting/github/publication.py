@@ -9,9 +9,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from ...context import finding_lifecycle_for_comment
 from ...diff import analyze_diff
 from ...errors import ReviewInputError
-from ...models import ReviewResult
+from ...models import ReviewComment, ReviewResult
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, prepare_publishable_review
@@ -26,6 +27,7 @@ from .http import GitHubHttp
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
+FINDING_MARKER_PREFIX_V2 = "<!-- reviewsensei:finding:v2"
 APPROVAL_MARKER_PREFIX = "<!-- reviewsensei:approval:v1"
 CHANGES_REQUESTED_MARKER_PREFIX = "<!-- reviewsensei:changes-requested:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
@@ -75,6 +77,13 @@ _FINDING_MARKER_RE = re.compile(
     r"blocking=(?P<blocking>true|false) -->"
 )
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_FINDING_MARKER_V2_RE = re.compile(
+    r"<!-- reviewsensei:finding:v2 repo=(?P<repository_id>[1-9][0-9]*) "
+    r"pr=(?P<pull_request>[1-9][0-9]*) head=(?P<head_sha>[a-f0-9]{40}) "
+    r"base=(?P<base_sha>[a-f0-9]{40}) fingerprint=(?P<fingerprint>[a-f0-9]{64}) "
+    r"state=(?P<state>new|still-present|fixed|outdated|uncertain) "
+    r"blocking=(?P<blocking>true|false) -->"
+)
 
 
 def _with_discussion_instruction(text: str) -> str:
@@ -101,7 +110,7 @@ def review_marker(
     digest = _result_digest(result)
     return (
         f"{review_identity_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha)} "
-        f"result={digest} -->"
+        f"result={digest} coverage={result.coverage_mode} -->"
     )
 
 
@@ -123,14 +132,34 @@ def finding_marker(
     base_sha: str,
     result: ReviewResult,
     blocking: bool,
+    fingerprint: str | None = None,
+    state: str | None = None,
 ) -> str:
     """Bind one inline finding's approval classification to this review head."""
 
+    if fingerprint is not None:
+        lifecycle_state = state or "new"
+        return (
+            f"{FINDING_MARKER_PREFIX_V2} repo={repository_id} pr={pull_request} "
+            f"head={head_sha} base={base_sha} fingerprint={fingerprint} "
+            f"state={lifecycle_state} blocking={'true' if blocking else 'false'} -->"
+        )
     return (
         f"{FINDING_MARKER_PREFIX} repo={repository_id} pr={pull_request} "
         f"head={head_sha} base={base_sha} result={_result_digest(result)} "
         f"blocking={'true' if blocking else 'false'} -->"
     )
+
+
+def finding_fingerprint_from_body(body: object) -> str | None:
+    """Return a stable finding fingerprint from an App-authored root, if present."""
+
+    if not isinstance(body, str):
+        return None
+    match = _FINDING_MARKER_V2_RE.search(body)
+    if match is None:
+        return None
+    return match.group("fingerprint")
 
 
 def approval_marker(
@@ -219,7 +248,9 @@ def finding_blocks_approval(
 
     if not isinstance(body, str):
         return None
-    match = _FINDING_MARKER_RE.search(body)
+    match = _FINDING_MARKER_V2_RE.search(body)
+    if match is None:
+        match = _FINDING_MARKER_RE.search(body)
     if match is not None:
         values = match.groupdict()
         if (
@@ -242,7 +273,9 @@ def finding_declares_blocking(body: object) -> bool:
 
     if not isinstance(body, str):
         return False
-    match = _FINDING_MARKER_RE.search(body)
+    match = _FINDING_MARKER_V2_RE.search(body)
+    if match is None:
+        match = _FINDING_MARKER_RE.search(body)
     if match is not None:
         return match.group("blocking") == "true"
     return body.startswith("[🚫 Blocking]")
@@ -1034,6 +1067,8 @@ class ReviewPublisher:
             return write_preflight.result
         try:
             summary = format_review_summary(result.summary, result.comments)
+            if result.coverage_mode != "full":
+                summary = f"{summary}\n\nCoverage mode: {result.coverage_mode}."
             validate_bounded_text(
                 summary,
                 result.limits.max_summary_bytes,
@@ -1047,11 +1082,16 @@ class ReviewPublisher:
                 label="published review body",
                 allow_empty=False,
             )
-            comments = []
+            lifecycle_by_fingerprint = {
+                item.fingerprint: item.state for item in result.finding_lifecycles
+            }
+            prepared_comments: list[tuple[ReviewComment, str, str]] = []
             for comment in result.comments:
+                lifecycle = finding_lifecycle_for_comment(comment)
+                state = lifecycle_by_fingerprint.get(lifecycle.fingerprint, "new")
                 comment_body = (
                     f"{_with_discussion_instruction(format_review_comment(comment))}\n\n"
-                    f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval)}"
+                    f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=lifecycle.fingerprint, state=state)}"
                 )
                 validate_bounded_text(
                     comment_body,
@@ -1059,18 +1099,31 @@ class ReviewPublisher:
                     label="published comment body",
                     allow_empty=False,
                 )
-                comments.append(
-                    {
-                        "path": comment.path,
-                        "line": comment.line,
-                        "side": "RIGHT",
-                        "body": comment_body,
-                    }
-                )
+                prepared_comments.append((comment, lifecycle.fingerprint, comment_body))
         except ReviewInputError as exc:
             raise GitHubPublicationError(
                 "formatted review exceeds the configured publication limit"
             ) from exc
+        published_fingerprints: frozenset[str] = frozenset()
+        if prepared_comments:
+            published_fingerprints = self._published_finding_fingerprints(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                app_slug=app_slug,
+            )
+        comments = []
+        for comment, fingerprint, comment_body in prepared_comments:
+            if fingerprint in published_fingerprints:
+                continue
+            comments.append(
+                {
+                    "path": comment.path,
+                    "line": comment.line,
+                    "side": "RIGHT",
+                    "body": comment_body,
+                }
+            )
         # Blocking findings request changes on this exact head. The shared
         # finalizer remains the sole APPROVE writer, and it re-asserts
         # REQUEST_CHANGES when a later execution still sees unresolved
@@ -1217,6 +1270,100 @@ class ReviewPublisher:
             app_slug=app_slug,
             enabled=auto_approve,
             known_blocking_finding=has_blocking_findings(result),
+        )
+
+    def _published_finding_fingerprints(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        app_slug: str,
+    ) -> frozenset[str]:
+        """Return App-authored finding fingerprints already on this pull request.
+
+        Human comments are ignored. Existing ReviewSensei roots keep their
+        discussion identity across heads so a moved or rephrased finding does
+        not open a duplicate thread. This lookup never resolves or edits a
+        thread.
+        """
+
+        owner, separator, name = repository.partition("/")
+        if not separator or not owner or not name:
+            raise GitHubPublicationError("review thread repository is invalid")
+        fingerprints: set[str] = set()
+        after: str | None = None
+        for _ in range(MAX_REVIEW_THREAD_PAGES):
+            try:
+                status, payload = self.http.request(
+                    "POST",
+                    "/graphql",
+                    token=token,
+                    body={
+                        "operationName": "ReviewThreads",
+                        "query": _REVIEW_THREADS_QUERY,
+                        "variables": {
+                            "owner": owner,
+                            "name": name,
+                            "number": pull_request,
+                            "after": after,
+                        },
+                    },
+                )
+            except GitHubHTTPTransientError as exc:
+                raise GitHubPublicationTransientError(
+                    "review thread lookup failed temporarily"
+                ) from exc
+            except GitHubHTTPError as exc:
+                raise GitHubPublicationError("review thread lookup failed") from exc
+            if status == 429 or status >= 500:
+                raise GitHubPublicationTransientError(
+                    "review thread lookup failed temporarily"
+                )
+            if status < 200 or status >= 300 or not isinstance(payload, dict):
+                raise GitHubPublicationError("review thread lookup failed")
+            if payload.get("errors") not in (None, []):
+                raise GitHubPublicationError("review thread lookup failed")
+            try:
+                threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+                nodes = threads["nodes"]
+                page_info = threads["pageInfo"]
+            except (KeyError, TypeError) as exc:
+                raise GitHubPublicationError(
+                    "review thread response was invalid"
+                ) from exc
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                raise GitHubPublicationError("review thread response was invalid")
+            for node in nodes:
+                if not isinstance(node, dict):
+                    raise GitHubPublicationError("review thread response was invalid")
+                comments = node.get("comments")
+                roots = comments.get("nodes") if isinstance(comments, dict) else None
+                if roots is None:
+                    continue
+                if not isinstance(roots, list):
+                    raise GitHubPublicationError("review thread response was invalid")
+                if not roots:
+                    continue
+                if not isinstance(roots[0], dict):
+                    raise GitHubPublicationError("review thread response was invalid")
+                root = roots[0]
+                author = root.get("author")
+                if not isinstance(author, dict) or author.get("login") != app_slug:
+                    continue
+                fingerprint = finding_fingerprint_from_body(root.get("body"))
+                if fingerprint is not None:
+                    fingerprints.add(fingerprint)
+            has_next = page_info.get("hasNextPage")
+            if not isinstance(has_next, bool):
+                raise GitHubPublicationError("review thread response was invalid")
+            if not has_next:
+                return frozenset(fingerprints)
+            after = page_info.get("endCursor")
+            if not isinstance(after, str) or not after:
+                raise GitHubPublicationError("review thread response was invalid")
+        raise GitHubPublicationError(
+            "review thread pagination exceeded configured limit"
         )
 
     def _validate_locations(self, result: ReviewResult, diff: str) -> None:

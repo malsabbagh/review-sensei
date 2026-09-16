@@ -10,7 +10,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from .errors import ContextLoadError, ReviewInputError
 from .learnings import LearningStore
@@ -19,10 +19,12 @@ from .models import (
     MAX_REVIEW_CONTEXT_TOTAL_BYTES,
     MAX_REVIEW_DOCUMENT_BYTES,
     LearningEntry,
+    ReviewComment,
     ReviewDocument,
     ReviewLensContext,
+    ReviewRequest,
 )
-from .stages import ContextDocumentSource, ReviewCategory
+from .stages import ContextDocumentSource, ReviewCategory, Stage
 from .validation import validate_bounded_text, validate_repository_path
 
 MAX_CONTEXT_FILES = MAX_REVIEW_CONTEXT_FILES
@@ -1673,17 +1675,52 @@ def stable_finding_fingerprint(
     return _finding_identity_digest(parts)
 
 
+FINDING_LIFECYCLE_STATES = frozenset(
+    {"new", "still-present", "fixed", "outdated", "uncertain"}
+)
+COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full"})
+_CACHE_COMPATIBILITY_FIELDS = (
+    "repository",
+    "pull_request",
+    "base_sha",
+    "engine",
+    "model",
+    "profile",
+    "stage_digest",
+    "context_digest",
+    "learning_digest",
+)
+
+
 @dataclass(frozen=True)
 class FindingLifecycle:
     fingerprint: str
     state: str
     evidence: str | None = None
+    concern: str | None = None
+    path: str | None = None
+    generation: int = 0
 
     def __post_init__(self) -> None:
         if not _SHA256.fullmatch(self.fingerprint):
             raise ContextLoadError("finding lifecycle fingerprint is invalid")
-        if self.state not in {"new", "still-present", "fixed", "outdated", "uncertain"}:
+        if self.state not in FINDING_LIFECYCLE_STATES:
             raise ContextLoadError("finding lifecycle state is invalid")
+        if self.concern is not None and (
+            not isinstance(self.concern, str) or not _SHA256.fullmatch(self.concern)
+        ):
+            raise ContextLoadError("finding lifecycle concern is invalid")
+        if self.path is not None:
+            try:
+                validate_repository_path(self.path, label="finding lifecycle path")
+            except ReviewInputError as exc:
+                raise ContextLoadError("finding lifecycle path is invalid") from exc
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 0
+        ):
+            raise ContextLoadError("finding lifecycle generation is invalid")
 
 
 def reconcile_finding_lifecycle(
@@ -1700,21 +1737,237 @@ def reconcile_finding_lifecycle(
     if not _SHA256.fullmatch(current_fingerprint):
         raise ContextLoadError("current finding fingerprint is invalid")
     if previous is None:
-        return FindingLifecycle(current_fingerprint, "new")
+        return FindingLifecycle(current_fingerprint, "new", concern=current_concern)
     if previous.fingerprint == current_fingerprint:
-        return FindingLifecycle(current_fingerprint, "still-present")
+        return FindingLifecycle(
+            current_fingerprint,
+            "still-present",
+            previous.evidence,
+            previous.concern or current_concern,
+            previous.path,
+            previous.generation,
+        )
     if previous.state in {"fixed", "outdated"}:
         return previous
     if not review_complete:
-        return FindingLifecycle(previous.fingerprint, "uncertain", previous.evidence)
+        return FindingLifecycle(
+            previous.fingerprint,
+            "uncertain",
+            previous.evidence,
+            previous.concern,
+            previous.path,
+            previous.generation,
+        )
     if (
         evidence_confirmed
         and previous_concern is not None
         and current_concern is not None
         and previous_concern == current_concern
     ):
-        return FindingLifecycle(previous.fingerprint, "fixed", previous.evidence)
-    return FindingLifecycle(previous.fingerprint, "outdated", previous.evidence)
+        return FindingLifecycle(
+            previous.fingerprint,
+            "fixed",
+            previous.evidence,
+            previous.concern,
+            previous.path,
+            previous.generation,
+        )
+    return FindingLifecycle(
+        previous.fingerprint,
+        "outdated",
+        previous.evidence,
+        previous.concern,
+        previous.path,
+        previous.generation,
+    )
+
+
+def finding_lifecycle_for_comment(
+    comment: ReviewComment, *, generation: int = 0
+) -> FindingLifecycle:
+    """Build a new lifecycle record from a validated inline comment."""
+
+    fingerprint = stable_finding_fingerprint(
+        evidence_id=comment.evidence_id,
+        path=comment.path,
+        symbol=comment.symbol,
+        defect_kind=comment.defect_kind or comment.category,
+    )
+    concern = stable_concern_identity(
+        evidence_id=comment.evidence_id,
+        path=comment.path,
+        symbol=comment.symbol,
+        defect_kind=comment.defect_kind or comment.category,
+    )
+    return FindingLifecycle(
+        fingerprint,
+        "new",
+        concern=concern,
+        path=comment.path,
+        generation=generation,
+    )
+
+
+def reconcile_finding_set(
+    previous: Sequence[FindingLifecycle],
+    current: Sequence[FindingLifecycle],
+    *,
+    review_complete: bool,
+    reviewed_paths: Iterable[str] | None = None,
+    evidence_confirmed_concerns: Iterable[str] = (),
+    generation: int = 0,
+) -> tuple[FindingLifecycle, ...]:
+    """Reconcile a finding set without treating omission as proof of a fix.
+
+    Concurrent older generations cannot replace newer lifecycle state. Findings
+    on paths this pass did not review stay ``still-present``. Findings a later
+    complete pass simply omitted become ``uncertain`` unless independent
+    evidence confirms the same concern is gone.
+    """
+
+    previous_records = tuple(previous)
+    current_records = tuple(current)
+    if any(item.generation > generation for item in previous_records):
+        return previous_records
+
+    confirmed = {
+        concern
+        for concern in evidence_confirmed_concerns
+        if isinstance(concern, str) and _SHA256.fullmatch(concern)
+    }
+    reviewed: set[str] | None = None
+    if reviewed_paths is not None:
+        reviewed = {path for path in reviewed_paths if isinstance(path, str) and path}
+
+    previous_by_fingerprint = {item.fingerprint: item for item in previous_records}
+    previous_by_concern = {
+        item.concern: item for item in previous_records if item.concern is not None
+    }
+    matched: set[str] = set()
+    reconciled: list[FindingLifecycle] = []
+    seen_fingerprints: set[str] = set()
+
+    for item in current_records:
+        prior = previous_by_fingerprint.get(item.fingerprint)
+        if prior is None and item.concern is not None:
+            prior = previous_by_concern.get(item.concern)
+        result = reconcile_finding_lifecycle(
+            prior,
+            item.fingerprint,
+            current_concern=item.concern,
+            previous_concern=None if prior is None else prior.concern,
+            evidence_confirmed=bool(item.concern and item.concern in confirmed),
+            review_complete=review_complete,
+        )
+        reconciled.append(
+            FindingLifecycle(
+                result.fingerprint,
+                result.state,
+                result.evidence if result.evidence is not None else item.evidence,
+                item.concern
+                if result.fingerprint == item.fingerprint
+                else result.concern,
+                item.path if result.fingerprint == item.fingerprint else result.path,
+                generation,
+            )
+        )
+        if prior is not None:
+            matched.add(prior.fingerprint)
+        seen_fingerprints.add(result.fingerprint)
+
+    for prior in previous_records:
+        if prior.fingerprint in matched or prior.fingerprint in seen_fingerprints:
+            continue
+        if prior.state in {"fixed", "outdated"}:
+            reconciled.append(prior)
+            continue
+        path_reviewed = reviewed is None or (
+            prior.path is not None and prior.path in reviewed
+        )
+        if not path_reviewed:
+            reconciled.append(
+                FindingLifecycle(
+                    prior.fingerprint,
+                    "still-present",
+                    prior.evidence,
+                    prior.concern,
+                    prior.path,
+                    generation,
+                )
+            )
+            continue
+        if review_complete and prior.concern is not None and prior.concern in confirmed:
+            state = "fixed"
+        else:
+            state = "uncertain"
+        reconciled.append(
+            FindingLifecycle(
+                prior.fingerprint,
+                state,
+                prior.evidence,
+                prior.concern,
+                prior.path,
+                generation,
+            )
+        )
+    return tuple(reconciled)
+
+
+@dataclass(frozen=True)
+class IncrementalReviewPlan:
+    """Caller-supplied prior review identity for an optional incremental pass."""
+
+    previous_key: ReviewContextCacheKey
+    previous_findings: tuple[FindingLifecycle, ...] = ()
+    reviewed_paths: tuple[str, ...] | None = None
+    related_paths: tuple[str, ...] = ()
+    context_complete: bool = True
+    generation: int = 0
+    evidence_confirmed_concerns: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.previous_key, ReviewContextCacheKey):
+            raise ContextLoadError("incremental review previous_key is invalid")
+        if not isinstance(self.previous_findings, tuple) or any(
+            not isinstance(item, FindingLifecycle) for item in self.previous_findings
+        ):
+            raise ContextLoadError("incremental review previous findings are invalid")
+        if len(self.previous_findings) > MAX_CACHE_METADATA_ITEMS:
+            raise ContextLoadError("incremental review previous findings exceed bound")
+        if self.reviewed_paths is not None:
+            if not isinstance(self.reviewed_paths, tuple) or any(
+                not isinstance(path, str) or not path for path in self.reviewed_paths
+            ):
+                raise ContextLoadError("incremental reviewed_paths are invalid")
+            for path in self.reviewed_paths:
+                try:
+                    validate_repository_path(path, label="incremental reviewed path")
+                except ReviewInputError as exc:
+                    raise ContextLoadError(
+                        "incremental reviewed path is invalid"
+                    ) from exc
+        if not isinstance(self.related_paths, tuple) or any(
+            not isinstance(path, str) or not path for path in self.related_paths
+        ):
+            raise ContextLoadError("incremental related_paths are invalid")
+        for path in self.related_paths:
+            try:
+                validate_repository_path(path, label="incremental related path")
+            except ReviewInputError as exc:
+                raise ContextLoadError("incremental related path is invalid") from exc
+        if not isinstance(self.context_complete, bool):
+            raise ContextLoadError("incremental context_complete must be a boolean")
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 0
+        ):
+            raise ContextLoadError("incremental generation is invalid")
+        if not isinstance(self.evidence_confirmed_concerns, tuple) or any(
+            not isinstance(item, str) or not _SHA256.fullmatch(item)
+            for item in self.evidence_confirmed_concerns
+        ):
+            raise ContextLoadError("incremental evidence concerns are invalid")
 
 
 @dataclass(frozen=True)
@@ -1773,6 +2026,88 @@ class ReviewContextCacheKey:
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def cache_key_is_compatible(
+    current: ReviewContextCacheKey, previous: ReviewContextCacheKey
+) -> bool:
+    """Return whether cached analysis can be reused across a new head SHA."""
+
+    return all(
+        getattr(current, field) == getattr(previous, field)
+        for field in _CACHE_COMPATIBILITY_FIELDS
+    )
+
+
+def _configuration_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def stage_configuration_digest(stages: Sequence[Stage]) -> str:
+    return _configuration_digest(
+        [
+            {
+                "name": stage.name,
+                "outputs": list(stage.outputs),
+                "categories": [category.id for category in stage.categories],
+                "prompt_template": stage.prompt_template,
+            }
+            for stage in stages
+        ]
+    )
+
+
+def learning_configuration_digest(learnings: Sequence[LearningEntry]) -> str:
+    return _configuration_digest([learning.to_dict() for learning in learnings])
+
+
+def context_configuration_digest(lens_contexts: Sequence[ReviewLensContext]) -> str:
+    return _configuration_digest(
+        [
+            {
+                "category_id": context.category_id,
+                "documents": [
+                    {"path": document.path, "sha256": document.sha256}
+                    for document in context.documents
+                ],
+                "learnings": [learning.id for learning in context.learnings],
+            }
+            for context in lens_contexts
+        ]
+    )
+
+
+def build_review_context_cache_key(
+    request: ReviewRequest,
+    *,
+    provider_name: str,
+    stages: Sequence[Stage],
+    profile: str = "default",
+) -> ReviewContextCacheKey | None:
+    """Bind optional incremental cache state to snapshot and configuration identity."""
+
+    if (
+        not request.repository
+        or request.pull_request_number is None
+        or request.base_sha is None
+        or request.head_sha is None
+    ):
+        return None
+    model = request.model or "default"
+    return ReviewContextCacheKey(
+        request.repository,
+        request.pull_request_number,
+        request.base_sha,
+        request.head_sha,
+        provider_name,
+        model,
+        profile,
+        stage_configuration_digest(stages),
+        context_configuration_digest(request.lens_contexts),
+        learning_configuration_digest(request.learnings),
+    )
+
+
 class ReviewContextCache:
     """Bounded in-memory cache for metadata only (never raw prompts/responses)."""
 
@@ -1781,6 +2116,7 @@ class ReviewContextCache:
             raise ContextLoadError("context cache max_entries must be positive")
         self._max_entries = max_entries
         self._values: OrderedDict[str, tuple[object, ...]] = OrderedDict()
+        self._keys: dict[str, ReviewContextCacheKey] = {}
         self._lock = threading.RLock()
 
     def get(self, key: ReviewContextCacheKey) -> tuple[object, ...] | None:
@@ -1829,17 +2165,67 @@ class ReviewContextCache:
         with self._lock:
             digest = key.digest()
             self._values[digest] = value
+            self._keys[digest] = key
             self._values.move_to_end(digest)
             while len(self._values) > self._max_entries:
-                self._values.popitem(last=False)
+                stale_digest, _stale = self._values.popitem(last=False)
+                self._keys.pop(stale_digest, None)
 
     def invalidate(self, key: ReviewContextCacheKey) -> None:
         with self._lock:
-            self._values.pop(key.digest(), None)
+            digest = key.digest()
+            self._values.pop(digest, None)
+            self._keys.pop(digest, None)
+
+    def invalidate_incompatible(self, current: ReviewContextCacheKey) -> None:
+        """Drop same-PR entries bound to a stale base, model, or configuration."""
+
+        with self._lock:
+            stale = [
+                digest
+                for digest, key in self._keys.items()
+                if key.repository == current.repository
+                and key.pull_request == current.pull_request
+                and not cache_key_is_compatible(current, key)
+            ]
+            for digest in stale:
+                self._values.pop(digest, None)
+                self._keys.pop(digest, None)
+
+    def put_if_newer(
+        self,
+        key: ReviewContextCacheKey,
+        metadata: Iterable[object],
+        *,
+        generation: int,
+    ) -> bool:
+        """Store metadata unless a newer generation already occupies this PR."""
+
+        value = self._bounded_cache_metadata(metadata)
+        with self._lock:
+            for digest, existing_key in self._keys.items():
+                existing = self._values.get(digest)
+                if (
+                    existing_key.repository == key.repository
+                    and existing_key.pull_request == key.pull_request
+                    and existing
+                    and isinstance(existing[0], int)
+                    and existing[0] > generation
+                ):
+                    return False
+            digest = key.digest()
+            self._values[digest] = value
+            self._keys[digest] = key
+            self._values.move_to_end(digest)
+            while len(self._values) > self._max_entries:
+                stale_digest, _stale = self._values.popitem(last=False)
+                self._keys.pop(stale_digest, None)
+        return True
 
     def clear(self) -> None:
         with self._lock:
             self._values.clear()
+            self._keys.clear()
 
 
 def build_review_context_selection(

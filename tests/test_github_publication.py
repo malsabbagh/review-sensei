@@ -13,6 +13,7 @@ from review_sensei.hosting.github.publication import (
     changes_requested_marker,
     finding_blocks_approval,
     finding_declares_blocking,
+    finding_fingerprint_from_body,
     finding_marker,
     review_marker,
 )
@@ -639,6 +640,7 @@ class ReviewPublisherTests(unittest.TestCase):
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -656,9 +658,11 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.review_id, 5)
-        post = calls[3]
+        post = calls[4]
         body = __import__("json").loads(post[2].decode("utf-8"))
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
+        self.assertIn("coverage=full", body["body"])
+        self.assertIn("<!-- reviewsensei:finding:v2", body["comments"][0]["body"])
         self.assertIn(
             "To discuss this finding, reply with @sensei followed by your question.",
             body["body"],
@@ -671,12 +675,69 @@ class ReviewPublisherTests(unittest.TestCase):
             body["comments"][0]["body"],
         )
 
+    def test_existing_fingerprint_is_not_republished_across_heads(self):
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha="c" * 40,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {"login": "reviewsensei[bot]"},
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "human discussion",
+                                        "author": {"login": "alice"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
+        self.assertTrue(finding_declares_blocking(existing))
+
     def test_publishes_classification_metadata_without_changing_identity_fields(self):
         head = "b" * 40
         responses = [
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -693,7 +754,7 @@ class ReviewPublisherTests(unittest.TestCase):
             app_slug="review-sensei[bot]",
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertIn("Review classification:", body["body"])
         self.assertIn(
             "[🚫 Blocking] [🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
@@ -710,6 +771,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
@@ -733,7 +795,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[8][2].decode("utf-8"))
+        body = __import__("json").loads(calls[9][2].decode("utf-8"))
         self.assertEqual(body["event"], "APPROVE")
         self.assertNotIn("comments", body)
 
@@ -1082,17 +1144,22 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
             ],
             auto_approve=False,
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertNotEqual(body["event"], "REQUEST_CHANGES")
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(
-            sum(1 for method, url, _ in calls if method == "POST"),
+            sum(
+                1
+                for method, url, _ in calls
+                if method == "POST" and url.endswith("/pulls/2/reviews")
+            ),
             1,
         )
 
@@ -1111,6 +1178,7 @@ class ReviewPublisherTests(unittest.TestCase):
                     [published_review(marker=prior, head_sha=head, state="APPROVED")]
                 ),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
             ]
         )
@@ -1819,6 +1887,7 @@ class ReviewPublisherTests(unittest.TestCase):
                             json_response(pr_payload(head_sha=head)),
                             json_response([]),
                             json_response(pr_payload(head_sha=head)),
+                            graphql_review_threads_response(),
                             json_response({}, status),
                         ]
                     )
@@ -1830,6 +1899,7 @@ class ReviewPublisherTests(unittest.TestCase):
                             json_response(pr_payload(head_sha=head)),
                             json_response([]),
                             json_response(pr_payload(head_sha=head)),
+                            graphql_review_threads_response(),
                             json_response({}, status),
                             json_response([]),
                         ]
@@ -1841,6 +1911,7 @@ class ReviewPublisherTests(unittest.TestCase):
                         json_response(pr_payload(head_sha=head)),
                         json_response([]),
                         json_response(pr_payload(head_sha=head)),
+                        graphql_review_threads_response(),
                         response,
                     ]
                 )
@@ -1886,6 +1957,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha="b" * 40)),
                 json_response([]),
                 json_response(pr_payload(head_sha="b" * 40)),
+                graphql_review_threads_response(),
                 json_response({"id": 9}, 200),
             ],
             result=unverified,
@@ -1896,7 +1968,7 @@ class ReviewPublisherTests(unittest.TestCase):
             auto_approve=False,
         )
         self.assertEqual(outcome.status, "published")
-        body = json.loads(calls[3][2].decode("utf-8"))
+        body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("Added line is unbounded.", body["comments"][0]["body"])
         self.assertNotIn("unverified finding", body["comments"][0]["body"])

@@ -510,6 +510,29 @@ class ModelTests(unittest.TestCase):
         )
         self.assertEqual(result.comments, (first, distinct))
 
+    def test_result_emits_coverage_mode_and_optional_identity_fields(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            symbol="run",
+            defect_kind="race",
+            evidence_id="abc",
+        )
+        result = ReviewResult(
+            summary="ok",
+            comments=(comment,),
+            provider="fake",
+            coverage_mode="incremental",
+            finding_lifecycles=(),
+        )
+        payload = result.to_dict()
+        self.assertEqual(payload["coverage_mode"], "incremental")
+        self.assertEqual(payload["comments"][0]["symbol"], "run")
+        restored = ReviewResult.from_dict(payload)
+        self.assertEqual(restored.comments[0].defect_kind, "race")
+        self.assertEqual(restored.coverage_mode, "incremental")
+
     def test_review_result_preserves_legacy_positional_status_before_limits(self):
         limits = ReviewLimits(max_summary_bytes=16)
         result = ReviewResult("ok", (), "fake", None, (), "complete", limits)
