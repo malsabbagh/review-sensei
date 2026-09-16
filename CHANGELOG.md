@@ -74,6 +74,13 @@
   `evaluate_fixture`, and the comparison; a renamed fixture quality key now
   fails the comparison loudly; and the feedback text output reports whether
   the absence list was enumerated.
+- Added a reproducible source-distribution test contract and a downstream
+  consumer harness (issue #34). Dist-safe tests run after `pip install
+  dist/*.whl` from an unpacked sdist suite that cannot import checkout `src/`;
+  checkout-only tests stay in the compatibility/quality lane. An operator-gated
+  `downstream-canary` workflow placeholder documents live-canary steps without
+  running them in required CI.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

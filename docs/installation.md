@@ -84,6 +84,38 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
+## Distribution test contract
+
+The package job (and the local commands below) prove that tests load only
+packaged or generated assets. After `python -m build --outdir dist`, record
+`sha256sum dist/*.tar.gz dist/*.whl`, install **only** the wheel into a clean
+virtualenv, extract the sdist, and run the dist-safe suite from that unpacked
+`tests/` tree with `REVIEWSENSEI_DIST_SAFE_LANE=1` and
+`REVIEWSENSEI_CHECKOUT_ROOT` pointing at the developer checkout. If
+`review_sensei.__file__` resolves under that checkout's `src/`, the suite
+fails.
+
+```bash
+python -m build --outdir dist
+sha256sum dist/*.tar.gz dist/*.whl
+python -m venv /tmp/review-sensei-wheel-venv
+/tmp/review-sensei-wheel-venv/bin/python -m pip install dist/*.whl
+sdist_root=/tmp/review-sensei-sdist
+rm -rf "$sdist_root"
+mkdir -p "$sdist_root"
+tar -xzf dist/*.tar.gz -C "$sdist_root"
+suite="$(printf '%s\n' "$sdist_root"/review_sensei-*/tests | head -n 1)"
+export REVIEWSENSEI_CHECKOUT_ROOT="$PWD"
+export REVIEWSENSEI_DIST_SAFE_LANE=1
+/tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/dist_safe" -v
+/tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/downstream" -v
+```
+
+Checkout-only tests (`scripts/`, `.github/`, `packages/`, `deploy/`, and the
+broader `tests/test_*.py` modules) stay in the developer checkout lane:
+`python -m unittest discover -s tests -v`. The live downstream canary workflow
+is operator-gated and is not a required CI job.
+
 ## Configuration
 
 Copy the documented variables from [`.env.example`](../.env.example) into the

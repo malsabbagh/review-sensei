@@ -142,17 +142,28 @@ jobs:
         run: |
           tar -tzf dist/*.tar.gz | grep -E 'src/review_sensei/schemas/(review-category|review-stage|learning-entry|evaluation-corpus|evaluation-report|promotion-record)\.schema\.json$'
           tar -tzf dist/*.tar.gz | grep -E 'evaluation/v1/corpus\.json$'
+          tar -tzf dist/*.tar.gz | grep -E 'tests/dist_safe/test_distribution_contract\.py$'
+          tar -tzf dist/*.tar.gz | grep -E 'tests/downstream/test_acceptance\.py$'
+          tar -tzf dist/*.tar.gz | grep -E 'tests/fixtures/distribution-contract\.json$'
+          tar -tzf dist/*.tar.gz | grep -E 'tests/fake_github_http\.py$'
+          tar -tzf dist/*.tar.gz | grep -E 'tests/packaging_guard\.py$'
+          if tar -tzf dist/*.tar.gz | grep -E 'tests/test_ci_policy\.py$'; then
+            echo "checkout-only tests must not be packaged in the sdist" >&2
+            exit 1
+          fi
+      - name: Record distribution digests
+        shell: bash
+        run: sha256sum dist/*.tar.gz dist/*.whl | tee dist/SHA256SUMS
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-distributions
           path: dist/*
-      - name: Verify wheel outside checkout
+      - name: Verify wheel and dist-safe suite outside checkout
         shell: bash
         run: |
           wheel_venv="$RUNNER_TEMP/review-sensei-wheel-venv"
           python -m venv "$wheel_venv"
-          "$wheel_venv/bin/python" -m pip install -r "$GITHUB_WORKSPACE/requirements/ci.txt"
           "$wheel_venv/bin/python" -m pip install dist/*.whl
           cd "$RUNNER_TEMP"
           "$wheel_venv/bin/python" - <<'PY'
@@ -176,7 +187,18 @@ jobs:
               assert importlib.resources.files("review_sensei").joinpath("schemas", name).is_file()
           PY
           "$wheel_venv/bin/python" -I -m review_sensei --help
-          "$wheel_venv/bin/python" -I -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
+          sdist_root="$RUNNER_TEMP/review-sensei-sdist"
+          mkdir -p "$sdist_root"
+          tar -xzf "$GITHUB_WORKSPACE"/dist/*.tar.gz -C "$sdist_root"
+          suite="$(printf '%s\n' "$sdist_root"/review_sensei-*/tests | head -n 1)"
+          test -d "$suite/dist_safe"
+          test -d "$suite/downstream"
+          test -f "$suite/fake_github_http.py"
+          test ! -e "$suite/test_ci_policy.py"
+          export REVIEWSENSEI_CHECKOUT_ROOT="$GITHUB_WORKSPACE"
+          export REVIEWSENSEI_DIST_SAFE_LANE=1
+          "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/dist_safe" -v
+          "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
           "$wheel_venv/bin/python" -m pip check
 
   npm:

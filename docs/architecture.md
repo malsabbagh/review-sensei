@@ -79,11 +79,15 @@ The repository quality boundary is deterministic and provider-independent. The
 `quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
 coverage; the `schemas` job validates the three packaged Draft 2020-12
 contracts and immutable GitHub Action pins; the `package` job builds both
-distributions and verifies a wheel from outside the checkout; CodeQL analyzes
-Python and JavaScript/TypeScript and its deterministic SARIF findings gate is
-the enforcement surface. All workflow permissions default to `contents: read`,
-and the `required-checks` aggregate publishes the stable
-`Required checks` status used by branch protection.
+distributions, records SHA-256 digests, and runs the packaged dist-safe and
+downstream suites from an unpacked sdist after installing only the wheel
+outside the checkout; CodeQL analyzes Python and JavaScript/TypeScript and its
+deterministic SARIF findings gate is the enforcement surface. Checkout-only
+tests that need `scripts/`, `.github/`, `packages/`, or `deploy/` remain in the
+compatibility and quality jobs. All workflow permissions default to
+`contents: read`, and the `required-checks` aggregate publishes the stable
+`Required checks` status used by branch protection. The optional downstream
+canary workflow is operator-gated and is excluded from that aggregate.
 
 The public JSON schemas are structural contracts only. They reject malformed
 shapes and unknown fields, but runtime loaders (`ReviewCategory`, `Stage`, and

@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "issue": 34,
+  "archive_identification": {
+    "algorithm": "sha256",
+    "command": "sha256sum dist/*.tar.gz dist/*.whl",
+    "sdist_glob": "dist/review_sensei-*.tar.gz",
+    "wheel_glob": "dist/review_sensei-*.whl"
+  },
+  "supported_command": {
+    "build": "python -m build --outdir dist",
+    "record_digests": "sha256sum dist/*.tar.gz dist/*.whl",
+    "install_wheel": "python -m pip install dist/*.whl",
+    "extract_sdist_tests": "tar -xzf dist/*.tar.gz",
+    "run_dist_safe": "python -I -m unittest discover -s tests/dist_safe -v",
+    "run_downstream": "python -I -m unittest discover -s tests/downstream -v"
+  },
+  "lanes": {
+    "dist_safe": {
+      "packaged": true,
+      "discover": ["tests/dist_safe", "tests/downstream"],
+      "helpers": [
+        "tests/packaging_guard.py",
+        "tests/fake_github_http.py",
+        "tests/fixtures/distribution-contract.json"
+      ],
+      "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
+    },
+    "checkout_only": {
+      "packaged": false,
+      "discover": ["tests"],
+      "description": "Developer checkout lane. Requires scripts/, .github/, packages/, deploy/, and checkout-only fixtures. Compatibility and quality CI continue to run this broader suite.",
+      "modules": [
+        "tests/test_ci_policy.py",
+        "tests/test_cloudflare_package.py",
+        "tests/test_github_conversation.py",
+        "tests/test_github_publication.py",
+        "tests/test_github_setup.py",
+        "tests/test_npm_distribution.py",
+        "tests/test_publication.py",
+        "tests/test_release.py",
+        "tests/test_security_gates.py"
+      ]
+    }
+  },
+  "import_guard": {
+    "environment": ["REVIEWSENSEI_CHECKOUT_ROOT", "REVIEWSENSEI_DIST_SAFE_LANE"],
+    "rule": "If review_sensei.__file__ is under $REVIEWSENSEI_CHECKOUT_ROOT/src, the dist-safe suite fails."
+  },
+  "reproduction": {
+    "baseline_commit": "3f9ca4ecdd49a398645561daf403f0569b07ddcc",
+    "command": "python -m build --outdir dist && python -m venv /tmp/rs-sdist-venv && /tmp/rs-sdist-venv/bin/python -m pip install dist/review_sensei-0.1.1.tar.gz && tar -xzf dist/review_sensei-0.1.1.tar.gz && cd review_sensei-0.1.1 && python -I -m unittest discover -s tests -v",
+    "sdist_sha256": "36afc36f6fdf5a0df9e9826cfbc2e8738fe6a6639f53f36cc1dad051cfcdda92",
+    "wheel_sha256": "a7f38329842fc46f0715ade88d3184beb50e14248aca09601fe0baf13f1fa66a",
+    "result": "Loader and fixture errors in seven broader modules were caused by unavailable helpers/fixtures (scripts/, deploy/, tests/fake_github_http.py, tests/fixtures), not engine assertion failures.",
+    "failed_modules": [
+      "test_ci_policy",
+      "test_cloudflare_package",
+      "test_github_conversation",
+      "test_github_publication",
+      "test_npm_distribution",
+      "test_publication",
+      "test_release"
+    ]
+  },
+  "canary": {
+    "workflow": ".github/workflows/downstream-canary.yml",
+    "environment": "downstream-canary",
+    "ci": false,
+    "secrets": false
+  }
+}
