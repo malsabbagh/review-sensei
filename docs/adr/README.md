@@ -47,7 +47,7 @@ Process: `docs/process/adr-process.md`
 | [0036](0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | #41 | Advisory stale/conflict signals; feedback is not trusted review context |
 | [0037](0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40 | Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited v4 promotion/rollback |
-| [0035](0035-verify-candidate-findings-before-publication.md) | Proposed | Verify candidate findings against snapshot evidence before publication | #37 | Legacy single-pass remains default; confirmed policy publishes only deterministic evidence-backed findings. |
+| [0039](0039-verify-candidate-findings-before-publication.md) | Proposed | Verify candidate findings against snapshot evidence before publication | #37 | Legacy single-pass remains default; confirmed policy publishes only deterministic evidence-backed findings. |
 
 ## Policy
 

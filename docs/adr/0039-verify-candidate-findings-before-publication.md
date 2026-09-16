@@ -1,4 +1,4 @@
-# ADR 0035 - Verify candidate findings before publication
+# ADR 0039 - Verify candidate findings before publication
 
 Status: Proposed
 Date: 2026-09-15
