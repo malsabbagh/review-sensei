@@ -854,6 +854,10 @@ jobs:
             echo "::error::pull request number is unavailable"
             exit 1
           fi
+          if [[ ! "${REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::repository identity is invalid"
+            exit 1
+          fi
           pull_json="$RUNNER_TEMP/review-sensei-pull.json"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             if [[ -z "${PULL_REQUEST_JSON}" ]]; then

@@ -174,6 +174,15 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("github.event.comment.pull_request_url", text)
+        repository_gate = text.find(
+            '[[ ! "${REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]'
+        )
+        pull_fetch = text.find(
+            'gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}"'
+        )
+        self.assertNotEqual(repository_gate, -1)
+        self.assertLess(repository_gate, pull_fetch)
+        self.assertIn("::error::repository identity is invalid", text)
         self.assertIn(
             "github.event_name == 'workflow_dispatch' ||",
             text,
