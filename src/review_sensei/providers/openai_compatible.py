@@ -16,7 +16,6 @@ import ssl
 import stat
 import unicodedata
 from collections.abc import Callable
-from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -34,7 +33,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body
+from .transport import read_bounded_body, urllib_error_is_transient
 
 # Provider credentials are untrusted configuration input.  Keep a generous
 # but finite ceiling so a malformed environment value cannot become an
@@ -377,22 +376,20 @@ class OpenAICompatibleProvider:
                 transient=transient,
             ) from exc
         except (TimeoutError, URLError) as exc:
+            if isinstance(exc, HTTPError):
+                transient = exc.code == 429 or 500 <= exc.code < 600
+                raise ProviderError(
+                    f"OpenAI-compatible request failed with HTTP {exc.code}",
+                    transient=transient,
+                ) from exc
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
                 ) from exc
-            # urllib reports DNS, connection, and proxy failures as URLError.
-            # They are retryable transport failures even when they are not
-            # phrased as a timeout; do not leak the underlying reason.
+            transient = isinstance(exc, URLError) and urllib_error_is_transient(exc)
             raise ProviderError(
-                "OpenAI-compatible request failed", transient=True
+                "OpenAI-compatible request failed", transient=transient
             ) from exc
-        except HTTPException as exc:
-            if "timed out" in str(exc).lower():
-                raise ProviderError(
-                    "OpenAI-compatible request timed out", transient=True
-                ) from exc
-            raise ProviderError("OpenAI-compatible request failed") from exc
         except TypeError as exc:
             # Context-manager protocol and builtin opener TypeErrors only.
             # Custom opener TypeErrors are normalized in ``_call_custom_opener``;
@@ -404,6 +401,10 @@ class OpenAICompatibleProvider:
             if "timed out" in str(exc).lower():
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
+                ) from exc
+            if isinstance(exc, ConnectionError):
+                raise ProviderError(
+                    "OpenAI-compatible request failed", transient=True
                 ) from exc
             raise ProviderError("OpenAI-compatible request failed") from exc
         try:
@@ -440,6 +441,33 @@ class OpenAICompatibleProvider:
             raise ProviderError(
                 "OpenAI-compatible review response exceeded the configured size limit"
             ) from exc
+        revision = None
+        if isinstance(data, dict):
+            fingerprint = data.get("system_fingerprint")
+            observed_model = data.get("model")
+            candidate = (
+                fingerprint
+                if isinstance(fingerprint, str) and fingerprint.strip()
+                else observed_model
+            )
+            if isinstance(candidate, str) and candidate.strip():
+                try:
+                    validate_bounded_text(
+                        candidate.strip(),
+                        request.limits.max_revision_bytes,
+                        label="OpenAI-compatible observed revision",
+                        allow_empty=False,
+                    )
+                except ReviewInputError as exc:
+                    raise ProviderError(
+                        "OpenAI-compatible observed revision exceeded the "
+                        "configured size limit"
+                    ) from exc
+                revision = candidate.strip()
         return ProviderResponse(
-            text=text, provider=self.name, model=model, limits=request.limits
+            text=text,
+            provider=self.name,
+            model=model,
+            limits=request.limits,
+            revision=revision,
         )

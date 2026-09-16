@@ -21,7 +21,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body
+from .transport import read_bounded_body, urllib_error_is_transient
 
 MAX_API_KEY_BYTES = 4_096
 
@@ -186,7 +186,11 @@ class OllamaProvider:
                     label="Ollama response",
                 )
         except HTTPError as exc:
-            raise ProviderError(f"Ollama request failed with HTTP {exc.code}") from exc
+            transient = exc.code == 429 or 500 <= exc.code < 600
+            raise ProviderError(
+                f"Ollama request failed with HTTP {exc.code}",
+                transient=transient,
+            ) from exc
         except ProviderError as exc:
             # Keep errors from an injected transport from reflecting a bearer
             # token supplied by the caller.  The built-in redirect error is
@@ -202,10 +206,13 @@ class OllamaProvider:
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc
-            raise ProviderError("Ollama request failed") from exc
+            transient = isinstance(exc, URLError) and urllib_error_is_transient(exc)
+            raise ProviderError("Ollama request failed", transient=transient) from exc
         except OSError as exc:
             if "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc
+            if isinstance(exc, ConnectionError):
+                raise ProviderError("Ollama request failed", transient=True) from exc
             raise ProviderError("Ollama request failed") from exc
         except TypeError as exc:
             raise ProviderError("Ollama request failed") from exc
@@ -234,9 +241,28 @@ class OllamaProvider:
                 "Ollama review response exceeded the configured size limit"
             ) from exc
 
+        revision = None
+        observed = data.get("model") if isinstance(data, dict) else None
+        if isinstance(observed, str) and observed.strip():
+            observed = observed.strip()
+            if observed != model:
+                try:
+                    validate_bounded_text(
+                        observed,
+                        request.limits.max_revision_bytes,
+                        label="Ollama observed revision",
+                        allow_empty=False,
+                    )
+                except ReviewInputError as exc:
+                    raise ProviderError(
+                        "Ollama observed revision exceeded the configured size limit"
+                    ) from exc
+                revision = observed
+
         return ProviderResponse(
             text=text,
             provider=self.name,
             model=model,
             limits=request.limits,
+            revision=revision,
         )

@@ -8,7 +8,6 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.error import URLError
 
 from review_sensei import ProviderResponse
 from review_sensei.cli import (
@@ -21,6 +20,7 @@ from review_sensei.cli import (
     _plan_parser,
     main,
 )
+from review_sensei.errors import ReviewInputError
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -1181,6 +1181,107 @@ class CliTests(unittest.TestCase):
         self.assertEqual(created, [])
         self.assertIn("--allow-data-egress", stderr.getvalue())
 
+    def test_evaluate_live_named_remote_profile_requires_data_egress(self):
+        created = []
+
+        class Registry:
+            def create(self, settings):
+                created.append(settings)
+                return FakeProvider()
+
+        stderr = io.StringIO()
+        with patch("review_sensei.cli.default_registry", return_value=Registry()):
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--corpus",
+                        "missing.json",
+                        "--provider-version",
+                        "1.0",
+                        "--allow-live-model",
+                        "--profile",
+                        "fast-triage",
+                        "--provider",
+                        "openai-compatible",
+                    ]
+                )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(created, [])
+        self.assertIn("--allow-data-egress", stderr.getvalue())
+
+    def test_evaluate_live_local_private_profile_does_not_require_data_egress(self):
+        created = []
+
+        class Registry:
+            def create(self, settings):
+                created.append(settings)
+                return FakeProvider()
+
+        stderr = io.StringIO()
+        with patch("review_sensei.cli.default_registry", return_value=Registry()):
+            with patch("review_sensei.evaluation.load_corpus", return_value=object()):
+                with patch(
+                    "review_sensei.evaluation.evaluate_live",
+                    return_value={"passed": True},
+                ):
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "evaluate",
+                                "--mode",
+                                "live",
+                                "--corpus",
+                                "missing.json",
+                                "--provider-version",
+                                "1.0",
+                                "--allow-live-model",
+                                "--profile",
+                                "local-private",
+                                "--provider",
+                                "ollama",
+                            ]
+                        )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(created), 1)
+        self.assertNotIn("--allow-data-egress", stderr.getvalue())
+
+    def test_evaluate_live_deep_verification_profile_requires_data_egress(self):
+        created = []
+
+        class Registry:
+            def create(self, settings):
+                created.append(settings)
+                return FakeProvider()
+
+        stderr = io.StringIO()
+        with patch("review_sensei.cli.default_registry", return_value=Registry()):
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--corpus",
+                        "missing.json",
+                        "--provider-version",
+                        "1.0",
+                        "--allow-live-model",
+                        "--profile",
+                        "deep-verification",
+                        "--provider",
+                        "ollama",
+                    ]
+                )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(created, [])
+        self.assertIn("--allow-data-egress", stderr.getvalue())
+
     def test_evaluate_fixture_rejects_live_acknowledgement_flags(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
@@ -1622,8 +1723,8 @@ class DoctorPlanCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
                 with patch(
-                    "review_sensei.diagnostics.urlopen",
-                    side_effect=URLError("connection refused"),
+                    "review_sensei.diagnostics._bounded_probe_get",
+                    side_effect=ReviewInputError("unreachable endpoint: URLError"),
                 ):
                     status = main(["doctor", "--network", "--json"])
         self.assertEqual(status, 2)

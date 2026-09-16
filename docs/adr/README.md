@@ -49,6 +49,7 @@ Process: `docs/process/adr-process.md`
 | [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited v4 promotion/rollback |
 | [0039](0039-verify-candidate-findings-before-publication.md) | Proposed | Verify candidate findings against snapshot evidence before publication | #37 | Legacy single-pass remains default; confirmed policy publishes only deterministic evidence-backed findings. |
 | [0040](0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89 | Preserve MIT Community source; official ops ≠ proprietary code; future commercial layer is separate |
+| [0041](0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42 | openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 
 ## Policy
 

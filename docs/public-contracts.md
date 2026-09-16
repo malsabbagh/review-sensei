@@ -267,8 +267,26 @@ The built-in `openai-compatible` adapter targets an explicit HTTPS
 provider fallback. Named registry profiles are deterministic presets:
 `local-private`, `fast-triage`, and `deep-verification` (with `local`, `private`,
 and `local/private` aliases for the first). Profiles carry bounded timeout/output-token
-budgets and endpoint/credential policy. `ProviderSettings.for_profile()` never
+budgets, `json_object` structured output, endpoint/credential policy, and
+`permitted_fallback: none`. A stage JSON file may set `provider_profile` to a
+canonical profile name. Unprofiled and `local-private` runs cannot select a
+remote stage profile; a remote run may narrow a stage to `local-private`.
+Routing never forwards one profile's credential to another endpoint and never
+escalates models after a failure. `ProviderSettings.for_profile()` never
 reads the environment or forwards a credential to a profile that disallows it.
+
+Ollama, fixture, and `openai-compatible` share a conformance suite covering
+request/result shape, malformed envelopes, resource limits, timeout/cancellation,
+redirects, missing credentials, rate limits, and sanitized errors. Observed
+provider/model values are recorded on `ProviderResponse`; an optional
+`revision` is recorded when the adapter can observe one (`system_fingerprint` or
+response model id). `revision` is internal adapter metadata bounded by
+`ReviewLimits.max_revision_bytes`; it is not part of the public evaluation-report
+or `ReviewResult` schemas and is not persisted in run outcomes. Promotion flows
+may aggregate an observed revision separately as `observed_revision`.
+Fixture-only promotion records cannot certify a named profile;
+`validate_profile_promotion` requires supported live evidence that matches the
+profile's adapter and allowed models.
 
 The adapter's default endpoint allowlist contains only `https://api.openai.com`.
 An operator who intentionally owns a different HTTPS-compatible service must
@@ -288,6 +306,7 @@ The command is `review-sensei`. Supported flags are:
 | --- | --- | --- |
 | `--version` | none | Print the installed ReviewSensei version and exit |
 | `--diff` | none | Required unified diff file path |
+| `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`) |
 | `--provider` | `REVIEWSENSEI_PROVIDER` | Provider registry key |
 | `--base-url` | `OLLAMA_BASE_URL` | Optional Ollama API root override; mode defaults to loopback or Ollama Cloud |
 | `--model` | `OLLAMA_MODEL` | Optional model override; mode defaults to the configured local/cloud model |

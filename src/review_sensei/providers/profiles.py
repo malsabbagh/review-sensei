@@ -2,17 +2,20 @@
 
 Profiles are configuration presets, not failover routes.  Selecting one chooses
 exactly one provider endpoint and model; callers must provide a credential when
-the profile requires one.  No environment lookup happens in this module.
+the profile requires one.  Optional per-stage models stay on that same adapter
+and endpoint.  No environment lookup happens in this module.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Literal, Mapping
 
-from ..errors import ProviderError
+from ..errors import ProviderError, UnknownProviderProfileError
 
 EndpointScope = Literal["local", "remote"]
+StructuredOutput = Literal["json_object"]
+FallbackPolicy = Literal["none"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,10 @@ class ProviderProfile:
     max_output_tokens: int
     api_key_env: str | None = None
     requires_api_key: bool = False
+    structured_output: StructuredOutput = "json_object"
+    permitted_fallback: FallbackPolicy = "none"
+    stage_models: tuple[tuple[str, str], ...] = ()
+    _stage_models_map: dict[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.provider.strip() or not self.model.strip():
@@ -48,6 +55,51 @@ class ProviderProfile:
             "https://"
         ):
             raise ValueError("remote provider profiles require an HTTPS endpoint")
+        if self.structured_output != "json_object":
+            raise ValueError("provider profile structured_output must be 'json_object'")
+        if self.permitted_fallback != "none":
+            raise ValueError("provider profiles do not permit fallback")
+        self._validate_stage_models()
+
+    def _validate_stage_models(self) -> None:
+        """Ensure ``stage_models`` keys match ``Stage.name`` values exactly."""
+        if not isinstance(self.stage_models, tuple):
+            raise ValueError("provider profile stage_models must be a tuple")
+        seen: set[str] = set()
+        for item in self.stage_models:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not isinstance(item[1], str)
+            ):
+                raise ValueError(
+                    "provider profile stage_models must be name/model pairs"
+                )
+            stage_name, model = item[0].strip(), item[1].strip()
+            if not stage_name or not model:
+                raise ValueError("provider profile stage_models must be non-empty")
+            if stage_name in seen:
+                raise ValueError("provider profile stage_models must be unique")
+            seen.add(stage_name)
+        object.__setattr__(
+            self,
+            "_stage_models_map",
+            {name: model for name, model in self.stage_models},
+        )
+
+    def model_for_stage(self, stage_name: str) -> str:
+        """Return the profile model for ``stage_name``, defaulting to the run model."""
+
+        if not isinstance(stage_name, str) or not stage_name.strip():
+            raise ValueError("stage name must be a non-empty string")
+        mapping: Mapping[str, str] = self._stage_models_map
+        return mapping.get(stage_name.strip(), self.model)
+
+    def allowed_models(self) -> frozenset[str]:
+        """Return the closed set of models this profile may select."""
+
+        return frozenset((self.model, *(model for _, model in self.stage_models)))
 
 
 PROVIDER_PROFILES: dict[str, ProviderProfile] = {
@@ -94,6 +146,12 @@ _ALIASES = {
 }
 
 
+def canonical_profile_name(name: str) -> str:
+    """Return the canonical profile name, resolving aliases."""
+
+    return get_provider_profile(name).name
+
+
 def get_provider_profile(name: str) -> ProviderProfile:
     """Return a canonical profile, rejecting unknown names before any call."""
 
@@ -105,7 +163,7 @@ def get_provider_profile(name: str) -> ProviderProfile:
         return PROVIDER_PROFILES[key]
     except KeyError as exc:
         available = ", ".join(sorted(PROVIDER_PROFILES))
-        raise ProviderError(
+        raise UnknownProviderProfileError(
             f"Unknown provider profile '{name}'. Available profiles: {available}"
         ) from exc
 

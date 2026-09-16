@@ -23,6 +23,7 @@ from .models import (
     ReviewRequest,
 )
 from .providers.base import ReviewProvider
+from .providers.profiles import ProviderProfile, get_provider_profile
 from .schemas import validate_public_document
 from .service import ReviewService
 from .stages import ReviewCategory, Stage
@@ -582,6 +583,135 @@ def require_supported_promotion(
     for report in documents:
         validate_promotion_against_report(parsed, report)
     return parsed
+
+
+def _profile_report_endpoint_scopes(profile: ProviderProfile) -> frozenset[str]:
+    if profile.endpoint_scope == "local":
+        return frozenset({"loopback"})
+    return frozenset({"remote"})
+
+
+def _validate_supplied_live_reports(
+    profile: ProviderProfile,
+    reports: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject live reports that do not match the profile promotion contract."""
+
+    expected = _profile_report_endpoint_scopes(profile)
+    for report in reports:
+        fields = _report_promotion_fields(report)
+        if fields["mode"] != "live":
+            continue
+        if fields["provider"] != profile.provider:
+            raise ReviewInputError(
+                "promotion live report provider does not match profile"
+            )
+        if fields["model"] not in profile.allowed_models():
+            raise ReviewInputError("promotion live report model does not match profile")
+        if _report_endpoint_scope(report) not in expected:
+            raise ReviewInputError(
+                "promotion record endpoint scope does not match profile"
+            )
+
+
+def _profile_live_reports(
+    profile: ProviderProfile,
+    reports: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return live reports that satisfy the profile promotion contract."""
+
+    expected = _profile_report_endpoint_scopes(profile)
+    live_reports: list[Mapping[str, Any]] = []
+    for report in reports:
+        fields = _report_promotion_fields(report)
+        if fields["mode"] != "live":
+            continue
+        if fields["provider"] != profile.provider:
+            continue
+        if fields["model"] not in profile.allowed_models():
+            continue
+        if _report_endpoint_scope(report) not in expected:
+            continue
+        live_reports.append(report)
+    return live_reports
+
+
+def _validate_profile_stage_model_evidence(
+    profile: ProviderProfile,
+    record: PromotionRecord,
+    reports: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require live reports for each declared per-stage model when present."""
+
+    if not profile.stage_models:
+        return
+    required_models = frozenset(model for _, model in profile.stage_models)
+    live_models = {
+        _report_promotion_fields(report)["model"]
+        for report in _profile_live_reports(profile, reports)
+    }
+    if profile.endpoint_scope == "remote" and not live_models:
+        raise ReviewInputError(
+            "remote profile promotion requires live evaluation reports"
+        )
+    missing = required_models - live_models
+    if missing:
+        raise ReviewInputError(
+            "profile promotion requires live reports for each declared stage model"
+        )
+
+
+def _report_endpoint_scope(report: Mapping[str, Any]) -> str:
+    run = report.get("run")
+    if not isinstance(run, Mapping):
+        raise ReviewInputError("evaluation report is incomplete")
+    scope = run.get("endpoint_scope")
+    if not isinstance(scope, str) or not scope.strip():
+        raise ReviewInputError("evaluation report endpoint_scope is required")
+    return scope.strip()
+
+
+def validate_profile_promotion(
+    profile_name: str,
+    record: PromotionRecord,
+    reports: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    """Reject fixture-only or mismatched evidence for a named provider profile.
+
+    Remote profiles require at least one live report whose ``endpoint_scope``
+    matches the profile's declared endpoint policy. Local profiles validate live
+    report scopes when ``reports`` are supplied. Callers promoting with live
+    evidence should pass reports or use ``require_supported_promotion``.
+    """
+
+    profile = get_provider_profile(profile_name)
+    if _is_fixture_alias(record.provider):
+        raise ReviewInputError("fixture-only evidence cannot support promotion")
+    if record.status != "supported":
+        raise ReviewInputError("profile promotion requires supported evidence")
+    if record.provider != profile.provider:
+        raise ReviewInputError(
+            "promotion record provider "
+            f"{record.provider!r} does not match profile "
+            f"'{profile.name}' (requires {profile.provider!r})"
+        )
+    if record.model not in profile.allowed_models():
+        raise ReviewInputError("promotion record model does not match profile")
+    if reports:
+        _validate_supplied_live_reports(profile, reports)
+    _validate_profile_stage_model_evidence(profile, record, reports)
+    if profile.endpoint_scope == "remote":
+        live_reports = _profile_live_reports(profile, reports)
+        if not live_reports:
+            raise ReviewInputError(
+                "remote profile promotion requires live evaluation reports"
+            )
+        for report in live_reports:
+            fields = _report_promotion_fields(report)
+            if fields["provider"] != record.provider:
+                raise ReviewInputError(
+                    "promotion live report provider does not match record"
+                )
 
 
 def _sha256_bytes(data: bytes) -> str:

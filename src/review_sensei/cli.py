@@ -28,7 +28,8 @@ from .models import LearningEntry, ReviewRequest
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.profiles import get_provider_profile
-from .service import ReviewService
+from .providers.routing import bind_stage_providers
+from .service import DEFAULT_STAGES, ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
 
@@ -209,6 +210,12 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
             raise ReviewInputError(
                 f"--api-key-env {actual} does not match profile "
                 f"'{selected.name}' (requires {expected})"
+            )
+    if _cli_option_set(argv, "--base-url", explicit=explicit):
+        actual = getattr(args, "base_url", None)
+        if actual is not None and actual.rstrip("/") != selected.base_url.rstrip("/"):
+            raise ReviewInputError(
+                f"--base-url cannot override profile '{selected.name}' endpoint"
             )
 
 
@@ -743,13 +750,19 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError("--mode live requires --allow-live-model")
         if not args.provider_version:
             raise ReviewInputError("--mode live requires --provider-version")
-        scope = endpoint_scope(args.base_url)
+        _validate_profile_cli_args(args, argv)
+        if args.profile:
+            profile = get_provider_profile(args.profile)
+            scope = "loopback" if profile.endpoint_scope == "local" else "remote"
+            live_model = profile.model
+        else:
+            scope = endpoint_scope(args.base_url)
+            live_model = args.model
         if scope == "remote" and not args.allow_data_egress:
             raise ReviewInputError(
                 "--mode live with a remote endpoint requires --allow-data-egress"
             )
         corpus = load_corpus(args.corpus)
-        _validate_profile_cli_args(args, argv)
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
@@ -761,7 +774,7 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
             corpus,
             provider,
             provider_version=args.provider_version,
-            model=args.model,
+            model=provider.model or live_model,
             endpoint_scope=scope,
         )
     rendered = json.dumps(report, indent=2) + "\n"
@@ -1416,16 +1429,22 @@ def main(argv: list[str] | None = None) -> int:
                     args.categories_dir
                 ),
             )
-        provider = default_registry().create(
-            _provider_settings_from_args(
+        provider, stage_providers = bind_stage_providers(
+            registry=default_registry(),
+            settings=_provider_settings_from_args(
                 args,
                 api_key=api_key,
                 fixture_response=args.fixture_response,
                 argv=args_list,
-            )
+            ),
+            stages=stages if stages is not None else DEFAULT_STAGES,
         )
 
-        service = ReviewService(provider, stages=stages)
+        service = ReviewService(
+            provider,
+            stages=stages,
+            stage_providers=stage_providers,
+        )
         context_root = args.context_root or args.learning_root
         context_store = (
             RepositoryContextStore(context_root) if context_root is not None else None

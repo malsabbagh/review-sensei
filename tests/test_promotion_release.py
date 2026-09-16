@@ -3,7 +3,9 @@ import json
 import tempfile
 import unittest
 from collections import UserDict
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
@@ -13,9 +15,11 @@ from review_sensei.evaluation import (
     promotion_record_from_reports,
     prompt_digest,
     require_supported_promotion,
+    validate_profile_promotion,
     validate_promotion_against_report,
     validate_promotion_record,
 )
+from review_sensei.providers.profiles import get_provider_profile
 from review_sensei.release_manifest import (
     _constraint_parts,
     _range_contains,
@@ -88,6 +92,201 @@ class PromotionAndReleaseTests(unittest.TestCase):
         )
         source["seed"] = "mutated"
         self.assertEqual(record.to_dict()["reproducibility"], {"seed": "fixed"})
+
+    def test_profile_promotion_rejects_fixture_and_mismatched_identity(self) -> None:
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        remote_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+        remote_report["run"]["mode"] = "live"
+        remote_report["run"]["provider"] = "openai-compatible"
+        remote_report["run"]["model"] = "gpt-4o-mini"
+        remote_report["run"]["endpoint_scope"] = "remote"
+        remote_report["run"]["invocation_id"] = "a" * 32
+        validate_profile_promotion("fast-triage", live, [remote_report])
+        with self.assertRaisesRegex(
+            ReviewInputError, "requires live evaluation reports"
+        ):
+            validate_profile_promotion("fast-triage", live)
+        with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
+            validate_profile_promotion("local-private", live)
+        loopback_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+        loopback_report["run"]["mode"] = "live"
+        loopback_report["run"]["provider"] = "openai-compatible"
+        loopback_report["run"]["model"] = "gpt-4o-mini"
+        loopback_report["run"]["endpoint_scope"] = "loopback"
+        loopback_report["run"]["invocation_id"] = "b" * 32
+        with self.assertRaisesRegex(ReviewInputError, "endpoint scope does not match"):
+            validate_profile_promotion("fast-triage", live, [loopback_report])
+        mismatched_provider = json.loads(fixture_path.read_text(encoding="utf-8"))
+        mismatched_provider["run"]["mode"] = "live"
+        mismatched_provider["run"]["provider"] = "ollama"
+        mismatched_provider["run"]["model"] = "qwen3.5:4b"
+        mismatched_provider["run"]["endpoint_scope"] = "remote"
+        mismatched_provider["run"]["invocation_id"] = "c" * 32
+        with self.assertRaisesRegex(
+            ReviewInputError, "live report provider does not match profile"
+        ):
+            validate_profile_promotion("fast-triage", live, [mismatched_provider])
+        with self.assertRaisesRegex(ReviewInputError, "fixture-only"):
+            validate_profile_promotion(
+                "local-private",
+                PromotionRecord(
+                    SHA,
+                    SHA,
+                    SHA,
+                    SHA,
+                    "fixture",
+                    "fixture-v1",
+                    "r1",
+                    1,
+                    "2026-01-01",
+                    {"seed": "fixed"},
+                    status="insufficient",
+                ),
+            )
+
+    def test_profile_promotion_requires_live_reports_for_declared_stage_models(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        default_only = json.loads(fixture_path.read_text(encoding="utf-8"))
+        default_only["run"]["mode"] = "live"
+        default_only["run"]["provider"] = "openai-compatible"
+        default_only["run"]["model"] = "gpt-4o-mini"
+        default_only["run"]["endpoint_scope"] = "remote"
+        default_only["run"]["invocation_id"] = "d" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "declared stage model"):
+                validate_profile_promotion("fast-triage", live, [default_only])
+            stage_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+            stage_report["run"]["mode"] = "live"
+            stage_report["run"]["provider"] = "openai-compatible"
+            stage_report["run"]["model"] = "gpt-4o"
+            stage_report["run"]["endpoint_scope"] = "remote"
+            stage_report["run"]["invocation_id"] = "e" * 32
+            validate_profile_promotion(
+                "fast-triage", live, [default_only, stage_report]
+            )
+
+    def test_profile_promotion_rejects_live_report_model_outside_allowlist(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        invalid = json.loads(fixture_path.read_text(encoding="utf-8"))
+        invalid["run"]["mode"] = "live"
+        invalid["run"]["provider"] = "openai-compatible"
+        invalid["run"]["model"] = "attacker-model"
+        invalid["run"]["endpoint_scope"] = "remote"
+        invalid["run"]["invocation_id"] = "h" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "live report model does not match profile"
+            ):
+                validate_profile_promotion("fast-triage", live, [invalid])
+
+    def test_profile_promotion_rejects_off_scope_stage_model_evidence(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        default_only = json.loads(fixture_path.read_text(encoding="utf-8"))
+        default_only["run"]["mode"] = "live"
+        default_only["run"]["provider"] = "openai-compatible"
+        default_only["run"]["model"] = "gpt-4o-mini"
+        default_only["run"]["endpoint_scope"] = "remote"
+        default_only["run"]["invocation_id"] = "f" * 32
+        loopback_stage = json.loads(fixture_path.read_text(encoding="utf-8"))
+        loopback_stage["run"]["mode"] = "live"
+        loopback_stage["run"]["provider"] = "openai-compatible"
+        loopback_stage["run"]["model"] = "gpt-4o"
+        loopback_stage["run"]["endpoint_scope"] = "loopback"
+        loopback_stage["run"]["invocation_id"] = "g" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "endpoint scope does not match profile"
+            ):
+                validate_profile_promotion(
+                    "fast-triage", live, [default_only, loopback_stage]
+                )
 
     def test_invalid_reproducibility_shape_fails_with_review_input_error(self) -> None:
         with self.assertRaises(ReviewInputError):

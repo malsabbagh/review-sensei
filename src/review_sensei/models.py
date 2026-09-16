@@ -1222,6 +1222,7 @@ class ProviderResponse:
     provider: str
     model: str | None = None
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    revision: str | None = None
 
     @property
     def max_response_bytes(self) -> int:
@@ -1247,6 +1248,13 @@ class ProviderResponse:
                 self.model,
                 self.limits.max_model_bytes,
                 label="provider response model",
+                allow_empty=False,
+            )
+        if self.revision is not None:
+            validate_bounded_text(
+                self.revision,
+                self.limits.max_revision_bytes,
+                label="provider response revision",
                 allow_empty=False,
             )
 

@@ -68,6 +68,14 @@ class ProviderRegistry:
         self._factories[normalized] = factory
 
     def create(self, settings: ProviderSettings) -> ReviewProvider:
+        return self._create(settings, stage_routed=False)
+
+    def create_for_stage(self, settings: ProviderSettings) -> ReviewProvider:
+        return self._create(settings, stage_routed=True)
+
+    def _create(
+        self, settings: ProviderSettings, *, stage_routed: bool
+    ) -> ReviewProvider:
         if settings.profile is not None:
             profile = get_provider_profile(settings.profile)
             if settings.allow_custom_endpoint:
@@ -91,9 +99,24 @@ class ProviderRegistry:
             # A named profile is an immutable routing and budget policy.  None
             # means that the caller omitted a value; every explicit value must
             # match the canonical profile before the settings are replaced by
-            # the profile's complete, canonical values below.
-            if settings.model is not None and settings.model != profile.model:
+            # the profile's complete, canonical values below.  The only allowed
+            # model values are the profile default and its declared per-stage
+            # models; this is not a generic override or failover path.  Run-level
+            # ``settings.model`` may select one of those declared models for the
+            # default provider; per-stage model selection is owned exclusively by
+            # ``bind_stage_providers`` through ``create(..., _stage_routed=True)``.
+            allowed_models = profile.allowed_models()
+            if settings.model is not None and settings.model not in allowed_models:
                 raise ProviderError("provider profile model cannot be overridden")
+            if (
+                settings.model is not None
+                and settings.model != profile.model
+                and not stage_routed
+            ):
+                raise ProviderError(
+                    "provider profile per-stage models must be selected through "
+                    "stage routing"
+                )
             if settings.base_url is not None and settings.base_url != profile.base_url:
                 raise ProviderError("provider profile endpoint cannot be overridden")
             if (
@@ -111,7 +134,7 @@ class ProviderRegistry:
             settings = replace(
                 settings,
                 name=profile.provider,
-                model=profile.model,
+                model=settings.model if settings.model is not None else profile.model,
                 base_url=profile.base_url,
                 timeout_seconds=profile.timeout_seconds,
                 max_output_tokens=profile.max_output_tokens,

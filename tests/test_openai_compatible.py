@@ -239,11 +239,13 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertNotIn("private prompt", str(raised.exception))
 
     def test_network_urlerror_is_transient_and_sanitized(self):
+        import socket
+
         secret_reason = "dns failure with credential=private-secret"
         provider = OpenAICompatibleProvider(
             api_key="secret",
             opener=lambda request, timeout, context: (_ for _ in ()).throw(
-                URLError(secret_reason)
+                URLError(socket.gaierror(socket.EAI_AGAIN, secret_reason))
             ),
         )
         with self.assertRaisesRegex(ProviderError, "request failed") as raised:

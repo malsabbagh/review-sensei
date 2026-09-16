@@ -39,6 +39,7 @@ class ReviewLimits:
     max_metadata_key_bytes: int = 128
     max_metadata_value_bytes: int = 4_096
     max_model_bytes: int = 256
+    max_revision_bytes: int = 512
     max_learning_entries: int = 100
     max_active_categories: int = 64
     max_lens_contexts: int = 64

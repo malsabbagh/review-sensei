@@ -513,6 +513,17 @@ available through `ProviderSettings.for_profile(...)`:
 Profiles select exactly one provider; they do not race or fail over between
 providers. Profile construction does not read environment variables, so callers
 must deliberately retrieve and pass a credential when policy requires one.
+CLI `--profile` selects the same presets. A stage configuration may set
+`provider_profile` to a canonical name; unprofiled and `local-private` runs
+reject a remote stage profile, and a remote run may only narrow a stage to
+`local-private`. The installed GitHub workflows keep the existing local/cloud
+variables and do not pass `--profile` or an OpenAI endpoint.
+
+Use `review-sensei --profile local-private --provider ollama --diff pr.patch`
+for the local preset, or `--profile fast-triage --provider openai-compatible`
+with `OPENAI_API_KEY` for the explicit OpenAI Chat Completions slice. Live
+evaluation of a remote profile still requires `--allow-live-model` and
+`--allow-data-egress`; fixture reports cannot promote a profile.
 
 The OpenAI-compatible adapter is restricted to `https://api.openai.com` by
 default and rejects redirects so its bearer token cannot be silently forwarded

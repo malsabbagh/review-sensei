@@ -51,10 +51,14 @@ diff changed paths --> active lens selection
                               ReviewProvider protocol
                                   |           |
                                   v           v
-                           OllamaProvider   future adapters
-                                  |
-                                  v
+                    OllamaProvider    OpenAICompatibleProvider
+                                  |           |
+                                  +-----------+
+                                              |
+                                              v
                          validated ReviewResult
+
+(fixture adapter: test-only seam, omitted from production map)
                            |                   |
                            v                   v
           prepare_publishable_review   learning proposals ----> GitHub learning PR
@@ -213,8 +217,10 @@ same validated result.
 - `ProviderRequest` is the provider-facing prompt contract.
 - `ProviderResponse` normalizes provider text without retaining raw request
   context.
-- `Stage` declares one provider invocation, its expected output sections, and
-  optional structured `ReviewCategory` values.
+- `Stage` declares one provider invocation, its expected output sections,
+  optional structured `ReviewCategory` values, and an optional canonical
+  `provider_profile`. Per-stage profiles cannot expand a local/private run onto
+  a remote endpoint.
 - `ReviewCategory` gives a category a stable lowercase id, a human-readable
   title, one or more concrete focus items, path applicability, and optional
   learning/document selectors. Active categories are serialized into

@@ -37,7 +37,11 @@
   single-pass comments remain the default and are identified as `legacy`;
   incomplete verification is `partial` and cannot be approved. Evaluation
   comparison, model verification, and run-budget enforcement stay deferred.
-
+- Closed remaining issue #42 gaps: explicit per-stage provider profiles, a
+  shared adapter conformance suite for Ollama, fixture, and openai-compatible,
+  observable revision recording, and CLI/schema documentation. Named profiles
+  still do not fail over or forward credentials; installed workflows keep
+  local/cloud Ollama defaults and do not pass `--profile`.
 - Skip automatic ReviewSensei runs on draft pull requests instead of failing
   preflight with "pull request is not eligible for review". Review starts when
   a draft is marked ready for review.

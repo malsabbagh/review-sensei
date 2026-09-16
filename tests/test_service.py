@@ -3,8 +3,14 @@ import json
 import unittest
 
 from review_sensei import ReviewCategory, ReviewDocument, ReviewLensContext, Stage
-from review_sensei.errors import ReviewFormatError, ReviewInputError
-from review_sensei.models import LearningEntry, ProviderResponse, ReviewRequest
+from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
+from review_sensei.models import (
+    LearningEntry,
+    ProviderRequest,
+    ProviderResponse,
+    ReviewRequest,
+)
+from review_sensei.outcomes import ResourceBudget
 from review_sensei.service import ReviewService
 from review_sensei.validation import ReviewLimits
 
@@ -531,3 +537,114 @@ class ReviewServiceTests(unittest.TestCase):
             )
         self.assertNotIn(marker, str(raised.exception))
         self.assertEqual(len(provider.requests), 1)
+
+    def test_stage_providers_are_used_without_switching_on_retry(self):
+        default = FakeProvider('{"summary":"default"}')
+        default.name = "default"
+        special = FakeProvider('{"summary":"special"}')
+        special.name = "special"
+        stages = [
+            Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
+            Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
+        ]
+        result = ReviewService(
+            default,
+            stages=stages,
+            stage_providers={"two": special},
+        ).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(len(default.requests), 1)
+        self.assertEqual(len(special.requests), 1)
+        self.assertEqual(result.provider, "special")
+        self.assertIn("default", result.summary)
+        self.assertIn("special", result.summary)
+
+    def test_resource_budget_stops_further_provider_calls(self):
+        provider = FakeProvider('{"summary":"ok"}')
+        stages = [
+            Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
+            Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
+        ]
+        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
+            ReviewService(
+                provider,
+                stages=stages,
+                budget=ResourceBudget.create(
+                    max_provider_calls=1, max_retry_attempts=0
+                ),
+            ).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_unknown_stage_provider_name_raises(self):
+        stage = Stage(name="one", prompt_template="{diff}", outputs=("summary",))
+        with self.assertRaisesRegex(
+            ReviewInputError, "stage providers must match configured stage names"
+        ):
+            ReviewService(
+                FakeProvider('{"summary":"ok"}'),
+                stages=[stage],
+                stage_providers={"missing": FakeProvider('{"summary":"ok"}')},
+            )
+
+    def test_empty_stage_provider_name_raises(self):
+        stage = Stage(name="one", prompt_template="{diff}", outputs=("summary",))
+        with self.assertRaisesRegex(
+            ReviewInputError, "stage provider names must be non-empty strings"
+        ):
+            ReviewService(
+                FakeProvider('{"summary":"ok"}'),
+                stages=[stage],
+                stage_providers={"": FakeProvider('{"summary":"ok"}')},
+            )
+
+    def test_failed_provider_call_consumes_call_budget(self):
+        class FailProvider(FakeProvider):
+            def complete(self, request):
+                self.requests.append(request)
+                raise ProviderError("transient provider failure", transient=True)
+
+        provider = FailProvider('{"summary":"ok"}')
+        service = ReviewService(
+            provider,
+            budget=ResourceBudget.create(max_provider_calls=1, max_retry_attempts=0),
+        )
+        request = ProviderRequest(prompt="review", limits=ReviewLimits())
+        with self.assertRaises(ProviderError) as raised:
+            service._complete(provider, request)
+        self.assertTrue(raised.exception.transient)
+        self.assertEqual(str(raised.exception), "transient provider failure")
+        self.assertEqual(len(provider.requests), 1)
+        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
+            service._complete(provider, request)
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_structural_recovery_uses_retry_budget_not_provider_call_budget(self):
+        class RecoveringProvider(FakeProvider):
+            def __init__(self) -> None:
+                super().__init__('{"comments":[]}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.requests.append(request)
+                self.attempts += 1
+                if self.attempts == 1:
+                    return ProviderResponse(
+                        text='{"comments":[{"body":"x"}]}',
+                        provider="fake",
+                        model="fake-model",
+                    )
+                return ProviderResponse(
+                    text='{"summary":"recovered","comments":[]}',
+                    provider="fake",
+                    model="fake-model",
+                )
+
+        provider = RecoveringProvider()
+        stages = [Stage(name="one", prompt_template="{diff}", outputs=("summary",))]
+        result = ReviewService(
+            provider,
+            stages=stages,
+            budget=ResourceBudget.create(max_provider_calls=2, max_retry_attempts=1),
+        ).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(provider.attempts, 2)
+        self.assertEqual(result.summary, "recovered")
+        self.assertEqual(len(provider.requests), 2)
