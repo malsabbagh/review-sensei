@@ -244,18 +244,20 @@ class OllamaProvider:
         revision = None
         observed = data.get("model") if isinstance(data, dict) else None
         if isinstance(observed, str) and observed.strip():
-            try:
-                validate_bounded_text(
-                    observed.strip(),
-                    request.limits.max_revision_bytes,
-                    label="Ollama observed revision",
-                    allow_empty=False,
-                )
-            except ReviewInputError as exc:
-                raise ProviderError(
-                    "Ollama observed revision exceeded the configured size limit"
-                ) from exc
-            revision = observed.strip()
+            observed = observed.strip()
+            if observed != model:
+                try:
+                    validate_bounded_text(
+                        observed,
+                        request.limits.max_revision_bytes,
+                        label="Ollama observed revision",
+                        allow_empty=False,
+                    )
+                except ReviewInputError as exc:
+                    raise ProviderError(
+                        "Ollama observed revision exceeded the configured size limit"
+                    ) from exc
+                revision = observed
 
         return ProviderResponse(
             text=text,

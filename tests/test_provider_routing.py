@@ -121,6 +121,10 @@ class ProviderRoutingTests(unittest.TestCase):
 
         with (
             patch(
+                "review_sensei.providers.profiles.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
+            patch(
                 "review_sensei.providers.routing.get_provider_profile",
                 side_effect=profile_lookup,
             ),
@@ -222,6 +226,10 @@ class ProviderRoutingTests(unittest.TestCase):
             return selected
 
         with (
+            patch(
+                "review_sensei.providers.profiles.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
             patch(
                 "review_sensei.providers.routing.get_provider_profile",
                 side_effect=profile_lookup,

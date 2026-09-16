@@ -72,7 +72,7 @@ class ProviderConformanceTests(unittest.TestCase):
         ollama_result = ollama.complete(ProviderRequest(prompt="review"))
         self.assertEqual(ollama_result.provider, "ollama")
         self.assertEqual(ollama_result.model, "qwen3.5:4b")
-        self.assertEqual(ollama_result.revision, "qwen3.5:4b")
+        self.assertIsNone(ollama_result.revision)
 
         ollama_without_revision = _ollama(
             lambda request, timeout, context: _Response(
@@ -83,6 +83,16 @@ class ProviderConformanceTests(unittest.TestCase):
             ProviderRequest(prompt="review")
         )
         self.assertIsNone(absent_revision.revision)
+
+        ollama_with_distinct_revision = _ollama(
+            lambda request, timeout, context: _Response(
+                b'{"response":"{\\"summary\\":\\"ok\\"}","model":"qwen3.5:4b-cloud"}'
+            )
+        )
+        distinct_revision = ollama_with_distinct_revision.complete(
+            ProviderRequest(prompt="review")
+        )
+        self.assertEqual(distinct_revision.revision, "qwen3.5:4b-cloud")
 
         openai = _openai(
             lambda request, timeout, context: _Response(
@@ -142,6 +152,7 @@ class ProviderConformanceTests(unittest.TestCase):
             path.write_text(secret, encoding="utf-8")
             with self.assertRaises(ProviderError) as raised:
                 FixtureProvider(path).complete(request)
+            self.assertFalse(raised.exception.transient)
             self.assertNotIn(secret, str(raised.exception))
             self.assertRegex(str(raised.exception), "size|read safely")
 
