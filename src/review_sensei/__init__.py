@@ -38,7 +38,10 @@ from .learnings import (
     LearningDiagnostic,
     LearningFeedback,
     LearningStore,
+    learning_digest,
+    load_learning_feedback,
     load_repository_learnings,
+    summarize_learning_feedback,
 )
 from .models import (
     ConversationContext,
@@ -100,6 +103,9 @@ __all__ = [
     "LearningDiagnostic",
     "LearningFeedback",
     "load_repository_learnings",
+    "load_learning_feedback",
+    "summarize_learning_feedback",
+    "learning_digest",
     "ProviderRequest",
     "ProviderResponse",
     "RepositoryContextStore",

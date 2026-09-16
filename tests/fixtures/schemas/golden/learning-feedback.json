@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "records": [
+    {
+      "learning_id": "provider-boundary",
+      "finding_id": "finding-1",
+      "outcome": "useful"
+    }
+  ]
+}

@@ -145,6 +145,24 @@ the CI workflow against reviewed synthetic or explicitly authorized data. The
 repository does not claim hosted-provider or GitHub evidence until that
 separately retained evidence is available.
 
+## Learning effect comparison
+
+Fixture evaluation can compare the same cases with and without selected
+approved learnings:
+
+```bash
+review-sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json \
+  --compare-learnings --learning-root /path/to/target-branch \
+  --output learning-effect.json
+```
+
+The comparison document sets `causal_claim` to false. Precision, recall, and
+false-positive deltas are estimates from the synthetic corpus, not proof that
+production feedback caused a quality change. Opt-in `learning-feedback`
+records distinguish useful, incorrect, obsolete, and unverified findings;
+absence of feedback is not counted as approval and cannot enter review
+prompts.
+
 ## Rollback
 
 Rollback is code-only: revert the additive fixture provider, evaluator, CLI,

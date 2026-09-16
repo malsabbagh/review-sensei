@@ -54,6 +54,11 @@
   PR-scoped reusable workflow concurrency group (`max_active=1`,
   cancel-in-progress for reviews). Logs for admission/cancellation stay
   metadata-only.
+- Added issue #41 learning lifecycle diagnostics, opt-in finding feedback, and
+  fixture with/without-learnings comparison. Existing learning files continue
+  to load without the new metadata; superseded/retired entries stay off the
+  prompt; diagnostics never mutate approved knowledge; absence of feedback is
+  not approval; comparison reports estimates rather than causal proof.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

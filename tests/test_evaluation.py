@@ -10,6 +10,7 @@ from review_sensei.evaluation import (
     MeasuredProvider,
     _one_to_one_matches,
     build_report,
+    compare_learning_effect,
     endpoint_scope,
     engine_digest,
     evaluate_fixture,
@@ -20,7 +21,7 @@ from review_sensei.evaluation import (
     require_supported_promotion,
     run_case,
 )
-from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.models import LearningEntry, ReviewComment, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.stages import ReviewCategory, Stage
 from review_sensei.validation import ReviewLimits
@@ -427,6 +428,23 @@ class EvaluationTests(unittest.TestCase):
             promotion_record_from_reports(reports, status="supported", **kwargs)
         with self.assertRaises(ReviewInputError):
             require_supported_promotion(minted, reports)
+
+    def test_compare_learning_effect_reports_estimates_not_causal_proof(self) -> None:
+        learning = LearningEntry(
+            id="provider-boundary",
+            title="Provider boundary",
+            rule="Keep provider calls behind adapters.",
+            scope=("src/**",),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            comparison = compare_learning_effect(corpus, (learning,))
+
+        self.assertFalse(comparison["causal_claim"])
+        self.assertIn("not causal proof", comparison["disclaimer"])
+        self.assertEqual(comparison["selected_learning_ids"], ["provider-boundary"])
+        self.assertEqual(len(comparison["learning_digest"]), 64)
+        self.assertIn("actionable_precision", comparison["delta"])
 
 
 if __name__ == "__main__":

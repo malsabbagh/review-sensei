@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -10,12 +11,20 @@ from typing import Iterable
 
 from .errors import LearningLoadError, ReviewInputError
 from .models import LearningEntry
+from .schemas import validate_public_document
+from .validation import read_bounded_utf8
 
 DEFAULT_LEARNING_DIRECTORY = Path(".github/review-sensei/learnings")
 MAX_LEARNING_FILES = 100
 MAX_LEARNING_FILE_BYTES = 64 * 1024
+MAX_FEEDBACK_FILE_BYTES = 256 * 1024
+MAX_FEEDBACK_RECORDS = 256
+MAX_FEEDBACK_FINDING_ID_BYTES = 256
+MAX_FEEDBACK_NOTE_BYTES = 512
 MAX_SCOPE_WITNESSES = 256
+FEEDBACK_OUTCOMES = ("useful", "incorrect", "obsolete", "unverified")
 _GLOB_TOKEN = re.compile(r"\*|\?|\[[^\]]*\]")
+_LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,14 @@ class LearningDiagnostic:
     entry_id: str
     related_ids: tuple[str, ...] = ()
     detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {"code": self.code, "entry_id": self.entry_id}
+        if self.related_ids:
+            value["related_ids"] = list(self.related_ids)
+        if self.detail:
+            value["detail"] = self.detail
+        return value
 
 
 @dataclass(frozen=True)
@@ -38,8 +55,50 @@ class LearningFeedback:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"useful", "incorrect", "obsolete", "unverified"}:
+        if not isinstance(self.learning_id, str) or not _LEARNING_ID.fullmatch(
+            self.learning_id
+        ):
+            raise LearningLoadError("learning feedback learning_id is invalid")
+        if (
+            not isinstance(self.finding_id, str)
+            or not self.finding_id.strip()
+            or len(self.finding_id.encode("utf-8")) > MAX_FEEDBACK_FINDING_ID_BYTES
+        ):
+            raise LearningLoadError("learning feedback finding_id is invalid")
+        if self.outcome not in FEEDBACK_OUTCOMES:
             raise LearningLoadError("learning feedback outcome is invalid")
+        if self.note is not None and (
+            not isinstance(self.note, str)
+            or not self.note.strip()
+            or len(self.note.encode("utf-8")) > MAX_FEEDBACK_NOTE_BYTES
+        ):
+            raise LearningLoadError("learning feedback note is invalid")
+
+    @classmethod
+    def from_dict(cls, value: object) -> "LearningFeedback":
+        if not isinstance(value, dict):
+            raise LearningLoadError("learning feedback record must be a JSON object")
+        allowed = {"learning_id", "finding_id", "outcome", "note"}
+        if any(key not in allowed for key in value):
+            raise LearningLoadError(
+                "learning feedback record contains an unsupported field"
+            )
+        return cls(
+            learning_id=str(value.get("learning_id", "")),
+            finding_id=str(value.get("finding_id", "")),
+            outcome=str(value.get("outcome", "")),
+            note=value.get("note") if isinstance(value.get("note"), str) else None,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "learning_id": self.learning_id,
+            "finding_id": self.finding_id,
+            "outcome": self.outcome,
+        }
+        if self.note is not None:
+            value["note"] = self.note
+        return value
 
 
 def _aware_utc(value: str) -> datetime:
@@ -256,6 +315,83 @@ class LearningStore:
             (item.code, item.entry_id, item.related_ids): item for item in diagnostics
         }
         return tuple(unique[key] for key in sorted(unique)[:MAX_LEARNING_FILES])
+
+
+def learning_digest(entries: Iterable[LearningEntry]) -> str:
+    """Return a SHA-256 digest of canonical approved learning content."""
+
+    payload = [entry.to_dict() for entry in sorted(entries, key=lambda item: item.id)]
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def load_learning_feedback(path: Path) -> tuple[LearningFeedback, ...]:
+    """Load opt-in finding feedback; records never become trusted review context."""
+
+    try:
+        text = read_bounded_utf8(
+            path, maximum=MAX_FEEDBACK_FILE_BYTES, label="learning feedback"
+        )
+        value = json.loads(text)
+    except (OSError, UnicodeError, ValueError, ReviewInputError) as exc:
+        raise LearningLoadError("learning feedback could not be loaded") from exc
+    try:
+        validate_public_document(value, "learning-feedback")
+    except ReviewInputError as exc:
+        raise LearningLoadError("learning feedback failed schema validation") from exc
+    if not isinstance(value, dict):
+        raise LearningLoadError("learning feedback must be a JSON object")
+    records = value.get("records")
+    if not isinstance(records, list) or len(records) > MAX_FEEDBACK_RECORDS:
+        raise LearningLoadError("learning feedback records are invalid")
+    return tuple(LearningFeedback.from_dict(item) for item in records)
+
+
+def summarize_learning_feedback(
+    records: Iterable[LearningFeedback],
+    *,
+    known_learning_ids: Iterable[str] = (),
+) -> dict[str, object]:
+    """Count feedback outcomes without treating silence as approval."""
+
+    items = tuple(records)
+    by_outcome = {outcome: 0 for outcome in FEEDBACK_OUTCOMES}
+    seen_ids: set[str] = set()
+    for item in items:
+        by_outcome[item.outcome] += 1
+        seen_ids.add(item.learning_id)
+    known = tuple(dict.fromkeys(known_learning_ids))
+    without_feedback = [
+        identifier for identifier in known if identifier not in seen_ids
+    ]
+    return {
+        "record_count": len(items),
+        "by_outcome": by_outcome,
+        "absence_is_not_approval": True,
+        "known_learning_ids_without_feedback": without_feedback,
+        "trusted_for_review": False,
+    }
+
+
+def build_learning_diagnostic_report(
+    store: LearningStore,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Serialize bounded lifecycle diagnostics for maintainer review."""
+
+    diagnostics = store.diagnostics(now=now)
+    return {
+        "schema_version": "1.0",
+        "entry_count": len(store.all_entries),
+        "active_count": len(store.entries),
+        "learning_digest": learning_digest(store.all_entries),
+        "diagnostics": [item.to_dict() for item in diagnostics],
+        "automatic_mutation": False,
+        "human_decision_required": bool(diagnostics),
+    }
 
 
 def load_repository_learnings(

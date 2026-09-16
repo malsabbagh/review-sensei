@@ -16,6 +16,7 @@ from review_sensei.cli import (
     _doctor_parser,
     _explicit_cli_options,
     _github_parser,
+    _learnings_parser,
     _parser,
     _plan_parser,
     main,
@@ -1416,6 +1417,96 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("boom", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_learnings_parser_accepts_diagnose_and_feedback(self):
+        diagnose = _learnings_parser().parse_args(
+            ["diagnose", "--learning-root", ".", "--json"]
+        )
+        self.assertEqual(diagnose.command, "diagnose")
+        self.assertTrue(diagnose.as_json)
+        feedback = _learnings_parser().parse_args(
+            ["feedback", "--file", "feedback.json", "--json"]
+        )
+        self.assertEqual(feedback.command, "feedback")
+        self.assertEqual(str(feedback.file), "feedback.json")
+
+    def test_learnings_diagnose_cli_is_advisory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / ".github" / "review-sensei" / "learnings"
+            directory.mkdir(parents=True)
+            (directory / "rule.json").write_text(
+                json.dumps(
+                    {
+                        "id": "stale-rule",
+                        "title": "Stale",
+                        "rule": "Replace me.",
+                        "scope": ["*"],
+                        "reviewed_at": "2020-01-01T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "learnings",
+                        "diagnose",
+                        "--learning-root",
+                        str(root),
+                        "--json",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertFalse(report["automatic_mutation"])
+        self.assertTrue(report["human_decision_required"])
+
+    def test_learnings_feedback_cli_states_absence_is_not_approval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "unverified",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(["learnings", "feedback", "--file", str(path)])
+        self.assertEqual(status, 0)
+        self.assertIn("Absence of feedback is not approval.", stdout.getvalue())
+        self.assertIn("unverified 1", stdout.getvalue())
+
+    def test_evaluate_compare_learnings_is_fixture_only(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "evaluate",
+                    "--mode",
+                    "live",
+                    "--compare-learnings",
+                    "--allow-live-model",
+                    "--provider-version",
+                    "local",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--compare-learnings is only valid with --mode fixture",
+            stderr.getvalue(),
+        )
 
 
 class PromotionCliTests(unittest.TestCase):

@@ -89,6 +89,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0030`](../adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | Bounded GraphQL thread sweep; clean reruns can promote same-head comments |
 | [`0034`](../adr/0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | Typed `resolve` decision, exact-head/App-root GraphQL guards, and deterministic approval finalization after a blocking resolution |
 | [`0035`](../adr/0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | Blocking findings emit `REQUEST_CHANGES`; a later same-head `APPROVE` wins only after those roots resolve |
+| [`0036`](../adr/0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | Advisory stale/conflict signals; feedback is not trusted review context |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

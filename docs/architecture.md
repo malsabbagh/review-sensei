@@ -180,7 +180,13 @@ same validated result.
 
 - `ReviewRequest` contains a unified diff and optional repository metadata.
 - `ReviewRequest.learnings` contains only approved `LearningEntry` values loaded
-  from the target branch or target commit.
+  from the target branch or target commit. Optional lifecycle metadata does not
+  change that boundary; retired/superseded entries and finding feedback never
+  enter the prompt. `learning_digest` is the canonical SHA-256 of approved
+  learning documents used by incremental cache keys.
+- `review-sensei learnings diagnose` reports stale, conflicting, missing
+  superseder, and supersession-cycle signals for a human decision and never
+  mutates approved files.
 - `ReviewRequest.active_category_ids` records the configured lenses whose
   `applies_to` patterns match the changed paths. The default pattern is `**`;
   `*` matches within one segment and `**` spans zero or more segments.

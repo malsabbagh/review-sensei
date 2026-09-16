@@ -51,6 +51,7 @@ containing `/v1/`.
 | `review-comment.schema.json` | One inline review comment |
 | `learning-entry.schema.json` | Approved repository-local learning entry |
 | `learning-proposal.schema.json` | Unapproved provider-proposed learning entry |
+| `learning-feedback.schema.json` | Opt-in finding feedback; not trusted review context |
 | `review-category.schema.json` | Review category/lens configuration |
 | `stage.schema.json` | Stage configuration |
 | `concurrency-plan.schema.json` | Host-enforced concurrency policy |
@@ -143,6 +144,11 @@ These imports are public and stable within a major version:
 - `review_sensei.require_supported_promotion`
 - `review_sensei.validate_promotion_record`
 - `review_sensei.load_repository_learnings`
+- `review_sensei.load_learning_feedback`
+- `review_sensei.summarize_learning_feedback`
+- `review_sensei.learning_digest`
+- `review_sensei.LearningFeedback`
+- `review_sensei.LearningDiagnostic`
 - `review_sensei.load_review_categories_from_dir`
 - `review_sensei.load_stages_from_dir`
 - `review_sensei.errors.ReviewSenseiError`
@@ -321,11 +327,26 @@ review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `doctor --network` performs read-only GET probes and never mints a token or
 sends a generation request.
 
+The command also supports a `learnings` subcommand for advisory lifecycle
+diagnostics and opt-in finding feedback. It never mutates approved knowledge,
+never constructs a provider, and never treats missing feedback as approval.
+
+```bash
+review-sensei learnings diagnose --learning-root /path/to/target-branch --json
+review-sensei learnings feedback --file feedback.json --json
+review-sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json \
+  --compare-learnings --learning-root /path/to/target-branch
+```
+
+`--compare-learnings` is fixture-only. Reported precision/recall/false-positive
+deltas are estimates from the same synthetic cases with and without selected
+approved learnings, not causal proof from production feedback.
+
 Exit codes are stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready |
+| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready; `learnings` diagnostics/feedback rendered |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
 | `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
 | `3` | `doctor` requested probe unverifiable with current permissions; `plan` incomplete (no diff) |
