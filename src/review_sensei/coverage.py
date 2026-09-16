@@ -249,6 +249,7 @@ class CoverageManifest:
     def from_dict(cls, value: Mapping[str, object]) -> "CoverageManifest":
         if not isinstance(value, Mapping):
             raise ReviewInputError("coverage manifest must be a JSON object")
+        validate_public_document(dict(value), "coverage-manifest")
         files = value.get("files")
         hunks = value.get("hunks", [])
         enumeration_complete = value.get("enumeration_complete", False)

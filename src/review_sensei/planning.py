@@ -134,13 +134,16 @@ def _classify_file(
     record: DiffFileRecord,
     *,
     analysis: DiffAnalysis,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
 ) -> tuple[str, str | None]:
     paths = record.coverage_paths
     if record.binary or any(path in analysis.binary_paths for path in paths):
         return "unsupported", "binary"
     if any(is_generated_path(path) for path in paths):
         return "excluded-by-policy", "generated"
-    if _file_bytes(record) > DEFAULT_REVIEW_LIMITS.max_diff_bytes and not record.hunks:
+    # Hunkless records cannot be split further; oversized payloads fail closed here.
+    # Multi-hunk files are classified as reviewable and handled by chunk packing.
+    if not record.hunks and _file_bytes(record) > limits.max_diff_bytes:
         return "unsupported", "too-large-file"
     return "reviewable", None
 
@@ -317,7 +320,7 @@ def plan_change(
     records = records or ()
 
     for record in records:
-        outcome, reason = _classify_file(record, analysis=analysis)
+        outcome, reason = _classify_file(record, analysis=analysis, limits=limits)
         for path in record.coverage_paths or (
             (record.canonical_path,) if record.canonical_path else ()
         ):

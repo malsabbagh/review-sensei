@@ -8,7 +8,7 @@ from review_sensei.coverage import (
     FileCoverage,
     coverage_approval_state,
 )
-from review_sensei.diff import analyze_diff
+from review_sensei.diff import DiffFileRecord, analyze_diff
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import compare_chunked_against_baseline
 from review_sensei.models import (
@@ -17,7 +17,12 @@ from review_sensei.models import (
     ReviewRequest,
     ReviewResult,
 )
-from review_sensei.planning import TotalWorkBudget, is_generated_path, plan_change
+from review_sensei.planning import (
+    TotalWorkBudget,
+    _classify_file,
+    is_generated_path,
+    plan_change,
+)
 from review_sensei.schemas import validate_public_document
 from review_sensei.service import ReviewService
 from review_sensei.validation import ReviewLimits
@@ -174,6 +179,40 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(
             paths, {"docs/old.md": "reviewed", "guides/new.md": "reviewed"}
         )
+
+    def test_hunkless_file_over_byte_limit_is_too_large_file(self):
+        analysis = analyze_diff(TWO_FILES)
+        record = DiffFileRecord(
+            old_path="src/a.py",
+            new_path="src/a.py",
+            text="--- a/src/a.py\n+++ b/src/a.py\n" + ("x" * 200) + "\n",
+            header="--- a/src/a.py\n+++ b/src/a.py\n",
+            added_lines=frozenset(),
+            deleted_lines=frozenset(),
+            hunks=(),
+            binary=False,
+        )
+        outcome, reason = _classify_file(
+            record,
+            analysis=analysis,
+            limits=ReviewLimits(max_diff_bytes=50),
+        )
+        self.assertEqual(outcome, "unsupported")
+        self.assertEqual(reason, "too-large-file")
+
+    def test_from_dict_rejects_unknown_top_level_fields(self):
+        with self.assertRaises(ReviewInputError):
+            CoverageManifest.from_dict(
+                {
+                    "schema_version": "1.0",
+                    "enumeration_complete": True,
+                    "fully_reviewed": True,
+                    "enumerated_paths": ["src/a.py"],
+                    "files": [{"path": "src/a.py", "outcome": "reviewed"}],
+                    "hunks": [],
+                    "unexpected": True,
+                }
+            )
 
     def test_oversized_hunk_is_unsupported_instead_of_truncated(self) -> None:
         added = "+" + ("x" * 400)
