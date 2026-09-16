@@ -6,6 +6,7 @@ from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
+    COMPARISON_DELTA_KEYS,
     ExpectedFinding,
     MeasuredProvider,
     _one_to_one_matches,
@@ -478,6 +479,19 @@ class EvaluationTests(unittest.TestCase):
             )
 
         self.assertEqual(comparison["selected_learning_ids"], ["provider-boundary"])
+
+    def test_compare_learning_effect_delta_keys_are_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            comparison = compare_learning_effect(corpus)
+
+        self.assertEqual(
+            set(comparison["delta"]),
+            set(COMPARISON_DELTA_KEYS),
+        )
+        # A future numeric field in the fixture report must not widen the
+        # comparison's public contract.
+        self.assertNotIn("elapsed_total_ms", comparison["delta"])
 
     def test_compare_learning_effect_accepts_a_learning_store(self) -> None:
         learning = LearningEntry(

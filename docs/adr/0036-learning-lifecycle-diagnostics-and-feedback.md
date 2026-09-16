@@ -31,9 +31,10 @@ cannot enter `ReviewRequest.learnings` or expand review scope.
 
 Fixture evaluation may compare the same cases with and without selected active
 learnings and report precision/recall/false-positive deltas as estimates, not
-causal proof. Cache keys already bind a `learning_digest`; the digest is the
-canonical SHA-256 of approved learning documents so learning edits invalidate
-incremental state.
+causal proof. Cache keys already bind a learning digest;
+`LearningStore.selection_digest` is the canonical SHA-256 of the review-time
+selection, so edits to entries that can reach a review invalidate incremental
+state while edits to retired or superseded entries do not.
 
 Rollback is ordinary Git history: revert or unmerge a learning file and the
 next trusted-base load uses the remaining active entries.

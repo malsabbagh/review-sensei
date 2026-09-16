@@ -1111,6 +1111,15 @@ def evaluate_fixture(
     )
 
 
+COMPARISON_DELTA_KEYS = (
+    "actionable_precision",
+    "false_positive_rate",
+    "expected_finding_recall",
+    "location_validity",
+    "category_coverage",
+)
+
+
 def compare_learning_effect(
     corpus: Corpus,
     learnings: Sequence[LearningEntry] | LearningStore = (),
@@ -1131,11 +1140,13 @@ def compare_learning_effect(
     without_learnings = evaluate_fixture(corpus, learnings=())
     with_quality = dict(with_learnings["quality"])
     without_quality = dict(without_learnings["quality"])
+    # Allowlisted so a future numeric field in the fixture report cannot widen
+    # the comparison's public contract or be reported as a quality estimate.
     delta = {
         key: with_quality[key] - without_quality[key]
-        for key in with_quality
-        if isinstance(with_quality[key], (int, float))
-        and isinstance(without_quality[key], (int, float))
+        for key in COMPARISON_DELTA_KEYS
+        if isinstance(with_quality.get(key), (int, float))
+        and isinstance(without_quality.get(key), (int, float))
     }
     return {
         "schema_version": "1.0",

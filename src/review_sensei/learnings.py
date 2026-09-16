@@ -48,7 +48,15 @@ class LearningDiagnostic:
 
 @dataclass(frozen=True)
 class LearningFeedback:
-    """Opt-in, non-authoritative finding feedback for evaluation."""
+    """Opt-in, non-authoritative finding feedback for evaluation.
+
+    Construction validates eagerly and raises `LearningLoadError` (a
+    `ReviewSenseiError`) for both type and value violations, including direct
+    construction rather than only the loader path. This is deliberate: the
+    schema path and direct construction then fail closed identically instead of
+    coercing values. Non-CLI hosts that construct this type from untrusted
+    input should catch `LearningLoadError`.
+    """
 
     learning_id: str
     finding_id: str
@@ -82,6 +90,12 @@ class LearningFeedback:
 
     @classmethod
     def from_dict(cls, value: object) -> "LearningFeedback":
+        """Build a record from a raw mapping, raising `LearningLoadError`.
+
+        Non-string field values are neither coerced nor dropped; they reach
+        `__post_init__` and are rejected there.
+        """
+
         if not isinstance(value, dict):
             raise LearningLoadError("learning feedback record must be a JSON object")
         allowed = {"learning_id", "finding_id", "outcome", "note"}
@@ -208,6 +222,17 @@ class LearningStore:
             entry for entry in self.entries if entry.superseded_by is None
         )
 
+    @property
+    def selection_digest(self) -> str:
+        """Canonical digest of the review-time selection for cache keys.
+
+        Bound to ``selectable_entries``, so edits to retired or superseded
+        entries do not invalidate incremental state and edits to entries that
+        can reach a review always do.
+        """
+
+        return learning_digest(self.selectable_entries)
+
     def for_paths(
         self,
         paths: Iterable[str],
@@ -329,7 +354,13 @@ class LearningStore:
 
 
 def learning_digest(entries: Iterable[LearningEntry]) -> str:
-    """Return a SHA-256 digest of canonical approved learning content."""
+    """Return a SHA-256 digest of exactly the entries supplied.
+
+    This is a scope-agnostic primitive: the caller owns the selection set, so
+    two callers passing different sets get different digests. Incremental cache
+    keys bind the review-time set, so use ``LearningStore.selection_digest``
+    rather than digesting an arbitrary mix of active and retired entries.
+    """
 
     payload = [entry.to_dict() for entry in sorted(entries, key=lambda item: item.id)]
     encoded = json.dumps(

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import LearningLoadError
 from review_sensei.learnings import (
@@ -288,6 +289,33 @@ class RepositoryLearningTests(unittest.TestCase):
             with self.assertRaises(LearningLoadError):
                 load_learning_feedback(path)
 
+    def test_schema_version_recheck_holds_without_the_schema_layer(self):
+        # The schema's const makes the loader's own re-check unreachable for
+        # valid input, so bypass the validator to prove the branch is a real
+        # defense if that layer is ever changed or stubbed.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "2.0",
+                    "records": [
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": "finding-1",
+                            "outcome": "useful",
+                        }
+                    ],
+                },
+            )
+            with patch(
+                "review_sensei.learnings.validate_public_document",
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(
+                    LearningLoadError, "schema_version is unsupported"
+                ):
+                    load_learning_feedback(path)
+
     def test_load_learning_feedback_rejects_non_object_record(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = self._write_feedback(
@@ -368,6 +396,42 @@ class RepositoryLearningTests(unittest.TestCase):
         loaded = summarize_learning_feedback(records, known_learning_ids=("other",))
         self.assertEqual(loaded["known_learning_ids_scope"], "store")
         self.assertEqual(loaded["known_learning_ids_without_feedback"], ["other"])
+
+    def test_selection_digest_tracks_only_the_review_time_selection(self):
+        active = LearningEntry(
+            id="provider-boundary",
+            title="Provider boundary",
+            rule="Keep provider calls behind adapters.",
+        )
+        retired = LearningEntry(
+            id="retired-boundary",
+            title="Retired boundary",
+            rule="Old rule.",
+            status="superseded",
+            superseded_by="provider-boundary",
+        )
+        baseline = LearningStore((active,))
+        with_retired = LearningStore((active, retired))
+        # Editing or adding a retired entry must not invalidate cache state.
+        self.assertEqual(baseline.selection_digest, with_retired.selection_digest)
+        self.assertNotEqual(
+            learning_digest(baseline.all_entries),
+            learning_digest(with_retired.all_entries),
+        )
+        # Editing an entry that can reach a review must invalidate it.
+        changed = LearningStore(
+            (
+                LearningEntry(
+                    id="provider-boundary",
+                    title="Provider boundary",
+                    rule="Keep provider calls behind ports.",
+                ),
+            )
+        )
+        self.assertNotEqual(baseline.selection_digest, changed.selection_digest)
+        self.assertEqual(
+            baseline.selection_digest, learning_digest(baseline.selectable_entries)
+        )
 
     def test_diagnostic_report_is_advisory_and_does_not_mutate(self):
         store = LearningStore(

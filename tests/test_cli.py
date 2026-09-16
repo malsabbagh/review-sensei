@@ -1515,6 +1515,44 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(summary["known_learning_ids_scope"], "unset")
         self.assertEqual(summary["known_learning_ids_without_feedback"], [])
 
+    def test_evaluate_compare_learnings_preserves_fixture_pass_fail(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "fixture",
+                        "--corpus",
+                        "evaluation/v1/corpus.json",
+                        "--compare-learnings",
+                    ]
+                )
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(status, 0 if report["with_learnings_passed"] else 1)
+
+        # Adding the flag must not mask failing fixture cases with exit 0.
+        failing = json.loads(json.dumps(report))
+        failing["with_learnings_passed"] = False
+        with patch(
+            "review_sensei.evaluation.compare_learning_effect",
+            return_value=failing,
+        ):
+            with redirect_stderr(io.StringIO()):
+                with patch("sys.stdout", io.StringIO()):
+                    status = main(
+                        [
+                            "evaluate",
+                            "--mode",
+                            "fixture",
+                            "--corpus",
+                            "evaluation/v1/corpus.json",
+                            "--compare-learnings",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+
     def test_evaluate_compare_learnings_is_fixture_only(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):

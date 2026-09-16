@@ -182,8 +182,10 @@ same validated result.
 - `ReviewRequest.learnings` contains only approved `LearningEntry` values loaded
   from the target branch or target commit. Optional lifecycle metadata does not
   change that boundary; retired/superseded entries and finding feedback never
-  enter the prompt. `learning_digest` is the canonical SHA-256 of approved
-  learning documents used by incremental cache keys.
+  enter the prompt. `LearningStore.selection_digest` is the canonical SHA-256
+  of the review-time selection used by incremental cache keys;
+  `learning_digest` is the scope-agnostic primitive it is built from and
+  digests exactly the entries it is given.
 - `review-sensei learnings diagnose` reports stale, conflicting, missing
   superseder, and supersession-cycle signals for a human decision and never
   mutates approved files.

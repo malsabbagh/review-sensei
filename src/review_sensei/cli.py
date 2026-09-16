@@ -670,7 +670,10 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
                 args.output.write_text(rendered, encoding="utf-8")
             else:
                 sys.stdout.write(rendered)
-            return 0
+            # The comparison already ran the fixture evaluation with the
+            # selected learnings, so adding this flag must not drop the
+            # fixture pass/fail contract callers depend on.
+            return 0 if report["with_learnings_passed"] else 1
         report = evaluate_fixture(corpus)
     else:
         if args.compare_learnings:

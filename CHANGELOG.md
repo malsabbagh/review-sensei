@@ -63,7 +63,11 @@
   `load_learning_feedback` re-checks `schema_version` independent of the schema
   layer, learning selection is shared through `LearningStore.selectable_entries`,
   and `learnings feedback` reports `known_learning_ids_scope` so an empty
-  absence list cannot be read as approval.
+  absence list cannot be read as approval. `evaluate --mode fixture
+  --compare-learnings` keeps the fixture pass/fail exit contract instead of
+  always exiting `0`, comparison deltas are restricted to an allowlist of
+  quality keys, and `LearningStore.selection_digest` is the canonical
+  review-time digest for incremental cache keys.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/
