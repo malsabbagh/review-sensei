@@ -115,6 +115,8 @@ class ModelTests(unittest.TestCase):
             }
         )
         self.assertIsNone(result.comments[0].blocking)
+        self.assertEqual(result.evidence_policy, "legacy")
+        self.assertEqual(result.to_dict()["evidence_policy"], "legacy")
 
     def test_review_comment_rejects_oversized_or_control_labels(self):
         for label, value in (

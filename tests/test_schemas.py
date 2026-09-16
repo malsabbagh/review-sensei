@@ -31,6 +31,7 @@ SCHEMA_NAMES = (
     "promotion-record",
     "run-outcome",
     "recovery-artifact",
+    "candidate-finding",
     "verification-result",
 )
 

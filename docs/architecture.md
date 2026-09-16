@@ -57,18 +57,25 @@ diff changed paths --> active lens selection
                          validated ReviewResult
                            |                   |
                            v                   v
-                    review comments   learning proposals ----> future draft learning PR
-                                               |
-                                               v
-                                future GitHub or other publisher adapters
+          prepare_publishable_review   learning proposals ----> GitHub learning PR
+                           |
+                           v
+              confirmed findings, or identified legacy comments
+                           |
+                           v
+                    GitHub or other publisher adapters
 
 ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
 ```
 
 The review service owns the business invariants. Provider adapters own protocol,
-authentication, timeout, and response-envelope details. Publishers will own
-GitHub API authentication and comment/review delivery when that boundary is
-implemented.
+authentication, timeout, and response-envelope details. Publishers own GitHub
+API authentication and comment/review delivery. `prepare_publishable_review`
+sits between a validated `ReviewResult` and any publisher: `legacy` keeps
+single-pass comments and identifies them; `confirmed` publishes only candidates
+whose evidence exists in the exact reviewed snapshot. Unverified candidates
+never become findings, and incomplete verification cannot be treated as a
+clean review. Candidate text and snapshot contents remain untrusted data.
 
 The versioned synthetic corpus flows through a bounded, provider-neutral
 evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.

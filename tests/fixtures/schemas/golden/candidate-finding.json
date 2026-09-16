@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "claim": "Division by zero when count is empty.",
+  "triggering_conditions": "Call average() with an empty list.",
+  "impacted_path": "src/app.py",
+  "severity_rationale": "The function raises and drops the request.",
+  "assumptions": ["count is a list of numbers"],
+  "evidence": [
+    {
+      "path": "src/app.py",
+      "line": 2,
+      "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "excerpt": "return total / len(values)"
+    }
+  ]
+}

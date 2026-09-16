@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 from ...conversation import ConversationService
 from ...models import ReviewResult
 from ...providers.base import ReviewProvider
+from ...verifier import CandidateFinding
 from .broker_client import BrokerClient
 from .conversation import (
     ConversationPublisher,
@@ -63,6 +65,10 @@ class GitHubApplication:
         result: ReviewResult,
         diff: str,
         app_slug: str,
+        candidates: Sequence[CandidateFinding] | None = None,
+        snapshot: Mapping[str, str] | None = None,
+        snapshot_sha256: str | None = None,
+        evidence_policy: str = "legacy",
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -86,6 +92,10 @@ class GitHubApplication:
             diff=diff,
             app_slug=app_slug,
             auto_approve=options.auto_approve,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
         )
 
     def publish_learning(

@@ -599,6 +599,9 @@ class ReviewResult:
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
     # are also classified as incomplete.
+    # ``legacy`` is the compatible single-pass publication mode. ``confirmed``
+    # means comments were selected by deterministic evidence verification.
+    evidence_policy: str = "legacy"
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):
@@ -653,6 +656,11 @@ class ReviewResult:
                 raise ReviewInputError(
                     "review source_context_coverage must be a SourceContextCoverage"
                 )
+        if not isinstance(self.evidence_policy, str) or self.evidence_policy not in {
+            "legacy",
+            "confirmed",
+        }:
+            raise ReviewInputError("evidence_policy must be legacy or confirmed")
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
@@ -727,6 +735,10 @@ class ReviewResult:
             value["source_context"] = cast(
                 SourceContextCoverage, self.source_context_coverage
             ).to_dict()
+        # Omitted evidence_policy is the compatible single-pass mode. Confirmed
+        # results serialize the policy so publishers cannot treat unverified
+        # candidates as findings.
+        value["evidence_policy"] = self.evidence_policy
         return value
 
     @classmethod
@@ -743,6 +755,7 @@ class ReviewResult:
         # Missing status is a legacy/incomplete artifact and must fail closed
         # in publication/approval paths.
         review_status = value.get("review_status", "incomplete")
+        evidence_policy = value.get("evidence_policy", "legacy")
         if not isinstance(summary, str):
             raise ReviewInputError("review result summary must be a string")
         if not isinstance(comments, list):
@@ -755,6 +768,8 @@ class ReviewResult:
             raise ReviewInputError("review result learning_proposals must be an array")
         if not isinstance(review_status, str):
             raise ReviewInputError("review result review_status must be a string")
+        if not isinstance(evidence_policy, str):
+            raise ReviewInputError("review result evidence_policy must be a string")
         comment_values: list[ReviewComment] = []
         for index, comment in enumerate(comments):
             if not isinstance(comment, Mapping):
@@ -829,6 +844,7 @@ class ReviewResult:
             learning_proposals=tuple(parsed_proposals),
             review_status=review_status,
             source_context_coverage=coverage,
+            evidence_policy=evidence_policy,
         )
 
 

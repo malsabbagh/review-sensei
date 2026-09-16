@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
+from .models import ReviewComment, ReviewResult
 from .schemas import validate_public_document
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
@@ -35,8 +36,13 @@ from .validation import (
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DISPOSITIONS = frozenset({"confirmed", "rejected", "insufficient-evidence"})
+EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 _EVIDENCE_FIELDS = frozenset({"path", "line", "snapshot_sha256", "excerpt"})
 PUBLIC_SCHEMA_VERSION = "1.0"
+_COVERAGE_NOTE = (
+    "Unpublished candidates are not findings. Incomplete verification is not "
+    "a clean review."
+)
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,20 @@ class CandidateFinding:
             )
         if len(self.assumptions) > 16:
             raise ReviewInputError("candidate has too many assumptions")
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "schema_version": PUBLIC_SCHEMA_VERSION,
+            "claim": self.claim,
+            "triggering_conditions": self.triggering_conditions,
+            "impacted_path": self.impacted_path,
+            "evidence": [reference.to_dict() for reference in self.evidence],
+            "severity_rationale": self.severity_rationale,
+        }
+        if self.assumptions:
+            value["assumptions"] = list(self.assumptions)
+        validate_public_document(value, "candidate-finding")
+        return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "CandidateFinding":
@@ -397,3 +417,152 @@ def verify_candidates(
             )
         )
     return tuple(results)
+
+
+@dataclass(frozen=True)
+class PublishableReview:
+    """A review whose comments are safe for a publisher to emit as findings."""
+
+    result: ReviewResult
+    verifications: tuple[VerificationResult, ...]
+    evidence_policy: str
+    unpublished: int
+
+
+def format_candidate_finding(candidate: CandidateFinding) -> str:
+    """Render a candidate as concise published reasoning, never a raw transcript."""
+
+    if not isinstance(candidate, CandidateFinding):
+        raise ReviewInputError("candidate must be a CandidateFinding")
+    evidence_parts: list[str] = []
+    for reference in candidate.evidence:
+        location = f"{reference.path}:{reference.line}"
+        if reference.excerpt:
+            evidence_parts.append(f"{location} (`{reference.excerpt}`)")
+        else:
+            evidence_parts.append(location)
+    lines = [
+        candidate.claim.strip(),
+        "",
+        f"Trigger: {candidate.triggering_conditions.strip()}",
+        f"Why it matters: {candidate.severity_rationale.strip()}",
+        f"Evidence: {'; '.join(evidence_parts)}",
+    ]
+    if candidate.assumptions:
+        lines.append("Assumptions: " + "; ".join(candidate.assumptions))
+    return "\n".join(lines)
+
+
+def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
+    located = next(
+        (
+            reference
+            for reference in candidate.evidence
+            if reference.path == candidate.impacted_path
+        ),
+        candidate.evidence[0],
+    )
+    path = (
+        candidate.impacted_path
+        if located.path == candidate.impacted_path
+        else located.path
+    )
+    return ReviewComment(
+        path=path,
+        line=located.line,
+        body=format_candidate_finding(candidate),
+    )
+
+
+def _verification_coverage(verifications: Sequence[VerificationResult]) -> str:
+    counts = {"confirmed": 0, "rejected": 0, "insufficient-evidence": 0}
+    for item in verifications:
+        counts[item.disposition] += 1
+    return (
+        f"Verification coverage: confirmed={counts['confirmed']}, "
+        f"rejected={counts['rejected']}, "
+        f"insufficient-evidence={counts['insufficient-evidence']}. {_COVERAGE_NOTE}"
+    )
+
+
+def _downgrade_incomplete_status(status: str) -> str:
+    if status in {"complete", "summary-only"}:
+        return "partial"
+    return status
+
+
+def prepare_publishable_review(
+    result: ReviewResult,
+    *,
+    candidates: Sequence[CandidateFinding] | None = None,
+    snapshot: Mapping[str, str] | None = None,
+    snapshot_sha256: str | None = None,
+    evidence_policy: str = "legacy",
+    limits: ReviewLimits | None = None,
+) -> PublishableReview:
+    """Gate findings before publication using the configured evidence policy.
+
+    ``legacy`` is the compatible single-pass mode: existing comments publish
+    unchanged and are identified by ``evidence_policy="legacy"``. ``confirmed``
+    publishes only candidates whose evidence exists in the exact reviewed
+    snapshot. Rejected, duplicate, malformed, and insufficient-evidence
+    candidates never become findings, and incomplete coverage cannot be a
+    clean review.
+    """
+
+    if not isinstance(result, ReviewResult):
+        raise ReviewInputError("review result is invalid")
+    if evidence_policy not in EVIDENCE_POLICIES:
+        raise ReviewInputError("evidence policy is unsupported")
+    if evidence_policy == "legacy":
+        if result.evidence_policy != "legacy":
+            result = ReviewResult(
+                summary=result.summary,
+                comments=result.comments,
+                provider=result.provider,
+                model=result.model,
+                learning_proposals=result.learning_proposals,
+                review_status=result.review_status,
+                limits=result.limits,
+                evidence_policy="legacy",
+            )
+        return PublishableReview(result, (), "legacy", 0)
+
+    if candidates is None:
+        candidates = ()
+    if snapshot is None or snapshot_sha256 is None:
+        raise ReviewInputError("confirmed evidence policy requires a reviewed snapshot")
+    review_limits = limits if limits is not None else result.limits
+    verifications = verify_candidates(
+        candidates,
+        snapshot,
+        snapshot_sha256=snapshot_sha256,
+        limits=review_limits,
+    )
+    published: list[ReviewComment] = []
+    unpublished = 0
+    for candidate, verification in zip(candidates, verifications, strict=True):
+        if verification.disposition == "confirmed":
+            published.append(_candidate_to_comment(candidate))
+        else:
+            unpublished += 1
+    if result.comments and not candidates:
+        unpublished += len(result.comments)
+    incomplete = unpublished > 0
+    summary = result.summary
+    status = result.review_status
+    if incomplete:
+        status = _downgrade_incomplete_status(status)
+        coverage = _verification_coverage(verifications)
+        summary = f"{summary}\n\n{coverage}" if summary else coverage
+    prepared = ReviewResult(
+        summary=summary,
+        comments=tuple(published),
+        provider=result.provider,
+        model=result.model,
+        learning_proposals=result.learning_proposals,
+        review_status=status,
+        limits=review_limits,
+        evidence_policy="confirmed",
+    )
+    return PublishableReview(prepared, verifications, "confirmed", unpublished)

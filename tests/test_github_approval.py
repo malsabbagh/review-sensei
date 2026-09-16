@@ -280,6 +280,24 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("review-incomplete",))
 
+    def test_incompletely_verified_review_cannot_be_approved(self):
+        result = ReviewResult(
+            summary="Verification coverage: confirmed=0, rejected=1.",
+            comments=(),
+            provider="fixture",
+            review_status="partial",
+            evidence_policy="confirmed",
+        )
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=result,
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertIn("review-partial", decision.blockers)
+        self.assertIn("review-unverified", decision.blockers)
+
 
 if __name__ == "__main__":
     unittest.main()

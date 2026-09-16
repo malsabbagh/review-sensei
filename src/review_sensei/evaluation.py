@@ -1044,6 +1044,12 @@ def run_case(
             if actual_document.get("review_status") == "complete":
                 actual_document = dict(actual_document)
                 actual_document.pop("review_status")
+            if expected_document.get("evidence_policy") == "legacy":
+                expected_document = dict(expected_document)
+                expected_document.pop("evidence_policy")
+            if actual_document.get("evidence_policy") == "legacy":
+                actual_document = dict(actual_document)
+                actual_document.pop("evidence_policy")
         status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(
         comment.line > 0 and comment.path for comment in result.comments

@@ -61,6 +61,11 @@ def evaluate_auto_approval(
         blockers.append(f"review-{status}")
     elif status != "complete":
         blockers.append("review-status-invalid")
+    policy = getattr(result, "evidence_policy", "legacy")
+    if policy not in {"legacy", "confirmed"}:
+        blockers.append("evidence-policy-invalid")
+    elif policy == "confirmed" and status != "complete":
+        blockers.append("review-unverified")
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 

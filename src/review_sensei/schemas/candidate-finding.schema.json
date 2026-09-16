@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/candidate-finding.schema.json",
+  "title": "ReviewSensei candidate finding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "claim",
+    "triggering_conditions",
+    "impacted_path",
+    "evidence",
+    "severity_rationale"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "claim": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "triggering_conditions": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "impacted_path": {"type": "string", "minLength": 1},
+    "severity_rationale": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "assumptions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "snapshot_sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "line": {"type": "integer", "minimum": 1},
+          "snapshot_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "excerpt": {
+            "anyOf": [
+              {"type": "string", "minLength": 1, "maxLength": 512},
+              {"type": "null"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}
