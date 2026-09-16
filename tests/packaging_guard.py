@@ -22,23 +22,28 @@ def is_loaded_from_checkout_src(
 
 
 def assert_distribution_import() -> Path:
-    """Return the loaded package path, failing on a checkout ``src/`` import.
+    """Return the loaded package path, failing a non-distribution import.
 
-    The guard is armed when ``REVIEWSENSEI_CHECKOUT_ROOT`` or
-    ``REVIEWSENSEI_DIST_SAFE_LANE=1`` is set so the checkout unit suite can
-    still import an editable install.
+    Setting ``REVIEWSENSEI_CHECKOUT_ROOT`` or ``REVIEWSENSEI_DIST_SAFE_LANE=1``
+    arms the guard; with neither set it is disarmed so the checkout unit suite
+    can still import an editable install. While armed the package must resolve
+    under ``sys.prefix``, so an unrelated site-packages install cannot stand in
+    for the freshly built wheel. It must additionally not resolve under
+    ``$REVIEWSENSEI_CHECKOUT_ROOT/src``, which is only checkable when that
+    variable is set.
     """
 
     import review_sensei
 
     package_file = Path(review_sensei.__file__).resolve()
     checkout = os.environ.get("REVIEWSENSEI_CHECKOUT_ROOT")
+    armed = bool(checkout) or os.environ.get("REVIEWSENSEI_DIST_SAFE_LANE") == "1"
     if checkout and is_loaded_from_checkout_src(package_file, checkout):
         raise AssertionError(
             "review_sensei loaded from checkout src/: "
             f"{package_file} checkout={checkout}"
         )
-    if os.environ.get("REVIEWSENSEI_DIST_SAFE_LANE") == "1":
+    if armed:
         prefix = Path(sys.prefix).resolve()
         if prefix not in package_file.parents:
             raise AssertionError(

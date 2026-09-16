@@ -7,6 +7,19 @@
     "sdist_glob": "dist/review_sensei-*.tar.gz",
     "wheel_glob": "dist/review_sensei-*.whl"
   },
+  "sdist_entries": {
+    "verifier": "scripts/check_sdist_contract.py",
+    "required": [
+      "src/review_sensei/schemas/review-category.schema.json",
+      "src/review_sensei/schemas/review-stage.schema.json",
+      "src/review_sensei/schemas/learning-entry.schema.json",
+      "src/review_sensei/schemas/evaluation-corpus.schema.json",
+      "src/review_sensei/schemas/evaluation-report.schema.json",
+      "src/review_sensei/schemas/promotion-record.schema.json",
+      "evaluation/v1/corpus.json"
+    ],
+    "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
+  },
   "supported_command": {
     "build": "python -m build --outdir dist",
     "record_digests": "sha256sum dist/*.tar.gz dist/*.whl",
@@ -45,7 +58,8 @@
   },
   "import_guard": {
     "environment": ["REVIEWSENSEI_CHECKOUT_ROOT", "REVIEWSENSEI_DIST_SAFE_LANE"],
-    "rule": "If review_sensei.__file__ is under $REVIEWSENSEI_CHECKOUT_ROOT/src, the dist-safe suite fails."
+    "armed": "Setting either variable arms the guard. Every documented dist-safe command exports both. With neither set the guard is disarmed so the checkout lane can import an editable install.",
+    "rule": "While armed, review_sensei.__file__ must resolve under sys.prefix, and must not resolve under $REVIEWSENSEI_CHECKOUT_ROOT/src when that variable is set."
   },
   "reproduction": {
     "baseline_commit": "3f9ca4ecdd49a398645561daf403f0569b07ddcc",

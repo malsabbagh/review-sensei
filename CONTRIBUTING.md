@@ -76,13 +76,19 @@ export REVIEWSENSEI_DIST_SAFE_LANE=1
 /tmp/review-sensei-wheel-venv/bin/python -m pip check
 ```
 
-The supported command, archive SHA-256 identification, and checkout-only lane
-are recorded in `tests/fixtures/distribution-contract.json`. Do not make the
-clean-wheel environment import the checkout. Verify that
-`review_sensei.__file__` is beneath `sys.prefix` and that all packaged schemas
-are readable through `importlib.resources`. Accidental imports from
-`$REVIEWSENSEI_CHECKOUT_ROOT/src` fail the dist-safe suite. Broad checkout tests
-remain `python -m unittest discover -s tests -v`.
+The supported command, archive SHA-256 identification, required sdist entries,
+and checkout-only lane are recorded in
+`tests/fixtures/distribution-contract.json`, which
+`scripts/check_sdist_contract.py` enforces against the built sdist. Declaring a
+new lane helper or fixture means editing that contract and `MANIFEST.in`; CI and
+the checkout lane tests read the contract rather than repeating the allowlist.
+
+Do not make the clean-wheel environment import the checkout. Setting either
+`REVIEWSENSEI_CHECKOUT_ROOT` or `REVIEWSENSEI_DIST_SAFE_LANE=1` arms the import
+guard: while armed, `review_sensei.__file__` must be beneath `sys.prefix` and
+must not be beneath `$REVIEWSENSEI_CHECKOUT_ROOT/src`. All packaged schemas must
+stay readable through `importlib.resources`. Broad checkout tests remain
+`python -m unittest discover -s tests -v`.
 
 ## Deterministic evaluation changes
 

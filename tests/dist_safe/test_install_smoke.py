@@ -5,6 +5,7 @@ import importlib.resources
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -23,11 +24,19 @@ from review_sensei.cli import main  # noqa: E402
 from review_sensei.models import ProviderRequest  # noqa: E402
 from review_sensei.providers.fixture import FixtureProvider  # noqa: E402
 
+# Release versions must stay PEP 440 parseable. CI pins the exact artifact
+# through REVIEWSENSEI_EXPECTED_VERSION so a version bump does not edit tests.
+PEP440 = re.compile(r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$")
+
 
 class InstallSmokeTests(unittest.TestCase):
     def test_packaged_cli_and_schemas_are_available(self) -> None:
         package_file = assert_distribution_import()
-        self.assertEqual(importlib.metadata.version("review-sensei"), "0.1.1")
+        installed_version = importlib.metadata.version("review-sensei")
+        self.assertRegex(installed_version, PEP440)
+        expected = os.environ.get("REVIEWSENSEI_EXPECTED_VERSION")
+        if expected:
+            self.assertEqual(installed_version, expected)
         package_root = importlib.resources.files("review_sensei")
         for name in (
             "review-category.schema.json",

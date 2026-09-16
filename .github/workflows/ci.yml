@@ -137,20 +137,8 @@ jobs:
         run: python -m pip install -r requirements/ci.txt
       - name: Build sdist and wheel
         run: python -m build --outdir dist
-      - name: Check sdist contents
-        shell: bash
-        run: |
-          tar -tzf dist/*.tar.gz | grep -E 'src/review_sensei/schemas/(review-category|review-stage|learning-entry|evaluation-corpus|evaluation-report|promotion-record)\.schema\.json$'
-          tar -tzf dist/*.tar.gz | grep -E 'evaluation/v1/corpus\.json$'
-          tar -tzf dist/*.tar.gz | grep -E 'tests/dist_safe/test_distribution_contract\.py$'
-          tar -tzf dist/*.tar.gz | grep -E 'tests/downstream/test_acceptance\.py$'
-          tar -tzf dist/*.tar.gz | grep -E 'tests/fixtures/distribution-contract\.json$'
-          tar -tzf dist/*.tar.gz | grep -E 'tests/fake_github_http\.py$'
-          tar -tzf dist/*.tar.gz | grep -E 'tests/packaging_guard\.py$'
-          if tar -tzf dist/*.tar.gz | grep -E 'tests/test_ci_policy\.py$'; then
-            echo "checkout-only tests must not be packaged in the sdist" >&2
-            exit 1
-          fi
+      - name: Check sdist contents against the distribution contract
+        run: python scripts/check_sdist_contract.py
       - name: Record distribution digests
         shell: bash
         run: sha256sum dist/*.tar.gz dist/*.whl | tee dist/SHA256SUMS
@@ -197,6 +185,8 @@ jobs:
           test ! -e "$suite/test_ci_policy.py"
           export REVIEWSENSEI_CHECKOUT_ROOT="$GITHUB_WORKSPACE"
           export REVIEWSENSEI_DIST_SAFE_LANE=1
+          REVIEWSENSEI_EXPECTED_VERSION="$(cd "$GITHUB_WORKSPACE" && python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
+          export REVIEWSENSEI_EXPECTED_VERSION
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/dist_safe" -v
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
           "$wheel_venv/bin/python" -m pip check

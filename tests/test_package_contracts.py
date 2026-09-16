@@ -46,8 +46,6 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("prune tests", manifest)
         self.assertIn("graft tests/dist_safe", manifest)
         self.assertIn("graft tests/downstream", manifest)
-        self.assertIn("include tests/fake_github_http.py", manifest)
-        self.assertIn("include tests/fixtures/distribution-contract.json", manifest)
         self.assertTrue((root / "evaluation" / "v1" / "corpus.json").is_file())
         self.assertTrue(
             (root / "tests" / "fixtures" / "distribution-contract.json").is_file()
