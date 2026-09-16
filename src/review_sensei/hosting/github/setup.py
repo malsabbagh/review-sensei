@@ -719,7 +719,7 @@ def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
     tag = _validate_public_workflow_tag(public_workflow_tag)
     return r"""# ReviewSensei setup version: 4
 name: ReviewSensei review
-run-name: ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}
+run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
 # The installer and this example follow the operator-managed v4 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs

@@ -878,6 +878,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                     ),
                 )
 
+    def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):
+        quoted = (
+            'run-name: "ReviewSensei ${{ github.event.pull_request && '
+            "format('PR #{0}', github.event.pull_request.number) || 'manual' }}\""
+        )
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            ".github/workflows/review-sensei-review.yml",
+            "examples/github-actions/review-sensei-review.yml",
+        ):
+            with self.subTest(relative=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn(quoted, text)
+                run_name_lines = [
+                    line for line in text.splitlines() if line.startswith("run-name:")
+                ]
+                self.assertEqual(run_name_lines, [quoted])
+
     def test_generated_dispatch_is_review_only(self):
         text = (
             Path(__file__).resolve().parents[1]
