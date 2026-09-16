@@ -41,6 +41,26 @@ diff --git a/src/b.py b/src/b.py
 +added-b
 """
 
+THREE_FILES = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ keep-a
++added-a
+diff --git a/src/b.py b/src/b.py
+--- a/src/b.py
++++ b/src/b.py
+@@ -1 +1,2 @@
+ keep-b
++added-b
+diff --git a/src/c.py b/src/c.py
+--- a/src/c.py
++++ b/src/c.py
+@@ -1 +1,2 @@
+ keep-c
++added-c
+"""
+
 DELETION = """diff --git a/src/legacy.py b/src/legacy.py
 deleted file mode 100644
 --- a/src/legacy.py
@@ -166,6 +186,25 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(first.chunks[1].paths, ("src/b.py",))
         self.assertEqual(first.chunks[0].related_paths, ("src/b.py",))
         self.assertEqual(first.chunks[1].related_paths, ("src/a.py",))
+
+    def test_max_chunks_overflows_after_limit_without_extra_flush(self):
+        limits = ReviewLimits(max_diff_files=1)
+        plan = plan_change(
+            THREE_FILES,
+            limits=limits,
+            orchestrate=True,
+            work_budget=TotalWorkBudget(max_chunks=2),
+        )
+        self.assertEqual(len(plan.chunks), 2)
+        outcomes = {
+            entry.path: (entry.outcome, entry.reason) for entry in plan.coverage.files
+        }
+        self.assertEqual(outcomes["src/a.py"], ("reviewed", None))
+        self.assertEqual(outcomes["src/b.py"], ("reviewed", None))
+        self.assertEqual(
+            outcomes["src/c.py"],
+            ("budget-exhausted", "provider-call-budget"),
+        )
 
     def test_binary_generated_and_rename_coverage(self):
         binary = plan_change(BINARY)
@@ -347,9 +386,48 @@ class CoveragePlanningTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(provider.requests), 1)
-        outcomes = {entry.path: entry.outcome for entry in result.coverage.files}
-        self.assertEqual(outcomes["src/a.py"], "reviewed")
-        self.assertEqual(outcomes["src/b.py"], "budget-exhausted")
+        outcomes = {
+            entry.path: (entry.outcome, entry.reason) for entry in result.coverage.files
+        }
+        self.assertEqual(outcomes["src/a.py"], ("reviewed", None))
+        self.assertEqual(
+            outcomes["src/b.py"],
+            ("budget-exhausted", "provider-call-budget"),
+        )
+
+    def test_provider_budget_exception_marks_current_chunk_exhausted(self):
+        limits = ReviewLimits(max_diff_files=1)
+
+        class BudgetOnSecondCall(FakeProvider):
+            def complete(self, request):
+                self.requests.append(request)
+                if len(self.requests) > 1:
+                    from review_sensei.errors import ReviewFormatError
+
+                    raise ReviewFormatError("provider call budget exhausted")
+                return ProviderResponse(
+                    text='{"summary":"one","comments":[]}',
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        provider = BudgetOnSecondCall([])
+        result = ReviewService(provider).review(
+            ReviewRequest(
+                diff=TWO_FILES,
+                limits=limits,
+                orchestrate_large_changes=True,
+                work_budget=TotalWorkBudget(max_provider_calls=1, max_chunks=2),
+            )
+        )
+        outcomes = {
+            entry.path: (entry.outcome, entry.reason) for entry in result.coverage.files
+        }
+        self.assertEqual(outcomes["src/a.py"], ("reviewed", None))
+        self.assertEqual(
+            outcomes["src/b.py"],
+            ("budget-exhausted", "provider-call-budget"),
+        )
 
     def test_chunk_orchestration_does_not_mutate_service_provider(self):
         limits = ReviewLimits(max_diff_files=1)

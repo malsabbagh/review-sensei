@@ -238,7 +238,7 @@ def _pack_records(
         for piece in pieces:
             if current and not _fits(current, piece, limits=limits):
                 flush()
-            if not current and len(chunks) >= work_budget.max_chunks:
+            if len(chunks) >= work_budget.max_chunks:
                 overflow_reason = "provider-call-budget"
                 overflow.append(piece)
                 chunk_budget_exhausted = True

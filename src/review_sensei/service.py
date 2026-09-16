@@ -389,6 +389,26 @@ class ReviewService:
                         reason="chunk-preflight-failed",
                         limits=request.limits,
                     )
+                elif budgeted.exhausted:
+                    coverage = apply_chunk_outcomes(
+                        coverage,
+                        paths=chunk.paths,
+                        hunk_indexes=chunk.hunk_indexes,
+                        outcome="budget-exhausted",
+                        reason="provider-call-budget",
+                        limits=request.limits,
+                    )
+                    for item in plan.reviewable_chunks:
+                        if item.index > chunk.index:
+                            coverage = apply_chunk_outcomes(
+                                coverage,
+                                paths=item.paths,
+                                hunk_indexes=item.hunk_indexes,
+                                outcome="budget-exhausted",
+                                reason="provider-call-budget",
+                                limits=request.limits,
+                            )
+                    break
                 else:
                     coverage = apply_chunk_outcomes(
                         coverage,

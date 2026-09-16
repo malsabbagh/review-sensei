@@ -399,8 +399,24 @@ def analyze_diff(
     def finish() -> None:
         close_hunk(require_complete=True)
 
-    def close_file() -> None:
+    def _reset_file_state() -> None:
         nonlocal in_file, current_binary, seen_hunk_in_file
+        in_file = False
+        current_binary = False
+        seen_hunk_in_file = False
+        current_file_lines.clear()
+        current_header_lines.clear()
+        current_file_hunks.clear()
+        current_file_added.clear()
+        current_file_deleted.clear()
+
+    def abandon_file() -> None:
+        close_hunk(require_complete=not allow_incomplete)
+        if not in_file:
+            return
+        _reset_file_state()
+
+    def close_file() -> None:
         close_hunk(require_complete=not allow_incomplete)
         if not in_file:
             return
@@ -420,14 +436,7 @@ def analyze_diff(
                 binary=current_binary,
             )
         )
-        in_file = False
-        current_binary = False
-        seen_hunk_in_file = False
-        current_file_lines.clear()
-        current_header_lines.clear()
-        current_file_hunks.clear()
-        current_file_added.clear()
-        current_file_deleted.clear()
+        _reset_file_state()
 
     def start_file() -> None:
         nonlocal in_file
@@ -538,7 +547,7 @@ def analyze_diff(
                 raise _invalid("diff file markers conflict with the Git header")
             if not record_path(current_old_path) or not record_path(new_path):
                 stopped_for_budget = True
-                close_file()
+                abandon_file()
                 break
             if (
                 current_old_path is not None
@@ -574,7 +583,7 @@ def analyze_diff(
             else:
                 if not record_path(rename_from):
                     stopped_for_budget = True
-                    close_file()
+                    abandon_file()
                     break
             append_file_line(line)
             continue
@@ -590,7 +599,7 @@ def analyze_diff(
                 resolve_pending_git_header(pending_rename_from, rename_to)
                 if not record_path(pending_rename_from) or not record_path(rename_to):
                     stopped_for_budget = True
-                    close_file()
+                    abandon_file()
                     break
                 if pending_rename_from is not None and rename_to is not None:
                     renamed_pairs.append((pending_rename_from, rename_to))
@@ -611,7 +620,7 @@ def analyze_diff(
             else:
                 if not record_path(rename_to):
                     stopped_for_budget = True
-                    close_file()
+                    abandon_file()
                     break
             append_file_line(line)
             continue
@@ -758,25 +767,6 @@ def analyze_diff(
     for pair in renamed_pairs:
         unique_renames.setdefault(pair, None)
     total_lines = len(diff.splitlines())
-    if not enumeration_complete:
-
-        def note_unenumerated_path(path: str | None) -> None:
-            if path is None or path == "/dev/null" or path in paths:
-                return
-            paths[path] = None
-
-        for scan_line in diff.splitlines():
-            try:
-                if scan_line.startswith("+++ "):
-                    note_unenumerated_path(
-                        _decode_marker(scan_line, prefix="+++ ", side=True)
-                    )
-                elif scan_line.startswith("--- "):
-                    note_unenumerated_path(
-                        _decode_marker(scan_line, prefix="--- ", side=True)
-                    )
-            except ReviewInputError:
-                continue
     return DiffAnalysis(
         changed_lines={path: frozenset(values) for path, values in changed.items()},
         changed_paths=tuple(paths),
