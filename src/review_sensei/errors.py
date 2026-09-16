@@ -9,6 +9,10 @@ class ReviewInputError(ReviewSenseiError, ValueError):
 
     error_category = "input"
 
+    def __init__(self, message: str = "", *, diagnostic: str | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
 
 class ReviewFormatError(ReviewSenseiError, ValueError):
     """Raised when a provider response cannot be safely used as a review."""

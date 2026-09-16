@@ -19,7 +19,10 @@ from review_sensei.hosting.github import (
     GitHubWriteOptions,
     PublicationResult,
 )
-from review_sensei.hosting.github.publication import outcome_from_publication
+from review_sensei.hosting.github.publication import (
+    PUBLICATION_RESULT_STATUSES,
+    outcome_from_publication,
+)
 from review_sensei.models import ProviderResponse, ReviewRequest, ReviewResult
 from review_sensei.outcomes import (
     RecoveryArtifact,
@@ -191,10 +194,19 @@ class RunOutcomeWiringTests(unittest.TestCase):
             sleeper=clock.sleep,
         )
         self.assertEqual(run.outcome.status, "reviewed")
-        self.assertEqual(run.outcome.provider_calls, 2)
+        self.assertEqual(run.outcome.provider_calls, 1)
         self.assertEqual(run.outcome.retry_attempts, 1)
         self.assertEqual(clock.sleeps, [0.25])
         self.assertIn("Recovered.", run.result.summary)
+
+    def test_structural_retry_exhaustion_returns_provider_failed(self):
+        provider = SequenceProvider(["not-json", "still-not-json"])
+        run = ReviewService(provider).run(ReviewRequest(diff=DIFF))
+        self.assertEqual(run.outcome.status, "provider_failed")
+        self.assertEqual(run.outcome.diagnostic, "invalid_provider_output")
+        self.assertEqual(run.outcome.stage_summary["Default Review Stage"], "failed")
+        self.assertEqual(run.outcome.provider_calls, 2)
+        self.assertEqual(run.outcome.retry_attempts, 0)
 
     def test_structural_retry_does_not_count_as_transport_retry(self):
         provider = SequenceProvider(
@@ -249,7 +261,9 @@ class RunOutcomeWiringTests(unittest.TestCase):
             text = summary.read_text(encoding="utf-8")
             self.assertIn("provider_failed", text)
             self.assertNotIn(CANARY, text)
-            self.assertIn("outcome_status=provider_failed", github_output.read_text())
+            output_text = github_output.read_text(encoding="utf-8")
+            self.assertIn("outcome_status=provider_failed", output_text)
+            self.assertIn("outcome_diagnostic=secret_redacted", output_text)
             self.assertNotIn(CANARY, outcome_path.read_text(encoding="utf-8"))
 
     def test_ineligible_plan_emits_skipped_policy(self):
@@ -279,6 +293,15 @@ class RunOutcomeWiringTests(unittest.TestCase):
         )
         with self.assertRaises(ReviewInputError):
             outcome_for_plan(eligible)
+
+    def test_publication_statuses_map_to_run_outcomes(self):
+        for status in PUBLICATION_RESULT_STATUSES:
+            outcome = outcome_from_publication(PublicationResult(status=status))
+            self.assertNotEqual(
+                outcome.status,
+                "publication_failed",
+                msg=f"status {status!r} is unmapped",
+            )
 
     def test_publication_projection_and_disabled_writes(self):
         published = outcome_from_publication(
@@ -324,7 +347,10 @@ class RunOutcomeWiringTests(unittest.TestCase):
                 head_sha=HEAD_SHA,
             )
             missing = diagnostic_for_recovery_error(
-                ReviewInputError("recovery artifact is missing")
+                ReviewInputError(
+                    "recovery artifact is missing",
+                    diagnostic="recovery_artifact_missing",
+                )
             )
             self.assertEqual(missing, "recovery_artifact_missing")
         expired = RecoveryArtifact.create(
@@ -401,13 +427,21 @@ class RunOutcomeWiringTests(unittest.TestCase):
 
     def test_retry_after_parser_bounds_numeric_hints(self):
         class HeaderError:
-            def __init__(self, value):
-                self.headers = {"Retry-After": value}
+            def __init__(self, value, *, headers=None):
+                if headers is None:
+                    headers = {"Retry-After": value} if value is not None else {}
+                self.headers = headers
 
         self.assertEqual(parse_retry_after_seconds(HeaderError("5")), 5.0)
+        self.assertEqual(parse_retry_after_seconds(HeaderError("0.5")), 0.5)
         self.assertEqual(parse_retry_after_seconds(HeaderError("120")), 60.0)
+        self.assertEqual(parse_retry_after_seconds(HeaderError("60")), 60.0)
+        self.assertIsNone(parse_retry_after_seconds(HeaderError(None)))
+        self.assertIsNone(parse_retry_after_seconds(HeaderError("0")))
+        self.assertIsNone(parse_retry_after_seconds(HeaderError("")))
         self.assertIsNone(parse_retry_after_seconds(HeaderError("Wed, 01 Jan 2026")))
         self.assertIsNone(parse_retry_after_seconds(HeaderError("-1")))
+        self.assertIsNone(parse_retry_after_seconds(type("NoHeaders", (), {})()))
 
     def test_cli_review_writes_outcome_without_echoing_canary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -453,6 +487,37 @@ class RunOutcomeWiringTests(unittest.TestCase):
             diff_path = root / "diff.patch"
             outcome_path = root / "outcome.json"
             diff_path.write_text(DIFF, encoding="utf-8")
+            learning_status = main(
+                [
+                    "github",
+                    "review",
+                    "--diff",
+                    str(diff_path),
+                    "--repository",
+                    "acme/repo",
+                    "--repository-id",
+                    "1",
+                    "--pull-request",
+                    "1",
+                    "--head-sha",
+                    HEAD_SHA,
+                    "--base-branch",
+                    "main",
+                    "--base-sha",
+                    GIT_SHA,
+                    "--allow-write",
+                    "--enable-review",
+                    "--enable-learning-prs",
+                    "--recover-from",
+                    str(root / "missing.json"),
+                    "--outcome",
+                    str(outcome_path),
+                ]
+            )
+            self.assertEqual(learning_status, 1)
+            learning_payload = json.loads(outcome_path.read_text(encoding="utf-8"))
+            self.assertEqual(learning_payload["status"], "publication_failed")
+            self.assertEqual(learning_payload["diagnostic"], "publication_failed")
             status = main(
                 [
                     "github",

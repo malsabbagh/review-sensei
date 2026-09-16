@@ -520,16 +520,23 @@ class RecoveryArtifact:
             self.head_sha,
         ) != (repository, pull_request_number, base_sha, head_sha):
             raise ReviewInputError(
-                "recovery artifact identity does not match current review"
+                "recovery artifact identity does not match current review",
+                diagnostic="recovery_artifact_identity_mismatch",
             )
         canonical = _canonical_recovery_result(self.result)
         if _digest(canonical) != self.result_sha256:
-            raise ReviewInputError("recovery artifact integrity check failed")
+            raise ReviewInputError(
+                "recovery artifact integrity check failed",
+                diagnostic="recovery_artifact_tampered",
+            )
         expiry = _parse_aware_datetime(
             self.expires_at, label="recovery artifact expiry"
         )
         if expiry <= _aware_now(now):
-            raise ReviewInputError("recovery artifact has expired")
+            raise ReviewInputError(
+                "recovery artifact has expired",
+                diagnostic="recovery_artifact_expired",
+            )
 
     def to_dict(self) -> dict[str, object]:
         _canonical_recovery_result(self.result)
@@ -603,6 +610,8 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
     if github_output:
         with Path(github_output).open("a", encoding="utf-8") as handle:
             handle.write(f"outcome_status={outcome.status}\n")
+            if outcome.diagnostic is not None:
+                handle.write(f"outcome_diagnostic={outcome.diagnostic}\n")
 
 
 def recovery_expires_at(
@@ -626,21 +635,36 @@ def load_recovery_artifact(path: Path) -> RecoveryArtifact:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise ReviewInputError("recovery artifact is missing") from exc
+        raise ReviewInputError(
+            "recovery artifact is missing",
+            diagnostic="recovery_artifact_missing",
+        ) from exc
     except OSError as exc:
-        raise ReviewInputError("recovery artifact could not be read") from exc
+        raise ReviewInputError(
+            "recovery artifact could not be read",
+            diagnostic="recovery_artifact_tampered",
+        ) from exc
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ReviewInputError("recovery artifact integrity check failed") from exc
+        raise ReviewInputError(
+            "recovery artifact integrity check failed",
+            diagnostic="recovery_artifact_tampered",
+        ) from exc
     if not isinstance(document, Mapping):
-        raise ReviewInputError("recovery artifact integrity check failed")
+        raise ReviewInputError(
+            "recovery artifact integrity check failed",
+            diagnostic="recovery_artifact_tampered",
+        )
     payload = dict(document)
     payload.pop("schema_version", None)
     try:
         result = payload.get("result")
         if not isinstance(result, Mapping):
-            raise ReviewInputError("recovery artifact integrity check failed")
+            raise ReviewInputError(
+                "recovery artifact integrity check failed",
+                diagnostic="recovery_artifact_tampered",
+            )
         return RecoveryArtifact(
             repository=payload.get("repository"),  # type: ignore[arg-type]
             pull_request_number=payload.get("pull_request_number"),  # type: ignore[arg-type]
@@ -654,23 +678,18 @@ def load_recovery_artifact(path: Path) -> RecoveryArtifact:
     except (KeyError, TypeError, ValueError, ReviewInputError) as exc:
         if isinstance(exc, ReviewInputError):
             raise
-        raise ReviewInputError("recovery artifact integrity check failed") from exc
+        raise ReviewInputError(
+            "recovery artifact integrity check failed",
+            diagnostic="recovery_artifact_tampered",
+        ) from exc
 
 
 def diagnostic_for_recovery_error(exc: BaseException) -> str:
     """Map a recovery validation failure to a closed diagnostic token."""
 
-    message = str(exc)
-    if "is missing" in message:
-        return "recovery_artifact_missing"
-    if "has expired" in message:
-        return "recovery_artifact_expired"
-    if "identity does not match" in message:
-        return "recovery_artifact_identity_mismatch"
-    if "incomplete" in message:
-        return "recovery_artifact_incomplete"
-    if "integrity" in message or "could not be read" in message:
-        return "recovery_artifact_tampered"
+    diagnostic = getattr(exc, "diagnostic", None)
+    if isinstance(diagnostic, str) and diagnostic in PUBLIC_DIAGNOSTICS:
+        return diagnostic
     return "recovery_artifact_tampered"
 
 

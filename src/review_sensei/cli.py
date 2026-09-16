@@ -1079,16 +1079,25 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError(
                 "review publication requires --base-branch and --base-sha"
             )
-        if args.recover_from and args.enable_learning_prs:
-            raise ReviewInputError(
-                "publication recovery cannot write learning pull requests"
-            )
         identity = {
             "repository": args.repository,
             "pull_request_number": args.pull_request,
             "base_sha": args.base_sha,
             "head_sha": args.head_sha,
         }
+        if args.recover_from and args.enable_learning_prs:
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="publication_failed",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(
+                "review-sensei: publication recovery cannot write learning pull requests",
+                file=sys.stderr,
+            )
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
@@ -1123,10 +1132,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     if isinstance(exc, GitHubPublicationTransientError)
                     else diagnostic_for_recovery_error(exc)
                 )
-                if diagnostic == "recovery_artifact_tampered" and "incomplete" in str(
-                    exc
-                ):
-                    diagnostic = "recovery_artifact_incomplete"
                 outcome = RunOutcome(
                     "publication_failed",
                     diagnostic=diagnostic,

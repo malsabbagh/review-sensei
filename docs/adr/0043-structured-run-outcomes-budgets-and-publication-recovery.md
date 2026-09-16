@@ -18,7 +18,9 @@ model again.
 ## Decision
 
 Every `ReviewService` and GitHub publication attempt emits a versioned
-`RunOutcome`. Statuses are `reviewed`, `partial`, `skipped_stale`,
+`RunOutcome`. `ReviewService.review` raises `ReviewInputError` when resource
+budgets are exhausted; callers that need the structured envelope should use
+`ReviewService.run` instead. Statuses are `reviewed`, `partial`, `skipped_stale`,
 `skipped_policy`, `provider_failed`, `budget_exhausted`, `publication_failed`,
 and `already_published`. Diagnostics are closed tokens. Actions summaries and
 `GITHUB_OUTPUT` expose the same envelope without prompts, responses, or source

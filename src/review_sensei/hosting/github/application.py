@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from ...conversation import ConversationService
+from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...outcomes import RecoveryArtifact
 from ...providers.base import ReviewProvider
@@ -142,7 +143,10 @@ class GitHubApplication:
         )
         result = ReviewResult.from_dict(artifact.result)
         if result.review_status == "incomplete":
-            raise GitHubPublicationError("recovery artifact result is incomplete")
+            raise ReviewInputError(
+                "recovery artifact result is incomplete",
+                diagnostic="recovery_artifact_incomplete",
+            )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",

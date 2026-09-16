@@ -593,23 +593,23 @@ jobs:
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
-          review_args=()
+          publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
-            review_args+=(--enable-review)
+            publish_args+=(--enable-review)
           fi
           if [[ "$LEARNING_PRS" == "true" ]]; then
-            review_args+=(--enable-learning-prs)
+            publish_args+=(--enable-learning-prs)
           fi
           if [[ "$AUTO_APPROVE" == "true" ]]; then
-            review_args+=(--enable-auto-approve)
+            publish_args+=(--enable-auto-approve)
           elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            review_args+=(--no-auto-approve)
+            publish_args+=(--no-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --allow-write "${review_args[@]}"
+            --outcome publication-outcome.json --allow-write "${publish_args[@]}"
 
       - name: Generate and publish cloud mention reply
         id: reply
@@ -937,23 +937,23 @@ jobs:
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
-          review_args=()
+          publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
-            review_args+=(--enable-review)
+            publish_args+=(--enable-review)
           fi
           if [[ "$LEARNING_PRS" == "true" ]]; then
-            review_args+=(--enable-learning-prs)
+            publish_args+=(--enable-learning-prs)
           fi
           if [[ "$AUTO_APPROVE" == "true" ]]; then
-            review_args+=(--enable-auto-approve)
+            publish_args+=(--enable-auto-approve)
           elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            review_args+=(--no-auto-approve)
+            publish_args+=(--no-auto-approve)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --allow-write "${review_args[@]}"
+            --outcome publication-outcome.json --allow-write "${publish_args[@]}"
 
       - name: Generate and publish trusted local mention reply
         id: reply

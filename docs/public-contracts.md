@@ -194,8 +194,10 @@ These imports are public and stable within a major version:
 
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`. `ReviewService.run` always returns a
-`ReviewRun` with that envelope. Statuses distinguish a clean review, partial
-coverage, an intentional skip, provider or budget failure, publication
+`ReviewRun` with that envelope. `ReviewService.review` raises
+`ReviewInputError` when resource budgets are exhausted; other failures surface
+as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
+partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
 transport retries, prompt/output bytes, and elapsed time. Structural
 correction remains one bounded retry and is counted separately from transport

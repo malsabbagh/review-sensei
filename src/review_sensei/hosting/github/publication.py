@@ -329,13 +329,22 @@ class PublicationResult:
 
 _PUBLICATION_TO_RUN_STATUS = {
     "published": "reviewed",
+    "approved": "reviewed",
+    "changes_requested": "reviewed",
     "already_published": "already_published",
+    "already_changes_requested": "already_published",
+    "already_approved": "already_published",
     "skipped_stale_head": "skipped_stale",
     "skipped_stale_base": "skipped_stale",
     "skipped_pr_state": "skipped_policy",
     "skipped_repository_mismatch": "skipped_policy",
+    "skipped_fork": "skipped_policy",
+    "skipped_app_authored": "skipped_policy",
+    "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
 }
+
+PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
 
 
 def outcome_from_publication(
@@ -355,10 +364,17 @@ def outcome_from_publication(
         token = "writes_disabled" if result.status == "disabled" else result.status
         if token not in {
             "already_published",
+            "approved",
+            "changes_requested",
+            "already_changes_requested",
+            "already_approved",
             "skipped_stale_head",
             "skipped_stale_base",
             "skipped_pr_state",
             "skipped_repository_mismatch",
+            "skipped_fork",
+            "skipped_app_authored",
+            "auto_approval_disabled",
             "writes_disabled",
             "publication_failed",
             "publication_ambiguous",
