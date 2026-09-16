@@ -84,6 +84,12 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "confirmed evidence policy requires a reviewed snapshot"
             )
+        if evidence_policy == "legacy" and (
+            candidates or snapshot is not None or snapshot_sha256 is not None
+        ):
+            raise GitHubPublicationError(
+                "legacy evidence policy cannot include candidate verification inputs"
+            )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",

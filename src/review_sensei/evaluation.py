@@ -1044,16 +1044,14 @@ def run_case(
             if actual_document.get("review_status") == "complete":
                 actual_document = dict(actual_document)
                 actual_document.pop("review_status")
-            expected_policy = expected_document.get("evidence_policy", "legacy")
-            actual_policy = actual_document.get("evidence_policy", "legacy")
-            if expected_policy != actual_policy:
+            if "evidence_policy" not in expected_document:
+                status = "failed"
+            elif expected_document.get("evidence_policy") != actual_document.get(
+                "evidence_policy"
+            ):
                 status = "failed"
             else:
-                expected_compare = dict(expected_document)
-                actual_compare = dict(actual_document)
-                if "evidence_policy" not in expected_compare:
-                    expected_compare["evidence_policy"] = expected_policy
-                status = "passed" if expected_compare == actual_compare else "failed"
+                status = "passed" if expected_document == actual_document else "failed"
         else:
             status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(

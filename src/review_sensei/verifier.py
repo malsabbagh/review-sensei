@@ -27,7 +27,7 @@ from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
-from .presentation import _escape_markdown_label
+from .presentation import escape_markdown_label
 from .schemas import validate_public_document
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
@@ -37,6 +37,7 @@ from .validation import (
 )
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_MENTION_PREFIX = re.compile(r"(^|\s)@")
 DISPOSITIONS = frozenset({"confirmed", "rejected", "insufficient-evidence"})
 EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 _EVIDENCE_FIELDS = frozenset({"path", "line", "snapshot_sha256", "excerpt"})
@@ -434,7 +435,8 @@ class PublishableReview:
 def _escape_published_text(value: str) -> str:
     """Escape untrusted candidate text before it becomes a published comment body."""
 
-    return _escape_markdown_label(value.strip()).replace("@", "\\@")
+    escaped = escape_markdown_label(value.strip())
+    return _MENTION_PREFIX.sub(r"\1\\@", escaped)
 
 
 def _escape_inline_excerpt(value: str) -> str:
@@ -544,9 +546,11 @@ def prepare_publishable_review(
     ``legacy`` is the compatible single-pass mode: existing comments publish
     unchanged and are identified by ``evidence_policy="legacy"``. ``confirmed``
     publishes only candidates whose evidence exists in the exact reviewed
-    snapshot. Rejected, duplicate, malformed, and insufficient-evidence
-    candidates never become findings, and incomplete coverage cannot be a
-    clean review.
+    snapshot. Legacy single-pass comments are always dropped under confirmed
+    policy and counted in coverage when present. Rejected, duplicate,
+    malformed, and insufficient-evidence candidates never become findings, and
+    incomplete coverage cannot be a clean review. A confirmed review with no
+    legacy comments, no candidates, and no rejections remains ``complete``.
     """
 
     if not isinstance(result, ReviewResult):
@@ -587,7 +591,7 @@ def prepare_publishable_review(
             published.append(_candidate_to_comment(candidate))
         else:
             unpublished_candidates += 1
-    dropped_legacy = len(result.comments) if result.comments and not candidates else 0
+    dropped_legacy = len(result.comments)
     unpublished = unpublished_candidates + dropped_legacy
     incomplete = unpublished_candidates > 0 or dropped_legacy > 0
     summary = result.summary

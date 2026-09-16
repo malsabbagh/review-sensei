@@ -168,6 +168,37 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(self.broker.requested, 0)
         self.assertEqual(self.broker.exchanges, [])
 
+    def test_legacy_policy_rejects_candidate_verification_inputs(self):
+        options = GitHubWriteOptions(
+            auto_review=True,
+            github_writes=True,
+        )
+        with self.assertRaisesRegex(
+            GitHubPublicationError,
+            "legacy evidence policy cannot include candidate verification inputs",
+        ):
+            self.application.publish_review(
+                options=options,
+                oidc_token=None,
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha="a" * 40,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=ReviewResult(
+                    summary="Summary.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                snapshot={"src/app.py": "content"},
+                snapshot_sha256="a" * 64,
+            )
+        self.assertEqual(self.broker.exchanges, [])
+
     def test_confirmed_policy_requires_snapshot_before_publisher(self):
         options = GitHubWriteOptions(
             auto_review=True,

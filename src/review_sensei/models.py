@@ -770,6 +770,10 @@ class ReviewResult:
             raise ReviewInputError("review result review_status must be a string")
         if not isinstance(evidence_policy, str):
             raise ReviewInputError("review result evidence_policy must be a string")
+        if evidence_policy not in {"legacy", "confirmed"}:
+            raise ReviewInputError(
+                "review result evidence_policy must be legacy or confirmed"
+            )
         comment_values: list[ReviewComment] = []
         for index, comment in enumerate(comments):
             if not isinstance(comment, Mapping):

@@ -46,8 +46,8 @@ def _label(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").title()
 
 
-def _escape_markdown_label(value: str) -> str:
-    """Keep untrusted classification text inside one readable Markdown label."""
+def escape_markdown_label(value: str) -> str:
+    """Escape untrusted text for safe Markdown label or body interpolation."""
 
     # Classification values are currently rejected when they contain control
     # characters, but keep this renderer safe if it is reused with a less
@@ -55,6 +55,10 @@ def _escape_markdown_label(value: str) -> str:
     # label from ever changing the surrounding Markdown line structure.
     escaped = _MARKDOWN_LABEL_CHARS.sub(r"\\\1", value)
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
+
+
+def _escape_markdown_label(value: str) -> str:
+    return escape_markdown_label(value)
 
 
 def _metadata_icon(icons: dict[str, str], value: str) -> str:
@@ -159,4 +163,9 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
     return f"{summary}\n\n" + "\n".join(lines)
 
 
-__all__ = ["format_review_comment", "format_review_summary", "humanize_lens"]
+__all__ = [
+    "escape_markdown_label",
+    "format_review_comment",
+    "format_review_summary",
+    "humanize_lens",
+]

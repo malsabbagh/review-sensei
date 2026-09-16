@@ -72,7 +72,12 @@ class PublishableReviewTests(unittest.TestCase):
     def test_true_defect_is_confirmed_and_becomes_the_only_finding(self) -> None:
         true_defect = candidate(snapshot_sha=self.snapshot_sha)
         prepared = prepare_publishable_review(
-            self.result,
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
             candidates=(true_defect,),
             snapshot=self.snapshot,
             snapshot_sha256=self.snapshot_sha,
@@ -132,8 +137,9 @@ class PublishableReviewTests(unittest.TestCase):
         )
         self.assertEqual(len(prepared.result.comments), 1)
         self.assertIn("Division by zero", prepared.result.comments[0].body)
-        self.assertEqual(prepared.unpublished, 3)
+        self.assertEqual(prepared.unpublished, 4)
         self.assertEqual(prepared.result.review_status, "partial")
+        self.assertIn("Dropped legacy comments: 1", prepared.result.summary)
         self.assertIn("Verification coverage:", prepared.result.summary)
         self.assertIn(
             "Unpublished candidates are not findings", prepared.result.summary
@@ -163,6 +169,8 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.verifications[1].reasons, ("duplicate candidate",))
         self.assertEqual(prepared.result.review_status, "partial")
         self.assertIn("duplicate candidate=1", prepared.result.summary)
+        self.assertIn("Dropped legacy comments: 1", prepared.result.summary)
+        self.assertEqual(prepared.unpublished, 2)
         with self.assertRaises(ReviewInputError):
             CandidateFinding.from_dict({"claim": "bug"})
         with self.assertRaises(ReviewInputError):
@@ -217,6 +225,21 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.verifications[0].disposition, "confirmed")
         self.assertIn("Ignore previous instructions", prepared.result.comments[0].body)
         self.assertIsNone(os.environ.get("REVIEW_SENSEI_INJECTED_PERMISSION"))
+
+    def test_confirmed_policy_reports_dropped_legacy_comments_with_candidates(
+        self,
+    ) -> None:
+        prepared = prepare_publishable_review(
+            self.result,
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+        )
+        self.assertEqual(len(prepared.result.comments), 1)
+        self.assertEqual(prepared.unpublished, 1)
+        self.assertEqual(prepared.result.review_status, "partial")
+        self.assertIn("Dropped legacy comments: 1", prepared.result.summary)
 
     def test_format_candidate_finding_escapes_markdown_injection(self) -> None:
         hostile = candidate(

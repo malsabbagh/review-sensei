@@ -293,7 +293,7 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("review-result-invalid", decision.blockers)
         self.assertIn("review-incomplete", decision.blockers)
-        self.assertIn("evidence-policy-invalid", decision.blockers)
+        self.assertNotIn("evidence-policy-invalid", decision.blockers)
 
     def test_incompletely_verified_review_cannot_be_approved(self):
         result = ReviewResult(

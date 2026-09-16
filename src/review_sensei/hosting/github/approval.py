@@ -65,18 +65,15 @@ def evaluate_auto_approval(
         blockers.append(f"review-{status}")
     elif status != "complete":
         blockers.append("review-status-invalid")
-    policy = (
-        result.evidence_policy
-        if isinstance(result, ReviewResult)
-        else getattr(result, "evidence_policy", None)
-    )
-    if policy not in {"legacy", "confirmed"}:
-        blockers.append("evidence-policy-invalid")
-    # Confirmed reviews that are not fully verified keep the status blocker
-    # above and add review-unverified so callers can distinguish evidence-
-    # gated partial coverage from other partial reviews.
-    elif policy == "confirmed" and status != "complete":
-        blockers.append("review-unverified")
+    if isinstance(result, ReviewResult):
+        policy = result.evidence_policy
+        if policy not in {"legacy", "confirmed"}:
+            blockers.append("evidence-policy-invalid")
+        # Confirmed reviews that are not fully verified keep the status blocker
+        # above and add review-unverified so callers can distinguish evidence-
+        # gated partial coverage from other partial reviews.
+        elif policy == "confirmed" and status != "complete":
+            blockers.append("review-unverified")
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 
