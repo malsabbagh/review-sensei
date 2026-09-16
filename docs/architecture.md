@@ -53,10 +53,12 @@ diff changed paths --> active lens selection
                                   v           v
                     OllamaProvider    OpenAICompatibleProvider
                                   |           |
-                                  +----- fixture ------+
+                                  +-----------+
                                               |
                                               v
                          validated ReviewResult
+
+(fixture adapter: test-only seam, omitted from production map)
                            |                   |
                            v                   v
           prepare_publishable_review   learning proposals ----> GitHub learning PR

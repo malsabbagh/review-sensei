@@ -3,7 +3,9 @@ import json
 import tempfile
 import unittest
 from collections import UserDict
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
@@ -17,6 +19,7 @@ from review_sensei.evaluation import (
     validate_promotion_against_report,
     validate_promotion_record,
 )
+from review_sensei.providers.profiles import get_provider_profile
 from review_sensei.release_manifest import (
     _constraint_parts,
     _range_contains,
@@ -154,6 +157,51 @@ class PromotionAndReleaseTests(unittest.TestCase):
                     {"seed": "fixed"},
                     status="insufficient",
                 ),
+            )
+
+    def test_profile_promotion_requires_live_reports_for_declared_stage_models(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        default_only = json.loads(fixture_path.read_text(encoding="utf-8"))
+        default_only["run"]["mode"] = "live"
+        default_only["run"]["provider"] = "openai-compatible"
+        default_only["run"]["model"] = "gpt-4o-mini"
+        default_only["run"]["endpoint_scope"] = "remote"
+        default_only["run"]["invocation_id"] = "d" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "declared stage model"):
+                validate_profile_promotion("fast-triage", live, [default_only])
+            stage_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+            stage_report["run"]["mode"] = "live"
+            stage_report["run"]["provider"] = "openai-compatible"
+            stage_report["run"]["model"] = "gpt-4o"
+            stage_report["run"]["endpoint_scope"] = "remote"
+            stage_report["run"]["invocation_id"] = "e" * 32
+            validate_profile_promotion(
+                "fast-triage", live, [default_only, stage_report]
             )
 
     def test_invalid_reproducibility_shape_fails_with_review_input_error(self) -> None:

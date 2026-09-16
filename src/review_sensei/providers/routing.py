@@ -65,18 +65,44 @@ def _run_uses_fixture_provider(settings: ProviderSettings) -> bool:
     )
 
 
+def _api_key_for_stage_profile(
+    *,
+    resolved: str,
+    run_settings: ProviderSettings,
+) -> str | None:
+    """Return the credential permitted for a stage provider on ``resolved``."""
+
+    profile = get_provider_profile(resolved)
+    if not profile.requires_api_key:
+        return None
+    if run_settings.profile is None:
+        raise ProviderError(
+            f"provider profile '{profile.name}' requires an explicit API key"
+        )
+    run_profile = canonical_profile_name(run_settings.profile)
+    if run_profile != profile.name:
+        raise ProviderError("stage profile cannot reuse another profile's credential")
+    api_key = run_settings.api_key
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ProviderError(
+            f"provider profile '{profile.name}' requires an explicit API key"
+        )
+    return api_key
+
+
 def _stage_provider_settings(
     *,
     resolved: str,
     model: str,
-    api_key: str | None,
+    run_settings: ProviderSettings,
 ) -> ProviderSettings:
     """Build canonical profile settings for one stage provider."""
 
-    selected = get_provider_profile(resolved)
+    profile = get_provider_profile(resolved)
+    api_key = _api_key_for_stage_profile(resolved=resolved, run_settings=run_settings)
     settings = ProviderSettings.for_profile(resolved, api_key=api_key)
-    if model != selected.model:
-        settings = replace(settings, model=model, allow_profile_stage_model=True)
+    if model != profile.model:
+        settings = replace(settings, model=model)
     return settings
 
 
@@ -129,27 +155,18 @@ def bind_stage_providers(
         default_model = default_provider.model or profile.model
         if resolved == run_profile_name and model == default_model:
             continue
-        if stage.provider_profile is not None:
-            if resolved != run_profile_name:
-                mapping[stage.name] = registry.create(
-                    ProviderSettings.for_profile(resolved)
-                )
-                continue
-            if model != default_model:
-                mapping[stage.name] = registry.create(
-                    _stage_provider_settings(
-                        resolved=resolved,
-                        model=model,
-                        api_key=settings.api_key,
-                    )
-                )
-            continue
-        if model != profile.model:
+        if resolved != run_profile_name:
             mapping[stage.name] = registry.create(
-                _stage_provider_settings(
-                    resolved=resolved,
-                    model=model,
-                    api_key=settings.api_key,
-                )
+                ProviderSettings.for_profile(resolved)
             )
+            continue
+        stage_settings = _stage_provider_settings(
+            resolved=resolved,
+            model=model,
+            run_settings=settings,
+        )
+        if model != profile.model:
+            mapping[stage.name] = registry.create_for_stage(stage_settings)
+        else:
+            mapping[stage.name] = registry.create(stage_settings)
     return default_provider, mapping

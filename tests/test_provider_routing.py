@@ -98,6 +98,38 @@ class ProviderRoutingTests(unittest.TestCase):
         self.assertEqual(provider.name, "ollama")
         self.assertEqual(dict(mapping), {})
 
+    def test_same_profile_stage_model_reapplies_profile_credential_policy(self) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        stages = [_stage("Comments", profile="fast-triage")]
+
+        def profile_lookup(name: str) -> ProviderProfile:
+            selected = get_provider_profile(name)
+            if selected.name == "fast-triage":
+                return profile
+            return selected
+
+        with (
+            patch(
+                "review_sensei.providers.routing.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
+            patch(
+                "review_sensei.providers.registry.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
+        ):
+            _, mapping = bind_stage_providers(
+                registry=default_registry(),
+                settings=ProviderSettings.for_profile("fast-triage", api_key="secret"),
+                stages=stages,
+            )
+        stage_provider = mapping["Comments"]
+        self.assertEqual(stage_provider.model, "gpt-4o")
+        self.assertEqual(getattr(stage_provider, "api_key", None), "secret")
+
     def test_bind_does_not_forward_remote_credential_when_narrowing(self) -> None:
         stages = [_stage("Summary", profile="local-private")]
         provider, mapping = bind_stage_providers(

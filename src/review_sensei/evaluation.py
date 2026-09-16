@@ -591,6 +591,32 @@ def _profile_report_endpoint_scopes(profile: ProviderProfile) -> frozenset[str]:
     return frozenset({"remote"})
 
 
+def _validate_profile_stage_model_evidence(
+    profile: ProviderProfile,
+    record: PromotionRecord,
+    reports: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require live reports for each declared per-stage model when present."""
+
+    if not profile.stage_models:
+        return
+    required_models = frozenset(model for _, model in profile.stage_models)
+    live_models = {
+        fields["model"]
+        for report in reports
+        if (fields := _report_promotion_fields(report))["mode"] == "live"
+    }
+    if profile.endpoint_scope == "remote" and not live_models:
+        raise ReviewInputError(
+            "remote profile promotion requires live evaluation reports"
+        )
+    missing = required_models - live_models
+    if missing:
+        raise ReviewInputError(
+            "profile promotion requires live reports for each declared stage model"
+        )
+
+
 def _report_endpoint_scope(report: Mapping[str, Any]) -> str:
     run = report.get("run")
     if not isinstance(run, Mapping):
@@ -627,6 +653,7 @@ def validate_profile_promotion(
         )
     if record.model not in profile.allowed_models():
         raise ReviewInputError("promotion record model does not match profile")
+    _validate_profile_stage_model_evidence(profile, record, reports)
     if profile.endpoint_scope == "remote":
         live_reports = [
             report
@@ -652,7 +679,10 @@ def validate_profile_promotion(
                 raise ReviewInputError(
                     "promotion live report provider does not match record"
                 )
-            if fields["model"] != record.model:
+            if (
+                fields["model"] != record.model
+                and fields["model"] not in profile.allowed_models()
+            ):
                 raise ReviewInputError(
                     "promotion live report model does not match record"
                 )

@@ -74,6 +74,16 @@ class ProviderConformanceTests(unittest.TestCase):
         self.assertEqual(ollama_result.model, "qwen3.5:4b")
         self.assertEqual(ollama_result.revision, "qwen3.5:4b")
 
+        ollama_without_revision = _ollama(
+            lambda request, timeout, context: _Response(
+                b'{"response":"{\\"summary\\":\\"ok\\"}"}'
+            )
+        )
+        absent_revision = ollama_without_revision.complete(
+            ProviderRequest(prompt="review")
+        )
+        self.assertIsNone(absent_revision.revision)
+
         openai = _openai(
             lambda request, timeout, context: _Response(
                 b'{"choices":[{"message":{"content":"ok"}}],'
