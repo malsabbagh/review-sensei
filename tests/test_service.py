@@ -567,3 +567,24 @@ class ReviewServiceTests(unittest.TestCase):
                 ),
             ).review(ReviewRequest(diff=DIFF))
         self.assertEqual(len(provider.requests), 1)
+
+    def test_failed_provider_call_does_not_consume_call_budget(self):
+        class FailProvider(FakeProvider):
+            def complete(self, request):
+                self.requests.append(request)
+                raise ProviderError("transient provider failure", transient=True)
+
+        provider = FailProvider('{"summary":"ok"}')
+        stages = [
+            Stage(name="one", prompt_template="{diff}", outputs=("summary",)),
+            Stage(name="two", prompt_template="{diff}", outputs=("summary",)),
+        ]
+        service = ReviewService(
+            provider,
+            stages=stages,
+            budget=ResourceBudget.create(max_provider_calls=1, max_retry_attempts=0),
+        )
+        with self.assertRaisesRegex(ProviderError, "transient provider failure"):
+            service.review(ReviewRequest(diff=DIFF))
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(service._provider_calls, 0)

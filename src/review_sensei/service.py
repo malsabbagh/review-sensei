@@ -131,8 +131,9 @@ class ReviewService:
     ) -> ProviderResponse:
         if self._provider_calls >= self.budget.max_provider_calls:
             raise ProviderError("resource budget exhausted")
+        response = provider.complete(provider_request)
         self._provider_calls += 1
-        return provider.complete(provider_request)
+        return response
 
     @staticmethod
     def _source_context_coverage(request: ReviewRequest) -> object | None:

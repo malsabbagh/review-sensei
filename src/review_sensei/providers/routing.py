@@ -71,6 +71,11 @@ def bind_stage_providers(
     """
 
     default_provider = registry.create(settings)
+    run_profile_name = (
+        get_provider_profile(settings.profile).name
+        if settings.profile is not None
+        else None
+    )
     if settings.name.strip().lower() == "fixture" and any(
         stage.provider_profile for stage in stages
     ):
@@ -88,9 +93,9 @@ def bind_stage_providers(
         profile = get_provider_profile(resolved)
         model = profile.model_for_stage(stage.name)
         default_model = default_provider.model or profile.model
-        if resolved == settings.profile and model == default_model:
+        if resolved == run_profile_name and model == default_model:
             continue
-        if resolved != settings.profile:
+        if resolved != run_profile_name:
             # Narrowing to local/private must not receive the remote credential.
             mapping[stage.name] = registry.create(
                 ProviderSettings.for_profile(resolved)

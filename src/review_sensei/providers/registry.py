@@ -93,7 +93,10 @@ class ProviderRegistry:
             # match the canonical profile before the settings are replaced by
             # the profile's complete, canonical values below.  The only allowed
             # model values are the profile default and its declared per-stage
-            # models; this is not a generic override or failover path.
+            # models; this is not a generic override or failover path.  Run-level
+            # ``settings.model`` may select one of those declared models for the
+            # default provider; per-stage model selection is owned by
+            # ``bind_stage_providers`` rather than ad hoc caller overrides.
             allowed_models = profile.allowed_models()
             if settings.model is not None and settings.model not in allowed_models:
                 raise ProviderError("provider profile model cannot be overridden")

@@ -146,6 +146,7 @@ class ProviderConformanceTests(unittest.TestCase):
                 )
                 with self.assertRaises(ProviderError) as raised:
                     cancelled.complete(ProviderRequest(prompt="private"))
+                self.assertTrue(raised.exception.transient)
                 self.assertNotIn(secret, str(raised.exception))
 
     def test_rate_limit_and_server_failures_are_transient(self) -> None:

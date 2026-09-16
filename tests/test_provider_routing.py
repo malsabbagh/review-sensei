@@ -69,6 +69,16 @@ class ProviderRoutingTests(unittest.TestCase):
         self.assertEqual(provider.name, "ollama")
         self.assertEqual(dict(mapping), {})
 
+    def test_bind_reuses_run_provider_when_run_profile_uses_alias(self) -> None:
+        stages = [_stage("Default Review Stage")]
+        provider, mapping = bind_stage_providers(
+            registry=default_registry(),
+            settings=ProviderSettings.for_profile("local"),
+            stages=stages,
+        )
+        self.assertEqual(provider.name, "ollama")
+        self.assertEqual(dict(mapping), {})
+
     def test_bind_does_not_forward_remote_credential_when_narrowing(self) -> None:
         stages = [_stage("Summary", profile="local-private")]
         provider, mapping = bind_stage_providers(

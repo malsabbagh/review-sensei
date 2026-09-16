@@ -392,6 +392,10 @@ class OpenAICompatibleProvider:
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
                 ) from exc
+            if isinstance(exc, ConnectionError):
+                raise ProviderError(
+                    "OpenAI-compatible request failed", transient=True
+                ) from exc
             raise ProviderError("OpenAI-compatible request failed") from exc
         except TypeError as exc:
             # Context-manager protocol and builtin opener TypeErrors only.
@@ -404,6 +408,10 @@ class OpenAICompatibleProvider:
             if "timed out" in str(exc).lower():
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
+                ) from exc
+            if isinstance(exc, ConnectionError):
+                raise ProviderError(
+                    "OpenAI-compatible request failed", transient=True
                 ) from exc
             raise ProviderError("OpenAI-compatible request failed") from exc
         try:
