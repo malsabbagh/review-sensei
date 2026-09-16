@@ -366,9 +366,7 @@ def outcome_from_publication(
     status = _PUBLICATION_TO_RUN_STATUS.get(result.status, "publication_failed")
     token = diagnostic
     if token is None:
-        candidate = _PUBLICATION_DIAGNOSTIC_OVERRIDES.get(
-            result.status, result.status
-        )
+        candidate = _PUBLICATION_DIAGNOSTIC_OVERRIDES.get(result.status, result.status)
         if candidate in PUBLIC_DIAGNOSTICS:
             token = candidate
         elif status == "publication_failed":
