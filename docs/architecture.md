@@ -456,7 +456,7 @@ every named artifact is present with an exact SHA-256 digest and an explicit
 trusted provenance mechanism. Missing or extra artifacts fail closed. The
 PyPI-primary and executing-commit install paths prove that identity in
 `review_sensei.release_manifest`; live disposable-repository canary and `v4`
-tag movement remain operator-only. See [ADR 0035](adr/0035-release-compatibility-manifest.md).
+tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
 
 ## Public landing-page analytics boundary
 

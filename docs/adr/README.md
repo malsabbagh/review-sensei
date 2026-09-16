@@ -46,7 +46,7 @@ Process: `docs/process/adr-process.md`
 | [0035](0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | #86 | Blocking findings emit `REQUEST_CHANGES`; a later same-head approve wins only after those roots resolve. |
 | [0036](0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | #41 | Advisory stale/conflict signals; feedback is not trusted review context |
 | [0037](0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40 | Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
-| [0035](0035-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited v4 promotion/rollback |
+| [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited v4 promotion/rollback |
 
 ## Policy
 

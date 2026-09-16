@@ -1,4 +1,4 @@
-# ADR 0035 - Bind release artifacts in a compatibility manifest
+# ADR 0038 - Bind release artifacts in a compatibility manifest
 
 Status: Proposed
 Date: 2026-09-15
