@@ -3,9 +3,9 @@ import json
 import os
 import unittest
 
+from review_sensei.context import ContextSnapshot, SourceContextCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import evaluate_auto_approval
-from review_sensei.context import ContextSnapshot, SourceContextCoverage
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.verifier import (
