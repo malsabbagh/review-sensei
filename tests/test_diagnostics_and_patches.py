@@ -241,8 +241,9 @@ class DiagnosticProbeTests(unittest.TestCase):
     VALID_MANIFEST = {
         "schema_version": "1.0",
         "release": "1.0.0",
+        "workflow_commit": "c" * 40,
         "compatible_worker_range": ">=1.0.0",
-        "provenance": "signed",
+        "provenance": "github-artifact-attestation",
         "artifacts": {
             "workflow": {"name": "wf", "version": "1.0.0", "sha256": "a" * 64},
             "python": {"name": "py", "version": "1.0.0", "sha256": "a" * 64},
