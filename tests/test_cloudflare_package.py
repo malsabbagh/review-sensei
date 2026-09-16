@@ -133,6 +133,33 @@ class CloudflarePackageTests(unittest.TestCase):
             self.assertIn("REVIEWSENSEI_UPLOAD_ARTIFACTS", content)
             self.assertNotIn("review-sensei-version.txt", content)
 
+    def test_worker_does_not_dispatch_reviews_or_invent_sha_concurrency_keys(self):
+        worker = (CLOUDFLARE / "src" / "worker.ts").read_text(encoding="utf-8")
+        github_app = (CLOUDFLARE / "src" / "github-app.ts").read_text(encoding="utf-8")
+        setup = (CLOUDFLARE / "src" / "setup-content.ts").read_text(encoding="utf-8")
+        example = (
+            ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        readme = (CLOUDFLARE / "README.md").read_text(encoding="utf-8")
+        for content in (worker, github_app):
+            with self.subTest(source="runtime"):
+                self.assertNotIn("concurrency:", content)
+                self.assertNotIn("source_comment_id || head_sha", content)
+                self.assertNotIn("head_sha || head_ref || run_id", content)
+                self.assertNotIn("reviewsensei-review-", content)
+        self.assertIn("review-sensei-run.yml@", setup)
+        self.assertNotIn("source_comment_id || head_sha", setup)
+        self.assertNotIn("head_sha || head_ref || run_id", setup)
+        self.assertNotRegex(example, r"(?m)^concurrency:")
+        self.assertNotIn("group:", example)
+        self.assertIn(
+            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+            example,
+        )
+        self.assertIn("not a hosted review engine", readme)
+        self.assertIn("does not invent a SHA-based concurrency key", readme)
+        self.assertIn("reusable workflow", readme)
+
 
 if __name__ == "__main__":
     unittest.main()

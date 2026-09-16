@@ -522,11 +522,14 @@ Hosts that run more than one review worker can reuse the same deterministic
 policy:
 
 ```python
-from review_sensei import ReviewConcurrencyPlan, ReviewService
+from review_sensei import ProviderAdmission, ReviewConcurrencyPlan, ReviewService
 
 plan = ReviewService(provider).concurrency_plan(request)
 # Enforce plan.workflow in the run scheduler.
 # Enforce plan.provider in the provider-stage scheduler.
+admission = ProviderAdmission(plan.provider)
+with admission.acquire():
+    result = ReviewService(provider).review(request)
 ```
 
 The workflow group is keyed by repository and pull request and is latest-wins.
@@ -534,8 +537,14 @@ The provider group uses the same pull-request identity, admits one active
 provider stage, and does not cancel the active stage. Different pull requests
 therefore remain independent. `ReviewConcurrencyPlan.for_non_review_trigger()`
 creates an isolated workflow group with no provider slot for triggers that do
-not request a review. ReviewSensei returns this policy but does not own durable
-queue state or cross-process cancellation.
+not request a review.
+
+GitHub-hosted runs enforce this with native workflow `concurrency` groups
+(`max_active=1`, cancel-in-progress for reviews). Local hosts and tests can
+use `ProviderAdmission` to enforce the same bound in-process, including lease
+release after cancellation or failure and a hard cap on waiters. ReviewSensei
+does not own durable queue state, a global cross-repository lock, or
+cross-process cancellation.
 
 ## Data handling
 

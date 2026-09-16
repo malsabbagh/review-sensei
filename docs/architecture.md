@@ -228,7 +228,10 @@ same validated result.
   review: a latest-wins workflow group and a non-cancelling, single-slot
   provider group. Both are keyed by repository and pull request, so different
   pull requests can run independently. Non-review triggers receive an isolated
-  workflow group and no provider slot.
+  workflow group and no provider slot. `ProviderAdmission` optionally enforces
+  one group in-process for tests and local hosts, with bounded waiters and
+  lease release. GitHub-hosted runs use reusable workflow `concurrency`
+  groups instead.
 - `ReviewComment` must use a repository-relative path and a positive line.
 - `ReviewComment` and `ReviewResult` reject bodies, lines, counts, proposals,
   and serialized output above the selected `ReviewLimits` profile. Exact
@@ -306,8 +309,10 @@ aggregate size violations. Selection and serialization are deterministic.
 - Missing required lens sources, unsafe paths, symlinks, secret-like files, and
   oversized document context raise `ContextLoadError` before provider use.
 - Invalid concurrency identities are rejected before a host can use their group
-  keys. The core does not create cross-process locks, cancel network requests,
-  or persist queue state; the embedding host enforces the returned policy.
+  keys. The core does not create cross-process locks or persist queue state.
+  `ProviderAdmission` is an optional in-process lease helper; GitHub-hosted
+  runs use workflow concurrency groups instead. Admission and cancellation
+  logs are metadata-only and omit prompts, diffs, and source content.
 - Error messages avoid including prompts, diffs, API keys, or provider bodies.
 - Expected failures from the bounded path, diff, request, transport, and result
   seams are static/sanitized and do not include supplied secret markers.

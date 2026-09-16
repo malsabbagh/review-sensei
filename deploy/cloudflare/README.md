@@ -6,7 +6,10 @@ validation, GitHub App authentication, and setup pull requests directly. A
 SQLite-backed Durable Object stores only bounded delivery metadata.
 
 It is not a hosted review engine: customer repositories still run the review
-workflow and provider compute in their own GitHub Actions setup.
+workflow and provider compute in their own GitHub Actions setup. The Worker
+does not dispatch reviews and does not invent a SHA-based concurrency key.
+Hosted PR-scoped latest-wins admission is owned by the reusable workflow
+`.github/workflows/review-sensei-run.yml`.
 
 ## Runtime shape
 

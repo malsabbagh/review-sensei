@@ -53,6 +53,17 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
   });
 
+  it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
+    const workflow = buildTaggedV4SetupFiles("v4")[0].content;
+    expect(workflow).toContain(
+      "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+    );
+    expect(workflow).not.toMatch(/^\s*group:.*head_sha/m);
+    expect(workflow).not.toContain("source_comment_id || head_sha");
+    expect(workflow).not.toContain("head_sha || head_ref || run_id");
+    expect(workflow).not.toContain("head_sha || github.run_id");
+  });
+
   it("generates one provider-neutral reusable job with the supplied tag", () => {
     const tag = "stable";
     const workflow = buildTaggedV4SetupFiles(tag)[0].content;

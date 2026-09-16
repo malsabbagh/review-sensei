@@ -1,9 +1,15 @@
+import threading
+import time
 import unittest
 
 from review_sensei import ConcurrencyGroup as ExportedConcurrencyGroup
 from review_sensei import ReviewConcurrencyPlan as ExportedReviewConcurrencyPlan
-from review_sensei.concurrency import ConcurrencyGroup, ReviewConcurrencyPlan
-from review_sensei.errors import ReviewInputError
+from review_sensei.concurrency import (
+    ConcurrencyGroup,
+    ProviderAdmission,
+    ReviewConcurrencyPlan,
+)
+from review_sensei.errors import AdmissionCancelled, AdmissionRejected, ReviewInputError
 from review_sensei.models import ReviewRequest
 from review_sensei.service import ReviewService
 
@@ -204,3 +210,254 @@ class ReviewConcurrencyPlanTests(unittest.TestCase):
 
         with self.assertRaises(ReviewInputError):
             ReviewConcurrencyPlan.for_non_review_trigger("owner/repository", 10**10)
+
+    def test_python_review_keys_are_pr_scoped_sha_free_and_latest_wins(self):
+        first_sha = "a" * 40
+        second_sha = "b" * 40
+        plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 7)
+
+        self.assertEqual(plan.workflow_key, "review-sensei:review:8:acme/api:1:7")
+        self.assertTrue(plan.workflow.cancel_in_progress)
+        self.assertEqual(plan.workflow.max_active, 1)
+        self.assertNotIn(first_sha, plan.workflow_key)
+        self.assertNotIn(second_sha, plan.workflow_key)
+        self.assertNotIn("head_sha", plan.workflow_key)
+        self.assertNotIn(first_sha, plan.provider_key or "")
+        same_pr_later_head = ReviewConcurrencyPlan.for_pull_request("acme/api", 7)
+        self.assertEqual(plan.workflow_key, same_pr_later_head.workflow_key)
+
+
+class ProviderAdmissionTests(unittest.TestCase):
+    def test_admission_types_are_exported_from_the_public_package(self):
+        from review_sensei import AdmissionCancelled as ExportedCancelled
+        from review_sensei import AdmissionLease as ExportedLease
+        from review_sensei import AdmissionOutcome as ExportedOutcome
+        from review_sensei import AdmissionRejected as ExportedRejected
+        from review_sensei import ProviderAdmission as ExportedAdmission
+        from review_sensei.concurrency import (
+            AdmissionLease,
+            AdmissionOutcome,
+            ProviderAdmission,
+        )
+        from review_sensei.errors import AdmissionCancelled, AdmissionRejected
+
+        self.assertIs(ExportedAdmission, ProviderAdmission)
+        self.assertIs(ExportedLease, AdmissionLease)
+        self.assertIs(ExportedOutcome, AdmissionOutcome)
+        self.assertIs(ExportedRejected, AdmissionRejected)
+        self.assertIs(ExportedCancelled, AdmissionCancelled)
+
+    def test_configured_bound_is_enforced(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:7")
+        admission = ProviderAdmission(group, max_waiters=0)
+
+        first = admission.try_acquire()
+        second = admission.try_acquire()
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(admission.active, 1)
+        self.assertEqual(admission.waiters, 0)
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire()
+        self.assertEqual(admission.waiters, 0)
+        assert first is not None
+        first.release()
+        self.assertEqual(admission.active, 0)
+
+    def test_concurrent_release_is_idempotent(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:12")
+        admission = ProviderAdmission(group, max_waiters=0)
+        lease = admission.acquire()
+        errors: list[BaseException] = []
+
+        def release_once() -> None:
+            try:
+                lease.release()
+            except BaseException as exc:  # pragma: no cover - test diagnostics
+                errors.append(exc)
+
+        threads = [threading.Thread(target=release_once) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+        self.assertEqual(admission.active, 0)
+
+    def test_context_manager_release_after_manual_release_is_idempotent(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:13")
+        admission = ProviderAdmission(group, max_waiters=0)
+        with admission.acquire() as lease:
+            self.assertEqual(admission.active, 1)
+            lease.release()
+            self.assertEqual(admission.active, 0)
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+
+    def test_cancelled_and_failed_work_release_the_slot(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:8")
+        admission = ProviderAdmission(group, max_waiters=1)
+
+        with self.assertRaises(RuntimeError):
+            with admission.acquire():
+                self.assertEqual(admission.active, 1)
+                raise RuntimeError("boom")
+        self.assertEqual(admission.active, 0)
+
+        with self.assertRaises(KeyboardInterrupt):
+            with admission.acquire():
+                raise KeyboardInterrupt()
+        self.assertEqual(admission.active, 0)
+
+        retry = admission.try_acquire()
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        retry.release(outcome="cancelled")
+        self.assertEqual(admission.active, 0)
+
+    def test_waiters_cannot_accumulate_without_bound(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:9")
+        admission = ProviderAdmission(group, max_waiters=1)
+        held = admission.acquire()
+        cancel = threading.Event()
+        errors: list[BaseException] = []
+
+        def wait_for_slot() -> None:
+            try:
+                admission.acquire(timeout=2, cancel_event=cancel)
+                errors.append(AssertionError("waiter was admitted"))
+            except AdmissionCancelled:
+                return
+            except BaseException as exc:  # pragma: no cover - test diagnostics
+                errors.append(exc)
+
+        waiter = threading.Thread(target=wait_for_slot)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while admission.waiters != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(admission.waiters, 1)
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire(timeout=0.05)
+        self.assertEqual(admission.waiters, 1)
+        cancel.set()
+        waiter.join(timeout=2)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(admission.waiters, 0)
+        held.release()
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+
+    def test_timeout_and_capacity_reject_do_not_underflow_waiters(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:14")
+        admission = ProviderAdmission(group, max_waiters=1)
+        held = admission.acquire()
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire(timeout=0.05)
+        self.assertEqual(admission.waiters, 0)
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire(timeout=0.05)
+        self.assertEqual(admission.waiters, 0)
+        held.release()
+        self.assertEqual(admission.active, 0)
+
+    def test_cancelled_waiter_is_not_granted_a_freed_slot(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:15")
+        admission = ProviderAdmission(group, max_waiters=1)
+        held = admission.acquire()
+        cancel = threading.Event()
+        granted: list[object] = []
+        errors: list[BaseException] = []
+
+        def wait_for_slot() -> None:
+            try:
+                granted.append(admission.acquire(cancel_event=cancel))
+            except AdmissionCancelled:
+                return
+            except BaseException as exc:  # pragma: no cover - test diagnostics
+                errors.append(exc)
+
+        waiter = threading.Thread(target=wait_for_slot)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while admission.waiters != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(admission.waiters, 1)
+        cancel.set()
+        held.release()
+        waiter.join(timeout=2)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(granted, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(admission.waiters, 0)
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+
+    def test_unrelated_pull_requests_do_not_share_an_in_process_lock(self):
+        first_plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 1)
+        second_plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 2)
+        self.assertIsNotNone(first_plan.provider)
+        self.assertIsNotNone(second_plan.provider)
+        assert first_plan.provider is not None
+        assert second_plan.provider is not None
+        first = ProviderAdmission(first_plan.provider)
+        second = ProviderAdmission(second_plan.provider)
+        lease_one = first.try_acquire()
+        lease_two = second.try_acquire()
+        self.assertIsNotNone(lease_one)
+        self.assertIsNotNone(lease_two)
+        self.assertEqual(first.active, 1)
+        self.assertEqual(second.active, 1)
+        assert lease_one is not None
+        assert lease_two is not None
+        lease_one.release()
+        lease_two.release()
+
+    def test_admission_logs_are_metadata_only(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:2:10")
+        admission = ProviderAdmission(group, max_waiters=0)
+        with self.assertLogs("review_sensei.concurrency", level="INFO") as captured:
+            lease = admission.acquire()
+            self.assertIsNone(admission.try_acquire())
+            lease.release()
+        log_text = "\n".join(captured.output)
+        self.assertIn("status=admitted", log_text)
+        self.assertIn("status=released", log_text)
+        self.assertIn("status=rejected_capacity", log_text)
+        self.assertIn("key=review-sensei:provider:4:test:8:acme/api:2:10", log_text)
+        self.assertNotIn("prompt", log_text)
+        self.assertNotIn("diff", log_text)
+        self.assertNotIn("def ", log_text)
+
+    def test_admission_rejects_invalid_waiter_bounds(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:test")
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, max_waiters=-1)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, max_waiters=True)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, max_waiters=10_000)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=0)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=True)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=2)
+        admission = ProviderAdmission(group, waiter_poll_interval=0.01)
+        self.assertEqual(admission.waiter_poll_interval, 0.01)
