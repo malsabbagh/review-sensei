@@ -81,7 +81,7 @@ jobs:
       - name: Validate evaluation corpus
         run: python scripts/validate_evaluation_corpus.py
       - name: Validate protection policy contract
-        run: python scripts/check_protection_policy.py --policy .github/protection-policy.json
+        run: python scripts/check_protection_policy.py --policy .github/protection-policy.json --promotion-ledger .publication/publication-ledger.jsonl
       - name: Prove CodeQL findings gate on committed fixtures
         run: |
           set +e

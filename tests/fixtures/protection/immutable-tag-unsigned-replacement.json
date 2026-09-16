@@ -1,0 +1,19 @@
+{
+  "id": 21068961,
+  "name": "Immutable tags missing required signatures",
+  "target": "tag",
+  "source_type": "Repository",
+  "source": "malsabbagh/review-sensei",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/v[0-9]*.[0-9]*.[0-9]*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "update" }
+  ],
+  "bypass_actors": []
+}

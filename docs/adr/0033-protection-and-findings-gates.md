@@ -54,3 +54,19 @@ upload:
   aggregate already depends on the live CodeQL matrix, so a gate failure fails
   the merge-policy job. Live GitHub ruleset attachment of that aggregate is
   still operator evidence under #26.
+
+## Amendment (2026-09-16) — issue #26 tag ruleset readback
+
+Keep ADR 0033 Proposed until a maintainer accepts it. This amendment records
+tag-ruleset comparison added to the read-only checker:
+
+- `scripts/check_protection_policy.py` compares captured immutable
+  semantic-version tag rulesets and the separately protected movable `v4`
+  channel. GitHub fnmatch include patterns are translated conservatively from
+  `tags.immutable_pattern`; the checker never writes rulesets.
+- `v4` promotions reuse `.publication/publication-ledger.jsonl` with a
+  validated `v4_promotion` JSONL record. That file is not a hosted ledger
+  service.
+- Local `--policy` checks remain configuration evidence only. Live ruleset
+  application, disposable merge tests, and production tag moves stay
+  maintainer-operator evidence for #26.

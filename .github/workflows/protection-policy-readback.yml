@@ -7,6 +7,14 @@ on:
         description: Active branch ruleset ID to capture and compare
         required: true
         type: string
+      tag_ruleset_id:
+        description: Immutable semantic-version tag ruleset ID (requires channel_ruleset_id)
+        required: false
+        type: string
+      channel_ruleset_id:
+        description: Movable v4 channel tag ruleset ID (requires tag_ruleset_id)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +32,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REVIEWSENSEI_RULESET_READ_TOKEN }}
           RULESET_ID: ${{ inputs.ruleset_id }}
+          TAG_RULESET_ID: ${{ inputs.tag_ruleset_id }}
+          CHANNEL_RULESET_ID: ${{ inputs.channel_ruleset_id }}
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
@@ -34,20 +44,32 @@ jobs:
             echo "ruleset_id must be a positive integer" >&2
             exit 1
           fi
-          response="$RUNNER_TEMP/reviewsensei-token-check"
-          gh api --include \
-            "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
-            > "$response"
-          scopes="$(awk -F': ' 'tolower($1) == "x-oauth-scopes" {print tolower($2)}' "$response" | tr -d '\r')"
-          if [[ "$scopes" == *"repo"* || "$scopes" == *"admin:"* || "$scopes" == *"workflow"* || "$scopes" == *"delete_repo"* ]]; then
-            echo "REVIEWSENSEI_RULESET_READ_TOKEN exposes broad classic OAuth scopes: $scopes" >&2
-            exit 1
+          ids=("$RULESET_ID")
+          if [[ -n "${TAG_RULESET_ID:-}" || -n "${CHANNEL_RULESET_ID:-}" ]]; then
+            if [[ ! "${TAG_RULESET_ID:-}" =~ ^[1-9][0-9]*$ || ! "${CHANNEL_RULESET_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "tag_ruleset_id and channel_ruleset_id must both be positive integers" >&2
+              exit 1
+            fi
+            ids+=("$TAG_RULESET_ID" "$CHANNEL_RULESET_ID")
           fi
-          rm -f "$response"
+          for id in "${ids[@]}"; do
+            response="$RUNNER_TEMP/reviewsensei-token-check"
+            gh api --include \
+              "repos/${GITHUB_REPOSITORY}/rulesets/${id}" \
+              > "$response"
+            scopes="$(awk -F': ' 'tolower($1) == "x-oauth-scopes" {print tolower($2)}' "$response" | tr -d '\r')"
+            if [[ "$scopes" == *"repo"* || "$scopes" == *"admin:"* || "$scopes" == *"workflow"* || "$scopes" == *"delete_repo"* ]]; then
+              echo "REVIEWSENSEI_RULESET_READ_TOKEN exposes broad classic OAuth scopes: $scopes" >&2
+              exit 1
+            fi
+            rm -f "$response"
+          done
       - name: Capture active ruleset readback
         env:
           GH_TOKEN: ${{ secrets.REVIEWSENSEI_RULESET_READ_TOKEN }}
           RULESET_ID: ${{ inputs.ruleset_id }}
+          TAG_RULESET_ID: ${{ inputs.tag_ruleset_id }}
+          CHANNEL_RULESET_ID: ${{ inputs.channel_ruleset_id }}
         run: |
           set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
@@ -58,14 +80,40 @@ jobs:
             echo "ruleset_id must be a positive integer" >&2
             exit 1
           fi
+          mkdir -p "$RUNNER_TEMP/protection-readback"
           gh api --fail-with-body \
             "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
-            > "$RUNNER_TEMP/reviewsensei-ruleset.json"
+            > "$RUNNER_TEMP/protection-readback/branch-ruleset.json"
+          if [[ -n "${TAG_RULESET_ID:-}" || -n "${CHANNEL_RULESET_ID:-}" ]]; then
+            if [[ ! "${TAG_RULESET_ID:-}" =~ ^[1-9][0-9]*$ || ! "${CHANNEL_RULESET_ID:-}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "tag_ruleset_id and channel_ruleset_id must both be positive integers" >&2
+              exit 1
+            fi
+            gh api --fail-with-body \
+              "repos/${GITHUB_REPOSITORY}/rulesets/${TAG_RULESET_ID}" \
+              > "$RUNNER_TEMP/protection-readback/immutable-tag-ruleset.json"
+            gh api --fail-with-body \
+              "repos/${GITHUB_REPOSITORY}/rulesets/${CHANNEL_RULESET_ID}" \
+              > "$RUNNER_TEMP/protection-readback/v4-channel-ruleset.json"
+          fi
       - name: Validate protection policy against readback
+        env:
+          TAG_RULESET_ID: ${{ inputs.tag_ruleset_id }}
+          CHANNEL_RULESET_ID: ${{ inputs.channel_ruleset_id }}
         run: |
-          python scripts/check_protection_policy.py \
-            --policy .github/protection-policy.json \
-            --readback "$RUNNER_TEMP/reviewsensei-ruleset.json"
+          set -euo pipefail
+          args=(
+            python scripts/check_protection_policy.py
+            --policy .github/protection-policy.json
+            --readback "$RUNNER_TEMP/protection-readback/branch-ruleset.json"
+          )
+          if [[ -n "${TAG_RULESET_ID:-}" || -n "${CHANNEL_RULESET_ID:-}" ]]; then
+            args+=(
+              --tag-readback "$RUNNER_TEMP/protection-readback/immutable-tag-ruleset.json"
+              --channel-readback "$RUNNER_TEMP/protection-readback/v4-channel-ruleset.json"
+            )
+          fi
+          "${args[@]}"
       - name: Remove ruleset readback
         if: ${{ always() }}
-        run: rm -f "$RUNNER_TEMP/reviewsensei-ruleset.json" "$RUNNER_TEMP/reviewsensei-token-check"
+        run: rm -rf "$RUNNER_TEMP/protection-readback" "$RUNNER_TEMP/reviewsensei-token-check"
