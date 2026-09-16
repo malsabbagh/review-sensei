@@ -137,6 +137,8 @@ class ReviewService:
 
         Failed attempts, including transient transport errors, do not consume
         ``max_provider_calls``; only responses returned from ``complete`` do.
+        Structural output retries within a stage are bounded separately by
+        ``max_retry_attempts`` via ``_stage_attempt_limit``.
         """
         if self._provider_calls >= self.budget.max_provider_calls:
             raise ProviderError("resource budget exhausted")

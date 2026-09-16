@@ -1,8 +1,36 @@
 from __future__ import annotations
 
+import errno
+import socket
 from typing import Any
+from urllib.error import URLError
 
 from ..errors import ProviderError
+
+_TRANSIENT_NETWORK_ERRNOS = frozenset(
+    {
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.ETIMEDOUT,
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+    }
+)
+
+
+def urllib_error_is_transient(exc: URLError) -> bool:
+    """Return whether ``exc`` represents a retryable transport failure."""
+
+    reason = exc.reason
+    if isinstance(reason, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(reason, socket.gaierror):
+        return True
+    if isinstance(reason, OSError) and getattr(reason, "errno", None) in (
+        _TRANSIENT_NETWORK_ERRNOS
+    ):
+        return True
+    return False
 
 
 def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:

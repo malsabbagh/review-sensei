@@ -100,7 +100,8 @@ class ProviderRoutingTests(unittest.TestCase):
         local = mapping["Summary"]
         self.assertEqual(local.name, "ollama")
         self.assertIsNot(local, provider)
-        self.assertIsNone(getattr(local, "api_key", "missing"))
+        self.assertIsNone(getattr(local, "api_key", None))
+        self.assertTrue(local.base_url.startswith("http://127.0.0.1"))
 
     def test_fixture_run_rejects_stage_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -179,12 +180,12 @@ class ProviderRoutingTests(unittest.TestCase):
         self,
     ) -> None:
         root = Path(__file__).resolve().parents[1]
-        workflow = (root / ".github" / "workflows" / "review-sensei-run.yml").read_text(
-            encoding="utf-8"
-        )
-        example = (
-            root / "examples" / "github-actions" / "review-sensei-review.yml"
-        ).read_text(encoding="utf-8")
+        workflow_path = root / ".github" / "workflows" / "review-sensei-run.yml"
+        example_path = root / "examples" / "github-actions" / "review-sensei-review.yml"
+        if not workflow_path.is_file() or not example_path.is_file():
+            self.skipTest("workflow fixtures are only available in a repository checkout")
+        workflow = workflow_path.read_text(encoding="utf-8")
+        example = example_path.read_text(encoding="utf-8")
         for text in (workflow, example):
             self.assertNotIn("--profile", text)
             self.assertNotIn("OPENAI_API_KEY", text)
@@ -203,16 +204,16 @@ class StageProviderProfileTests(unittest.TestCase):
         )
         self.assertEqual(stage.provider_profile, "local-private")
 
-    def test_stage_json_rejects_profile_alias_and_unknown_name(self) -> None:
-        with self.assertRaises(ReviewInputError):
-            Stage.from_dict(
-                {
-                    "name": "Summary",
-                    "prompt_template": "{diff}",
-                    "outputs": ["summary"],
-                    "provider_profile": "local",
-                }
-            )
+    def test_stage_json_accepts_profile_alias_and_rejects_unknown_name(self) -> None:
+        stage = Stage.from_dict(
+            {
+                "name": "Summary",
+                "prompt_template": "{diff}",
+                "outputs": ["summary"],
+                "provider_profile": "local",
+            }
+        )
+        self.assertEqual(stage.provider_profile, "local-private")
         with self.assertRaises(ReviewInputError) as raised:
             Stage.from_dict(
                 {

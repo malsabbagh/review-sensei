@@ -34,7 +34,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body
+from .transport import read_bounded_body, urllib_error_is_transient
 
 # Provider credentials are untrusted configuration input.  Keep a generous
 # but finite ceiling so a malformed environment value cannot become an
@@ -381,11 +381,9 @@ class OpenAICompatibleProvider:
                 raise ProviderError(
                     "OpenAI-compatible request timed out", transient=True
                 ) from exc
-            # urllib reports DNS, connection, and proxy failures as URLError.
-            # They are retryable transport failures even when they are not
-            # phrased as a timeout; do not leak the underlying reason.
+            transient = isinstance(exc, URLError) and urllib_error_is_transient(exc)
             raise ProviderError(
-                "OpenAI-compatible request failed", transient=True
+                "OpenAI-compatible request failed", transient=transient
             ) from exc
         except HTTPException as exc:
             if "timed out" in str(exc).lower():

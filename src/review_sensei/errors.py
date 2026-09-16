@@ -38,6 +38,12 @@ class ProviderError(ReviewSenseiError):
         self.transient = bool(transient)
 
 
+class UnknownProviderProfileError(ProviderError):
+    """Raised when a named provider profile does not exist."""
+
+    error_category = "provider"
+
+
 class AdmissionRejected(ReviewSenseiError):
     """Raised when in-process admission cannot grant a slot."""
 

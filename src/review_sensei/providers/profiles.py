@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Mapping
 
-from ..errors import ProviderError
+from ..errors import ProviderError, UnknownProviderProfileError
 
 EndpointScope = Literal["local", "remote"]
 StructuredOutput = Literal["json_object"]
@@ -62,6 +62,7 @@ class ProviderProfile:
         self._validate_stage_models()
 
     def _validate_stage_models(self) -> None:
+        """Ensure ``stage_models`` keys match ``Stage.name`` values exactly."""
         if not isinstance(self.stage_models, tuple):
             raise ValueError("provider profile stage_models must be a tuple")
         seen: set[str] = set()
@@ -156,7 +157,7 @@ def get_provider_profile(name: str) -> ProviderProfile:
         return PROVIDER_PROFILES[key]
     except KeyError as exc:
         available = ", ".join(sorted(PROVIDER_PROFILES))
-        raise ProviderError(
+        raise UnknownProviderProfileError(
             f"Unknown provider profile '{name}'. Available profiles: {available}"
         ) from exc
 

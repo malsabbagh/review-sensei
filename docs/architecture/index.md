@@ -93,6 +93,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0036`](../adr/0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | Advisory stale/conflict signals; feedback is not trusted review context |
 | [`0037`](../adr/0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40; Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [`0040`](../adr/0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89; MIT Community source preserved; official ops distinct from copyright; future commercial layer separate |
+| [`0041`](../adr/0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42; openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

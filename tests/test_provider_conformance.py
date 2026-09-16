@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
 from http.client import RemoteDisconnected
@@ -18,7 +19,7 @@ from review_sensei.validation import ReviewLimits
 class _Response:
     def __init__(self, body: bytes):
         self.body = body
-        self.done = False
+        self._offset = 0
 
     def __enter__(self):
         return self
@@ -27,10 +28,11 @@ class _Response:
         return False
 
     def read(self, size: int):
-        if self.done:
+        if size <= 0:
             return b""
-        self.done = True
-        return self.body[:size]
+        chunk = self.body[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 def _ollama(opener, **kwargs):
@@ -176,7 +178,10 @@ class ProviderConformanceTests(unittest.TestCase):
             with self.subTest(adapter=label):
                 provider = factory(
                     lambda request, timeout, context: (_ for _ in ()).throw(
-                        URLError(f"dns {secret}")
+                        URLError(
+                            "dns failure",
+                            socket.gaierror(8, f"dns {secret}"),
+                        )
                     ),
                     api_key=secret if label == "Ollama" else "secret",
                 )
@@ -184,6 +189,19 @@ class ProviderConformanceTests(unittest.TestCase):
                     provider.complete(ProviderRequest(prompt="private"))
                 self.assertTrue(raised.exception.transient)
                 self.assertNotIn(secret, str(raised.exception))
+
+    def test_permanent_url_error_is_not_transient(self) -> None:
+        for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
+            with self.subTest(adapter=label):
+                provider = factory(
+                    lambda request, timeout, context: (_ for _ in ()).throw(
+                        URLError("unknown url type")
+                    ),
+                    api_key="secret" if label == "Ollama" else "secret",
+                )
+                with self.assertRaisesRegex(ProviderError, "request failed") as raised:
+                    provider.complete(ProviderRequest(prompt="private"))
+                self.assertFalse(raised.exception.transient)
 
     def test_missing_credentials_fail_before_request(self) -> None:
         with self.assertRaisesRegex(ValueError, "API key"):

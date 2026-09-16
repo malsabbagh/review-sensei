@@ -21,7 +21,7 @@ import certifi
 from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
-from .transport import read_bounded_body
+from .transport import read_bounded_body, urllib_error_is_transient
 
 MAX_API_KEY_BYTES = 4_096
 
@@ -206,8 +206,8 @@ class OllamaProvider:
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc
-            # urllib reports DNS, connection, and proxy failures as URLError.
-            raise ProviderError("Ollama request failed", transient=True) from exc
+            transient = isinstance(exc, URLError) and urllib_error_is_transient(exc)
+            raise ProviderError("Ollama request failed", transient=transient) from exc
         except OSError as exc:
             if "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc

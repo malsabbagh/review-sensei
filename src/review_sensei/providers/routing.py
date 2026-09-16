@@ -2,8 +2,9 @@
 
 A run selects at most one named profile.  A stage may pin the same profile or a
 narrower local/private profile.  Routing never falls back to a remote endpoint
-from a local run, never switches adapters, and never forwards one profile's
-credential to another endpoint.
+from a local run and never forwards one profile's credential to another
+endpoint.  Per-stage model overrides stay on the same adapter and endpoint as
+the named profile that declares them.
 """
 
 from __future__ import annotations
@@ -63,9 +64,12 @@ def bind_stage_providers(
 ) -> tuple[ReviewProvider, Mapping[str, ReviewProvider]]:
     """Create the run provider and any stage-specific providers.
 
-    Stage-specific providers are created only when the resolved profile or
-    model differs from the run default.  Narrowing to ``local-private`` builds
-    a new credential-free adapter; the run credential is never reused.
+    The default provider serves every stage unless the stage explicitly sets
+    ``provider_profile`` or the run profile declares a per-stage model that
+    differs from the run default.  Profile narrowing always builds a fresh
+    credential-free adapter from ``ProviderSettings.for_profile``; caller
+    overrides such as ``api_key`` or ``base_url`` are not forwarded across
+    endpoints.
     """
 
     if settings.name.strip().lower() == "fixture" and any(
@@ -93,11 +97,17 @@ def bind_stage_providers(
         default_model = default_provider.model or profile.model
         if resolved == run_profile_name and model == default_model:
             continue
-        if resolved != run_profile_name:
-            # Narrowing to local/private must not receive the remote credential.
-            mapping[stage.name] = registry.create(
-                ProviderSettings.for_profile(resolved)
-            )
+        if stage.provider_profile is not None:
+            if resolved != run_profile_name:
+                mapping[stage.name] = registry.create(
+                    ProviderSettings.for_profile(resolved)
+                )
+                continue
+            if model != default_model:
+                mapping[stage.name] = registry.create(
+                    replace(settings, model=model)
+                )
             continue
-        mapping[stage.name] = registry.create(replace(settings, model=model))
+        if model != profile.model:
+            mapping[stage.name] = registry.create(replace(settings, model=model))
     return default_provider, mapping

@@ -619,7 +619,11 @@ def validate_profile_promotion(
     if record.status != "supported":
         raise ReviewInputError("profile promotion requires supported evidence")
     if record.provider != profile.provider:
-        raise ReviewInputError("promotion record provider does not match profile")
+        raise ReviewInputError(
+            "promotion record provider "
+            f"{record.provider!r} does not match profile "
+            f"'{profile.name}' (requires {profile.provider!r})"
+        )
     if record.model not in profile.allowed_models():
         raise ReviewInputError("promotion record model does not match profile")
     if reports:

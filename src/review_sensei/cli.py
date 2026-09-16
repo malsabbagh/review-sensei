@@ -211,6 +211,12 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
                 f"--api-key-env {actual} does not match profile "
                 f"'{selected.name}' (requires {expected})"
             )
+    if _cli_option_set(argv, "--base-url", explicit=explicit):
+        actual = getattr(args, "base_url", None)
+        if actual is not None and actual.rstrip("/") != selected.base_url.rstrip("/"):
+            raise ReviewInputError(
+                f"--base-url cannot override profile '{selected.name}' endpoint"
+            )
 
 
 def _openai_timeout_default() -> float:
