@@ -99,6 +99,9 @@ class ReviewServiceTests(unittest.TestCase):
             ReviewRequest(diff=DIFF, active_category_ids=())
         )
         self.assertEqual(len(provider.requests), 0)
+        self.assertEqual(result.comments, ())
+        self.assertTrue(result.summary)
+        self.assertNotIn("unused", result.summary)
         self.assertEqual(result.review_status, "partial")
 
     def test_category_less_independent_output_stage_makes_one_provider_call(self):
