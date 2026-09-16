@@ -283,10 +283,26 @@ def analyze_diff(
     if not isinstance(allow_incomplete, bool):
         raise _invalid("diff allow_incomplete must be a boolean")
     byte_count = utf8_size(diff, label="diff")
-    byte_limit = max_bytes if allow_incomplete and max_bytes is not None else limits.max_diff_bytes
-    line_limit = max_lines if allow_incomplete and max_lines is not None else limits.max_diff_lines
-    file_limit = max_files if allow_incomplete and max_files is not None else limits.max_diff_files
-    hunk_limit = max_hunks if allow_incomplete and max_hunks is not None else limits.max_diff_hunks
+    byte_limit = (
+        max_bytes
+        if allow_incomplete and max_bytes is not None
+        else limits.max_diff_bytes
+    )
+    line_limit = (
+        max_lines
+        if allow_incomplete and max_lines is not None
+        else limits.max_diff_lines
+    )
+    file_limit = (
+        max_files
+        if allow_incomplete and max_files is not None
+        else limits.max_diff_files
+    )
+    hunk_limit = (
+        max_hunks
+        if allow_incomplete and max_hunks is not None
+        else limits.max_diff_hunks
+    )
     enumeration_complete = True
     if byte_count > byte_limit:
         if not allow_incomplete:

@@ -73,8 +73,10 @@ class FakeProvider:
 
     def complete(self, request):
         self.requests.append(request)
-        text = self.responses.pop(0) if self.responses else (
-            '{"summary":"ok","comments":[]}'
+        text = (
+            self.responses.pop(0)
+            if self.responses
+            else ('{"summary":"ok","comments":[]}')
         )
         return ProviderResponse(text=text, provider=self.name, model=self.model)
 
@@ -103,10 +105,15 @@ class CoveragePlanningTests(unittest.TestCase):
         limits = ReviewLimits(max_diff_files=1)
         first = plan_change(TWO_FILES, limits=limits, orchestrate=True)
         second = plan_change(TWO_FILES, limits=limits, orchestrate=True)
-        self.assertEqual([chunk.paths for chunk in first.chunks], [chunk.paths for chunk in second.chunks])
+        self.assertEqual(
+            [chunk.paths for chunk in first.chunks],
+            [chunk.paths for chunk in second.chunks],
+        )
         self.assertEqual(len(first.chunks), 2)
         self.assertEqual(first.chunks[0].paths, ("src/a.py",))
         self.assertEqual(first.chunks[1].paths, ("src/b.py",))
+        self.assertEqual(first.chunks[0].related_paths, ("src/b.py",))
+        self.assertEqual(first.chunks[1].related_paths, ("src/a.py",))
 
     def test_binary_generated_and_rename_coverage(self):
         binary = plan_change(BINARY)
@@ -116,8 +123,31 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertTrue(is_generated_path("dist/app.min.js"))
         self.assertEqual(generated.coverage.files[0].outcome, "excluded-by-policy")
         rename = plan_change(RENAME)
-        paths = {entry.path for entry in rename.coverage.files}
-        self.assertEqual(paths, {"docs/old.md", "guides/new.md"})
+        paths = {entry.path: entry.outcome for entry in rename.coverage.files}
+        self.assertEqual(
+            paths, {"docs/old.md": "reviewed", "guides/new.md": "reviewed"}
+        )
+
+    def test_oversized_hunk_is_unsupported_instead_of_truncated(self) -> None:
+        added = "+" + ("x" * 400)
+        huge = f"""diff --git a/src/huge.py b/src/huge.py
+--- a/src/huge.py
++++ b/src/huge.py
+@@ -1 +1,2 @@
+ keep
+{added}
+"""
+        plan = plan_change(
+            huge,
+            limits=ReviewLimits(max_diff_bytes=80),
+            orchestrate=True,
+        )
+        self.assertEqual(plan.coverage.files[0].path, "src/huge.py")
+        self.assertEqual(plan.coverage.files[0].outcome, "unsupported")
+        self.assertEqual(plan.coverage.files[0].reason, "too-large-hunk")
+        self.assertEqual(plan.chunks, ())
+        self.assertTrue(plan.coverage.hunks)
+        self.assertEqual(plan.coverage.hunks[0].outcome, "unsupported")
 
     def test_deleted_lines_are_validated_on_the_left_side(self):
         analysis = analyze_diff(DELETION)

@@ -1054,6 +1054,13 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.fixture_response, Path("response.json"))
 
+    def test_parser_accepts_orchestrate_large_changes(self):
+        args = _parser().parse_args(
+            ["--diff", "review.patch", "--orchestrate-large-changes"]
+        )
+
+        self.assertTrue(args.orchestrate_large_changes)
+
     def test_fixture_response_is_rejected_for_non_fixture_provider(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):

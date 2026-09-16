@@ -141,7 +141,9 @@ class ReviewRequest:
     base_sha: str | None = None
     head_sha: str | None = None
     orchestrate_large_changes: bool = False
-    work_budget: TotalWorkBudget = field(default_factory=lambda: DEFAULT_TOTAL_WORK_BUDGET)
+    work_budget: TotalWorkBudget = field(
+        default_factory=lambda: DEFAULT_TOTAL_WORK_BUDGET
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -747,7 +749,9 @@ class ReviewResult:
             )
         if len(self.finding_lifecycles) > self.limits.max_comments:
             raise ReviewInputError("review contains too many finding lifecycles")
-        if self.coverage is not None and not isinstance(self.coverage, CoverageManifest):
+        if self.coverage is not None and not isinstance(
+            self.coverage, CoverageManifest
+        ):
             raise ReviewInputError("review coverage must be a CoverageManifest value")
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
@@ -937,7 +941,9 @@ class ReviewResult:
             comment_values.append(
                 ReviewComment(
                     path=path,
-                    line=line if isinstance(line, int) and not isinstance(line, bool) else None,
+                    line=line
+                    if isinstance(line, int) and not isinstance(line, bool)
+                    else None,
                     body=body,
                     side=side,
                     severity=(

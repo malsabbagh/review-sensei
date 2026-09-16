@@ -1582,9 +1582,7 @@ def main(argv: list[str] | None = None) -> int:
         if orchestrate:
             from .planning import plan_change
 
-            analysis = plan_change(
-                diff, limits=limits, orchestrate=True
-            ).analysis
+            analysis = plan_change(diff, limits=limits, orchestrate=True).analysis
         else:
             analysis = analyze_diff(diff, limits=limits)
         changed_paths = analysis.changed_paths

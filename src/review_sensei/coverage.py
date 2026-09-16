@@ -111,7 +111,11 @@ class HunkCoverage:
     reason: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 1:
+        if (
+            isinstance(self.index, bool)
+            or not isinstance(self.index, int)
+            or self.index < 1
+        ):
             raise ReviewInputError("coverage hunk index must be a positive integer")
         validate_repository_path(self.path, label="coverage hunk path")
         if self.outcome not in COVERAGE_OUTCOMES:

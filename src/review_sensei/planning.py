@@ -282,7 +282,8 @@ def _coverage_for(
         if path is None:
             continue
         outcome, reason = hunk_outcomes.get(
-            hunk.index, file_outcomes.get(path, ("unsupported", "incomplete-enumeration"))
+            hunk.index,
+            file_outcomes.get(path, ("unsupported", "incomplete-enumeration")),
         )
         hunks.append(
             HunkCoverage(index=hunk.index, path=path, outcome=outcome, reason=reason)
@@ -344,10 +345,16 @@ def plan_change(
 
     for record in records:
         outcome, reason = _classify_file(record, analysis=analysis)
-        for path in record.coverage_paths or ((record.canonical_path,) if record.canonical_path else ()):
-            file_outcomes[path] = (outcome, reason) if outcome != "reviewable" else (
-                "reviewed",
-                None,
+        for path in record.coverage_paths or (
+            (record.canonical_path,) if record.canonical_path else ()
+        ):
+            file_outcomes[path] = (
+                (outcome, reason)
+                if outcome != "reviewable"
+                else (
+                    "reviewed",
+                    None,
+                )
             )
         if outcome != "reviewable":
             for hunk in record.hunks:
@@ -366,9 +373,7 @@ def plan_change(
         chunks = packed
         packed_paths = {path for chunk in packed for path in chunk.paths}
         packed_hunks = {index for chunk in packed for index in chunk.hunk_indexes}
-        overflow_paths = {
-            path for record in overflow for path in record.coverage_paths
-        }
+        overflow_paths = {path for record in overflow for path in record.coverage_paths}
         for record in overflow:
             reason = overflow_reason or (
                 "too-large-hunk" if record.hunks else "too-large-file"
@@ -407,19 +412,21 @@ def plan_change(
             ),
         )
         for hunk in analysis.hunk_records:
-            path = hunk.new_path or hunk.old_path
-            if path is None:
+            hunk_path = hunk.new_path or hunk.old_path
+            if hunk_path is None:
                 continue
-            if path not in file_outcomes:
+            if hunk_path not in file_outcomes:
                 continue
-            if file_outcomes[path][0] == "reviewed":
+            if file_outcomes[hunk_path][0] == "reviewed":
                 hunk_outcomes[hunk.index] = ("reviewed", None)
 
     for path in analysis.changed_paths:
         file_outcomes.setdefault(
             path,
             (
-                "budget-exhausted" if not analysis.enumeration_complete else "unsupported",
+                "budget-exhausted"
+                if not analysis.enumeration_complete
+                else "unsupported",
                 "incomplete-enumeration",
             ),
         )
@@ -450,18 +457,18 @@ def apply_chunk_outcomes(
 ) -> CoverageManifest:
     """Return a copy of ``coverage`` with the selected files/hunks updated."""
 
-    files = []
-    for entry in coverage.files:
-        if entry.path in paths:
-            files.append(replace(entry, outcome=outcome, reason=reason))
+    files: list[FileCoverage] = []
+    for file_entry in coverage.files:
+        if file_entry.path in paths:
+            files.append(replace(file_entry, outcome=outcome, reason=reason))
         else:
-            files.append(entry)
-    hunks = []
-    for entry in coverage.hunks:
-        if entry.index in hunk_indexes:
-            hunks.append(replace(entry, outcome=outcome, reason=reason))
+            files.append(file_entry)
+    hunks: list[HunkCoverage] = []
+    for hunk_entry in coverage.hunks:
+        if hunk_entry.index in hunk_indexes:
+            hunks.append(replace(hunk_entry, outcome=outcome, reason=reason))
         else:
-            hunks.append(entry)
+            hunks.append(hunk_entry)
     return CoverageManifest(
         files=tuple(files),
         hunks=tuple(hunks),

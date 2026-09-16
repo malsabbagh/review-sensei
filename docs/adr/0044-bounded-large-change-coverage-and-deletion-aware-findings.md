@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-09-15
 GitHub Issue: #39
-Pull Request: draft PR to be linked
+Pull Request: https://github.com/malsabbagh/review-sensei/pull/85
 Owners/Reviewers: Maintainers
 Approved by: not configured
 

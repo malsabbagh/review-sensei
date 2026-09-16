@@ -233,6 +233,15 @@ bytes for the compact UTF-8 serialization of the complete proposal array
 result; and line numbers up to 2,147,483,647. These are byte limits unless a
 unit is stated otherwise.
 
+Every changed file in a review result receives an explicit coverage outcome
+(`reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
+`budget-exhausted`). Incomplete enumeration is never reported as fully
+reviewed. Finding locations may bind to a right-side added line (the legacy
+default), a left-side deleted line, or a file-level concern. Per-request
+limits stay in place; opt-in `--orchestrate-large-changes` adds a separate
+total-work budget so larger diffs can be chunked without silent truncation or
+unbounded provider calls.
+
 Repository paths are strict canonical NFC UTF-8, `/`-separated, relative paths:
 no empty, dot, parent, absolute, drive/UNC, backslash, surrounding whitespace,
 control/format/surrogate, or silently normalized forms are accepted. Glob

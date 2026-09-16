@@ -1894,6 +1894,131 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIn("Findings without a publishable inline location", body["body"])
         self.assertIn("unchanged", body["body"])
 
+    def test_deleted_line_comment_is_published_on_the_left_side(self):
+        deletion = """diff --git a/src/legacy.py b/src/legacy.py
+deleted file mode 100644
+--- a/src/legacy.py
++++ /dev/null
+@@ -1 +0,0 @@
+-legacy = True
+"""
+        result = ReviewResult(
+            summary="Deletion risk.",
+            comments=(
+                ReviewComment(
+                    path="src/legacy.py",
+                    line=1,
+                    body="Removing this flag is unsafe.",
+                    side="LEFT",
+                ),
+            ),
+            provider="ollama",
+        )
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
+            json_response({"id": 5}, 200),
+        ]
+        http, calls = make_http(responses)
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=result,
+            diff=deletion,
+            app_slug="review-sensei[bot]",
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"][0]["path"], "src/legacy.py")
+        self.assertEqual(body["comments"][0]["line"], 1)
+        self.assertEqual(body["comments"][0]["side"], "LEFT")
+        self.assertNotIn("subject_type", body["comments"][0])
+
+    def test_file_level_comment_is_published_with_subject_type_file(self):
+        result = ReviewResult(
+            summary="File-wide finding.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=None,
+                    body="This file needs a tighter contract.",
+                    side="FILE",
+                ),
+            ),
+            provider="ollama",
+        )
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
+            json_response({"id": 5}, 200),
+        ]
+        http, calls = make_http(responses)
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=result,
+            diff=DIFF,
+            app_slug="review-sensei[bot]",
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"][0]["path"], "src/app.py")
+        self.assertEqual(body["comments"][0]["subject_type"], "file")
+        self.assertNotIn("line", body["comments"][0])
+        self.assertNotIn("side", body["comments"][0])
+
+    def test_invalid_inline_line_on_a_changed_file_is_published_as_file_level(self):
+        result = ReviewResult(
+            summary="Retained.",
+            comments=(ReviewComment(path="src/app.py", line=1, body="unchanged line"),),
+            provider="ollama",
+        )
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
+            json_response({"id": 5}, 200),
+        ]
+        http, calls = make_http(responses)
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=result,
+            diff=DIFF,
+            app_slug="review-sensei[bot]",
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        self.assertEqual(body["comments"][0]["subject_type"], "file")
+        self.assertEqual(body["comments"][0]["path"], "src/app.py")
+        self.assertNotIn("line", body["comments"][0])
+
     def test_existing_approval_is_reconciled_before_post(self):
         head = "b" * 40
         marker = review_marker(

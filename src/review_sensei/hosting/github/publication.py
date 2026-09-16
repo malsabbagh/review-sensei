@@ -1225,9 +1225,13 @@ class ReviewPublisher:
                 if anchor == "summary":
                     unanchored.append(comment)
                     continue
-                prepared_comments.append((comment, lifecycle.fingerprint, comment_body, anchor))
+                prepared_comments.append(
+                    (comment, lifecycle.fingerprint, comment_body, anchor)
+                )
             if unanchored:
-                summary = f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
+                summary = (
+                    f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
+                )
             validate_bounded_text(
                 summary,
                 result.limits.max_summary_bytes,
@@ -1566,16 +1570,12 @@ class ReviewPublisher:
             "review thread pagination exceeded configured limit"
         )
 
-    def _validate_locations(self, result: ReviewResult, diff: str) -> None:
+    def _validate_locations(self, result: ReviewResult, diff: str) -> DiffAnalysis:
         try:
             analysis = analyze_diff(diff)
         except ReviewInputError as exc:
             raise GitHubPublicationError("review diff failed validation") from exc
-        allowed = analysis.changed_lines
-        for comment in result.comments:
-            lines = allowed.get(comment.path)
-            if not lines or comment.line not in lines:
-                raise GitHubPublicationError("review comment targets an unchanged line")
+        return analysis
 
     def _preflight_pr(
         self,

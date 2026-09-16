@@ -131,9 +131,13 @@ class ReviewRun:
 class _BudgetedProvider:
     """Count provider calls against a total-work budget without raising per-request limits."""
 
-    def __init__(self, provider, *, max_calls: int) -> None:
+    name: str
+    model: str | None
+
+    def __init__(self, provider: ReviewProvider, *, max_calls: int) -> None:
         self._provider = provider
         self.name = provider.name
+        self.model = provider.model
         self.max_calls = max_calls
         self.calls = 0
         self.exhausted = False
