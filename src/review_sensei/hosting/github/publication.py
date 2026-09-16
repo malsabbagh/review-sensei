@@ -13,7 +13,7 @@ from ...context import finding_lifecycle_for_comment
 from ...diff import analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewComment, ReviewResult
-from ...outcomes import RunOutcome, sanitize_diagnostic
+from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
 from ...presentation import format_review_comment, format_review_summary
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, prepare_publishable_review
@@ -346,6 +346,11 @@ _PUBLICATION_TO_RUN_STATUS = {
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
 
+_PUBLICATION_DIAGNOSTIC_OVERRIDES = {
+    "disabled": "writes_disabled",
+    "skipped_fork": "fork_not_allowed",
+}
+
 
 def outcome_from_publication(
     result: PublicationResult,
@@ -360,25 +365,13 @@ def outcome_from_publication(
 
     status = _PUBLICATION_TO_RUN_STATUS.get(result.status, "publication_failed")
     token = diagnostic
-    if token is None and result.status != "published":
-        token = "writes_disabled" if result.status == "disabled" else result.status
-        if token not in {
-            "already_published",
-            "approved",
-            "changes_requested",
-            "already_changes_requested",
-            "already_approved",
-            "skipped_stale_head",
-            "skipped_stale_base",
-            "skipped_pr_state",
-            "skipped_repository_mismatch",
-            "skipped_fork",
-            "skipped_app_authored",
-            "auto_approval_disabled",
-            "writes_disabled",
-            "publication_failed",
-            "publication_ambiguous",
-        }:
+    if token is None:
+        candidate = _PUBLICATION_DIAGNOSTIC_OVERRIDES.get(
+            result.status, result.status
+        )
+        if candidate in PUBLIC_DIAGNOSTICS:
+            token = candidate
+        elif status == "publication_failed":
             token = "publication_failed"
     return RunOutcome(
         status,

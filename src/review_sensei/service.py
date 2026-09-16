@@ -401,6 +401,7 @@ class ReviewService:
                             repository=request.repository,
                             pull_request_number=request.pull_request_number,
                         )
+                    tracker.record_prompt_attempt(current_prompt)
                     try:
                         provider_request = self._provider_request(
                             current_prompt,
@@ -410,15 +411,24 @@ class ReviewService:
                         )
                     except ReviewInputError as exc:
                         size = utf8_size(current_prompt, label="review prompt")
-                        if (
-                            size > prompt_limit
-                            and prompt_limit == effective_budget.max_prompt_bytes
-                        ):
+                        if size > prompt_limit:
+                            if prompt_limit == effective_budget.max_prompt_bytes:
+                                return self._finish_run(
+                                    tracker=tracker,
+                                    status="budget_exhausted",
+                                    stage_summary=stage_summary,
+                                    diagnostic="prompt_budget",
+                                    repository=request.repository,
+                                    pull_request_number=request.pull_request_number,
+                                )
                             return self._finish_run(
                                 tracker=tracker,
-                                status="budget_exhausted",
+                                status="provider_failed",
                                 stage_summary=stage_summary,
-                                diagnostic="prompt_budget",
+                                diagnostic="invalid_provider_output",
+                                error=ReviewInputError(
+                                    "review prompt exceeds the configured limit"
+                                ),
                                 repository=request.repository,
                                 pull_request_number=request.pull_request_number,
                             )
@@ -457,21 +467,16 @@ class ReviewService:
                             if retry_diagnostic is None:
                                 tracker.sleep_transport_retry(exc.retry_after_seconds)
                                 continue
-                            status = (
-                                "budget_exhausted"
-                                if retry_diagnostic != "transport_retry_exhausted"
-                                else "provider_failed"
-                            )
                             return self._finish_run(
                                 tracker=tracker,
-                                status=status,
+                                status="budget_exhausted",
                                 stage_summary=stage_summary,
                                 diagnostic=retry_diagnostic,
                                 error=exc,
                                 repository=request.repository,
                                 pull_request_number=request.pull_request_number,
                             )
-                        tracker.record_call(current_prompt)
+                        tracker.record_provider_call()
                         self._provider_calls = tracker.provider_calls
                         return self._finish_run(
                             tracker=tracker,
@@ -483,7 +488,7 @@ class ReviewService:
                             pull_request_number=request.pull_request_number,
                         )
                     except ReviewSenseiError as exc:
-                        tracker.record_call(current_prompt)
+                        tracker.record_provider_call()
                         self._provider_calls = tracker.provider_calls
                         return self._finish_run(
                             tracker=tracker,
@@ -498,7 +503,7 @@ class ReviewService:
                         # Provider adapters should sanitize their own failures.
                         # Keep this fallback static so a third-party adapter
                         # cannot echo a prompt, response body, or credential.
-                        tracker.record_call(current_prompt)
+                        tracker.record_provider_call()
                         self._provider_calls = tracker.provider_calls
                         error = ReviewFormatError("provider request failed")
                         error.__cause__ = exc
@@ -511,9 +516,8 @@ class ReviewService:
                             repository=request.repository,
                             pull_request_number=request.pull_request_number,
                         )
-                    tracker.record_call(
-                        current_prompt, getattr(response, "text", "") or ""
-                    )
+                    tracker.record_provider_call()
+                    tracker.record_response(getattr(response, "text", "") or "")
                     self._provider_calls = tracker.provider_calls
                     break
                 if not hasattr(response, "text") or not isinstance(response.text, str):
@@ -727,6 +731,7 @@ class ReviewService:
                 stage_summary=stage_summary,
                 provider_calls=tracker.provider_calls,
                 retry_attempts=tracker.transport_retries,
+                structural_retries=tracker.structural_retries,
                 prompt_bytes=tracker.prompt_bytes,
                 response_bytes=tracker.response_bytes,
                 elapsed_ms=tracker.elapsed_ms(),

@@ -4,6 +4,7 @@
   "stage_summary": {},
   "provider_calls": 0,
   "retry_attempts": 0,
+  "structural_retries": 0,
   "prompt_bytes": 0,
   "response_bytes": 0,
   "elapsed_ms": 0,

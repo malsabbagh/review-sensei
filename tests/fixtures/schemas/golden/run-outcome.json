@@ -8,6 +8,7 @@
   "stage_summary": {"Default Review Stage": "complete"},
   "provider_calls": 1,
   "retry_attempts": 0,
+  "structural_retries": 0,
   "prompt_bytes": 128,
   "response_bytes": 64,
   "elapsed_ms": 25,

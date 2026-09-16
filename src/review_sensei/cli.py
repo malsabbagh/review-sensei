@@ -932,7 +932,8 @@ def _github_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     review = subparsers.add_parser("review", help="Publish a validated review result")
-    review.add_argument("--result", type=Path)
+    publication_source = review.add_mutually_exclusive_group()
+    publication_source.add_argument("--result", type=Path)
     review.add_argument("--diff", type=Path, required=True)
     review.add_argument("--repository", required=True)
     review.add_argument("--repository-id", type=int, required=True)
@@ -947,7 +948,7 @@ def _github_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Write the structured run-outcome JSON for this publication",
     )
-    review.add_argument(
+    publication_source.add_argument(
         "--recover-from",
         type=Path,
         help="Publish a retained recovery artifact without invoking a model",
@@ -1088,7 +1089,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         if args.recover_from and args.enable_learning_prs:
             outcome = RunOutcome(
                 "publication_failed",
-                diagnostic="publication_failed",
+                diagnostic="recovery_learning_prs_refused",
                 **identity,
             )
             emit_host_outcome(outcome, output_path=args.outcome)
@@ -1156,7 +1157,18 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             print(review_publication.status)
             return run_outcome_exit_code(outcome.status)
         if args.result is None:
-            raise ReviewInputError("review publication requires --result")
+            outcome = RunOutcome(
+                "publication_failed",
+                diagnostic="publication_failed",
+                **identity,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(
+                "review-sensei: review publication requires --result or --recover-from",
+                file=sys.stderr,
+            )
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
         result = ReviewResult.from_dict(
             json.loads(
                 read_bounded_utf8(args.result, maximum=2_097_152, label="result")

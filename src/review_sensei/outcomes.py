@@ -75,6 +75,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "recovery_artifact_missing",
         "recovery_artifact_stale",
         "recovery_artifact_tampered",
+        "recovery_learning_prs_refused",
         "secret_redacted",
         "skipped_pr_state",
         "skipped_repository_mismatch",
@@ -360,6 +361,7 @@ class RunOutcome:
     stage_summary: Mapping[str, str] = field(default_factory=dict)
     provider_calls: int = 0
     retry_attempts: int = 0
+    structural_retries: int = 0
     prompt_bytes: int = 0
     response_bytes: int = 0
     elapsed_ms: int = 0
@@ -383,6 +385,7 @@ class RunOutcome:
         for name in (
             "provider_calls",
             "retry_attempts",
+            "structural_retries",
             "prompt_bytes",
             "response_bytes",
             "elapsed_ms",
@@ -415,6 +418,7 @@ class RunOutcome:
             "stage_summary": dict(self.stage_summary),
             "provider_calls": self.provider_calls,
             "retry_attempts": self.retry_attempts,
+            "structural_retries": self.structural_retries,
             "prompt_bytes": self.prompt_bytes,
             "response_bytes": self.response_bytes,
             "elapsed_ms": self.elapsed_ms,
@@ -580,6 +584,7 @@ def render_actions_summary(outcome: RunOutcome) -> str:
         f"- status: `{outcome.status}`",
         f"- provider_calls: {outcome.provider_calls}",
         f"- retry_attempts: {outcome.retry_attempts}",
+        f"- structural_retries: {outcome.structural_retries}",
         f"- prompt_bytes: {outcome.prompt_bytes}",
         f"- response_bytes: {outcome.response_bytes}",
         f"- elapsed_ms: {outcome.elapsed_ms}",
@@ -675,9 +680,9 @@ def load_recovery_artifact(path: Path) -> RecoveryArtifact:
             expires_at=payload.get("expires_at"),  # type: ignore[arg-type]
             result_sha256=payload.get("result_sha256"),  # type: ignore[arg-type]
         )
-    except (KeyError, TypeError, ValueError, ReviewInputError) as exc:
-        if isinstance(exc, ReviewInputError):
-            raise
+    except ReviewInputError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
         raise ReviewInputError(
             "recovery artifact integrity check failed",
             diagnostic="recovery_artifact_tampered",
@@ -753,11 +758,20 @@ class ResourceBudgetTracker:
             return "prompt_budget"
         return None
 
-    def record_call(self, prompt: str, response_text: str = "") -> None:
-        self.provider_calls += 1
+    def record_prompt_attempt(self, prompt: str) -> None:
         self.prompt_bytes += utf8_size(prompt, label="review prompt")
+
+    def record_provider_call(self) -> None:
+        self.provider_calls += 1
+
+    def record_response(self, response_text: str) -> None:
         if response_text:
             self.response_bytes += utf8_size(response_text, label="provider response")
+
+    def record_call(self, prompt: str, response_text: str = "") -> None:
+        self.record_prompt_attempt(prompt)
+        self.record_provider_call()
+        self.record_response(response_text)
 
     def admit_transport_retry(self, retry_after_seconds: float | None) -> str | None:
         if self.transport_retries >= self.budget.max_retry_attempts:

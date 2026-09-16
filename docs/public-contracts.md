@@ -199,9 +199,13 @@ against `run-outcome.schema.json`. `ReviewService.run` always returns a
 as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
 partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
-transport retries, prompt/output bytes, and elapsed time. Structural
-correction remains one bounded retry and is counted separately from transport
-retries. Publication recovery loads an opt-in `RecoveryArtifact`, revalidates
+transport retries, structural retries, prompt/output bytes, and elapsed time.
+Closed diagnostic tokens are enumerated by `PUBLIC_DIAGNOSTICS` in
+`review_sensei.outcomes`; `cancelled` is reserved for host-layer cancellation
+and is not emitted by `ReviewService` today. Structural correction remains one
+bounded retry and is counted separately from transport retries via the
+`structural_retries` field. Publication recovery loads an opt-in
+`RecoveryArtifact`, revalidates
 identity, expiry, integrity, and current publication policy, and never invokes
 a model or writes trusted learnings or configuration.
 

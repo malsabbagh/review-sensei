@@ -196,6 +196,8 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertEqual(run.outcome.status, "reviewed")
         self.assertEqual(run.outcome.provider_calls, 1)
         self.assertEqual(run.outcome.retry_attempts, 1)
+        self.assertEqual(run.outcome.structural_retries, 0)
+        self.assertGreater(run.outcome.prompt_bytes, 0)
         self.assertEqual(clock.sleeps, [0.25])
         self.assertIn("Recovered.", run.result.summary)
 
@@ -207,6 +209,20 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertEqual(run.outcome.stage_summary["Default Review Stage"], "failed")
         self.assertEqual(run.outcome.provider_calls, 2)
         self.assertEqual(run.outcome.retry_attempts, 0)
+        self.assertEqual(run.outcome.structural_retries, 1)
+
+    def test_transport_retry_exhaustion_reports_budget_exhausted(self):
+        provider = SequenceProvider(
+            [ProviderError("rate limited", transient=True, retry_after_seconds=0)]
+        )
+        run = ReviewService(
+            provider,
+            budget=ResourceBudget.create(max_retry_attempts=0),
+        ).run(ReviewRequest(diff=DIFF))
+        self.assertEqual(run.outcome.status, "budget_exhausted")
+        self.assertEqual(run.outcome.diagnostic, "transport_retry_exhausted")
+        self.assertEqual(run.outcome.provider_calls, 0)
+        self.assertGreater(run.outcome.prompt_bytes, 0)
 
     def test_structural_retry_does_not_count_as_transport_retry(self):
         provider = SequenceProvider(
@@ -219,6 +235,7 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertEqual(run.outcome.status, "reviewed")
         self.assertEqual(run.outcome.provider_calls, 2)
         self.assertEqual(run.outcome.retry_attempts, 0)
+        self.assertEqual(run.outcome.structural_retries, 1)
 
     def test_stage_failure_does_not_publish_earlier_stages(self):
         stages = [
@@ -320,6 +337,9 @@ class RunOutcomeWiringTests(unittest.TestCase):
         disabled = outcome_from_publication(PublicationResult(status="disabled"))
         self.assertEqual(disabled.status, "skipped_policy")
         self.assertEqual(disabled.diagnostic, "writes_disabled")
+        approved = outcome_from_publication(PublicationResult(status="approved"))
+        self.assertEqual(approved.status, "reviewed")
+        self.assertIsNone(approved.diagnostic)
 
     def test_recovery_artifact_round_trip_and_expiry(self):
         result = {
@@ -517,7 +537,9 @@ class RunOutcomeWiringTests(unittest.TestCase):
             self.assertEqual(learning_status, 1)
             learning_payload = json.loads(outcome_path.read_text(encoding="utf-8"))
             self.assertEqual(learning_payload["status"], "publication_failed")
-            self.assertEqual(learning_payload["diagnostic"], "publication_failed")
+            self.assertEqual(
+                learning_payload["diagnostic"], "recovery_learning_prs_refused"
+            )
             status = main(
                 [
                     "github",
