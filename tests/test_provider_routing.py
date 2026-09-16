@@ -36,6 +36,16 @@ class ProviderRoutingTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "cannot select a remote"):
             resolve_stage_profile_name(run_profile=None, stage_profile="fast-triage")
 
+    def test_unprofiled_run_cannot_pin_local_stage_profile(self) -> None:
+        with self.assertRaisesRegex(ProviderError, "cannot pin a stage"):
+            resolve_stage_profile_name(run_profile=None, stage_profile="local-private")
+        with self.assertRaisesRegex(ProviderError, "cannot pin a stage"):
+            bind_stage_providers(
+                registry=default_registry(),
+                settings=ProviderSettings(name="ollama"),
+                stages=[_stage("Summary", profile="local-private")],
+            )
+
     def test_local_profile_cannot_fall_back_to_remote_stage(self) -> None:
         with self.assertRaisesRegex(ProviderError, "cannot fall back to a remote"):
             resolve_stage_profile_name(
@@ -65,10 +75,8 @@ class ProviderRoutingTests(unittest.TestCase):
             )
 
     def test_stage_aliases_resolve_like_run_profile(self) -> None:
-        self.assertEqual(
-            resolve_stage_profile_name(run_profile=None, stage_profile="local"),
-            "local-private",
-        )
+        with self.assertRaisesRegex(ProviderError, "cannot pin a stage"):
+            resolve_stage_profile_name(run_profile=None, stage_profile="local")
         self.assertEqual(
             resolve_stage_profile_name(
                 run_profile="fast-triage", stage_profile="local/private"

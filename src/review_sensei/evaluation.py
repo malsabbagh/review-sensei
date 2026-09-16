@@ -591,6 +591,51 @@ def _profile_report_endpoint_scopes(profile: ProviderProfile) -> frozenset[str]:
     return frozenset({"remote"})
 
 
+def _validate_supplied_live_reports(
+    profile: ProviderProfile,
+    reports: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject live reports that do not match the profile promotion contract."""
+
+    expected = _profile_report_endpoint_scopes(profile)
+    for report in reports:
+        fields = _report_promotion_fields(report)
+        if fields["mode"] != "live":
+            continue
+        if fields["provider"] != profile.provider:
+            raise ReviewInputError(
+                "promotion live report provider does not match profile"
+            )
+        if fields["model"] not in profile.allowed_models():
+            raise ReviewInputError("promotion live report model does not match profile")
+        if _report_endpoint_scope(report) not in expected:
+            raise ReviewInputError(
+                "promotion record endpoint scope does not match profile"
+            )
+
+
+def _profile_live_reports(
+    profile: ProviderProfile,
+    reports: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return live reports that satisfy the profile promotion contract."""
+
+    expected = _profile_report_endpoint_scopes(profile)
+    live_reports: list[Mapping[str, Any]] = []
+    for report in reports:
+        fields = _report_promotion_fields(report)
+        if fields["mode"] != "live":
+            continue
+        if fields["provider"] != profile.provider:
+            continue
+        if fields["model"] not in profile.allowed_models():
+            continue
+        if _report_endpoint_scope(report) not in expected:
+            continue
+        live_reports.append(report)
+    return live_reports
+
+
 def _validate_profile_stage_model_evidence(
     profile: ProviderProfile,
     record: PromotionRecord,
@@ -601,13 +646,9 @@ def _validate_profile_stage_model_evidence(
     if not profile.stage_models:
         return
     required_models = frozenset(model for _, model in profile.stage_models)
-    expected = _profile_report_endpoint_scopes(profile)
     live_models = {
-        fields["model"]
-        for report in reports
-        if (fields := _report_promotion_fields(report))["mode"] == "live"
-        and fields["provider"] == profile.provider
-        and _report_endpoint_scope(report) in expected
+        _report_promotion_fields(report)["model"]
+        for report in _profile_live_reports(profile, reports)
     }
     if profile.endpoint_scope == "remote" and not live_models:
         raise ReviewInputError(
@@ -656,45 +697,20 @@ def validate_profile_promotion(
         )
     if record.model not in profile.allowed_models():
         raise ReviewInputError("promotion record model does not match profile")
+    if reports:
+        _validate_supplied_live_reports(profile, reports)
     _validate_profile_stage_model_evidence(profile, record, reports)
     if profile.endpoint_scope == "remote":
-        live_reports = [
-            report
-            for report in reports
-            if _report_promotion_fields(report)["mode"] == "live"
-        ]
+        live_reports = _profile_live_reports(profile, reports)
         if not live_reports:
             raise ReviewInputError(
                 "remote profile promotion requires live evaluation reports"
             )
-        expected = _profile_report_endpoint_scopes(profile)
         for report in live_reports:
             fields = _report_promotion_fields(report)
-            if fields["provider"] != profile.provider:
-                raise ReviewInputError(
-                    "promotion live report provider does not match profile"
-                )
-            if fields["model"] not in profile.allowed_models():
-                raise ReviewInputError(
-                    "promotion live report model does not match profile"
-                )
             if fields["provider"] != record.provider:
                 raise ReviewInputError(
                     "promotion live report provider does not match record"
-                )
-            if _report_endpoint_scope(report) not in expected:
-                raise ReviewInputError(
-                    "promotion record endpoint scope does not match profile"
-                )
-    elif reports:
-        expected = _profile_report_endpoint_scopes(profile)
-        for report in reports:
-            fields = _report_promotion_fields(report)
-            if fields["mode"] != "live":
-                continue
-            if _report_endpoint_scope(report) not in expected:
-                raise ReviewInputError(
-                    "promotion record endpoint scope does not match profile"
                 )
 
 

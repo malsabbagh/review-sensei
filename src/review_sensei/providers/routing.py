@@ -45,7 +45,9 @@ def resolve_stage_profile_name(
             raise ProviderError(
                 "unprofiled local runs cannot select a remote stage profile"
             )
-        return selected.name
+        raise ProviderError(
+            "unprofiled runs cannot pin a stage to a named provider profile"
+        )
     run = get_provider_profile(run_profile)
     if selected.name == run.name:
         return selected.name
@@ -84,6 +86,9 @@ def _api_key_for_stage_profile(
     )
     if run_profile != profile.name:
         raise ProviderError("stage profile cannot reuse another profile's credential")
+    run_profile_def = get_provider_profile(run_profile)
+    if profile.api_key_env != run_profile_def.api_key_env:
+        raise ProviderError("stage profile cannot switch credentials")
     if profile.endpoint_scope == "remote" and not profile.requires_api_key:
         raise ProviderError("remote provider profile requires an explicit API key")
     if not profile.requires_api_key:

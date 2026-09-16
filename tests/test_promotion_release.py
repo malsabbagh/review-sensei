@@ -204,6 +204,44 @@ class PromotionAndReleaseTests(unittest.TestCase):
                 "fast-triage", live, [default_only, stage_report]
             )
 
+    def test_profile_promotion_rejects_live_report_model_outside_allowlist(
+        self,
+    ) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        live = PromotionRecord(
+            SHA,
+            SHA,
+            SHA,
+            SHA,
+            "openai-compatible",
+            "gpt-4o-mini",
+            "fp_test",
+            3,
+            "2026-01-01",
+            {"seed": "fixed"},
+        )
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        invalid = json.loads(fixture_path.read_text(encoding="utf-8"))
+        invalid["run"]["mode"] = "live"
+        invalid["run"]["provider"] = "openai-compatible"
+        invalid["run"]["model"] = "attacker-model"
+        invalid["run"]["endpoint_scope"] = "remote"
+        invalid["run"]["invocation_id"] = "h" * 32
+        with patch(
+            "review_sensei.evaluation.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "live report model does not match profile"
+            ):
+                validate_profile_promotion("fast-triage", live, [invalid])
+
     def test_profile_promotion_rejects_off_scope_stage_model_evidence(
         self,
     ) -> None:
@@ -243,7 +281,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
             "review_sensei.evaluation.get_provider_profile",
             return_value=profile,
         ):
-            with self.assertRaisesRegex(ReviewInputError, "declared stage model"):
+            with self.assertRaisesRegex(
+                ReviewInputError, "endpoint scope does not match profile"
+            ):
                 validate_profile_promotion(
                     "fast-triage", live, [default_only, loopback_stage]
                 )
