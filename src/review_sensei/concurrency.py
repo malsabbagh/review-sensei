@@ -26,6 +26,8 @@ from .models import ReviewRequest
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_WAITERS = 1024
+# Condition.wait cannot observe a separate cancel Event; this is the bound
+# on how long a waiter may take to notice cancellation or a timeout.
 _WAITER_POLL_SECONDS = 0.05
 ADMISSION_STATUSES = frozenset(
     {
@@ -406,15 +408,23 @@ class ProviderAdmission:
         with self._lock:
             if self._active < self._group.max_active:
                 return self._grant_locked()
-            if self._waiters >= self._max_waiters:
-                self._log_locked("rejected_capacity")
-                raise AdmissionRejected(
-                    "provider admission waiters are at the configured bound"
-                )
-            self._waiters += 1
-            acquired = False
+            queued = False
             try:
-                while self._active >= self._group.max_active:
+                if self._waiters >= self._max_waiters:
+                    self._log_locked("rejected_capacity")
+                    raise AdmissionRejected(
+                        "provider admission waiters are at the configured bound"
+                    )
+                self._waiters += 1
+                queued = True
+                while True:
+                    if self._active < self._group.max_active:
+                        if cancel_event is not None and cancel_event.is_set():
+                            self._log_locked("cancelled")
+                            raise AdmissionCancelled(
+                                "provider admission wait was cancelled"
+                            )
+                        return self._grant_locked()
                     if cancel_event is not None and cancel_event.is_set():
                         self._log_locked("cancelled")
                         raise AdmissionCancelled(
@@ -430,11 +440,8 @@ class ProviderAdmission:
                     if remaining is not None:
                         wait_for = min(wait_for, remaining)
                     self._slots.wait(timeout=wait_for)
-                self._waiters -= 1
-                acquired = True
-                return self._grant_locked()
             finally:
-                if not acquired:
+                if queued:
                     self._waiters -= 1
 
     def _grant_locked(self) -> AdmissionLease:

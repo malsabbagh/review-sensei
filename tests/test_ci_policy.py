@@ -84,6 +84,123 @@ def _step_block(job_text: str, name: str) -> str:
     return job_text[start:end]
 
 
+def _reusable_group_templates() -> tuple[str, str]:
+    groups = [
+        line.split("group:", 1)[1].strip()
+        for line in _reusable_workflow_text().splitlines()
+        if line.strip().startswith("group:")
+    ]
+    if len(groups) != 3:
+        raise AssertionError(
+            f"expected 3 concurrency group templates, found {len(groups)}"
+        )
+    workflow_group, cloud_provider, local_provider = groups
+    if cloud_provider != local_provider:
+        raise AssertionError("cloud and local provider group templates diverged")
+    return workflow_group, cloud_provider
+
+
+def _gha_truthy(value: object) -> bool:
+    return value not in (None, False, "")
+
+
+class _GhaExprParser:
+    def __init__(self, expr: str, values: dict[str, object]) -> None:
+        self.tokens = re.findall(
+            r"'[^']*'|==|&&|\|\||[()]|[A-Za-z][A-Za-z0-9._-]*", expr
+        )
+        self.index = 0
+        self.values = values
+
+    def peek(self) -> str | None:
+        if self.index >= len(self.tokens):
+            return None
+        return self.tokens[self.index]
+
+    def take(self, expected: str | None = None) -> str:
+        token = self.peek()
+        if token is None:
+            raise AssertionError("unexpected end of GitHub expression")
+        if expected is not None and token != expected:
+            raise AssertionError(f"expected {expected!r}, found {token!r}")
+        self.index += 1
+        return token
+
+    def parse(self) -> object:
+        value = self.parse_or()
+        if self.peek() is not None:
+            raise AssertionError(
+                f"unparsed GitHub expression tokens: {self.tokens[self.index :]}"
+            )
+        return value
+
+    def parse_or(self) -> object:
+        left = self.parse_and()
+        while self.peek() == "||":
+            self.take("||")
+            right = self.parse_and()
+            left = left if _gha_truthy(left) else right
+        return left
+
+    def parse_and(self) -> object:
+        left = self.parse_eq()
+        while self.peek() == "&&":
+            self.take("&&")
+            right = self.parse_eq()
+            left = right if _gha_truthy(left) else left
+        return left
+
+    def parse_eq(self) -> object:
+        left = self.parse_primary()
+        if self.peek() == "==":
+            self.take("==")
+            return left == self.parse_primary()
+        return left
+
+    def parse_primary(self) -> object:
+        token = self.peek()
+        if token == "(":
+            self.take("(")
+            value = self.parse_or()
+            self.take(")")
+            return value
+        token = self.take()
+        if token.startswith("'") and token.endswith("'"):
+            return token[1:-1]
+        if token not in self.values:
+            raise AssertionError(f"unknown GitHub expression identifier {token!r}")
+        return self.values[token]
+
+
+def _eval_gha_group(template: str, values: dict[str, object]) -> str:
+    def repl(match: re.Match[str]) -> str:
+        value = _GhaExprParser(match.group(1).strip(), values).parse()
+        if value is None or value is False:
+            return ""
+        return str(value)
+
+    return re.sub(r"\$\{\{\s*(.+?)\s*\}\}", repl, template)
+
+
+def _group_context(
+    *,
+    operation: str,
+    repository: str,
+    event_pull_request: int | str | None,
+    run_id: str,
+    preflight_pull_request: int | str | None = None,
+) -> dict[str, object]:
+    return {
+        "inputs.operation": operation,
+        "github.repository": repository,
+        "github.run_id": run_id,
+        "github.event.pull_request.number": event_pull_request,
+        "needs.authoritative-preflight.outputs.pull_request_number": (
+            preflight_pull_request
+        ),
+    }
+
+
 def _hosted_workflow_group(
     *,
     operation: str,
@@ -93,9 +210,16 @@ def _hosted_workflow_group(
 ) -> str:
     """Evaluate the reusable workflow-level group expression for a trigger."""
 
-    op = "review" if operation == "review" else "reply"
-    identity = (event_pull_request or run_id) if operation == "review" else run_id
-    return f"reviewsensei-{op}-{repository}-{identity}"
+    template, _ = _reusable_group_templates()
+    return _eval_gha_group(
+        template,
+        _group_context(
+            operation=operation,
+            repository=repository,
+            event_pull_request=event_pull_request,
+            run_id=run_id,
+        ),
+    )
 
 
 def _hosted_provider_group(
@@ -108,13 +232,17 @@ def _hosted_provider_group(
 ) -> str:
     """Evaluate the reusable provider-job group expression for a trigger."""
 
-    op = "review" if operation == "review" else "reply"
-    identity = (
-        (preflight_pull_request or event_pull_request or run_id)
-        if operation == "review"
-        else run_id
+    _, template = _reusable_group_templates()
+    return _eval_gha_group(
+        template,
+        _group_context(
+            operation=operation,
+            repository=repository,
+            event_pull_request=event_pull_request,
+            run_id=run_id,
+            preflight_pull_request=preflight_pull_request,
+        ),
     )
-    return f"reviewsensei-provider-{op}-{repository}-{identity}"
 
 
 class ActionPinPolicyTests(unittest.TestCase):
@@ -908,7 +1036,11 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 )
                 self.assertIn("--jq '.head.sha'", revalidate)
                 self.assertIn("for attempt in 1 2 3", revalidate)
+                self.assertIn("HTTP\\ (401|403|404)", revalidate)
+                self.assertIn("jitter_hundredths", revalidate)
+                self.assertIn('sleep "${delay}.${jitter_hundredths}"', revalidate)
                 self.assertNotIn("2>/dev/null", revalidate)
+                self.assertNotIn('sleep "$attempt"', revalidate)
                 self.assertEqual(revalidate.count("echo 'skipped_stale'"), 1)
                 self.assertIn("status=skipped_stale", revalidate)
                 self.assertIn("status=current", revalidate)

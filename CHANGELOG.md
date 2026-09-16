@@ -46,8 +46,9 @@
 - Closed remaining issue #27 gaps: publish steps now require success and are
   skipped when cancelled, confirm the live pull-request head with a bounded
   read-only `gh api` retry immediately before writes (SHA mismatch records
-  `skipped_stale` and skips publish without failing the job; API unavailability
-  or a malformed live SHA fail closed and refuse publish), and expose an
+  `skipped_stale` and skips publish without failing the job; `401`/`403`/`404`
+  fail closed immediately; other API unavailability uses exponential backoff
+  with jitter then refuses publish; a malformed live SHA fail-closes), and expose an
   in-process bounded `ProviderAdmission` helper with lease release after
   cancellation or failure. Hosted GitHub Actions admission remains the
   PR-scoped reusable workflow concurrency group (`max_active=1`,

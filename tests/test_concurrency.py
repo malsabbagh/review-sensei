@@ -361,6 +361,54 @@ class ProviderAdmissionTests(unittest.TestCase):
         assert recovered is not None
         recovered.release()
 
+    def test_timeout_and_capacity_reject_do_not_underflow_waiters(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:14")
+        admission = ProviderAdmission(group, max_waiters=1)
+        held = admission.acquire()
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire(timeout=0.05)
+        self.assertEqual(admission.waiters, 0)
+        with self.assertRaises(AdmissionRejected):
+            admission.acquire(timeout=0.05)
+        self.assertEqual(admission.waiters, 0)
+        held.release()
+        self.assertEqual(admission.active, 0)
+
+    def test_cancelled_waiter_is_not_granted_a_freed_slot(self):
+        group = ConcurrencyGroup(key="review-sensei:provider:4:test:8:acme/api:1:15")
+        admission = ProviderAdmission(group, max_waiters=1)
+        held = admission.acquire()
+        cancel = threading.Event()
+        granted: list[object] = []
+        errors: list[BaseException] = []
+
+        def wait_for_slot() -> None:
+            try:
+                granted.append(admission.acquire(cancel_event=cancel))
+            except AdmissionCancelled:
+                return
+            except BaseException as exc:  # pragma: no cover - test diagnostics
+                errors.append(exc)
+
+        waiter = threading.Thread(target=wait_for_slot)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while admission.waiters != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(admission.waiters, 1)
+        cancel.set()
+        held.release()
+        waiter.join(timeout=2)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(granted, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(admission.waiters, 0)
+        self.assertEqual(admission.active, 0)
+        recovered = admission.try_acquire()
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        recovered.release()
+
     def test_unrelated_pull_requests_do_not_share_an_in_process_lock(self):
         first_plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 1)
         second_plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 2)

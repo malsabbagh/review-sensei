@@ -110,10 +110,11 @@ native workflow `concurrency`.
 
 A cancelled or stale hosted run cannot publish even if the provider
 finished: publish steps require `success() && !cancelled()` and a current
-live-head admission output. The read-only live head SHA check retries
-transient `gh api` failures, then fails closed (job failure, no publish)
-when the API is unavailable or the live SHA is malformed. A SHA mismatch
-records `skipped_stale` and skips publish without failing the job.
+live-head admission output. The read-only live head SHA check retries transient `gh api` failures with
+bounded exponential backoff and jitter, fails fast on `401`/`403`/`404`,
+then fails closed (job failure, no publish) when the API remains unavailable
+or the live SHA is malformed. A SHA mismatch records `skipped_stale` and
+skips publish without failing the job.
 Exact-head publication preflight remains; the pre-publish check does not
 mint write tokens.
 
