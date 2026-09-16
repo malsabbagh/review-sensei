@@ -9,7 +9,6 @@ from io import StringIO
 from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.schemas import validate_public_document
 from review_sensei.release_manifest import (
     FAILURE_AUTHENTICATION,
     FAILURE_NETWORK,
@@ -17,6 +16,7 @@ from review_sensei.release_manifest import (
     FAILURE_UNAVAILABLE,
     INSTALL_SOURCE_EXECUTING_COMMIT,
     INSTALL_SOURCE_PYPI,
+    abandon_in_flight_promotion,
     allow_executing_commit_fallback,
     begin_channel_promotion,
     bind_canary_evidence,
@@ -37,6 +37,7 @@ from review_sensei.release_manifest import (
     verify_artifact_digests,
     verify_worker_compatibility,
 )
+from review_sensei.schemas import validate_public_document
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "c" * 40
@@ -87,6 +88,13 @@ def _build_manifest(
         provenance=PROVENANCE,
         provenance_kind=PROVENANCE,
     )
+
+
+def _identity_observations(manifest):
+    return {
+        "observed_artifact_digests": expected_artifact_digests(manifest),
+        "observed_worker_version": manifest.worker.version,
+    }
 
 
 class CompatibilityManifestContractTests(unittest.TestCase):
@@ -199,9 +207,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 compatible_worker_range=">=1.0.0",
                 provenance="signed",
             )
-            with self.assertRaisesRegex(
-                ReviewInputError, "explicit trusted mechanism"
-            ):
+            with self.assertRaisesRegex(ReviewInputError, "explicit trusted mechanism"):
                 build_compatibility_manifest(**kwargs, provenance_kind="signed")
             with self.assertRaises(TypeError):
                 build_compatibility_manifest(**kwargs)
@@ -225,7 +231,9 @@ class CompatibilityManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "disagrees with provenance"):
             validate_compatibility_manifest(manifest)
 
-    def test_legacy_v1_schema_accepts_open_provenance_without_workflow_commit(self) -> None:
+    def test_legacy_v1_schema_accepts_open_provenance_without_workflow_commit(
+        self,
+    ) -> None:
         legacy = {
             "schema_version": "1.0",
             "release": "1.0.0",
@@ -271,13 +279,14 @@ class CompatibilityManifestContractTests(unittest.TestCase):
     def test_pypi_and_executing_commit_paths_prove_release_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = _build_manifest(Path(temporary))
+            observations = _identity_observations(manifest)
             prove_release_identity(
                 source=INSTALL_SOURCE_PYPI,
                 requested_version="1.0.0",
                 installed_version="1.0.0",
                 manifest=manifest,
                 executing_commit=COMMIT,
-                observed_python_sha256=manifest.python.sha256,
+                **observations,
             )
             prove_release_identity(
                 source=INSTALL_SOURCE_EXECUTING_COMMIT,
@@ -285,7 +294,10 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 installed_version="1.0.0",
                 manifest=manifest,
                 executing_commit=COMMIT,
+                **observations,
             )
+            bad_observed = dict(observations["observed_artifact_digests"])
+            bad_observed["python"] = "b" * 64
             with self.assertRaises(ReviewInputError):
                 prove_release_identity(
                     source=INSTALL_SOURCE_PYPI,
@@ -293,7 +305,8 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     installed_version="1.0.0",
                     manifest=manifest,
                     executing_commit=COMMIT,
-                    observed_python_sha256="b" * 64,
+                    observed_artifact_digests=bad_observed,
+                    observed_worker_version=manifest.worker.version,
                 )
             with self.assertRaises(ReviewInputError):
                 prove_release_identity(
@@ -302,6 +315,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     installed_version="1.0.0",
                     manifest=manifest,
                     executing_commit=PREVIOUS,
+                    **observations,
                 )
             with self.assertRaisesRegex(
                 ReviewInputError, "does not match the manifest release"
@@ -312,7 +326,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     installed_version="1.0.1",
                     manifest=manifest,
                     executing_commit=COMMIT,
-                    observed_python_sha256=manifest.python.sha256,
+                    **observations,
                 )
 
     def test_worker_caret_and_tilde_ranges_are_enforced(self) -> None:
@@ -328,7 +342,10 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 python_path=_write(Path(temporary) / "caret.whl", b"python"),
                 python_name="review-sensei",
                 npm_artifacts=(
-                    ("@reviewsensei/cli", _write(Path(temporary) / "caret.tgz", b"npm")),
+                    (
+                        "@reviewsensei/cli",
+                        _write(Path(temporary) / "caret.tgz", b"npm"),
+                    ),
                 ),
                 worker_path=_write(Path(temporary) / "caret-worker.js", b"worker"),
                 worker_name="review-sensei-worker",
@@ -353,7 +370,10 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 python_path=_write(Path(temporary) / "tilde.whl", b"python"),
                 python_name="review-sensei",
                 npm_artifacts=(
-                    ("@reviewsensei/cli", _write(Path(temporary) / "tilde.tgz", b"npm")),
+                    (
+                        "@reviewsensei/cli",
+                        _write(Path(temporary) / "tilde.tgz", b"npm"),
+                    ),
                 ),
                 worker_path=_write(Path(temporary) / "tilde-worker.js", b"worker"),
                 worker_name="review-sensei-worker",
@@ -380,18 +400,32 @@ class CompatibilityManifestContractTests(unittest.TestCase):
             "INFO: upstream docs mention SSLError handling\n"
             "ERROR: No matching distribution found for review-sensei==1.0.0"
         )
+        unavailable_with_auth_substring = (
+            "ERROR: No matching distribution found for review-sensei==1.0.0\n"
+            "ERROR: 401 Client Error: Unauthorized for url: https://pypi.org/simple/review-sensei/"
+        )
+        resolution_impossible = "ERROR: ResolutionImpossible: for review-sensei==1.0.0"
         self.assertEqual(classify_install_failure(unavailable), FAILURE_UNAVAILABLE)
         self.assertEqual(classify_install_failure(network), FAILURE_NETWORK)
         self.assertEqual(classify_install_failure(auth), FAILURE_AUTHENTICATION)
         self.assertEqual(classify_install_failure(other), FAILURE_OTHER)
         self.assertEqual(
+            classify_install_failure(resolution_impossible), FAILURE_UNAVAILABLE
+        )
+        self.assertEqual(
             classify_install_failure(unavailable_with_network_substring),
-            FAILURE_UNAVAILABLE,
+            FAILURE_NETWORK,
+        )
+        self.assertEqual(
+            classify_install_failure(unavailable_with_auth_substring),
+            FAILURE_AUTHENTICATION,
         )
         allow_executing_commit_fallback(FAILURE_UNAVAILABLE)
-        allow_executing_commit_fallback(
-            classify_install_failure(unavailable_with_network_substring)
-        )
+        allow_executing_commit_fallback(classify_install_failure(resolution_impossible))
+        with self.assertRaises(ReviewInputError):
+            allow_executing_commit_fallback(
+                classify_install_failure(unavailable_with_network_substring)
+            )
         with self.assertRaises(ReviewInputError):
             allow_executing_commit_fallback(FAILURE_NETWORK)
         with self.assertRaises(ReviewInputError):
@@ -488,7 +522,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
             )
             current_manifest = _build_manifest(directory / "current")
             canary = bind_canary_evidence(current_manifest, "fixture-downstream")
-            in_flight = begin_channel_promotion(
+            first_in_flight = begin_channel_promotion(
                 manifest=current_manifest,
                 canary=canary,
                 previous_target=PREVIOUS,
@@ -502,21 +536,40 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     previous_target=PREVIOUS,
                     publication_state="complete",
                     recorded_at="2026-09-15T00:01:00Z",
-                    ledger=(in_flight,),
+                    ledger=(first_in_flight,),
                 )
+            abandoned = abandon_in_flight_promotion(
+                first_in_flight,
+                recorded_at="2026-09-15T00:01:30Z",
+                ledger=(first_in_flight,),
+            )
+            self.assertEqual(abandoned.action, "abandon")
+            self.assertEqual(abandoned.previous_target, abandoned.new_target)
+            validate_channel_promotion_record(abandoned.to_dict())
+            ledger = (first_in_flight, abandoned)
+            in_flight = begin_channel_promotion(
+                manifest=current_manifest,
+                canary=canary,
+                previous_target=PREVIOUS,
+                publication_state="complete",
+                recorded_at="2026-09-15T00:01:45Z",
+                ledger=ledger,
+            )
+            ledger = (*ledger, in_flight)
             completed = complete_channel_promotion(
                 in_flight,
                 recorded_at="2026-09-15T00:02:00Z",
-                ledger=(in_flight,),
+                ledger=ledger,
             )
             validate_channel_promotion_record(completed.to_dict())
+            ledger = (*ledger, completed)
             restored_canary = bind_canary_evidence(restored, "fixture-downstream")
             rollback = record_channel_rollback(
                 current=completed,
                 restored=restored,
                 canary=restored_canary,
                 recorded_at="2026-09-15T00:03:00Z",
-                ledger=(in_flight, completed),
+                ledger=ledger,
             )
             self.assertEqual(rollback.action, "rollback")
             self.assertEqual(rollback.previous_target, COMMIT)
@@ -686,6 +739,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     installed_version="1.0.0",
                     manifest=manifest,
                     executing_commit=COMMIT,
+                    **_identity_observations(manifest),
                 )
             with self.assertRaises(ReviewInputError):
                 verify_artifact_digests(

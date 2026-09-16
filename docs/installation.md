@@ -165,9 +165,9 @@ it installs from the public ReviewSensei repository at the executing workflow
 commit SHA;
 other PyPI failures remain fatal, including network and authentication errors.
 Both paths must prove the intended release identity against a validated
-compatibility manifest: PyPI by the Python artifact digest plus executing
-workflow commit, and the GitHub fallback by that executing commit and the
-installed version metadata. The reusable workflow still performs the
+compatibility manifest through `prove_release_identity`, which checks the
+executing workflow commit, every manifest artifact digest, and Worker
+compatibility range membership. The reusable workflow still performs the
 version-string and executing-SHA checks; digest/manifest verification is the
 implemented release contract in `review_sensei.release_manifest` and is not
 satisfied by fetching a checksum beside an untrusted artifact. Live

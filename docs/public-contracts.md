@@ -72,7 +72,11 @@ prefer a bounded range. The manifest may also record the exact 40-character
 workflow commit and a closed `provenance_kind`
 (`github-artifact-attestation`, `pypi-trusted-publishing`, or
 `npm-oidc-provenance`) while keeping the legacy open `provenance` string for
-v1 compatibility. Binding validation requires both fields for new manifests. A
+v1 schema compatibility. The JSON schema still accepts legacy open `provenance`
+values such as `"signed"`, but the binding loader in
+`validate_compatibility_manifest` is intentionally stricter: new binding
+manifests must include `workflow_commit` and a trusted `provenance_kind`, and
+legacy open provenance strings that are not trusted kinds fail at load time. A
 checksum fetched beside an untrusted artifact is rejected.
 
 Implemented now: validating and building that manifest, proving PyPI-primary

@@ -18,7 +18,7 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "channel": {"const": "v4"},
-    "action": {"enum": ["promote", "rollback"]},
+    "action": {"enum": ["promote", "rollback", "abandon"]},
     "status": {"enum": ["in-flight", "complete"]},
     "previous_target": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
     "new_target": {"type": "string", "pattern": "^[a-f0-9]{40}$"},

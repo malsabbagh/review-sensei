@@ -34,6 +34,7 @@ REQUIRED_PUBLICATION_LANES = ("workflow", "python", "npm", "worker", "schemas")
 _UNAVAILABLE_MARKERS = (
     "No matching distribution found for review-sensei==",
     "Could not find a version that satisfies the requirement review-sensei==",
+    "ResolutionImpossible: for review-sensei",
 )
 _AUTHENTICATION_MARKERS = (
     "401 Client Error",
@@ -246,9 +247,7 @@ def _resolve_provenance_kind(value: Mapping[str, Any]) -> str:
         return explicit
     if isinstance(legacy, str) and legacy in TRUSTED_PROVENANCE:
         return legacy
-    raise ReviewInputError(
-        "manifest provenance must be an explicit trusted mechanism"
-    )
+    raise ReviewInputError("manifest provenance must be an explicit trusted mechanism")
 
 
 @dataclass(frozen=True)
@@ -508,6 +507,10 @@ def verify_worker_compatibility(
 ) -> None:
     """Reject a deployed Worker that is outside the manifest compatibility range."""
 
+    if not isinstance(observed_worker_version, str) or not _VERSION.fullmatch(
+        observed_worker_version
+    ):
+        raise ReviewInputError("observed worker version is malformed")
     try:
         compatible = _range_contains(
             observed_worker_version, manifest.compatible_worker_range
@@ -521,19 +524,19 @@ def verify_worker_compatibility(
 def classify_install_failure(message: str) -> str:
     """Classify a package-install failure without treating outages as missing packages.
 
-    Precedence is fixed: unavailable distribution markers win over authentication
-    and network substrings so incidental network-like text cannot suppress the
-    GitHub executing-commit fallback when pip reports a missing package.
+    Authentication and network markers are evaluated before unavailable
+    distribution markers so a resolver message that also mentions a network or
+    auth failure cannot authorize the executing-commit fallback.
     """
 
     if not isinstance(message, str) or not message.strip():
         return FAILURE_OTHER
-    if any(marker in message for marker in _UNAVAILABLE_MARKERS):
-        return FAILURE_UNAVAILABLE
     if any(marker in message for marker in _AUTHENTICATION_MARKERS):
         return FAILURE_AUTHENTICATION
     if any(marker in message for marker in _NETWORK_MARKERS):
         return FAILURE_NETWORK
+    if any(marker in message for marker in _UNAVAILABLE_MARKERS):
+        return FAILURE_UNAVAILABLE
     return FAILURE_OTHER
 
 
@@ -553,14 +556,13 @@ def prove_release_identity(
     installed_version: str,
     manifest: CompatibilityManifest,
     executing_commit: str,
-    observed_python_sha256: str | None = None,
+    observed_artifact_digests: Mapping[str, str],
+    observed_worker_version: str,
 ) -> None:
     """Prove PyPI-primary or executing-commit identity against one validated manifest.
 
-    This checks release/version alignment, executing workflow commit equality, and
-    (for PyPI) the observed Python artifact digest. It does not verify workflow,
-    npm, or worker digests, or worker compatibility range membership. Callers must
-    also invoke ``verify_artifact_digests`` and ``verify_worker_compatibility``.
+    This enforces release/version alignment, executing workflow commit equality,
+    every manifest artifact digest, and Worker compatibility range membership.
     """
 
     if requested_version != manifest.release or installed_version != manifest.release:
@@ -570,21 +572,10 @@ def prove_release_identity(
         != manifest.workflow_commit
     ):
         raise ReviewInputError("executing workflow commit does not match the manifest")
-    if source == INSTALL_SOURCE_PYPI:
-        if not isinstance(observed_python_sha256, str) or not _SHA.fullmatch(
-            observed_python_sha256
-        ):
-            raise ReviewInputError(
-                "PyPI installs must prove the python artifact digest"
-            )
-        if observed_python_sha256 != manifest.python.sha256:
-            raise ReviewInputError(
-                "release artifact digest does not match the manifest"
-            )
-        return
-    if source == INSTALL_SOURCE_EXECUTING_COMMIT:
-        return
-    raise ReviewInputError("release install source is unsupported")
+    if source not in {INSTALL_SOURCE_PYPI, INSTALL_SOURCE_EXECUTING_COMMIT}:
+        raise ReviewInputError("release install source is unsupported")
+    verify_artifact_digests(manifest, observed_artifact_digests)
+    verify_worker_compatibility(manifest, observed_worker_version)
 
 
 @dataclass(frozen=True)
@@ -731,12 +722,18 @@ class ChannelPromotionRecord:
     def __post_init__(self) -> None:
         if self.channel != MOVABLE_CHANNEL:
             raise ReviewInputError("only the operator-managed v4 channel may move")
-        if self.action not in {"promote", "rollback"}:
+        if self.action not in {"promote", "rollback", "abandon"}:
             raise ReviewInputError("channel promotion action is unsupported")
         if self.status not in {"in-flight", "complete"}:
             raise ReviewInputError("channel promotion status is unsupported")
         _require_git_sha(self.previous_target, "previous channel target")
         _require_git_sha(self.new_target, "new channel target")
+        if self.action == "abandon":
+            if self.status != "complete":
+                raise ReviewInputError("abandoned promotions must be complete records")
+            if self.new_target != self.previous_target:
+                raise ReviewInputError("abandoned promotions leave v4 unchanged")
+            return
         if self.previous_target == self.new_target:
             raise ReviewInputError("channel promotion must change the v4 target")
         _require_sha256(self.manifest_sha256, "promotion manifest digest")
@@ -793,7 +790,13 @@ def validate_channel_promotion_record(
 
 
 def _ledger_has_inflight(ledger: Sequence[ChannelPromotionRecord]) -> bool:
-    return any(record.status == "in-flight" for record in ledger)
+    blocked_manifests: set[str] = set()
+    for record in ledger:
+        if record.action == "promote" and record.status == "in-flight":
+            blocked_manifests.add(record.manifest_sha256)
+        if record.action in {"abandon", "promote"} and record.status == "complete":
+            blocked_manifests.discard(record.manifest_sha256)
+    return bool(blocked_manifests)
 
 
 def _published_version_conflict(
@@ -847,6 +850,33 @@ def begin_channel_promotion(
         manifest_sha256=digest,
         canary_manifest_sha256=canary.manifest_sha256,
         publication_state=publication_state,
+        recorded_at=recorded_at,
+    )
+    record.to_dict()
+    return record
+
+
+def abandon_in_flight_promotion(
+    in_flight: ChannelPromotionRecord,
+    *,
+    recorded_at: str,
+    ledger: Sequence[ChannelPromotionRecord] = (),
+) -> ChannelPromotionRecord:
+    """Record an abandoned in-flight promotion without moving ``v4``."""
+
+    if in_flight.status != "in-flight" or in_flight.action != "promote":
+        raise ReviewInputError("channel promotion is not in flight")
+    if in_flight not in ledger:
+        raise ReviewInputError("channel promotion is not in the audit ledger")
+    record = ChannelPromotionRecord(
+        channel=in_flight.channel,
+        action="abandon",
+        status="complete",
+        previous_target=in_flight.previous_target,
+        new_target=in_flight.previous_target,
+        manifest_sha256=in_flight.manifest_sha256,
+        canary_manifest_sha256=in_flight.canary_manifest_sha256,
+        publication_state="failed",
         recorded_at=recorded_at,
     )
     record.to_dict()
