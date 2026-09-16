@@ -19,6 +19,8 @@ import {
   buildTaggedV4SetupFiles,
   previousProviderParityWorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
+  providerParityWorkflowTemplate,
+  resolveTriggerWorkflowBeforeDraftSkip,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
@@ -273,6 +275,8 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     try {
       return (
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
+        content === resolveTriggerWorkflowBeforeDraftSkip(publicWorkflowTag) ||
+        content === providerParityWorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowBeforeDraftSkip(publicWorkflowTag) ||
         content === previousProviderParityWorkflowTemplate(publicWorkflowTag) ||
         content === buildHistoricalTaggedV4SetupFiles(publicWorkflowTag)[0].content ||

@@ -12,7 +12,6 @@
 - Skip automatic ReviewSensei runs on draft pull requests instead of failing
   preflight with "pull request is not eligible for review". Review starts when
   a draft is marked ready for review.
-
 - Added committed CodeQL SARIF fixtures and a CI proof step so a seeded
   warning or malformed report fails the findings gate, while clean Python and
   JavaScript/TypeScript reports pass. Fork pull-request CodeQL remains
@@ -25,6 +24,12 @@
   movable `v4` channel, plus a validated `v4_promotion` JSONL record in the
   existing publication ledger. Live GitHub ruleset application remains
   maintainer-operator evidence.
+- Closed remaining issue #30 gaps for trusted stage configuration: inactive
+  category stages make zero provider calls while category-less independent
+  output stages still run, generated setup-v4 callers now include the
+  authoritative resolve-trigger job and stay compatible with the public
+  reusable runner inputs, and custom stage JSON is loaded only from the
+  reviewed trusted base.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

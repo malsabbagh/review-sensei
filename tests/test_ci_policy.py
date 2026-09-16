@@ -103,7 +103,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         text = workflow.read_text(encoding="utf-8")
         run_blocks = _run_blocks(text)
-        self.assertFalse(run_blocks)
+        self.assertTrue(run_blocks)
         self.assertIn("# ReviewSensei setup version: 4", text)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
@@ -130,14 +130,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
         )
+        self.assertIn("resolve-trigger:", text)
         self.assertIn(
-            "enable_review: ${{ github.event_name == 'workflow_dispatch' && 'true' "
-            "|| (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') "
-            "|| contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'true') "
-            "|| vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}",
+            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
             text,
         )
-        self.assertIn("contains(github.event.comment.body, 're-scan')", text)
+        self.assertIn('rescan = re.compile(r"\\bre[\\s-]?scan\\b"', text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 

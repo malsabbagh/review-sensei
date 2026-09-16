@@ -15,7 +15,12 @@ from review_sensei.hosting.github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
-from review_sensei.hosting.github.setup import SETUP_VARIABLES
+from review_sensei.hosting.github.setup import (
+    SETUP_VARIABLES,
+    WORKFLOW_PATH,
+    _historical_provider_parity_workflow,
+    _provider_parity_workflow,
+)
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
@@ -277,18 +282,26 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(("REVIEWSENSEI_AUTO_APPROVE", "true"), SETUP_VARIABLES)
+        self.assertIn("resolve-trigger:", workflow)
         self.assertIn(
-            "operation: ${{ github.event_name == 'pull_request' && 'review' || "
-            "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
-            "(github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || "
-            "contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || "
-            "'reply' }}",
+            "operation: ${{ needs.resolve-trigger.outputs.operation }}",
+            workflow,
+        )
+        self.assertIn(
+            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
             workflow,
         )
         self.assertNotIn(
             "operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' "
             "&& 'review') || 'reply' }}",
             workflow,
+        )
+        self.assertEqual(
+            workflow,
+            (
+                Path(__file__).parent.parent
+                / ".github/workflows/review-sensei-review.yml"
+            ).read_text(encoding="utf-8"),
         )
         config = dict((f.path, f.content) for f in plan.files)[
             ".github/review-sensei/config.yml"
@@ -634,25 +647,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
-        current_operation = (
-            "operation: ${{ github.event_name == 'pull_request' && 'review' || "
-            "inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || "
-            "(github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || "
-            "contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || "
-            "'reply' }}"
-        )
-        historical_operation = (
-            "operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' "
-            "&& 'review') || 'reply' }}"
-        )
         files = {file.path: file.content for file in plan.files}
-        files[".github/workflows/review-sensei-review.yml"] = (
-            files[".github/workflows/review-sensei-review.yml"]
-            .replace("      github.event.pull_request.draft != true &&\n", "", 1)
-            .replace(current_operation, historical_operation, 1)
-            .replace("pull-requests: write", "pull-requests: read", 1)
-            .replace("issues: write", "issues: read", 1)
-        )
+        files[WORKFLOW_PATH] = _historical_provider_parity_workflow("v4")
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
@@ -681,6 +677,39 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "created")
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_released_provider_parity_v4_caller_without_resolve_trigger_is_migrated(
+        self,
+    ):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = _provider_parity_workflow("v4")
+        self.assertNotIn("resolve-trigger:", files[WORKFLOW_PATH])
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        migrated = next(
+            file.content for file in branch_request[6] if file.path == WORKFLOW_PATH
+        )
+        self.assertIn("resolve-trigger:", migrated)
+        combined = "\n".join(file.content for file in branch_request[6])
+        for marker in (
+            "GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_APP_WEBHOOK_SECRET",
+            "installation_token",
+            "raw webhook",
+            "Authorization:",
+        ):
+            self.assertNotIn(marker, combined)
 
     def test_released_v3_setup_with_stale_public_workflow_sha_is_migrated(self):
         files = self.historical_v3_files()

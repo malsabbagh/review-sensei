@@ -63,8 +63,9 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("github.event.pull_request.draft != true");
     expect(workflow).toContain("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}");
+    expect(workflow).toContain("resolve-trigger:");
     expect(workflow).toContain(
-      "operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}",
+      "operation: ${{ needs.resolve-trigger.outputs.operation }}",
     );
     expect(workflow).not.toContain(
       "operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}",
