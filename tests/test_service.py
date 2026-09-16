@@ -568,6 +568,28 @@ class ReviewServiceTests(unittest.TestCase):
             ).review(ReviewRequest(diff=DIFF))
         self.assertEqual(len(provider.requests), 1)
 
+    def test_unknown_stage_provider_name_raises(self):
+        stage = Stage(name="one", prompt_template="{diff}", outputs=("summary",))
+        with self.assertRaisesRegex(
+            ReviewInputError, "stage providers must match configured stage names"
+        ):
+            ReviewService(
+                FakeProvider('{"summary":"ok"}'),
+                stages=[stage],
+                stage_providers={"missing": FakeProvider('{"summary":"ok"}')},
+            )
+
+    def test_empty_stage_provider_name_raises(self):
+        stage = Stage(name="one", prompt_template="{diff}", outputs=("summary",))
+        with self.assertRaisesRegex(
+            ReviewInputError, "stage provider names must be non-empty strings"
+        ):
+            ReviewService(
+                FakeProvider('{"summary":"ok"}'),
+                stages=[stage],
+                stage_providers={"": FakeProvider('{"summary":"ok"}')},
+            )
+
     def test_failed_provider_call_does_not_consume_call_budget(self):
         class FailProvider(FakeProvider):
             def complete(self, request):

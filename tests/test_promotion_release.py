@@ -106,6 +106,25 @@ class PromotionAndReleaseTests(unittest.TestCase):
         validate_profile_promotion("fast-triage", live)
         with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
             validate_profile_promotion("local-private", live)
+        fixture_path = (
+            Path(__file__).resolve().parent
+            / "fixtures/schemas/golden/evaluation-report.json"
+        )
+        remote_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+        remote_report["run"]["mode"] = "live"
+        remote_report["run"]["provider"] = "openai-compatible"
+        remote_report["run"]["model"] = "gpt-4o-mini"
+        remote_report["run"]["endpoint_scope"] = "remote"
+        remote_report["run"]["invocation_id"] = "a" * 32
+        validate_profile_promotion("fast-triage", live, [remote_report])
+        loopback_report = json.loads(fixture_path.read_text(encoding="utf-8"))
+        loopback_report["run"]["mode"] = "live"
+        loopback_report["run"]["provider"] = "openai-compatible"
+        loopback_report["run"]["model"] = "gpt-4o-mini"
+        loopback_report["run"]["endpoint_scope"] = "loopback"
+        loopback_report["run"]["invocation_id"] = "b" * 32
+        with self.assertRaisesRegex(ReviewInputError, "endpoint scope does not match"):
+            validate_profile_promotion("fast-triage", live, [loopback_report])
         with self.assertRaisesRegex(ReviewInputError, "fixture-only"):
             validate_profile_promotion(
                 "local-private",

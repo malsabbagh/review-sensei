@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.errors import ProviderError, ReviewInputError
 from review_sensei.providers.profiles import ProviderProfile, get_provider_profile
@@ -55,9 +56,17 @@ class ProviderRoutingTests(unittest.TestCase):
                 run_profile="fast-triage", stage_profile="deep-verification"
             )
 
-    def test_stage_aliases_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ProviderError, "canonical profile name"):
-            resolve_stage_profile_name(run_profile=None, stage_profile="local")
+    def test_stage_aliases_resolve_like_run_profile(self) -> None:
+        self.assertEqual(
+            resolve_stage_profile_name(run_profile=None, stage_profile="local"),
+            "local-private",
+        )
+        self.assertEqual(
+            resolve_stage_profile_name(
+                run_profile="fast-triage", stage_profile="local/private"
+            ),
+            "local-private",
+        )
 
     def test_bind_reuses_run_provider_when_stage_matches(self) -> None:
         stages = [_stage("Default Review Stage")]
@@ -87,8 +96,10 @@ class ProviderRoutingTests(unittest.TestCase):
             stages=stages,
         )
         self.assertEqual(provider.name, "openai-compatible")
+        self.assertEqual(getattr(provider, "api_key", None), "secret")
         local = mapping["Summary"]
         self.assertEqual(local.name, "ollama")
+        self.assertIsNot(local, provider)
         self.assertIsNone(getattr(local, "api_key", "missing"))
 
     def test_fixture_run_rejects_stage_profiles(self) -> None:
@@ -107,14 +118,29 @@ class ProviderRoutingTests(unittest.TestCase):
     ) -> None:
         profile = replace(
             get_provider_profile("fast-triage"),
-            stage_models=(("Summary", "gpt-4o-mini"), ("Comments", "gpt-4o-mini")),
+            stage_models=(("Comments", "gpt-4o"),),
         )
-        self.assertEqual(profile.model_for_stage("Comments"), "gpt-4o-mini")
-        self.assertEqual(profile.model_for_stage("Other"), "gpt-4o-mini")
-        settings = ProviderSettings.for_profile("fast-triage", api_key="secret")
-        provider = default_registry().create(replace(settings, model="gpt-4o-mini"))
-        self.assertEqual(provider.model, "gpt-4o-mini")
-        self.assertEqual(provider.base_url, "https://api.openai.com/v1")
+        stages = [_stage("Comments"), _stage("Summary")]
+
+        def profile_lookup(name: str) -> ProviderProfile:
+            selected = get_provider_profile(name)
+            if selected.name == "fast-triage":
+                return profile
+            return selected
+
+        with patch(
+            "review_sensei.providers.routing.get_provider_profile",
+            side_effect=profile_lookup,
+        ):
+            run_provider, mapping = bind_stage_providers(
+                registry=default_registry(),
+                settings=ProviderSettings.for_profile("fast-triage", api_key="secret"),
+                stages=stages,
+            )
+        self.assertEqual(run_provider.model, "gpt-4o-mini")
+        self.assertEqual(run_provider.base_url, "https://api.openai.com/v1")
+        self.assertEqual(mapping["Comments"].model, "gpt-4o")
+        self.assertNotIn("Summary", mapping)
 
     def test_profile_rejects_undeclared_stage_model(self) -> None:
         with self.assertRaisesRegex(ProviderError, "model cannot be overridden"):
@@ -184,7 +210,7 @@ class StageProviderProfileTests(unittest.TestCase):
                     "provider_profile": "local",
                 }
             )
-        with self.assertRaises(ReviewInputError):
+        with self.assertRaises(ReviewInputError) as raised:
             Stage.from_dict(
                 {
                     "name": "Summary",
@@ -193,6 +219,8 @@ class StageProviderProfileTests(unittest.TestCase):
                     "provider_profile": "not-a-profile",
                 }
             )
+        self.assertEqual(str(raised.exception), "stage provider_profile is unknown")
+        self.assertNotIn("not-a-profile", str(raised.exception))
 
 
 if __name__ == "__main__":

@@ -206,7 +206,8 @@ class OllamaProvider:
         except (TimeoutError, URLError) as exc:
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc
-            raise ProviderError("Ollama request failed") from exc
+            # urllib reports DNS, connection, and proxy failures as URLError.
+            raise ProviderError("Ollama request failed", transient=True) from exc
         except OSError as exc:
             if "timed out" in str(exc).lower():
                 raise ProviderError("Ollama request timed out", transient=True) from exc

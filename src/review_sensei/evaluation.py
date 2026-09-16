@@ -23,7 +23,7 @@ from .models import (
     ReviewRequest,
 )
 from .providers.base import ReviewProvider
-from .providers.profiles import get_provider_profile
+from .providers.profiles import ProviderProfile, get_provider_profile
 from .schemas import validate_public_document
 from .service import ReviewService
 from .stages import ReviewCategory, Stage
@@ -585,8 +585,33 @@ def require_supported_promotion(
     return parsed
 
 
-def validate_profile_promotion(profile_name: str, record: PromotionRecord) -> None:
-    """Reject fixture-only or mismatched evidence for a named provider profile."""
+def _profile_report_endpoint_scopes(profile: ProviderProfile) -> frozenset[str]:
+    if profile.endpoint_scope == "local":
+        return frozenset({"loopback"})
+    return frozenset({"remote"})
+
+
+def _report_endpoint_scope(report: Mapping[str, Any]) -> str:
+    run = report.get("run")
+    if not isinstance(run, Mapping):
+        raise ReviewInputError("evaluation report is incomplete")
+    scope = run.get("endpoint_scope")
+    if not isinstance(scope, str) or not scope.strip():
+        raise ReviewInputError("evaluation report endpoint_scope is required")
+    return scope.strip()
+
+
+def validate_profile_promotion(
+    profile_name: str,
+    record: PromotionRecord,
+    reports: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    """Reject fixture-only or mismatched evidence for a named provider profile.
+
+    When ``reports`` are supplied, each live report's ``endpoint_scope`` must
+    match the profile's declared endpoint policy. Callers promoting with live
+    evidence should pass reports or use ``require_supported_promotion``.
+    """
 
     profile = get_provider_profile(profile_name)
     if _is_fixture_alias(record.provider):
@@ -597,6 +622,16 @@ def validate_profile_promotion(profile_name: str, record: PromotionRecord) -> No
         raise ReviewInputError("promotion record provider does not match profile")
     if record.model not in profile.allowed_models():
         raise ReviewInputError("promotion record model does not match profile")
+    if reports:
+        expected = _profile_report_endpoint_scopes(profile)
+        for report in reports:
+            fields = _report_promotion_fields(report)
+            if fields["mode"] != "live":
+                continue
+            if _report_endpoint_scope(report) not in expected:
+                raise ReviewInputError(
+                    "promotion record endpoint scope does not match profile"
+                )
 
 
 def _sha256_bytes(data: bytes) -> str:

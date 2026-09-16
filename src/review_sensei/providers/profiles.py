@@ -80,13 +80,18 @@ class ProviderProfile:
             if stage_name in seen:
                 raise ValueError("provider profile stage_models must be unique")
             seen.add(stage_name)
+        object.__setattr__(
+            self,
+            "_stage_models_map",
+            {name: model for name, model in self.stage_models},
+        )
 
     def model_for_stage(self, stage_name: str) -> str:
         """Return the profile model for ``stage_name``, defaulting to the run model."""
 
         if not isinstance(stage_name, str) or not stage_name.strip():
             raise ProviderError("stage name must be a non-empty string")
-        mapping: Mapping[str, str] = {name: model for name, model in self.stage_models}
+        mapping: Mapping[str, str] = self._stage_models_map
         return mapping.get(stage_name.strip(), self.model)
 
     def allowed_models(self) -> frozenset[str]:

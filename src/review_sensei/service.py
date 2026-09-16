@@ -73,7 +73,11 @@ class _ValidatedStageOutput:
 
 
 class ReviewService:
-    """Run and validate a review independently of GitHub and model vendors."""
+    """Run and validate a review independently of GitHub and model vendors.
+
+    Instances are reusable, but ``review()`` is not thread-safe: concurrent
+    calls would race on the per-run ``_provider_calls`` budget counter.
+    """
 
     def __init__(
         self,
@@ -129,6 +133,11 @@ class ReviewService:
     def _complete(
         self, provider: ReviewProvider, provider_request: ProviderRequest
     ) -> ProviderResponse:
+        """Call a provider and count only successful completions toward the budget.
+
+        Failed attempts, including transient transport errors, do not consume
+        ``max_provider_calls``; only responses returned from ``complete`` do.
+        """
         if self._provider_calls >= self.budget.max_provider_calls:
             raise ProviderError("resource budget exhausted")
         response = provider.complete(provider_request)

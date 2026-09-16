@@ -33,8 +33,6 @@ def resolve_stage_profile_name(
     if stage_profile is None:
         return run_profile
     selected = get_provider_profile(stage_profile)
-    if selected.name != stage_profile.strip().lower():
-        raise ProviderError("stage provider_profile must be a canonical profile name")
     if run_profile is None:
         if selected.endpoint_scope == "remote":
             raise ProviderError(
@@ -70,18 +68,18 @@ def bind_stage_providers(
     a new credential-free adapter; the run credential is never reused.
     """
 
-    default_provider = registry.create(settings)
-    run_profile_name = (
-        get_provider_profile(settings.profile).name
-        if settings.profile is not None
-        else None
-    )
     if settings.name.strip().lower() == "fixture" and any(
         stage.provider_profile for stage in stages
     ):
         raise ProviderError(
             "fixture provider cannot be combined with stage provider_profile"
         )
+    default_provider = registry.create(settings)
+    run_profile_name = (
+        get_provider_profile(settings.profile).name
+        if settings.profile is not None
+        else None
+    )
     mapping: dict[str, ReviewProvider] = {}
     for stage in stages:
         resolved = resolve_stage_profile_name(

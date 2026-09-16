@@ -328,6 +328,8 @@ class Stage:
             try:
                 selected = get_provider_profile(self.provider_profile)
             except ProviderError as exc:
+                if "Unknown provider profile" in str(exc):
+                    raise ReviewInputError("stage provider_profile is unknown") from exc
                 raise ReviewInputError(str(exc)) from exc
             if selected.name != self.provider_profile.strip().lower():
                 raise ReviewInputError(

@@ -123,6 +123,13 @@ class ProviderConformanceTests(unittest.TestCase):
             with self.assertRaises(ProviderError):
                 FixtureProvider(path).complete(request)
 
+    def test_fixture_provider_does_not_use_transient_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ok.json"
+            path.write_text('{"summary":"ok"}', encoding="utf-8")
+            result = FixtureProvider(path).complete(ProviderRequest(prompt="review"))
+        self.assertEqual(result.provider, "fixture")
+
     def test_timeout_and_cancellation_are_transient_and_sanitized(self) -> None:
         secret = "private-secret"
         for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
@@ -165,15 +172,18 @@ class ProviderConformanceTests(unittest.TestCase):
 
     def test_network_failure_does_not_echo_secret(self) -> None:
         secret = "credential-value"
-        provider = _openai(
-            lambda request, timeout, context: (_ for _ in ()).throw(
-                URLError(f"dns {secret}")
-            )
-        )
-        with self.assertRaisesRegex(ProviderError, "request failed") as raised:
-            provider.complete(ProviderRequest(prompt="private"))
-        self.assertTrue(raised.exception.transient)
-        self.assertNotIn(secret, str(raised.exception))
+        for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
+            with self.subTest(adapter=label):
+                provider = factory(
+                    lambda request, timeout, context: (_ for _ in ()).throw(
+                        URLError(f"dns {secret}")
+                    ),
+                    api_key=secret if label == "Ollama" else "secret",
+                )
+                with self.assertRaisesRegex(ProviderError, "request failed") as raised:
+                    provider.complete(ProviderRequest(prompt="private"))
+                self.assertTrue(raised.exception.transient)
+                self.assertNotIn(secret, str(raised.exception))
 
     def test_missing_credentials_fail_before_request(self) -> None:
         with self.assertRaisesRegex(ValueError, "API key"):
