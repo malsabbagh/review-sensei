@@ -447,8 +447,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--title")
     parser.add_argument("--instructions")
-    parser.add_argument("--base-sha", help="Exact reviewed base commit SHA")
-    parser.add_argument("--head-sha", help="Exact reviewed head commit SHA")
+    parser.add_argument(
+        "--base-sha",
+        help=(
+            "Exact reviewed base commit SHA; also the trusted snapshot for "
+            "symbol-aware context"
+        ),
+    )
+    parser.add_argument(
+        "--head-sha",
+        help=(
+            "Exact reviewed head commit SHA; recorded only as coverage metadata "
+            "and never used as the context snapshot or trusted configuration"
+        ),
+    )
     parser.add_argument(
         "--learning-root",
         type=Path,
@@ -478,17 +490,6 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Opt in to bounded Python symbol-aware source context from the "
             "trusted base snapshot. Default remains documents and learnings only."
-        ),
-    )
-    parser.add_argument(
-        "--base-sha",
-        help="Trusted base commit SHA for symbol-aware context provenance",
-    )
-    parser.add_argument(
-        "--head-sha",
-        help=(
-            "Untrusted head commit SHA recorded only as coverage metadata; "
-            "never used as the context snapshot or trusted configuration"
         ),
     )
     parser.add_argument(
@@ -1643,8 +1644,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         outcome = replace(
             run.outcome,
-            base_sha=args.base_sha,
-            head_sha=args.head_sha,
+            base_sha=(args.base_sha or "").strip().lower() or None,
+            head_sha=(args.head_sha or "").strip().lower() or None,
         )
         emit_host_outcome(outcome, output_path=args.outcome)
         if run.result is None:
@@ -1663,15 +1664,15 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReviewInputError(
                     "recovery artifacts require --repository and --pull-request"
                 )
-            if not args.base_sha or not args.head_sha:
+            if not outcome.base_sha or not outcome.head_sha:
                 raise ReviewInputError(
                     "recovery artifacts require --base-sha and --head-sha"
                 )
             artifact = RecoveryArtifact.create(
                 repository=args.repository,
                 pull_request_number=args.pull_request,
-                base_sha=args.base_sha,
-                head_sha=args.head_sha,
+                base_sha=outcome.base_sha,
+                head_sha=outcome.head_sha,
                 result=run.result.to_dict(),
                 expires_at=recovery_expires_at(ttl_seconds=args.recovery_ttl_seconds),
             )
