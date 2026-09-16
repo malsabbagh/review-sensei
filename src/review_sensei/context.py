@@ -10,7 +10,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .errors import ContextLoadError, ReviewInputError
 from .learnings import LearningStore
@@ -48,6 +48,13 @@ MAX_IMPORT_MODULE_PARTS = 32
 MAX_IMPORT_ALIASES_PER_NODE = 64
 MAX_IMPORT_NODES_PER_FILE = 256
 MAX_IMPORT_FILESYSTEM_PROBES_PER_FILE = 1024
+MAX_CALLER_DIRECTORY_ENTRIES = 64
+SUPPORTED_SYMBOL_LANGUAGES = ("python",)
+_PYTHON_SOURCE_SUFFIXES = frozenset({".py", ".pyi"})
+_FALLBACK_SOURCE_SUFFIXES = frozenset({".js", ".jsx", ".ts", ".tsx"})
+_SOURCE_SUFFIXES = _PYTHON_SOURCE_SUFFIXES | _FALLBACK_SOURCE_SUFFIXES
+_INTERFACE_BASE_NAMES = frozenset({"ABC", "Protocol"})
+_INTERFACE_NAME_SUFFIXES = ("ABC", "Interface", "Protocol")
 
 
 @dataclass
@@ -90,6 +97,49 @@ _SECRET_NAMES = frozenset(
 )
 _SHA1 = re.compile(r"^[a-f0-9]{40}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+
+
+def _git_blob_oid(content: str) -> str:
+    """Return the Git blob object id for UTF-8 source text."""
+
+    data = content.encode("utf-8")
+    return hashlib.sha1(
+        b"blob %d\0" % len(data) + data, usedforsecurity=False
+    ).hexdigest()
+
+
+def _slice_lines(content: str, start_line: int, end_line: int) -> str:
+    """Return an inclusive 1-based line slice, or the original text."""
+
+    lines = content.splitlines(keepends=True)
+    if start_line < 1 or end_line < start_line or end_line > len(lines):
+        return content
+    sliced = "".join(lines[start_line - 1 : end_line])
+    return sliced if sliced.strip() else content
+
+
+def _symbol_span(node: ast.AST) -> tuple[int, int] | None:
+    start = getattr(node, "lineno", None)
+    end = getattr(node, "end_lineno", None)
+    if not isinstance(start, int) or start < 1:
+        return None
+    if not isinstance(end, int) or end < start:
+        end = start
+    return start, end
+
+
+def _base_identifier(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _is_interface_class(node: ast.ClassDef) -> bool:
+    if node.name.endswith(_INTERFACE_NAME_SUFFIXES):
+        return True
+    return any(_base_identifier(base) in _INTERFACE_BASE_NAMES for base in node.bases)
 
 
 def _matches(path: str, pattern: str) -> bool:
@@ -398,6 +448,7 @@ class ReviewContextSelection:
 
     active_category_ids: tuple[str, ...]
     lens_contexts: tuple[ReviewLensContext, ...]
+    source_context: SourceContextSelection | None = None
 
 
 @dataclass(frozen=True)
@@ -413,6 +464,9 @@ class ContextSnapshot:
         if self.kind != "base":
             raise ContextLoadError("context snapshot kind must be base")
 
+    def to_prompt_dict(self) -> dict[str, str]:
+        return {"revision": self.revision, "kind": self.kind}
+
 
 @dataclass(frozen=True)
 class SourceContextExcerpt:
@@ -425,6 +479,7 @@ class SourceContextExcerpt:
     end_line: int = 1
     reason: str = "changed-file"
     sha256: str = ""
+    blob_oid: str = ""
 
     def __post_init__(self) -> None:
         try:
@@ -458,8 +513,9 @@ class SourceContextExcerpt:
             raise ContextLoadError("source context excerpt line range is invalid")
         if self.end_line < self.start_line:
             raise ContextLoadError("source context excerpt line range is invalid")
-        line_count = max(1, len(self.content.splitlines()))
-        if self.start_line > line_count or self.end_line > line_count:
+        expected_lines = self.end_line - self.start_line + 1
+        actual_lines = max(1, len(self.content.splitlines()))
+        if actual_lines != expected_lines:
             raise ContextLoadError("source context excerpt line range is invalid")
         try:
             validate_bounded_text(
@@ -482,6 +538,27 @@ class SourceContextExcerpt:
                 "source context excerpt digest does not match content"
             )
         object.__setattr__(self, "sha256", expected)
+        if not isinstance(self.blob_oid, str):
+            raise ContextLoadError("source context excerpt blob identity is invalid")
+        if self.blob_oid:
+            if not _SHA1.fullmatch(self.blob_oid):
+                raise ContextLoadError(
+                    "source context excerpt blob identity is invalid"
+                )
+        else:
+            object.__setattr__(self, "blob_oid", _git_blob_oid(self.content))
+
+    def to_prompt_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "snapshot": self.snapshot.to_prompt_dict(),
+            "blob_oid": self.blob_oid,
+            "sha256": self.sha256,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+            "reason": self.reason,
+            "content": self.content,
+        }
 
 
 @dataclass(frozen=True)
@@ -497,6 +574,215 @@ class SourceContextSelection:
     excerpts: tuple[SourceContextExcerpt, ...] = ()
     outcomes: tuple[tuple[str, str], ...] = ()
     complete: bool = True
+    snapshot: ContextSnapshot = ContextSnapshot()
+
+    def to_prompt_dict(self) -> dict[str, object]:
+        return {
+            "kind": "symbol-aware-source-context",
+            "policy": "trusted-base",
+            "untrusted_data": True,
+            "languages": list(SUPPORTED_SYMBOL_LANGUAGES),
+            "complete": self.complete,
+            "snapshot": self.snapshot.to_prompt_dict(),
+            "outcomes": [
+                {"path": path, "status": status} for path, status in self.outcomes
+            ],
+            "excerpts": [excerpt.to_prompt_dict() for excerpt in self.excerpts],
+        }
+
+    def coverage(
+        self, *, untrusted_head_sha: str | None = None
+    ) -> SourceContextCoverage:
+        return SourceContextCoverage(
+            enabled=True,
+            complete=self.complete,
+            snapshot=self.snapshot,
+            outcomes=self.outcomes,
+            excerpt_count=len(self.excerpts),
+            untrusted_head_sha=untrusted_head_sha,
+        )
+
+
+@dataclass(frozen=True)
+class SourceContextCoverage:
+    """Publisher-facing coverage for opt-in symbol-aware context.
+
+    This record never includes source text.  Exhausted budgets, unsupported
+    languages, and ambiguous parses stay visible so a bounded subset cannot be
+    mistaken for complete understanding.
+    """
+
+    enabled: bool
+    complete: bool
+    snapshot: ContextSnapshot
+    outcomes: tuple[tuple[str, str], ...] = ()
+    excerpt_count: int = 0
+    languages: tuple[str, ...] = SUPPORTED_SYMBOL_LANGUAGES
+    untrusted_head_sha: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.complete, bool):
+            raise ContextLoadError("source context coverage flags are invalid")
+        if not isinstance(self.snapshot, ContextSnapshot):
+            raise ContextLoadError("source context coverage snapshot is invalid")
+        if (
+            isinstance(self.excerpt_count, bool)
+            or not isinstance(self.excerpt_count, int)
+            or self.excerpt_count < 0
+        ):
+            raise ContextLoadError("source context coverage excerpt_count is invalid")
+        if self.languages != SUPPORTED_SYMBOL_LANGUAGES:
+            raise ContextLoadError(
+                "source context coverage language set is unsupported"
+            )
+        if not isinstance(self.outcomes, tuple):
+            raise ContextLoadError("source context coverage outcomes are invalid")
+        if len(self.outcomes) > MAX_PENDING_SOURCE_CONTEXT_CANDIDATES:
+            raise ContextLoadError("source context coverage has too many outcomes")
+        for path, status in self.outcomes:
+            try:
+                validate_repository_path(path, label="source context coverage path")
+                validate_bounded_text(
+                    status,
+                    64,
+                    label="source context coverage status",
+                    allow_empty=False,
+                )
+            except ReviewInputError as exc:
+                raise ContextLoadError(
+                    "source context coverage outcomes are invalid"
+                ) from exc
+        if self.untrusted_head_sha is not None and (
+            not isinstance(self.untrusted_head_sha, str)
+            or not _SHA1.fullmatch(self.untrusted_head_sha)
+        ):
+            raise ContextLoadError("untrusted head SHA must be a commit SHA")
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "enabled": self.enabled,
+            "complete": self.complete,
+            "snapshot": self.snapshot.to_prompt_dict(),
+            "languages": list(self.languages),
+            "excerpt_count": self.excerpt_count,
+            "outcomes": [
+                {"path": path, "status": status} for path, status in self.outcomes
+            ],
+        }
+        if self.untrusted_head_sha is not None:
+            value["untrusted_head_sha"] = self.untrusted_head_sha
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> SourceContextCoverage:
+        if not isinstance(value, Mapping):
+            raise ContextLoadError("source context coverage must be an object")
+        snapshot_value = value.get("snapshot")
+        if not isinstance(snapshot_value, Mapping):
+            raise ContextLoadError("source context coverage snapshot is invalid")
+        revision = snapshot_value.get("revision")
+        kind = snapshot_value.get("kind")
+        if not isinstance(revision, str) or not isinstance(kind, str):
+            raise ContextLoadError("source context coverage snapshot is invalid")
+        raw_outcomes = value.get("outcomes")
+        if not isinstance(raw_outcomes, (list, tuple)):
+            raise ContextLoadError("source context coverage outcomes are invalid")
+        outcomes: list[tuple[str, str]] = []
+        for item in raw_outcomes:
+            if not isinstance(item, Mapping):
+                raise ContextLoadError("source context coverage outcomes are invalid")
+            path = item.get("path")
+            status = item.get("status")
+            if not isinstance(path, str) or not isinstance(status, str):
+                raise ContextLoadError("source context coverage outcomes are invalid")
+            outcomes.append((path, status))
+        # The schema requires these fields and constrains their types, so the
+        # publisher-facing boundary rejects anything else instead of coercing a
+        # malformed document into a plausible-looking record.
+        enabled = value.get("enabled")
+        complete = value.get("complete")
+        if not isinstance(enabled, bool) or not isinstance(complete, bool):
+            raise ContextLoadError("source context coverage flags are invalid")
+        excerpt_count = value.get("excerpt_count")
+        if isinstance(excerpt_count, bool) or not isinstance(excerpt_count, int):
+            raise ContextLoadError("source context coverage excerpt_count is invalid")
+        languages = value.get("languages")
+        if not isinstance(languages, (list, tuple)) or not all(
+            isinstance(item, str) for item in languages
+        ):
+            raise ContextLoadError(
+                "source context coverage language set is unsupported"
+            )
+        head_sha = value.get("untrusted_head_sha")
+        if head_sha is not None and not isinstance(head_sha, str):
+            raise ContextLoadError("untrusted head SHA must be a commit SHA")
+        return cls(
+            enabled=enabled,
+            complete=complete,
+            snapshot=ContextSnapshot(revision, kind),
+            outcomes=tuple(outcomes),
+            excerpt_count=excerpt_count,
+            languages=tuple(languages),
+            untrusted_head_sha=head_sha,
+        )
+
+
+@dataclass(frozen=True)
+class SymbolAwareContextPolicy:
+    """Opt-in trusted-base policy for symbol-aware source selection.
+
+    Disabled by default so reviews keep the existing document/learning context
+    boundary until an operator explicitly enables this selector.  Head source
+    remains untrusted data and is never used as the snapshot or configuration.
+    """
+
+    enabled: bool = False
+    allowed_paths: tuple[str, ...] = ("**",)
+    max_files: int = 16
+    max_bytes: int = 128 * 1024
+    max_depth: int = 1
+    languages: tuple[str, ...] = SUPPORTED_SYMBOL_LANGUAGES
+    fail_closed_on_exhaustion: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ContextLoadError("symbol-aware context enabled flag is invalid")
+        if not isinstance(self.fail_closed_on_exhaustion, bool):
+            raise ContextLoadError("symbol-aware context fail-closed flag is invalid")
+        if self.languages != SUPPORTED_SYMBOL_LANGUAGES:
+            raise ContextLoadError("symbol-aware context language set is unsupported")
+        if isinstance(self.allowed_paths, (str, bytes)) or not isinstance(
+            self.allowed_paths, tuple
+        ):
+            raise ContextLoadError("symbol-aware context allowed_paths must be a tuple")
+        if not self.allowed_paths:
+            raise ContextLoadError(
+                "symbol-aware context allowed_paths must be non-empty"
+            )
+        if len(self.allowed_paths) > MAX_ALLOWED_CONTEXT_PATTERNS:
+            raise ContextLoadError("source context has too many path patterns")
+        for pattern in self.allowed_paths:
+            if not isinstance(pattern, str):
+                raise ContextLoadError(
+                    "source context allowed path patterns must be strings"
+                )
+            try:
+                validate_repository_path(
+                    pattern,
+                    pattern=True,
+                    label="source context allowed path",
+                )
+            except ReviewInputError as exc:
+                raise ContextLoadError(
+                    "source context allowed path pattern is invalid"
+                ) from exc
+        if not (
+            1 <= self.max_files <= MAX_CONTEXT_FILES
+            and 1 <= self.max_bytes <= MAX_CONTEXT_TOTAL_BYTES
+        ):
+            raise ContextLoadError("source context budgets are invalid")
+        if not (0 <= self.max_depth <= 4):
+            raise ContextLoadError("source context depth is invalid")
 
 
 class SymbolAwareContextSelector:
@@ -562,14 +848,7 @@ class SymbolAwareContextSelector:
         return any(_matches(path, pattern) for pattern in self.allowed_paths)
 
     def _read(self, path: Path) -> str | None:
-        if _is_secret_like(path) or path.suffix.lower() not in {
-            ".py",
-            ".pyi",
-            ".js",
-            ".jsx",
-            ".ts",
-            ".tsx",
-        }:
+        if _is_secret_like(path) or path.suffix.lower() not in _SOURCE_SUFFIXES:
             return None
         try:
             path.relative_to(self.store.root)
@@ -787,7 +1066,7 @@ class SymbolAwareContextSelector:
 
     def _import_candidates(
         self, source: Path, tree: ast.AST
-    ) -> tuple[tuple[str, ...], bool]:
+    ) -> tuple[tuple[str, ...], bool, dict[str, frozenset[str]]]:
         """Collect bounded, deterministic local candidates from Python AST.
 
         The second return value tells the caller that the per-file relation
@@ -801,16 +1080,25 @@ class SymbolAwareContextSelector:
         relation_nodes = 0
         candidate_cap_reached = False
 
-        def add_candidates(values: Iterable[str]) -> bool:
+        named_symbols: dict[str, set[str]] = {}
+
+        def add_candidates(values: Iterable[str], names: Iterable[str] = ()) -> bool:
             nonlocal candidate_cap_reached
+            name_set = {
+                name for name in names if isinstance(name, str) and name and name != "*"
+            }
             for candidate in values:
                 if candidate in candidates:
+                    if name_set:
+                        named_symbols.setdefault(candidate, set()).update(name_set)
                     continue
                 if len(candidates) >= MAX_RELATION_CANDIDATES_PER_FILE:
                     candidate_cap_reached = True
                     resolution.truncated = True
                     return False
                 candidates.add(candidate)
+                if name_set:
+                    named_symbols.setdefault(candidate, set()).update(name_set)
             return True
 
         for node in ast.walk(tree):
@@ -842,20 +1130,26 @@ class SymbolAwareContextSelector:
                 if relation_nodes > MAX_IMPORT_NODES_PER_FILE:
                     resolution.truncated = True
                     break
+                imported_names = tuple(alias.name for alias in node.names)
                 if not add_candidates(
                     self._relative_module_candidates(
                         source,
                         level=node.level,
                         module=node.module,
-                        aliases=(alias.name for alias in node.names),
+                        aliases=imported_names,
                         budget=resolution,
                         roots=roots,
-                    )
+                    ),
+                    imported_names,
                 ):
                     break
             if resolution.exhausted or candidate_cap_reached:
                 break
-        return tuple(sorted(candidates)), resolution.truncated
+        return (
+            tuple(sorted(candidates)),
+            resolution.truncated,
+            {path: frozenset(names) for path, names in sorted(named_symbols.items())},
+        )
 
     def _associated_test_candidates(self, source: Path) -> tuple[str, ...]:
         """Return fixed-cost conventional test paths for ``source``.
@@ -900,7 +1194,195 @@ class SymbolAwareContextSelector:
                     candidates.add(relative)
         return tuple(sorted(candidates))
 
-    def select(self, changed_paths: Iterable[str]) -> SourceContextSelection:
+    def _importable_module_names(self, source: Path) -> frozenset[str]:
+        """Return names other local files might use to import ``source``."""
+
+        names = {source.stem}
+        if source.stem == "__init__":
+            names.add(source.parent.name)
+        try:
+            package_root = self._package_root(source)
+            relative = source.with_suffix("").relative_to(package_root)
+            dotted = ".".join(relative.parts)
+            if dotted:
+                names.add(dotted)
+                names.add(relative.parts[-1])
+        except ValueError:
+            pass
+        return frozenset(name for name in names if name and name != "__init__")
+
+    def _file_imports_names(self, content: str, names: frozenset[str]) -> bool:
+        """Return whether static import nodes mention any of ``names``."""
+
+        if not names:
+            return False
+        try:
+            tree = ast.parse(content)
+        except (SyntaxError, ValueError):
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported = alias.name
+                    if imported in names or imported.split(".")[-1] in names:
+                        return True
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module in names or module.split(".")[-1] in names:
+                    return True
+                for alias in node.names:
+                    if alias.name in names:
+                        return True
+        return False
+
+    def _caller_candidates(self, source: Path) -> tuple[tuple[str, ...], str | None]:
+        """Return bounded same-directory callers discovered by static imports.
+
+        Directory listing is capped independently of repository size.  Only
+        Python sources count toward ``MAX_CALLER_DIRECTORY_ENTRIES`` so a
+        directory padded with data, fixture, or compiled files does not report
+        truncation when every Python file in it was inspected.  The returned
+        reason distinguishes a capped directory listing from a capped candidate
+        set so coverage records which bound was reached.  The selector never
+        executes the scanned files.
+        """
+
+        names = self._importable_module_names(source)
+        directory = source.parent
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError:
+            return (), None
+        truncated: str | None = None
+        candidates: set[str] = set()
+        inspected = 0
+        for name in entries:
+            suffix = Path(name).suffix.lower()
+            if suffix not in _PYTHON_SOURCE_SUFFIXES:
+                continue
+            if inspected >= MAX_CALLER_DIRECTORY_ENTRIES:
+                truncated = "directory-truncated"
+                break
+            inspected += 1
+            candidate = directory / name
+            if candidate == source:
+                continue
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+            except OSError:
+                continue
+            content = self._read(candidate)
+            if content is None:
+                continue
+            if self._file_imports_names(content, names):
+                relative = self._relative_path(candidate)
+                if relative is not None:
+                    candidates.add(relative)
+                    if len(candidates) >= MAX_RELATION_CANDIDATES_PER_FILE:
+                        truncated = "relations-truncated"
+                        break
+        return tuple(sorted(candidates)), truncated
+
+    def _named_symbol_span(
+        self, tree: ast.AST, names: frozenset[str]
+    ) -> tuple[int, int, bool] | None:
+        """Return the union of matching top-level symbols and interface-ness."""
+
+        if not names:
+            return None
+        spans: list[tuple[int, int]] = []
+        is_interface = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in names:
+                span = _symbol_span(node)
+                if span is not None:
+                    spans.append(span)
+                    is_interface = is_interface or _is_interface_class(node)
+            elif (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in names
+            ):
+                span = _symbol_span(node)
+                if span is not None:
+                    spans.append(span)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in names:
+                        span = _symbol_span(node)
+                        if span is not None:
+                            spans.append(span)
+        if not spans:
+            return None
+        return (
+            min(span[0] for span in spans),
+            max(span[1] for span in spans),
+            is_interface,
+        )
+
+    def _enclosing_symbol_span(
+        self, tree: ast.AST, changed_lines: frozenset[int]
+    ) -> tuple[int, int] | None:
+        """Return enclosing function/class range covering changed lines."""
+
+        if not changed_lines:
+            return None
+        spans: list[tuple[int, int]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                span = _symbol_span(node)
+                if span is None:
+                    continue
+                start, end = span
+                if any(start <= line <= end for line in changed_lines):
+                    spans.append(span)
+        if not spans:
+            return None
+        return min(span[0] for span in spans), max(span[1] for span in spans)
+
+    def _bounded_excerpt(
+        self,
+        *,
+        path: str,
+        content: str,
+        reason: str,
+        tree: ast.AST | None,
+        names: frozenset[str],
+        changed_lines: frozenset[int],
+    ) -> tuple[str, int, int, str]:
+        """Choose a bounded excerpt range without executing source."""
+
+        lines = content.splitlines()
+        start_line = 1
+        end_line = max(1, len(lines))
+        excerpt_reason = reason
+        excerpt_content = content
+        if tree is None:
+            return excerpt_content, start_line, end_line, excerpt_reason
+        span: tuple[int, int] | None = None
+        if reason == "changed-file":
+            span = self._enclosing_symbol_span(tree, changed_lines)
+            if span is not None:
+                excerpt_reason = "enclosing-symbol"
+        elif names:
+            named = self._named_symbol_span(tree, names)
+            if named is not None:
+                span = (named[0], named[1])
+                if named[2]:
+                    excerpt_reason = "interface"
+        if span is not None:
+            sliced = _slice_lines(content, span[0], span[1])
+            if sliced.strip():
+                start_line, end_line = span
+                excerpt_content = sliced
+        return excerpt_content, start_line, end_line, excerpt_reason
+
+    def select(
+        self,
+        changed_paths: Iterable[str],
+        *,
+        changed_lines: Mapping[str, Iterable[int]] | None = None,
+    ) -> SourceContextSelection:
         if isinstance(changed_paths, (str, bytes)):
             raise ContextLoadError("changed source paths must be iterable")
         changed_values: set[str] = set()
@@ -926,8 +1408,39 @@ class SymbolAwareContextSelector:
                     invalid_paths = True
         except TypeError as exc:
             raise ContextLoadError("changed source paths must be iterable") from exc
+        line_map: dict[str, frozenset[int]] = {}
+        if changed_lines is not None:
+            if isinstance(changed_lines, (str, bytes)) or not hasattr(
+                changed_lines, "items"
+            ):
+                raise ContextLoadError("changed source lines must be a mapping")
+            try:
+                for index, (path, lines) in enumerate(changed_lines.items()):
+                    if index >= MAX_PENDING_SOURCE_CONTEXT_CANDIDATES:
+                        changed_overflow = True
+                        break
+                    if not isinstance(path, str) or not path:
+                        invalid_paths = True
+                        continue
+                    selected_lines: set[int] = set()
+                    try:
+                        for line in lines:
+                            if (
+                                isinstance(line, int)
+                                and not isinstance(line, bool)
+                                and line > 0
+                            ):
+                                selected_lines.add(line)
+                    except TypeError:
+                        invalid_paths = True
+                        continue
+                    line_map[path] = frozenset(selected_lines)
+            except (TypeError, AttributeError) as exc:
+                raise ContextLoadError(
+                    "changed source lines must be a mapping"
+                ) from exc
         changed = tuple(sorted(changed_values))
-        queue: deque[tuple[str, int, str]] = deque()
+        queue: deque[tuple[str, int, str, frozenset[str]]] = deque()
         queued: set[str] = set()
         seen: set[str] = set()
         excerpts: list[SourceContextExcerpt] = []
@@ -935,7 +1448,12 @@ class SymbolAwareContextSelector:
         total = 0
         incomplete = changed_overflow or invalid_paths
 
-        def enqueue(path: str, depth: int, reason: str) -> bool:
+        def enqueue(
+            path: str,
+            depth: int,
+            reason: str,
+            names: frozenset[str] = frozenset(),
+        ) -> bool:
             nonlocal incomplete
             if path in seen or path in queued:
                 return True
@@ -943,7 +1461,7 @@ class SymbolAwareContextSelector:
                 incomplete = True
                 return False
             queued.add(path)
-            queue.append((path, depth, reason))
+            queue.append((path, depth, reason, names))
             return True
 
         for path in changed:
@@ -958,7 +1476,7 @@ class SymbolAwareContextSelector:
                 continue
             enqueue(path, 0, "changed-file")
         while queue:
-            path, depth, reason = queue.popleft()
+            path, depth, reason, names = queue.popleft()
             queued.discard(path)
             if path in seen:
                 continue
@@ -973,36 +1491,68 @@ class SymbolAwareContextSelector:
                 outcomes[path] = "unsupported"
                 incomplete = True
                 continue
-            encoded = content.encode("utf-8")
+            suffix = source.suffix.lower()
+            tree: ast.AST | None = None
+            if suffix in _PYTHON_SOURCE_SUFFIXES:
+                try:
+                    tree = ast.parse(content, filename=path)
+                except SyntaxError:
+                    tree = None
+                    incomplete = True
+            excerpt_content, start_line, end_line, excerpt_reason = (
+                self._bounded_excerpt(
+                    path=path,
+                    content=content,
+                    reason=reason,
+                    tree=tree,
+                    names=names,
+                    changed_lines=line_map.get(path, frozenset()),
+                )
+            )
+            encoded = excerpt_content.encode("utf-8")
             if len(excerpts) >= self.max_files or total + len(encoded) > self.max_bytes:
                 outcomes[path] = "budget-exhausted"
                 incomplete = True
                 continue
-            lines = content.splitlines()
             excerpt = SourceContextExcerpt(
                 path=path,
-                content=content,
+                content=excerpt_content,
                 snapshot=self.snapshot,
-                start_line=1,
-                end_line=max(1, len(lines)),
-                reason=reason,
+                start_line=start_line,
+                end_line=end_line,
+                reason=excerpt_reason,
+                blob_oid=_git_blob_oid(content),
             )
             excerpts.append(excerpt)
             total += len(encoded)
-            outcomes[path] = "reviewed"
-            if source.suffix.lower() not in {".py", ".pyi"}:
+            if suffix not in _PYTHON_SOURCE_SUFFIXES:
+                outcomes[path] = "unsupported-language"
+                incomplete = True
                 continue
-            try:
-                tree = ast.parse(content, filename=path)
-            except SyntaxError:
+            if tree is None:
                 outcomes[path] = "partially-reviewed"
                 incomplete = True
                 continue
-            import_candidates, imports_truncated = self._import_candidates(source, tree)
+            outcomes[path] = "reviewed"
+            import_candidates, imports_truncated, imported_names = (
+                self._import_candidates(source, tree)
+            )
             associated_tests = self._associated_test_candidates(source)
-            related = tuple(sorted(set(import_candidates) | set(associated_tests)))
+            callers, callers_truncated = self._caller_candidates(source)
+            related = tuple(
+                sorted(set(import_candidates) | set(associated_tests) | set(callers))
+            )
+            # Record which bound was reached rather than collapsing every
+            # truncation into one status.  Both causes are reported when both
+            # trigger so an operator cannot read a capped graph as a complete
+            # one.
+            truncation_reasons: set[str] = set()
             if imports_truncated:
-                outcomes[path] = "partially-reviewed"
+                truncation_reasons.add("relations-truncated")
+            if callers_truncated is not None:
+                truncation_reasons.add(callers_truncated)
+            if truncation_reasons:
+                outcomes[path] = ",".join(sorted(truncation_reasons))
                 incomplete = True
             if depth >= self.max_depth:
                 # We intentionally include the changed/selected file but mark
@@ -1012,21 +1562,31 @@ class SymbolAwareContextSelector:
                     candidate not in seen and candidate not in queued
                     for candidate in related
                 ):
-                    outcomes[path] = "partially-reviewed"
+                    if not truncation_reasons:
+                        outcomes[path] = "partially-reviewed"
                     incomplete = True
                 continue
             for candidate in related:
-                reason_for_candidate = (
-                    "associated-test"
-                    if candidate in associated_tests
-                    else "direct-import"
-                )
-                if not enqueue(candidate, depth + 1, reason_for_candidate):
-                    outcomes[path] = "partially-reviewed"
+                if candidate in associated_tests:
+                    reason_for_candidate = "associated-test"
+                    candidate_names: frozenset[str] = frozenset()
+                elif candidate in callers:
+                    reason_for_candidate = "direct-caller"
+                    candidate_names = frozenset()
+                else:
+                    reason_for_candidate = "direct-import"
+                    candidate_names = imported_names.get(candidate, frozenset())
+                if not enqueue(
+                    candidate, depth + 1, reason_for_candidate, candidate_names
+                ):
+                    if not truncation_reasons:
+                        outcomes[path] = "partially-reviewed"
                     incomplete = True
         ordered_outcomes = tuple(sorted(outcomes.items()))
         complete = not incomplete
-        return SourceContextSelection(tuple(excerpts), ordered_outcomes, complete)
+        return SourceContextSelection(
+            tuple(excerpts), ordered_outcomes, complete, self.snapshot
+        )
 
 
 def _normalized_finding_parts(
@@ -1288,8 +1848,17 @@ def build_review_context_selection(
     changed_paths: Iterable[str],
     learnings: Iterable[LearningEntry] = (),
     context_store: RepositoryContextStore | None = None,
+    source_context_policy: SymbolAwareContextPolicy | None = None,
+    snapshot: ContextSnapshot | None = None,
+    changed_lines: Mapping[str, Iterable[int]] | None = None,
 ) -> ReviewContextSelection:
-    """Resolve applicable lenses and their bounded learnings/documents."""
+    """Resolve applicable lenses and their bounded learnings/documents.
+
+    Symbol-aware source selection is opt-in through ``source_context_policy``.
+    The default remains document/learning context only.  When enabled, the
+    selector reads the trusted base snapshot exclusively; head source is never
+    used as configuration or as the snapshot identity.
+    """
 
     category_values = tuple(categories)
     if any(not isinstance(category, ReviewCategory) for category in category_values):
@@ -1297,6 +1866,12 @@ def build_review_context_selection(
     category_ids = [category.id for category in category_values]
     if len(category_ids) != len(set(category_ids)):
         raise ContextLoadError("review categories contain duplicate ids")
+    if source_context_policy is not None and not isinstance(
+        source_context_policy, SymbolAwareContextPolicy
+    ):
+        raise ContextLoadError("source context policy is invalid")
+    if snapshot is not None and not isinstance(snapshot, ContextSnapshot):
+        raise ContextLoadError("source context snapshot is invalid")
 
     paths = tuple(path for path in changed_paths if isinstance(path, str) and path)
     relevant_learnings = LearningStore(learnings).for_paths(paths)
@@ -1355,7 +1930,34 @@ def build_review_context_selection(
             )
         )
 
+    source_context: SourceContextSelection | None = None
+    policy = source_context_policy or SymbolAwareContextPolicy()
+    if policy.enabled:
+        if context_store is None:
+            raise ContextLoadError(
+                "symbol-aware context requires a trusted context root"
+            )
+        if snapshot is None:
+            raise ContextLoadError(
+                "symbol-aware context requires a trusted base snapshot"
+            )
+        source_context = SymbolAwareContextSelector(
+            context_store.root,
+            snapshot=snapshot,
+            allowed_paths=policy.allowed_paths,
+            max_files=policy.max_files,
+            max_bytes=policy.max_bytes,
+            max_depth=policy.max_depth,
+        ).select(paths, changed_lines=changed_lines)
+        if policy.fail_closed_on_exhaustion and any(
+            status == "budget-exhausted" for _, status in source_context.outcomes
+        ):
+            raise ContextLoadError(
+                "symbol-aware context exhausted its configured budget"
+            )
+
     return ReviewContextSelection(
         active_category_ids=tuple(active_ids),
         lens_contexts=tuple(lens_contexts),
+        source_context=source_context,
     )

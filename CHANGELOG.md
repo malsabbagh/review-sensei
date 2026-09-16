@@ -87,6 +87,17 @@
   installed version instead of pinning `0.1.1`, with CI supplying
   `REVIEWSENSEI_EXPECTED_VERSION` to keep the exact-artifact assertion.
 
+- Wired issue #40's opt-in, deterministic, bounded symbol-aware source context
+  into the live review path. Default reviews still use documents and learnings
+  only. `--enable-symbol-context` plus a trusted `--base-sha` selects Python
+  relationships from the immutable base snapshot, records excerpt provenance
+  and coverage outcomes, and fails closed on budget exhaustion. Head source
+  remains untrusted data. Coverage names the relationship bound it reached
+  (`directory-truncated` or `relations-truncated`), only Python sources count
+  toward the caller-directory cap, and `source_context` loading requires the
+  schema's exact types instead of coercing malformed input to defaults.
+  Evaluation under #33 is required before default enablement.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

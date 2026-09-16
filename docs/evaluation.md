@@ -140,6 +140,12 @@ with `--reproducibility-file`. The record is metadata about the evaluation, not
 the run evidence itself: operators must retain exact run outputs and provider
 terms/egress approval separately.
 
+Symbol-aware source context stays opt-in until evaluation under
+[#33](https://github.com/malsabbagh/review-sensei/issues/33) measures
+precision, recall, and usage impact on cross-file cases. Enabling
+`--enable-symbol-context` without that evaluation must not be treated as
+default policy.
+
 CI remains fixture-only. Live runs are gated, non-secret, and performed outside
 the CI workflow against reviewed synthetic or explicitly authorized data. The
 repository does not claim hosted-provider or GitHub evidence until that

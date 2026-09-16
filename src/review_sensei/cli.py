@@ -8,7 +8,12 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from .context import RepositoryContextStore, build_review_context_selection
+from .context import (
+    ContextSnapshot,
+    RepositoryContextStore,
+    SymbolAwareContextPolicy,
+    build_review_context_selection,
+)
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
 from .learnings import (
@@ -44,6 +49,10 @@ def _provider_mode() -> str:
     return (
         os.getenv("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE).strip().lower()
     )
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _default_ollama_base_url() -> str:
@@ -441,6 +450,49 @@ def _parser() -> argparse.ArgumentParser:
             "Trusted target-branch checkout used for explicitly configured lens "
             "documents; defaults to --learning-root when omitted"
         ),
+    )
+    parser.add_argument(
+        "--enable-symbol-context",
+        action="store_true",
+        help=(
+            "Opt in to bounded Python symbol-aware source context from the "
+            "trusted base snapshot. Default remains documents and learnings only."
+        ),
+    )
+    parser.add_argument(
+        "--base-sha",
+        help="Trusted base commit SHA for symbol-aware context provenance",
+    )
+    parser.add_argument(
+        "--head-sha",
+        help=(
+            "Untrusted head commit SHA recorded only as coverage metadata; "
+            "never used as the context snapshot or trusted configuration"
+        ),
+    )
+    parser.add_argument(
+        "--symbol-context-allowed-path",
+        action="append",
+        default=[],
+        help="Allowed repository-relative path pattern for symbol-aware context",
+    )
+    parser.add_argument(
+        "--symbol-context-max-files",
+        type=int,
+        default=16,
+        help="Maximum files selected by symbol-aware context (default: 16)",
+    )
+    parser.add_argument(
+        "--symbol-context-max-bytes",
+        type=int,
+        default=128 * 1024,
+        help="Maximum total bytes selected by symbol-aware context (default: 131072)",
+    )
+    parser.add_argument(
+        "--symbol-context-max-depth",
+        type=int,
+        default=1,
+        help="Maximum relationship depth for symbol-aware context (default: 1)",
     )
     parser.add_argument(
         "--no-learning-proposals",
@@ -1378,11 +1430,37 @@ def main(argv: list[str] | None = None) -> int:
         context_store = (
             RepositoryContextStore(context_root) if context_root is not None else None
         )
+        symbol_context_enabled = bool(args.enable_symbol_context) or _env_flag(
+            "REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT"
+        )
+        source_policy = SymbolAwareContextPolicy(enabled=False)
+        snapshot = None
+        untrusted_head_sha = None
+        if symbol_context_enabled:
+            allowed_paths = tuple(args.symbol_context_allowed_path) or ("**",)
+            source_policy = SymbolAwareContextPolicy(
+                enabled=True,
+                allowed_paths=allowed_paths,
+                max_files=args.symbol_context_max_files,
+                max_bytes=args.symbol_context_max_bytes,
+                max_depth=args.symbol_context_max_depth,
+            )
+            base_sha = (args.base_sha or "").strip().lower()
+            if not base_sha:
+                raise ReviewInputError(
+                    "--enable-symbol-context requires --base-sha for the trusted "
+                    "base snapshot"
+                )
+            snapshot = ContextSnapshot(base_sha, kind="base")
+            untrusted_head_sha = (args.head_sha or "").strip().lower() or None
         context_selection = build_review_context_selection(
             service.review_categories,
             changed_paths=changed_paths,
             learnings=learnings,
             context_store=context_store,
+            source_context_policy=source_policy,
+            snapshot=snapshot,
+            changed_lines=analysis.changed_lines,
         )
 
         result = service.review(
@@ -1398,6 +1476,8 @@ def main(argv: list[str] | None = None) -> int:
                 lens_contexts=context_selection.lens_contexts,
                 propose_learnings=args.propose_learnings,
                 limits=limits,
+                source_context=context_selection.source_context,
+                untrusted_head_sha=untrusted_head_sha,
             )
         )
         rendered = json.dumps(result.to_dict(), indent=2) + "\n"

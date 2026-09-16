@@ -378,6 +378,47 @@ packaged default pipeline includes an architecture lens whose optional sources
 are `AGENTS.md`, `docs/architecture.md`, `docs/architecture/**/*.md`, and
 `docs/adr/**/*.md`.
 
+### Opt-in symbol-aware source context
+
+By default, reviews do **not** load related source files. That keeps the
+trusted context boundary at configured documents and approved learnings.
+Operators may opt in to bounded Python symbol-aware context from the same
+trusted base checkout:
+
+```bash
+review-sensei --diff pr.patch \
+  --context-root /path/to/target-branch-checkout \
+  --enable-symbol-context \
+  --base-sha <trusted-base-commit-sha>
+```
+
+`--enable-symbol-context` can also be set with
+`REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT=true`. `--base-sha` is required when the
+selector is enabled and identifies the immutable trusted-base snapshot. Optional
+`--head-sha` is recorded only as untrusted coverage metadata; head trees, build
+scripts, hooks, tests, and package installers are never checked out or
+executed for this context.
+
+The documented language set is Python. The selector uses static AST parsing
+for enclosing functions/classes, local imports, Protocol/ABC interfaces,
+same-directory callers, and conventional associated tests. JavaScript and
+TypeScript files may be included as a whole-file fallback and are reported as
+`unsupported-language`. Canonical path, traversal, symlink, file-type, and
+secret-sensitive-file protections apply. Identical snapshot and policy inputs
+produce identical excerpts and outcome ordering.
+
+Each excerpt records path, base commit SHA, Git blob object id, line range,
+selection reason, and SHA-256 digest. Ambiguous parses, excluded paths,
+unsupported languages, and exhausted budgets appear in result
+`source_context` coverage; they are not presented as complete understanding.
+Bounded relationship expansion names the bound it reached, using
+`directory-truncated` for a capped caller-directory listing and
+`relations-truncated` for a capped import or caller candidate set.
+When the opt-in policy is enabled, exhausting the configured file or byte
+budget fails closed. Evaluation under
+[#33](https://github.com/malsabbagh/review-sensei/issues/33) is required
+before this selector can become the default.
+
 ## Repository-local learnings
 
 Durable repository knowledge lives in the reviewed repository under

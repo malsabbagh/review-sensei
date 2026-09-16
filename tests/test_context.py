@@ -8,7 +8,12 @@ from review_sensei import (
     RepositoryContextStore,
     ReviewCategory,
 )
-from review_sensei.context import MAX_CONTEXT_FILE_BYTES, build_review_context_selection
+from review_sensei.context import (
+    MAX_CONTEXT_FILE_BYTES,
+    ContextSnapshot,
+    SymbolAwareContextPolicy,
+    build_review_context_selection,
+)
 from review_sensei.errors import ContextLoadError, ReviewInputError
 
 
@@ -238,6 +243,92 @@ class ReviewContextSelectionTests(unittest.TestCase):
 
         self.assertEqual(nested.active_category_ids, ("source",))
         self.assertEqual(empty.active_category_ids, ())
+        self.assertIsNone(nested.source_context)
+        self.assertIsNone(empty.source_context)
+
+    def test_default_policy_does_not_select_symbol_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("import helper\n")
+            (root / "src" / "helper.py").write_text("VALUE = 1\n")
+            category = ReviewCategory(
+                id="architecture",
+                title="Architecture",
+                focus=("Dependency direction",),
+                applies_to=("src/**",),
+            )
+            selection = build_review_context_selection(
+                (category,),
+                changed_paths=("src/app.py",),
+                context_store=RepositoryContextStore(root),
+            )
+
+        self.assertIsNone(selection.source_context)
+        self.assertEqual(selection.active_category_ids, ("architecture",))
+
+    def test_enabled_policy_selects_trusted_base_symbol_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("import helper\n")
+            (root / "src" / "helper.py").write_text("VALUE = 1\n")
+            category = ReviewCategory(
+                id="architecture",
+                title="Architecture",
+                focus=("Dependency direction",),
+                applies_to=("src/**",),
+            )
+            snapshot = ContextSnapshot("c" * 40)
+            selection = build_review_context_selection(
+                (category,),
+                changed_paths=("src/app.py",),
+                context_store=RepositoryContextStore(root),
+                source_context_policy=SymbolAwareContextPolicy(enabled=True),
+                snapshot=snapshot,
+            )
+
+        self.assertIsNotNone(selection.source_context)
+        assert selection.source_context is not None
+        self.assertEqual(
+            [item.path for item in selection.source_context.excerpts],
+            ["src/app.py", "src/helper.py"],
+        )
+        self.assertTrue(
+            all(
+                item.snapshot.revision == "c" * 40
+                for item in selection.source_context.excerpts
+            )
+        )
+
+    def test_enabled_policy_fails_closed_when_budget_is_exhausted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("import helper\n" + ("x = 1\n" * 20))
+            (root / "src" / "helper.py").write_text("VALUE = 1\n" + ("y = 2\n" * 20))
+            category = ReviewCategory(
+                id="architecture",
+                title="Architecture",
+                focus=("Dependency direction",),
+                applies_to=("src/**",),
+            )
+            with self.assertRaises(ContextLoadError):
+                build_review_context_selection(
+                    (category,),
+                    changed_paths=("src/app.py",),
+                    context_store=RepositoryContextStore(root),
+                    source_context_policy=SymbolAwareContextPolicy(
+                        enabled=True,
+                        max_files=1,
+                        max_bytes=32,
+                    ),
+                    snapshot=ContextSnapshot("d" * 40),
+                )
+
+    def test_enabled_policy_rejects_head_snapshot_kind(self):
+        with self.assertRaises(ContextLoadError):
+            ContextSnapshot("a" * 40, kind="head")
 
 
 if __name__ == "__main__":  # pragma: no cover

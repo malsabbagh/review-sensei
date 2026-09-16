@@ -24,11 +24,13 @@ tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-
 
 ```text
 trusted target/base checkout
-     |                    |
-     v                    v
-LearningStore    RepositoryContextStore
-     |                    |
-     +------> ReviewLensContext
+     |                    |                        |
+     v                    v                        v
+LearningStore    RepositoryContextStore    SymbolAwareContextSelector
+     |                    |                        |
+     +------> ReviewLensContext          SourceContextSelection
+                    |                        |
+                    +----------- ReviewRequest <--+
                     |
 trusted category files --> ReviewCategoryCatalog
                     |          |
@@ -287,6 +289,20 @@ required. The CLI resolves documents against
 not implicitly use the current directory. The packaged architecture lens opts
 into conventional architecture sources; other lenses receive no document
 context unless configured.
+
+Symbol-aware source selection is a separate opt-in policy
+(`SymbolAwareContextPolicy`, `--enable-symbol-context`). Disabled by default,
+it never expands trusted context. When enabled, `SymbolAwareContextSelector`
+reads only the trusted-base snapshot identified by `--base-sha`. Head source
+remains the untrusted diff. The documented language set is Python with
+deterministic AST parsing; JavaScript/TypeScript receive a bounded fallback
+and an explicit `unsupported-language` outcome. Selection is static: files are
+never executed. Exhausted budgets fail closed; other incomplete coverage is
+recorded on the review result as `source_context` without changing GitHub
+write, egress, or approval defaults. Bounded relationship expansion reports
+`directory-truncated` or `relations-truncated` so a capped graph cannot be
+read as a complete one, and only Python sources count toward the
+caller-directory cap. Default enablement requires evaluation under issue #33.
 
 Custom stage and category directories are operator-selected configuration. They
 must come from a trusted checkout or deployment bundle, not the pull-request

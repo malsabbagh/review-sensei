@@ -130,6 +130,8 @@ class ReviewRequest:
     active_category_ids: tuple[str, ...] | None = None
     lens_contexts: tuple[ReviewLensContext, ...] = ()
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    source_context: object | None = None
+    untrusted_head_sha: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -238,6 +240,18 @@ class ReviewRequest:
             > MAX_REVIEW_CONTEXT_TOTAL_BYTES
         ):
             raise ReviewInputError("review context exceeds the total size limit")
+        if self.source_context is not None:
+            from .context import SourceContextSelection
+
+            if not isinstance(self.source_context, SourceContextSelection):
+                raise ReviewInputError(
+                    "review source_context must be a SourceContextSelection"
+                )
+        if self.untrusted_head_sha is not None:
+            if not isinstance(self.untrusted_head_sha, str) or not _GIT_SHA.fullmatch(
+                self.untrusted_head_sha
+            ):
+                raise ReviewInputError("untrusted_head_sha must be a commit SHA")
 
 
 @dataclass(frozen=True)
@@ -580,6 +594,7 @@ class ReviewResult:
     # its validated aggregate explicitly as ``complete``.
     review_status: str = "incomplete"
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    source_context_coverage: object | None = None
     # Directly constructed results are not proof that every configured stage
     # ran successfully.  The service marks its validated aggregate explicitly
     # as complete; callers reconstructing a legacy artifact without this field
@@ -631,6 +646,13 @@ class ReviewResult:
             raise ReviewInputError(
                 "review_status must be complete, partial, incomplete, or summary-only"
             )
+        if self.source_context_coverage is not None:
+            from .context import SourceContextCoverage
+
+            if not isinstance(self.source_context_coverage, SourceContextCoverage):
+                raise ReviewInputError(
+                    "review source_context_coverage must be a SourceContextCoverage"
+                )
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
@@ -696,6 +718,15 @@ class ReviewResult:
         # can distinguish an omitted legacy status (parsed as incomplete) from
         # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
+        if self.source_context_coverage is not None:
+            from .context import SourceContextCoverage
+
+            # ``__post_init__`` already rejects any other type, so the field is
+            # always emitted once set and the document cannot drift from the
+            # schema's required set on read-back.
+            value["source_context"] = cast(
+                SourceContextCoverage, self.source_context_coverage
+            ).to_dict()
         return value
 
     @classmethod
@@ -777,6 +808,19 @@ class ReviewResult:
                     f"review result learning proposal {index} must be an object"
                 )
             parsed_proposals.append(LearningProposal.from_dict(proposal))
+        coverage = None
+        raw_coverage = value.get("source_context")
+        if raw_coverage is not None:
+            from .context import ContextLoadError, SourceContextCoverage
+
+            try:
+                if not isinstance(raw_coverage, Mapping):
+                    raise ContextLoadError("source context coverage must be an object")
+                coverage = SourceContextCoverage.from_dict(raw_coverage)
+            except ContextLoadError as exc:
+                raise ReviewInputError(
+                    "review result source_context is invalid"
+                ) from exc
         return cls(
             summary=summary,
             comments=tuple(comment_values),
@@ -784,6 +828,7 @@ class ReviewResult:
             model=cast(str | None, model),
             learning_proposals=tuple(parsed_proposals),
             review_status=review_status,
+            source_context_coverage=coverage,
         )
 
 

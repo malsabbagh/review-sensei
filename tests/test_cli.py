@@ -47,6 +47,19 @@ class FakeProvider:
         )
 
 
+class SymbolContextProvider(FakeProvider):
+    def complete(self, request):
+        self.requests.append(request)
+        return ProviderResponse(
+            text=(
+                '{"summary":"Architecture reviewed.","comments":[],'
+                '"learning_proposals":[]}'
+            ),
+            provider=self.name,
+            model=self.model,
+        )
+
+
 class FakeRegistry:
     def __init__(self, provider):
         self.provider = provider
@@ -1004,6 +1017,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.categories_dir, Path("categories"))
         self.assertEqual(args.stages_dir, Path("stages"))
         self.assertEqual(args.context_root, Path("target-checkout"))
+        self.assertFalse(args.enable_symbol_context)
+
+    def test_parser_accepts_symbol_context_opt_in_flags(self):
+        args = _parser().parse_args(
+            [
+                "--diff",
+                "review.patch",
+                "--enable-symbol-context",
+                "--base-sha",
+                "a" * 40,
+                "--head-sha",
+                "b" * 40,
+                "--symbol-context-allowed-path",
+                "src/**",
+                "--symbol-context-max-files",
+                "8",
+                "--symbol-context-max-bytes",
+                "4096",
+                "--symbol-context-max-depth",
+                "2",
+            ]
+        )
+        self.assertTrue(args.enable_symbol_context)
+        self.assertEqual(args.base_sha, "a" * 40)
+        self.assertEqual(args.head_sha, "b" * 40)
+        self.assertEqual(args.symbol_context_allowed_path, ["src/**"])
+        self.assertEqual(args.symbol_context_max_files, 8)
+        self.assertEqual(args.symbol_context_max_bytes, 4096)
+        self.assertEqual(args.symbol_context_max_depth, 2)
 
     def test_parser_accepts_fixture_response(self):
         args = _parser().parse_args(
@@ -1239,6 +1281,233 @@ class CliTests(unittest.TestCase):
         self.assertIn("architecture.md", provider.requests[0].prompt)
         self.assertIn("architecture-rule", provider.requests[0].prompt)
         self.assertEqual(provider.requests[0].prompt.count("architecture-rule"), 1)
+        self.assertNotIn("symbol-aware-source-context", provider.requests[0].prompt)
+
+    def test_cli_symbol_context_default_stays_on_document_learning_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            src = root / "src"
+            src.mkdir()
+            (src / "app.py").write_text("import helper\nkeep\n")
+            (src / "helper.py").write_text("VALUE = 1\n")
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            output_path = root / "review.json"
+            provider = SymbolContextProvider()
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=FakeRegistry(provider),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--learning-root",
+                        str(root),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            self.assertNotIn("helper.py", provider.requests[0].prompt)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertNotIn("source_context", payload)
+
+    def test_cli_symbol_context_opt_in_uses_trusted_base_and_records_coverage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            src = root / "src"
+            src.mkdir()
+            (src / "app.py").write_text("import helper\nkeep\nchange\n")
+            (src / "helper.py").write_text("VALUE = 1\n")
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            output_path = root / "review.json"
+            provider = SymbolContextProvider()
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=FakeRegistry(provider),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--learning-root",
+                        str(root),
+                        "--enable-symbol-context",
+                        "--base-sha",
+                        "a" * 40,
+                        "--head-sha",
+                        "b" * 40,
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            prompt = provider.requests[0].prompt
+            self.assertIn("symbol-aware-source-context", prompt)
+            self.assertIn("helper.py", prompt)
+            self.assertIn("trusted-base", prompt)
+            self.assertIn("a" * 40, prompt)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            coverage = payload["source_context"]
+            self.assertTrue(coverage["enabled"])
+            self.assertEqual(coverage["snapshot"]["kind"], "base")
+            self.assertEqual(coverage["snapshot"]["revision"], "a" * 40)
+            self.assertEqual(coverage["untrusted_head_sha"], "b" * 40)
+            self.assertEqual(coverage["languages"], ["python"])
+            self.assertNotIn("content", coverage)
+
+    def test_cli_symbol_context_requires_base_sha(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--enable-symbol-context",
+                    ]
+                )
+
+        self.assertEqual(status, 1)
+        self.assertIn("--base-sha", stderr.getvalue())
+
+    def test_cli_symbol_context_rejects_malformed_base_sha(self):
+        for value in ("a" * 39, "a" * 41, "z" * 40, "not-a-sha"):
+            with self.subTest(base_sha=value):
+                stderr = io.StringIO()
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    diff_path = root / "review.patch"
+                    diff_path.write_text(DIFF, encoding="utf-8")
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                str(diff_path),
+                                "--learning-root",
+                                str(root),
+                                "--enable-symbol-context",
+                                "--base-sha",
+                                value,
+                            ]
+                        )
+
+                self.assertEqual(status, 1)
+                message = stderr.getvalue()
+                self.assertIn("context snapshot revision must be a commit SHA", message)
+                # The sanitized boundary names the offending input without a
+                # traceback.
+                self.assertNotIn("Traceback", message)
+
+    def test_cli_symbol_context_rejects_malformed_head_sha(self):
+        for value in ("b" * 39, "b" * 41, "z" * 40, "not-a-sha"):
+            with self.subTest(head_sha=value):
+                stderr = io.StringIO()
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    src = root / "src"
+                    src.mkdir()
+                    (src / "app.py").write_text("import helper\nkeep\nchange\n")
+                    (src / "helper.py").write_text("VALUE = 1\n")
+                    diff_path = root / "review.patch"
+                    diff_path.write_text(DIFF, encoding="utf-8")
+                    provider = SymbolContextProvider()
+                    with patch(
+                        "review_sensei.cli.default_registry",
+                        return_value=FakeRegistry(provider),
+                    ):
+                        with redirect_stderr(stderr):
+                            status = main(
+                                [
+                                    "--diff",
+                                    str(diff_path),
+                                    "--learning-root",
+                                    str(root),
+                                    "--enable-symbol-context",
+                                    "--base-sha",
+                                    "a" * 40,
+                                    "--head-sha",
+                                    value,
+                                ]
+                            )
+
+                self.assertEqual(status, 1)
+                message = stderr.getvalue()
+                self.assertIn("untrusted_head_sha must be a commit SHA", message)
+                self.assertNotIn("Traceback", message)
+                self.assertEqual(provider.requests, [])
+
+    def test_cli_symbol_context_normalizes_uppercase_shas(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            src = root / "src"
+            src.mkdir()
+            (src / "app.py").write_text("import helper\nkeep\nchange\n")
+            (src / "helper.py").write_text("VALUE = 1\n")
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            output_path = root / "review.json"
+            provider = SymbolContextProvider()
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=FakeRegistry(provider),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--learning-root",
+                        str(root),
+                        "--enable-symbol-context",
+                        "--base-sha",
+                        "A" * 40,
+                        "--head-sha",
+                        "B" * 40,
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            # Uppercase input is normalized rather than rejected, so the
+            # recorded identity stays canonical lowercase hex.
+            coverage = json.loads(output_path.read_text(encoding="utf-8"))[
+                "source_context"
+            ]
+            self.assertEqual(coverage["snapshot"]["revision"], "a" * 40)
+            self.assertEqual(coverage["untrusted_head_sha"], "b" * 40)
+
+    def test_cli_symbol_context_rejects_malicious_allowed_path(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--learning-root",
+                        str(root),
+                        "--enable-symbol-context",
+                        "--base-sha",
+                        "a" * 40,
+                        "--symbol-context-allowed-path",
+                        "../secret/**",
+                    ]
+                )
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "source context allowed path pattern is invalid", stderr.getvalue()
+        )
 
     def test_categories_directory_requires_a_stages_directory(self):
         stderr = io.StringIO()

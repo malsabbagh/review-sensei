@@ -19,7 +19,7 @@ result before a future publisher can consume it.
 | Validation boundary | Frozen downward-only limits, canonical paths, strict quoted-path decoding, and bounded file reads | Maintainers | `src/review_sensei/validation.py` | Shared by request, diff, stage, transport, and publisher contracts |
 | Portable workflow boundary | Ref/repository validation, bounded diff preparation, and installed-package workflow composition | Maintainers | `src/review_sensei/workflow.py`, `examples/github-actions/review-sensei-review.yml` | Must not execute head code or interpolate untrusted refs into shell commands |
 | Public schemas | Versioned JSON Schema documents and local validation helpers | Maintainers | `src/review_sensei/schemas/`, `src/review_sensei/schemas.py` | Packaged defaults, examples, and golden fixtures validate against v1 schemas |
-| Trusted context | Target-branch learnings and lens documents | Maintainers | `src/review_sensei/{learnings,context}.py` | Inputs are bounded and explicitly rooted |
+| Trusted context | Target-branch learnings, lens documents, and opt-in Python symbol-aware excerpts | Maintainers | `src/review_sensei/{learnings,context}.py` | Inputs are bounded and explicitly rooted; symbol-aware selection is disabled by default |
 | Provider adapters | Authentication, transport, and provider envelopes | Maintainers | `src/review_sensei/providers/` | Ollama is the first adapter |
 | CLI | Host-neutral command-line composition | Maintainers | `src/review_sensei/cli.py` | Primary user path is running the CLI in the user's own GitHub Actions workflow |
 | Concurrency policy | Deterministic scheduling keys and optional in-process admission leases | Maintainers | `src/review_sensei/concurrency.py` | GitHub-hosted enforcement uses workflow concurrency groups; no global lock |
@@ -56,7 +56,8 @@ transport calls; future GitHub publishers consume only validated
 | Repository-local learnings | `LearningEntry` JSON files | Repository maintainers | Loaded only from the trusted target/base checkout |
 | Learning PR provenance | v2 marker and commit trailer | ReviewSensei publisher | Binds repository/PR, pending batch, reviewed source head, latest base, exact title/body hashes, and the rendered source-title line; no provider or private review data |
 | Review configuration | Stage and category JSON files | Repository operators | Treated as trusted configuration but structurally bounded |
-| Supplemental context | Explicit Markdown/text sources | Repository operators | Selected beneath an explicit trusted context root |
+| Supplemental context | Explicit Markdown/text sources and opt-in Python symbol-aware excerpts | Repository operators | Documents/learnings by default; symbol-aware selection requires trusted-base policy |
+
 
 ## Architecture Decisions
 
@@ -90,6 +91,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0034`](../adr/0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | Typed `resolve` decision, exact-head/App-root GraphQL guards, and deterministic approval finalization after a blocking resolution |
 | [`0035`](../adr/0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | Blocking findings emit `REQUEST_CHANGES`; a later same-head `APPROVE` wins only after those roots resolve |
 | [`0036`](../adr/0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | Advisory stale/conflict signals; feedback is not trusted review context |
+| [`0037`](../adr/0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40; Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git

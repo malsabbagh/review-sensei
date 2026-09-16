@@ -94,6 +94,17 @@ class ReviewService:
                     )
         self.review_categories = tuple(category_definitions.values())
 
+    @staticmethod
+    def _source_context_coverage(request: ReviewRequest) -> object | None:
+        source = request.source_context
+        if source is None:
+            return None
+        from .context import SourceContextSelection
+
+        if not isinstance(source, SourceContextSelection):
+            return None
+        return source.coverage(untrusted_head_sha=request.untrusted_head_sha)
+
     def concurrency_plan(self, request: ReviewRequest) -> ReviewConcurrencyPlan:
         """Return the host-enforced concurrency policy for ``request``."""
 
@@ -244,6 +255,7 @@ class ReviewService:
                     learning_proposals=tuple(candidate_proposals),
                     limits=request.limits,
                     review_status=checkpoint_status,
+                    source_context_coverage=self._source_context_coverage(request),
                 )
             except ReviewInputError as exc:
                 raise ReviewFormatError(
@@ -272,6 +284,7 @@ class ReviewService:
                 learning_proposals=tuple(accumulated_proposals),
                 limits=request.limits,
                 review_status=review_status,
+                source_context_coverage=self._source_context_coverage(request),
             )
         except ReviewInputError as exc:
             raise ReviewFormatError(
@@ -330,12 +343,18 @@ class ReviewService:
             ensure_ascii=False,
             indent=2,
         )
+        review_context_payload: list[object] = [
+            context.to_prompt_dict()
+            for context in request.lens_contexts
+            if context.category_id in active_ids
+        ]
+        if request.source_context is not None:
+            from .context import SourceContextSelection
+
+            if isinstance(request.source_context, SourceContextSelection):
+                review_context_payload.append(request.source_context.to_prompt_dict())
         review_context = json.dumps(
-            [
-                context.to_prompt_dict()
-                for context in request.lens_contexts
-                if context.category_id in active_ids
-            ],
+            review_context_payload,
             ensure_ascii=False,
             indent=2,
         )
