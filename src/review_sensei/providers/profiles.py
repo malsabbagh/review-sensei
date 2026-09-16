@@ -92,7 +92,7 @@ class ProviderProfile:
         """Return the profile model for ``stage_name``, defaulting to the run model."""
 
         if not isinstance(stage_name, str) or not stage_name.strip():
-            raise ProviderError("stage name must be a non-empty string")
+            raise ValueError("stage name must be a non-empty string")
         mapping: Mapping[str, str] = self._stage_models_map
         return mapping.get(stage_name.strip(), self.model)
 

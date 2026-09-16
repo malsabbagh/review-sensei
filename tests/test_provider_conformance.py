@@ -103,27 +103,37 @@ class ProviderConformanceTests(unittest.TestCase):
         self.assertNotIn(prompt, str(raised.exception))
 
     def test_resource_limit_rejects_oversized_bodies(self) -> None:
+        secret = "oversized-response-secret"
         limits = ReviewLimits(max_provider_response_bytes=8)
         request = ProviderRequest(prompt="review", limits=limits)
-        ollama = _ollama(
-            lambda request, timeout, context: _Response(
-                b'{"response":"' + (b"x" * 40) + b'"}'
-            )
-        )
-        with self.assertRaisesRegex(ProviderError, "size"):
-            ollama.complete(request)
-        openai = _openai(
-            lambda request, timeout, context: _Response(
-                b'{"choices":[{"message":{"content":"' + (b"x" * 40) + b'"}}]}'
-            )
-        )
-        with self.assertRaisesRegex(ProviderError, "size"):
-            openai.complete(request)
+        for factory, label, body in (
+            (
+                _ollama,
+                "Ollama",
+                b'{"response":"' + secret.encode() + b'"}',
+            ),
+            (
+                _openai,
+                "OpenAI-compatible",
+                b'{"choices":[{"message":{"content":"' + secret.encode() + b'"}}]}',
+            ),
+        ):
+            with self.subTest(adapter=label):
+                provider = factory(
+                    lambda request, timeout, context, body=body: _Response(body)
+                )
+                with self.assertRaisesRegex(
+                    ProviderError, "exceeded the configured size limit"
+                ) as raised:
+                    provider.complete(request)
+                self.assertNotIn(secret, str(raised.exception))
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "big.json"
-            path.write_bytes(b"x" * 40)
-            with self.assertRaises(ProviderError):
+            path.write_text(secret, encoding="utf-8")
+            with self.assertRaises(ProviderError) as raised:
                 FixtureProvider(path).complete(request)
+            self.assertNotIn(secret, str(raised.exception))
+            self.assertRegex(str(raised.exception), "size|read safely")
 
     def test_fixture_provider_does_not_use_transient_transport(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

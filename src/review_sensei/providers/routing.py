@@ -58,6 +58,13 @@ def resolve_stage_profile_name(
     return selected.name
 
 
+def _run_uses_fixture_provider(settings: ProviderSettings) -> bool:
+    return (
+        settings.name.strip().lower() == "fixture"
+        or settings.fixture_response is not None
+    )
+
+
 def _stage_provider_settings(
     *,
     resolved: str,
@@ -69,7 +76,7 @@ def _stage_provider_settings(
     selected = get_provider_profile(resolved)
     settings = ProviderSettings.for_profile(resolved, api_key=api_key)
     if model != selected.model:
-        settings = replace(settings, model=model)
+        settings = replace(settings, model=model, allow_profile_stage_model=True)
     return settings
 
 
@@ -89,8 +96,16 @@ def bind_stage_providers(
     reuse the run ``api_key`` when the profile requires one.
     """
 
-    if settings.name.strip().lower() == "fixture" and any(
+    if _run_uses_fixture_provider(settings) and any(
         stage.provider_profile for stage in stages
+    ):
+        raise ProviderError(
+            "fixture provider cannot be combined with stage provider_profile"
+        )
+    if any(
+        stage.provider_profile is not None
+        and stage.provider_profile.strip().lower() == "fixture"
+        for stage in stages
     ):
         raise ProviderError(
             "fixture provider cannot be combined with stage provider_profile"

@@ -128,6 +128,16 @@ class PromotionAndReleaseTests(unittest.TestCase):
         loopback_report["run"]["invocation_id"] = "b" * 32
         with self.assertRaisesRegex(ReviewInputError, "endpoint scope does not match"):
             validate_profile_promotion("fast-triage", live, [loopback_report])
+        mismatched_provider = json.loads(fixture_path.read_text(encoding="utf-8"))
+        mismatched_provider["run"]["mode"] = "live"
+        mismatched_provider["run"]["provider"] = "ollama"
+        mismatched_provider["run"]["model"] = "qwen3.5:4b"
+        mismatched_provider["run"]["endpoint_scope"] = "remote"
+        mismatched_provider["run"]["invocation_id"] = "c" * 32
+        with self.assertRaisesRegex(
+            ReviewInputError, "live report provider does not match profile"
+        ):
+            validate_profile_promotion("fast-triage", live, [mismatched_provider])
         with self.assertRaisesRegex(ReviewInputError, "fixture-only"):
             validate_profile_promotion(
                 "local-private",

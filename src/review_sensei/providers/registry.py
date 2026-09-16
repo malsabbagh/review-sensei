@@ -23,6 +23,7 @@ class ProviderSettings:
     max_output_tokens: int | None = None
     profile: str | None = None
     allow_custom_endpoint: bool = False
+    allow_profile_stage_model: bool = False
 
     @classmethod
     def for_profile(
@@ -96,10 +97,20 @@ class ProviderRegistry:
             # models; this is not a generic override or failover path.  Run-level
             # ``settings.model`` may select one of those declared models for the
             # default provider; per-stage model selection is owned by
-            # ``bind_stage_providers`` rather than ad hoc caller overrides.
+            # ``bind_stage_providers`` sets ``allow_profile_stage_model`` when
+            # constructing a stage-scoped provider.
             allowed_models = profile.allowed_models()
             if settings.model is not None and settings.model not in allowed_models:
                 raise ProviderError("provider profile model cannot be overridden")
+            if (
+                settings.model is not None
+                and settings.model != profile.model
+                and not settings.allow_profile_stage_model
+            ):
+                raise ProviderError(
+                    "provider profile per-stage models must be selected through "
+                    "stage routing"
+                )
             if settings.base_url is not None and settings.base_url != profile.base_url:
                 raise ProviderError("provider profile endpoint cannot be overridden")
             if (

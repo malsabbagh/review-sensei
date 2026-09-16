@@ -141,7 +141,11 @@ class ReviewService:
         ``max_retry_attempts`` via ``_stage_attempt_limit``.
         """
         if self._provider_calls >= self.budget.max_provider_calls:
-            raise ProviderError("resource budget exhausted")
+            raise ProviderError(
+                "resource budget exhausted "
+                f"({self._provider_calls}/{self.budget.max_provider_calls} "
+                "provider calls)"
+            )
         response = provider.complete(provider_request)
         self._provider_calls += 1
         return response

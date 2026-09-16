@@ -124,6 +124,48 @@ class ProviderRoutingTests(unittest.TestCase):
                     stages=[_stage("Summary", profile="local-private")],
                 )
 
+    def test_fixture_response_run_rejects_stage_profiles_without_fixture_name(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ok.json"
+            path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ProviderError, "fixture"):
+                bind_stage_providers(
+                    registry=default_registry(),
+                    settings=ProviderSettings(
+                        name="ollama",
+                        fixture_response=path,
+                    ),
+                    stages=[_stage("Summary", profile="local-private")],
+                )
+
+    def test_model_for_stage_rejects_empty_stage_name(self) -> None:
+        profile = get_provider_profile("fast-triage")
+        with self.assertRaisesRegex(
+            ValueError, "stage name must be a non-empty string"
+        ):
+            profile.model_for_stage("")
+
+    def test_registry_rejects_run_level_stage_model_without_routing_flag(self) -> None:
+        profile = replace(
+            get_provider_profile("fast-triage"),
+            stage_models=(("Comments", "gpt-4o"),),
+        )
+        with patch(
+            "review_sensei.providers.registry.get_provider_profile",
+            return_value=profile,
+        ):
+            with self.assertRaisesRegex(ProviderError, "stage routing"):
+                default_registry().create(
+                    ProviderSettings(
+                        name="openai-compatible",
+                        profile="fast-triage",
+                        model="gpt-4o",
+                        api_key="secret",
+                    )
+                )
+
     def test_bind_selects_declared_per_stage_model_without_endpoint_change(
         self,
     ) -> None:
