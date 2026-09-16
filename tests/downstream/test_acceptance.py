@@ -174,7 +174,6 @@ class GeneratedCallerContractTests(unittest.TestCase):
         )
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("options: [review]", workflow)
-        self.assertIn("enable_review:", workflow)
         self.assertIn(
             "enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}",
             workflow,
@@ -183,8 +182,16 @@ class GeneratedCallerContractTests(unittest.TestCase):
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
             workflow,
         )
-        self.assertIn("operation:", workflow)
-        self.assertIn("'reply'", workflow)
+        self.assertIn("resolve-trigger:", workflow)
+        self.assertIn(
+            "operation: ${{ needs.resolve-trigger.outputs.operation }}",
+            workflow,
+        )
+        self.assertIn(
+            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
+            workflow,
+        )
+        self.assertIn('operation = "reply"', workflow)
         self.assertIn("@sensei", workflow)
         self.assertIn("vars.REVIEWSENSEI_MENTION_REPLIES == 'true'", workflow)
         self.assertIn("vars.REVIEWSENSEI_GITHUB_WRITES == 'true'", workflow)
