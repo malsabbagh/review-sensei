@@ -278,7 +278,7 @@ class ReviewApprovalFinalizer:
             return PublicationResult(status="skipped_app_authored")
         assert preflight.repository_id is not None and preflight.base_sha is not None
         scan = (
-            None
+            _ThreadBlockingScan(open_blocking=True, saw_app_finding=True)
             if known_blocking_finding
             else self._scan_blocking_threads(
                 token=token,
@@ -308,38 +308,17 @@ class ReviewApprovalFinalizer:
             or write_preflight.base_sha != preflight.base_sha
         ):
             return PublicationResult(status="skipped_stale_base")
-        blocking = known_blocking_finding or (scan is not None and scan.open_blocking)
-        try:
-            reviews = self.http.paginate(
-                path=self.http.repository_path(
-                    repository, f"/pulls/{pull_request}/reviews"
-                ),
-                token=token,
-            )
-        except GitHubHTTPTransientError as exc:
-            raise GitHubPublicationTransientError(
-                "review decision reconciliation failed temporarily"
-            ) from exc
-        except GitHubHTTPError as exc:
-            raise GitHubPublicationError(
-                "review decision reconciliation failed"
-            ) from exc
-        has_changes_requested = self._reviews_have_app_head_state(
-            reviews,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            state="CHANGES_REQUESTED",
-        )
-        if (
-            not blocking
-            and scan is not None
-            and not scan.saw_app_finding
-            and has_changes_requested
-        ):
-            # Change-request finished first, but this approve pass cannot yet
-            # prove those roots are resolved. Keep REQUEST_CHANGES in force.
-            blocking = True
+        blocking = scan.open_blocking
         if blocking:
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            has_changes_requested = self._reviews_have_app_head_state(
+                reviews,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                state="CHANGES_REQUESTED",
+            )
             if has_changes_requested:
                 return PublicationResult(status="already_changes_requested")
             marker = changes_requested_marker(
@@ -368,6 +347,44 @@ class ReviewApprovalFinalizer:
                 permission="change-request publication lacks permission",
                 transient="change-request publication failed temporarily",
             )
+        # Recheck reviews immediately before APPROVE so a change request that
+        # landed during the first thread sweep is not dismissed.
+        reviews = self._load_head_reviews(
+            token=token, repository=repository, pull_request=pull_request
+        )
+        if self._reviews_have_app_head_state(
+            reviews,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            state="CHANGES_REQUESTED",
+        ):
+            scan = self._scan_blocking_threads(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                repository_id=preflight.repository_id,
+                head_sha=head_sha,
+                base_sha=preflight.base_sha,
+                app_slug=app_slug,
+            )
+            write_preflight = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if write_preflight.result is not None:
+                return write_preflight.result
+            if write_preflight.app_authored:
+                return PublicationResult(status="skipped_app_authored")
+            if (
+                write_preflight.repository_id != preflight.repository_id
+                or write_preflight.base_sha != preflight.base_sha
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            if scan.open_blocking:
+                return PublicationResult(status="already_changes_requested")
         marker = approval_marker(
             repository_id=preflight.repository_id,
             pull_request=pull_request,
@@ -447,6 +464,29 @@ class ReviewApprovalFinalizer:
         if status == 403:
             raise GitHubPublicationError(permission)
         raise GitHubPublicationError(rejected)
+
+    def _load_head_reviews(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+    ) -> list[Any]:
+        try:
+            return self.http.paginate(
+                path=self.http.repository_path(
+                    repository, f"/pulls/{pull_request}/reviews"
+                ),
+                token=token,
+            )
+        except GitHubHTTPTransientError as exc:
+            raise GitHubPublicationTransientError(
+                "review decision reconciliation failed temporarily"
+            ) from exc
+        except GitHubHTTPError as exc:
+            raise GitHubPublicationError(
+                "review decision reconciliation failed"
+            ) from exc
 
     def _preflight(
         self,
@@ -1041,6 +1081,9 @@ class ReviewPublisher:
         app_authored: bool,
         finding_event: str,
     ) -> None:
+        # The finding review already submitted REQUEST_CHANGES. Calling the
+        # finalizer here would only duplicate that event; a later execution or
+        # resolved-root pass is what may APPROVE.
         if app_authored or finding_event == "REQUEST_CHANGES":
             return
         self.finalizer.finalize(

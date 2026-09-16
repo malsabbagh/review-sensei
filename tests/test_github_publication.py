@@ -1058,7 +1058,12 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
+        self.assertNotEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(len(calls), 4)
+        self.assertEqual(
+            sum(1 for method, url, _ in calls if method == "POST"),
+            1,
+        )
 
     def test_blocking_result_overrides_same_head_approval(self):
         head = "b" * 40
@@ -1102,6 +1107,8 @@ class ReviewPublisherTests(unittest.TestCase):
                 graphql_review_threads_response(),
                 json_response(pr_payload(head_sha=head)),
                 json_response([existing]),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                json_response(pr_payload(head_sha=head)),
             ],
             result=clean_result(),
             auto_approve=True,
@@ -1118,6 +1125,36 @@ class ReviewPublisherTests(unittest.TestCase):
                 if payload
             )
         )
+
+    def test_deleted_blocking_roots_do_not_deadlock_an_existing_change_request(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 6}, 200),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "already_published")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
 
     def test_change_request_promotes_to_approve_after_blocking_roots_resolve(self):
         head = "b" * 40
