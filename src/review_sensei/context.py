@@ -1845,6 +1845,10 @@ def reconcile_finding_set(
     ``reviewed_paths`` is a scope declaration that decides retention, so each
     entry must be a canonical repository-relative path.  A non-canonical entry
     fails closed rather than silently widening retention to every finding.
+
+    One concern holds at most one record in the reconciled set: a concern seen
+    again under a different fingerprint is superseded by the current identity,
+    whether the prior record was live or already retired.
     """
 
     previous_records = tuple(previous)
@@ -1870,9 +1874,13 @@ def reconcile_finding_set(
             reviewed.add(path)
 
     previous_by_fingerprint = {item.fingerprint: item for item in previous_records}
-    previous_by_concern = {
-        item.concern: item for item in previous_records if item.concern is not None
-    }
+    # Several prior records can share one concern under different evidence
+    # fingerprints.  Resolve first-wins, matching the exact-comment contract, so
+    # the concern lookup does not depend on caller ordering accidents.
+    previous_by_concern: dict[str, FindingLifecycle] = {}
+    for item in previous_records:
+        if item.concern is not None:
+            previous_by_concern.setdefault(item.concern, item)
     matched: set[str] = set()
     reconciled: list[FindingLifecycle] = []
     seen_fingerprints: set[str] = set()
@@ -1903,8 +1911,11 @@ def reconcile_finding_set(
             matched.add(moved.fingerprint)
             seen_fingerprints.add(record.fingerprint)
             continue
-        # A retired concern reported again under a new fingerprint is a new
-        # finding; the retired record is left for the tail pass to carry over.
+        if moved is not None:
+            # A retired concern reported again under a new fingerprint is a new
+            # finding, and the current identity supersedes the retired record so
+            # one concern never holds two records in the same reconciled set.
+            matched.add(moved.fingerprint)
         result = reconcile_finding_lifecycle(
             None if moved is not None else prior,
             item.fingerprint,

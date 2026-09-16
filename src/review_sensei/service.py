@@ -243,7 +243,10 @@ class ReviewService:
         if coverage.skip_provider:
             # No provider call is made, so none is charged to the budget: the
             # budget counts real provider invocations, and a skipped incremental
-            # pass must not consume a call a later pass may need.
+            # pass must not consume a call a later pass may need.  The summary
+            # below is engine-authored rather than provider output, and the pass
+            # carries no findings, so approval still depends entirely on the
+            # finalizer's unresolved-blocking-root check.
             return self._finalize_result(
                 request,
                 summary="Incremental review: no changed paths since the last accepted review.",
@@ -548,8 +551,15 @@ class ReviewService:
         )
         # ``_coverage_decision`` already evicted same-PR entries incompatible
         # with this key, so the write cannot land behind a stale entry that a
-        # later incremental pass would still read as compatible.
-        if self.cache is not None and coverage.current_key is not None:
+        # later incremental pass would still read as compatible.  Only a
+        # validated complete pass may become the authoritative record: a partial
+        # or incomplete aggregate must not let a later incremental run treat its
+        # lifecycle set as verified or decide there is nothing left to review.
+        if (
+            self.cache is not None
+            and coverage.current_key is not None
+            and review_complete
+        ):
             self.cache.put_if_newer(
                 coverage.current_key,
                 (coverage.generation, coverage.mode, len(lifecycles)),

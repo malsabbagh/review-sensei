@@ -926,6 +926,34 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(result.coverage_mode, "incremental")
         self.assertEqual(provider.requests, [])
 
+    def test_partial_pass_does_not_become_the_authoritative_cache_record(self):
+        """Only a complete pass may be replayed as verified prior state."""
+
+        provider = FakeProvider('{"summary":"Looks good."}')
+        cache = ReviewContextCache()
+        # A summary-only pipeline never executes a comment stage, so the
+        # aggregate is not a complete review.
+        service = ReviewService(
+            provider,
+            stages=[Stage(name="one", prompt_template="{diff}", outputs=("summary",))],
+            cache=cache,
+        )
+        request = self._current_request()
+        result = service.review(
+            request,
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider),
+                reviewed_paths=("src/app.py",),
+            ),
+        )
+        self.assertNotEqual(result.review_status, "complete")
+        current_key = build_review_context_cache_key(
+            request,
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        self.assertIsNone(cache.get(current_key))
+
     def test_full_review_evicts_incompatible_cache_entries(self):
         """Eviction is not gated on an incremental plan."""
 

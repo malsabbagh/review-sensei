@@ -734,6 +734,154 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
         self.assertTrue(finding_declares_blocking(existing))
 
+    def test_fingerprint_sweep_matches_app_slug_case_insensitively(self):
+        """GitHub logins are case-insensitive, so the slug must match anyway."""
+
+        from review_sensei.context import finding_lifecycle_for_comment
+
+        head = "b" * 40
+        current = result()
+        fingerprint = finding_lifecycle_for_comment(current.comments[0]).fingerprint
+        existing = finding_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha="c" * 40,
+            base_sha="a" * 40,
+            result=current,
+            blocking=True,
+            fingerprint=fingerprint,
+            state="still-present",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {"login": "ReviewSensei[BOT]"},
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+
+    def test_fingerprint_sweep_fails_closed_on_an_unreadable_root_author(self):
+        head = "b" * 40
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [{"body": "root", "author": "reviewsensei"}]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        with self.assertRaises(GitHubPublicationError):
+            ReviewPublisher(http=http).publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertFalse(
+            any(
+                method == "POST" and url.endswith("/pulls/2/reviews")
+                for method, url, _ in calls
+            )
+        )
+
+    def test_fingerprint_sweep_reports_a_blocked_graphql_surface(self):
+        """A missing scope or policy block is distinct from a bad response."""
+
+        head = "b" * 40
+        for status in (401, 403):
+            with self.subTest(status=status):
+                http, _calls = make_http(
+                    [
+                        json_response(pr_payload(head_sha=head)),
+                        json_response([]),
+                        json_response(pr_payload(head_sha=head)),
+                        json_response({}, status),
+                        json_response({"id": 5}, 200),
+                    ]
+                )
+                with self.assertRaises(GitHubPublicationError) as raised:
+                    ReviewPublisher(http=http).publish(
+                        token="token",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=2,
+                        head_sha=head,
+                        base_branch="main",
+                        base_sha="a" * 40,
+                        result=result(),
+                        diff=DIFF,
+                        app_slug="reviewsensei[bot]",
+                    )
+                self.assertIn("was not permitted", str(raised.exception))
+
+    def test_skipped_incremental_pass_cannot_approve_with_blocking_roots(self):
+        """A skip carries no findings, so only the finalizer decides approval."""
+
+        head = "b" * 40
+        skipped = ReviewResult(
+            summary="Incremental review: no changed paths since the last accepted review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+            coverage_mode="incremental",
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                *request_changes_write_responses(head),
+            ],
+            result=skipped,
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        events = [
+            __import__("json").loads(payload.decode("utf-8")).get("event")
+            for method, url, payload in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews") and payload
+        ]
+        self.assertNotIn("APPROVE", events)
+        self.assertIn("REQUEST_CHANGES", events)
+
     def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
         """An uncertain sweep must not publish a possible duplicate."""
 

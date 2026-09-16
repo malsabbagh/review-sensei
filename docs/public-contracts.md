@@ -235,6 +235,13 @@ reclassifying a finding does not open a second discussion; a comment without
 `defect_kind` buckets under the canonical `unknown` kind. Legacy documents
 without those keys remain valid.
 
+An incremental pass whose reviewed set is empty returns without calling a
+provider. Its `summary` is engine-authored rather than provider output and
+carries no findings, and the pass charges no provider call to the resource
+budget. Approval is unchanged: the shared finalizer remains the sole approval
+writer and still refuses to approve while unresolved blocking ReviewSensei
+threads exist.
+
 ### Finding classification and presentation
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`

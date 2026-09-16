@@ -1015,6 +1015,21 @@ class ExpectedFinding:
         )
 
 
+def _without_derived_coverage(document: dict[str, object]) -> dict[str, object]:
+    """Drop derived lifecycle metadata and a default coverage mode.
+
+    ``finding_lifecycles`` is an additive v1 field computed from finding
+    identity, and ``full`` is the default coverage mode, so a legacy fixture
+    that omits both still describes the same deterministic review.
+    """
+
+    normalized = dict(document)
+    normalized.pop("finding_lifecycles", None)
+    if normalized.get("coverage_mode") == "full":
+        normalized.pop("coverage_mode")
+    return normalized
+
+
 def _one_to_one_matches(
     comments: Sequence[ReviewComment],
     expected: Sequence[ExpectedFinding],
@@ -1174,6 +1189,13 @@ def run_case(
             if actual_document.get("review_status") == "complete":
                 actual_document = dict(actual_document)
                 actual_document.pop("review_status")
+            # Lifecycle records are derived from the finding-identity algorithm
+            # rather than from provider output, so pinning them here would make
+            # the corpus assert an implementation detail and break on any
+            # identity change. The corpus asserts the deterministic review
+            # content; coverage defaults are normalized like review_status.
+            expected_document = _without_derived_coverage(expected_document)
+            actual_document = _without_derived_coverage(actual_document)
             if "evidence_policy" not in expected_document:
                 status = "failed"
             elif expected_document.get("evidence_policy") != actual_document.get(

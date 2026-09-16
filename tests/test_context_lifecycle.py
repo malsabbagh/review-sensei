@@ -697,9 +697,119 @@ class ContextLifecycleTests(unittest.TestCase):
             review_complete=True,
             reviewed_paths=("src/a.py",),
         )
-        states = {item.fingerprint: item.state for item in result}
-        self.assertEqual(states[current.fingerprint], "new")
-        self.assertEqual(states[previous.fingerprint], "fixed")
+        # The current identity supersedes the retired record, so one concern
+        # never holds two records in the same reconciled set.
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].fingerprint, current.fingerprint)
+        self.assertEqual(result[0].state, "new")
+        self.assertEqual(
+            len({item.concern for item in result if item.concern is not None}), 1
+        )
+
+    def test_moved_concern_from_uncertain_prior_stays_live(self):
+        """``uncertain`` is not terminal, so the concern is carried forward."""
+
+        comment = ReviewComment(
+            path="src/b.py",
+            line=4,
+            body="race",
+            symbol="run",
+            defect_kind="race",
+        )
+        current = finding_lifecycle_for_comment(comment)
+        previous = FindingLifecycle(
+            stable_finding_fingerprint(
+                path="src/b.py",
+                symbol="run",
+                defect_kind="race",
+                evidence="earlier prose",
+            ),
+            "uncertain",
+            "earlier prose",
+            current.concern,
+            "src/a.py",
+            generation=2,
+        )
+        result = reconcile_finding_set(
+            (previous,),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/b.py",),
+            generation=2,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].fingerprint, current.fingerprint)
+        self.assertEqual(result[0].state, "still-present")
+        self.assertEqual(result[0].path, "src/b.py")
+
+    def test_prior_without_a_path_is_treated_as_unreviewed(self):
+        """A pathless prior cannot be proven in scope, so it is retained."""
+
+        previous = FindingLifecycle(
+            stable_finding_fingerprint(evidence_id="abc"),
+            "still-present",
+            concern=stable_concern_identity(evidence_id="abc"),
+            path=None,
+        )
+        result = reconcile_finding_set(
+            (previous,),
+            (),
+            review_complete=True,
+            reviewed_paths=("src/a.py",),
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].state, "still-present")
+        self.assertIsNone(result[0].path)
+
+    def test_duplicate_prior_concerns_resolve_to_the_first_record(self):
+        comment = ReviewComment(
+            path="src/a.py",
+            line=2,
+            body="race",
+            symbol="run",
+            defect_kind="race",
+        )
+        current = finding_lifecycle_for_comment(comment)
+        first = FindingLifecycle(
+            stable_finding_fingerprint(
+                path="src/a.py",
+                symbol="run",
+                defect_kind="race",
+                evidence="first prose",
+            ),
+            "still-present",
+            "first prose",
+            current.concern,
+            "src/a.py",
+        )
+        second = FindingLifecycle(
+            stable_finding_fingerprint(
+                path="src/a.py",
+                symbol="run",
+                defect_kind="race",
+                evidence="second prose",
+            ),
+            "still-present",
+            "second prose",
+            current.concern,
+            "src/a.py",
+        )
+        self.assertNotEqual(first.fingerprint, second.fingerprint)
+        result = reconcile_finding_set(
+            (first, second),
+            (current,),
+            review_complete=True,
+            reviewed_paths=("src/a.py",),
+        )
+        # First-wins keeps the concern lookup deterministic; the unmatched
+        # duplicate is still reconciled rather than dropped.
+        live = [item for item in result if item.fingerprint == current.fingerprint]
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0].evidence, "first prose")
+        self.assertEqual(
+            {item.fingerprint for item in result},
+            {current.fingerprint, second.fingerprint},
+        )
 
     def test_category_is_not_part_of_finding_identity(self):
         """Reclassifying a lens must not fan a concern out into a new thread."""

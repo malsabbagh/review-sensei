@@ -51,8 +51,17 @@ changed-path list, or incompatible state falls back to a full bounded review.
 Prior findings stay in scope for a fallback only when this run verified the
 prior key is compatible; an incompatible or unverifiable key discards them.
 The cache stores only small metadata: never raw prompts or provider
-responses, and no hosted cache is required. A skipped incremental pass makes
-no provider call and therefore charges none to the resource budget.
+responses, and no hosted cache is required. Only a validated complete pass
+becomes the authoritative cache record, so a partial or incomplete aggregate
+cannot let a later incremental run treat its lifecycle set as verified.
+
+A skipped incremental pass makes no provider call and therefore charges none
+to the resource budget. Because no provider ran, its summary is engine-authored
+rather than provider output: it states that no changed path remained since the
+last accepted review, carries no findings, and is bounded by the same summary
+limits. A skip does not approve anything on its own—the shared finalizer
+remains the sole approval writer and still refuses to approve while unresolved
+blocking ReviewSensei roots exist on the pull request.
 
 Publication emits an explicit `coverage_mode` on the review marker. Inline
 findings use a v2 marker that carries the fingerprint. Already published

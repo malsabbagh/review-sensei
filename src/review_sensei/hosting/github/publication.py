@@ -1320,6 +1320,15 @@ class ReviewPublisher:
                 raise GitHubPublicationTransientError(
                     "review thread lookup failed temporarily"
                 )
+            if status in (401, 403):
+                # Duplicate suppression depends on the GraphQL surface for every
+                # publication carrying inline findings, so a missing scope or an
+                # enterprise policy blocking /graphql is reported distinctly from
+                # a malformed response instead of as a generic failure.
+                raise GitHubPublicationError(
+                    "review thread lookup was not permitted; publication "
+                    "requires GraphQL read access to review threads"
+                )
             if status < 200 or status >= 300 or not isinstance(payload, dict):
                 raise GitHubPublicationError("review thread lookup failed")
             if payload.get("errors") not in (None, []):
@@ -1351,7 +1360,17 @@ class ReviewPublisher:
                     raise GitHubPublicationError("review thread response was invalid")
                 root = roots[0]
                 author = root.get("author")
-                if not isinstance(author, dict) or author.get("login") != app_slug:
+                if not isinstance(author, dict):
+                    # A root whose author cannot be read may still be an
+                    # App-authored finding, so skipping it would risk opening a
+                    # duplicate thread for a fingerprint already published.
+                    raise GitHubPublicationError("review thread response was invalid")
+                login = author.get("login")
+                if login is not None and not isinstance(login, str):
+                    raise GitHubPublicationError("review thread response was invalid")
+                # GitHub logins are case-insensitive, so a configured slug that
+                # differs only in case must still match its own findings.
+                if login is None or login.casefold() != app_slug.casefold():
                     continue
                 fingerprint = finding_fingerprint_from_body(root.get("body"))
                 if fingerprint is not None:
