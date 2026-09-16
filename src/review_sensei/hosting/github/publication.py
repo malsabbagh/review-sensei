@@ -90,8 +90,6 @@ _FINDING_MARKER_V2_RE = re.compile(
 )
 
 
-
-
 def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
     if comment.side == "RIGHT" and comment.line in analysis.changed_lines.get(
         comment.path, frozenset()
@@ -126,6 +124,7 @@ def format_unanchored_findings(comments: tuple[ReviewComment, ...]) -> str:
     for comment in comments:
         lines.append(f"- `{comment.path}`: {comment.body}")
     return "\n".join(lines)
+
 
 def _with_discussion_instruction(text: str) -> str:
     return f"{text}\n\n{DISCUSSION_INSTRUCTION}"

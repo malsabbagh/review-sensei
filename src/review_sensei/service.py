@@ -21,7 +21,7 @@ from .context import (
     reconcile_finding_set,
 )
 from .coverage import CoverageManifest
-from .diff import DiffAnalysis, analyze_diff
+from .diff import DiffAnalysis
 from .errors import (
     ProviderError,
     ReviewFormatError,
@@ -37,13 +37,13 @@ from .models import (
     ReviewRequest,
     ReviewResult,
 )
-from .planning import LargeChangePlan, apply_chunk_outcomes, plan_change
 from .outcomes import (
     ResourceBudget,
     ResourceBudgetTracker,
     RunOutcome,
     sanitize_diagnostic,
 )
+from .planning import LargeChangePlan, apply_chunk_outcomes, plan_change
 from .providers.base import ReviewProvider
 from .stages import (
     ReviewCategory,
@@ -263,7 +263,6 @@ class ReviewService:
         return ReviewConcurrencyPlan.for_request(
             request, provider_name=self.provider.name
         )
-
 
     def _attach_coverage(
         self, result: ReviewResult, coverage: CoverageManifest
