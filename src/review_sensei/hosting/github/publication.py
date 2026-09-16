@@ -233,9 +233,10 @@ def _should_suppress_published_finding(
     existing = suppression.by_fingerprint.get(fingerprint)
     if existing is not None:
         return existing == comment.blocks_approval
-    location = suppression.by_location.get((comment.path, comment.line))
-    if location is not None:
-        return location == comment.blocks_approval
+    if comment.line is not None:
+        location = suppression.by_location.get((comment.path, comment.line))
+        if location is not None:
+            return location == comment.blocks_approval
     return False
 
 
@@ -1267,19 +1268,19 @@ class ReviewPublisher:
         for comment, fingerprint, comment_body, anchor in prepared_comments:
             if _should_suppress_published_finding(comment, fingerprint, suppression):
                 continue
-            payload: dict[str, object] = {
+            comment_payload: dict[str, object] = {
                 "path": comment.path,
                 "body": comment_body,
             }
             if anchor == "file":
-                payload["subject_type"] = "file"
+                comment_payload["subject_type"] = "file"
             elif anchor == "left":
-                payload["line"] = comment.line
-                payload["side"] = "LEFT"
+                comment_payload["line"] = comment.line
+                comment_payload["side"] = "LEFT"
             else:
-                payload["line"] = comment.line
-                payload["side"] = "RIGHT"
-            comments.append(payload)
+                comment_payload["line"] = comment.line
+                comment_payload["side"] = "RIGHT"
+            comments.append(comment_payload)
         # Blocking findings request changes on this exact head. The shared
         # finalizer remains the sole APPROVE writer, and it re-asserts
         # REQUEST_CHANGES when a later execution still sees unresolved
