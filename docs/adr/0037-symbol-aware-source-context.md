@@ -1,4 +1,4 @@
-# ADR 0035 - Deterministic bounded symbol-aware source context
+# ADR 0037 - Deterministic bounded symbol-aware source context
 
 Status: Proposed
 Date: 2026-09-16
