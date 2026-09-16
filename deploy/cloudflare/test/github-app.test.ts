@@ -585,6 +585,30 @@ describe("setup repository reconciliation", () => {
     ).toBe(true);
   });
 
+  it("migrates a released v4 caller that still reviews draft pull requests", async () => {
+    const fake = new FakeGitHub();
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const current = files[SETUP_FILE_PATHS[0]]!;
+    const previous = current.replace(
+      "      github.event.pull_request.draft != true &&\n",
+      "",
+    );
+    expect(previous).not.toBe(current);
+    files[SETUP_FILE_PATHS[0]] = previous;
+    fake.files = files;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      mutationRequests(fake).some(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      ),
+    ).toBe(true);
+  });
+
   it("does not replace customized partial setup-v4 content", async () => {
     const fake = new FakeGitHub();
     const current = buildSetupFiles(TAG)[0].content;

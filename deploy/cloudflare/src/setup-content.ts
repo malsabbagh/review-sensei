@@ -319,6 +319,7 @@ jobs:
     if: >-
       (github.event_name == 'pull_request' &&
       vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
+      github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch' ||
       ((github.event_name == 'issue_comment' &&
@@ -381,8 +382,22 @@ function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
   );
 }
 
+const PROVIDER_PARITY_DRAFT_SKIP =
+  "      github.event.pull_request.draft != true &&\n";
+
+export function providerParityWorkflowBeforeDraftSkip(
+  publicWorkflowTag: string,
+): string {
+  const current = providerParityWorkflowTemplate(publicWorkflowTag);
+  const previous = current.replace(PROVIDER_PARITY_DRAFT_SKIP, "");
+  if (previous === current) {
+    throw new Error("draft skip gate is missing from the current caller");
+  }
+  return previous;
+}
+
 export function previousProviderParityWorkflowTemplate(publicWorkflowTag: string): string {
-  return providerParityWorkflowTemplate(publicWorkflowTag)
+  return providerParityWorkflowBeforeDraftSkip(publicWorkflowTag)
     .replace("  pull-requests: write\n", "  pull-requests: read\n")
     .replace("  issues: write\n", "  issues: read\n");
 }
