@@ -240,6 +240,15 @@ class InlineCallerResolverTests(unittest.TestCase):
             inline_resolver_script(repo), inline_resolver_script(generated)
         )
 
+    def test_inline_rescan_regex_matches_trigger_module(self):
+        trigger = (
+            ROOT / "src" / "review_sensei" / "hosting" / "github" / "trigger.py"
+        ).read_text(encoding="utf-8")
+        script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
+        pattern = 're.compile(r"\\bre[\\s-]?scan\\b", re.IGNORECASE)'
+        self.assertIn("_RESCAN = " + pattern, trigger)
+        self.assertIn("rescan = " + pattern, script)
+
     def test_inline_fallback_matches_trigger_module_outputs(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
         pull = _pull(head_sha="016017b" + ("0" * 33))

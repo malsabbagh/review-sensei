@@ -573,7 +573,11 @@ def _historical_tagged_v4_workflow(
 
 
 def _provider_parity_workflow(public_workflow_tag: str) -> str:
-    """Return the pre-resolve-trigger setup-v4 caller for managed migration."""
+    """Return the pre-resolve-trigger setup-v4 caller for managed migration.
+
+    Current tag-following installs come from ``_tagged_workflow`` /
+    ``_resolve_trigger_workflow``. This template is stale managed content only.
+    """
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
     return """\

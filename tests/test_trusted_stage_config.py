@@ -200,6 +200,7 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         }
         self.assertEqual(callers["repo"], callers["example"])
         self.assertEqual(callers["repo"], callers["generated"])
+        self.assertNotEqual(callers["generated"], callers["historical-parity"])
         for name, text in callers.items():
             with self.subTest(caller=name):
                 passed = caller_reusable_with_keys(text)

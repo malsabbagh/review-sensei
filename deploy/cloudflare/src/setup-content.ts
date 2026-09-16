@@ -241,6 +241,7 @@ function taggedWorkflowTemplate(publicWorkflowTag: string): string {
     .replace("# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4");
 }
 
+/** Released pre-resolve-trigger setup-v4 caller. Stale managed content only. */
 export function providerParityWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 4
