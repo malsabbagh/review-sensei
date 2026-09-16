@@ -252,11 +252,6 @@ class ReviewService:
         if run.result is None:
             if run.outcome.status == "budget_exhausted":
                 raise ReviewInputError("resource budget exhausted")
-            if (
-                run.outcome.status == "provider_failed"
-                and run.outcome.diagnostic == "provider_failed"
-            ):
-                raise ProviderError("provider request failed")
             raise ReviewFormatError("provider request failed")
         return run.result
 
@@ -443,6 +438,8 @@ class ReviewService:
                         tracker.record_prompt_attempt(current_prompt)
                         response = stage_provider.complete(provider_request)
                     except ReviewFormatError as exc:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
                         return self._finish_run(
                             tracker=tracker,
                             status="provider_failed",
@@ -453,6 +450,8 @@ class ReviewService:
                             pull_request_number=request.pull_request_number,
                         )
                     except ReviewInputError as exc:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
                         error = ReviewFormatError("provider response failed")
                         error.__cause__ = exc
                         return self._finish_run(
@@ -521,10 +520,20 @@ class ReviewService:
                             repository=request.repository,
                             pull_request_number=request.pull_request_number,
                         )
-                    tracker.record_provider_call()
-                    tracker.record_response(getattr(response, "text", "") or "")
-                    self._provider_calls = tracker.provider_calls
-                    break
+                    else:
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        if tracker.elapsed_ms() >= tracker.budget.timeout_ms:
+                            return self._finish_run(
+                                tracker=tracker,
+                                status="budget_exhausted",
+                                stage_summary=stage_summary,
+                                diagnostic="deadline_exceeded",
+                                repository=request.repository,
+                                pull_request_number=request.pull_request_number,
+                            )
+                        tracker.record_response(getattr(response, "text", "") or "")
+                        break
                 if not hasattr(response, "text") or not isinstance(response.text, str):
                     error = ReviewFormatError(
                         "provider response did not contain review text"
@@ -585,7 +594,11 @@ class ReviewService:
                     stage_proposals = stage_output.proposals
                     omitted_inline_comments += stage_output.omitted_inline_comments
                 except ReviewFormatError as exc:
-                    if attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS:
+                    if (
+                        attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS
+                        or tracker.structural_retries
+                        >= tracker.budget.max_retry_attempts
+                    ):
                         stage_summary[stage.name] = "failed"
                         return self._finish_run(
                             tracker=tracker,

@@ -893,7 +893,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         marker = 'run-name: "ReviewSensei @@{{ github.event.pull_request && format('
         start = worker_source.index(marker)
         end = worker_source.index('"', start + len('run-name: "'))
-        worker_line = worker_source[start:end + 1].replace("@@{{", "${{")
+        worker_line = worker_source[start : end + 1].replace("@@{{", "${{")
         self.assertEqual(python_line, worker_line)
 
     def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):

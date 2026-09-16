@@ -252,9 +252,10 @@ class ResourceBudget:
 
     Embedders publish these bounds alongside ``RunOutcome`` so callers can
     reason about budget exhaustion consistently.  ``ReviewService.run``
-    enforces the ceilings: transport retries stay distinct from the one
-    structural-correction attempt, and a hard deadline/admission check happens
-    before each provider call.
+    enforces the ceilings: transport retries stay distinct from structural
+    correction, structural retries are capped by ``max_retry_attempts``, and
+    deadline admission is checked before and after each provider call. In-flight
+    provider calls are not interrupted.
 
     Defaults are public downward-only ceilings.  Direct construction validates
     field types only; ``create(limits=...)`` is the fail-closed entry point that

@@ -29,7 +29,8 @@ today. Actions summaries and
 `GITHUB_OUTPUT` expose the same envelope without prompts, responses, or source
 text.
 
-`ResourceBudget` is enforced before each provider call. Transport retries for
+`ResourceBudget` is enforced before and after each provider call; in-flight calls
+are not interrupted. Transport retries for
 explicitly transient HTTP/rate-limit failures are bounded and may honor a
 numeric `Retry-After` hint. The existing one-shot structural-correction retry
 remains separate and does not rewrite unsafe GitHub writes; publishers continue

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import re
 import socket
 from typing import Any
 from urllib.error import URLError
@@ -17,6 +18,7 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
     }
 )
 MAX_RETRY_AFTER_SECONDS = 60.0
+_DECIMAL_RETRY_AFTER = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:
@@ -52,11 +54,11 @@ def parse_retry_after_seconds(error: Any) -> float | None:
     raw = headers.get("Retry-After")
     if raw is None:
         return None
-    try:
-        value = float(str(raw).strip())
-    except (TypeError, ValueError):
+    text = str(raw).strip()
+    if not _DECIMAL_RETRY_AFTER.fullmatch(text):
         return None
-    if isinstance(raw, bool) or value <= 0 or value != value or value == float("inf"):
+    value = float(text)
+    if value <= 0:
         return None
     return min(value, MAX_RETRY_AFTER_SECONDS)
 

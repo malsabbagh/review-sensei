@@ -13,7 +13,7 @@ from review_sensei import (
     plan_review_execution,
 )
 from review_sensei.cli import main
-from review_sensei.errors import ProviderError, ReviewInputError
+from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubWriteOptions,
@@ -95,6 +95,17 @@ class Clock:
     def sleep(self, seconds):
         self.sleeps.append(seconds)
         self.value += seconds
+
+
+class AdvancingClockProvider(FakeProvider):
+    def __init__(self, clock, response_text, *, advance_ms=1000):
+        super().__init__(response_text)
+        self.clock = clock
+        self.advance_ms = advance_ms
+
+    def complete(self, request):
+        self.clock.value += self.advance_ms / 1000.0
+        return super().complete(request)
 
 
 class RecordingReviewer:
@@ -179,6 +190,48 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertEqual(run.outcome.status, "budget_exhausted")
         self.assertEqual(run.outcome.diagnostic, "deadline_exceeded")
         self.assertEqual(provider.requests, [])
+
+    def test_deadline_exceeded_after_slow_provider_call(self):
+        clock = Clock()
+        provider = AdvancingClockProvider(
+            clock,
+            '{"summary":"Late.","comments":[]}',
+            advance_ms=1000,
+        )
+        run = ReviewService(provider).run(
+            ReviewRequest(diff=DIFF),
+            budget=ResourceBudget.create(timeout_ms=500),
+            monotonic=clock,
+            sleeper=clock.sleep,
+        )
+        self.assertEqual(run.outcome.status, "budget_exhausted")
+        self.assertEqual(run.outcome.diagnostic, "deadline_exceeded")
+        self.assertEqual(run.outcome.provider_calls, 1)
+
+    def test_failed_provider_call_is_counted_for_format_errors(self):
+        provider = FakeProvider("", error=ReviewFormatError("bad output"))
+        run = ReviewService(provider).run(ReviewRequest(diff=DIFF))
+        self.assertEqual(run.outcome.status, "provider_failed")
+        self.assertEqual(run.outcome.provider_calls, 1)
+
+    def test_structural_retries_respect_budget_retry_ceiling(self):
+        provider = SequenceProvider(["not-json", "still-not-json"])
+        run = ReviewService(
+            provider,
+            budget=ResourceBudget.create(max_retry_attempts=0),
+        ).run(ReviewRequest(diff=DIFF))
+        self.assertEqual(run.outcome.status, "provider_failed")
+        self.assertEqual(run.outcome.structural_retries, 0)
+        self.assertEqual(run.outcome.provider_calls, 1)
+
+    def test_load_recovery_artifact_rejects_directory_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(ReviewInputError) as raised:
+                load_recovery_artifact(Path(temp_dir))
+            self.assertEqual(
+                diagnostic_for_recovery_error(raised.exception),
+                "recovery_artifact_tampered",
+            )
 
     def test_load_recovery_artifact_rejects_malformed_payload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -472,6 +525,8 @@ class RunOutcomeWiringTests(unittest.TestCase):
         self.assertIsNone(parse_retry_after_seconds(HeaderError("")))
         self.assertIsNone(parse_retry_after_seconds(HeaderError("Wed, 01 Jan 2026")))
         self.assertIsNone(parse_retry_after_seconds(HeaderError("-1")))
+        self.assertIsNone(parse_retry_after_seconds(HeaderError("1e3")))
+        self.assertIsNone(parse_retry_after_seconds(HeaderError("1_0")))
         self.assertIsNone(parse_retry_after_seconds(type("NoHeaders", (), {})()))
 
     def test_cli_review_writes_outcome_without_echoing_canary(self):
