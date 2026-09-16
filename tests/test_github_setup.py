@@ -20,6 +20,7 @@ from review_sensei.hosting.github.setup import (
     WORKFLOW_PATH,
     _historical_provider_parity_workflow,
     _provider_parity_workflow,
+    _provider_parity_workflow_before_draft_skip,
 )
 
 BASE_SHA = "b" * 40
@@ -662,12 +663,10 @@ class SetupPullRequestServiceTests(unittest.TestCase):
     def test_released_v4_setup_without_draft_skip_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
         files = {file.path: file.content for file in plan.files}
-        current = files[".github/workflows/review-sensei-review.yml"]
-        previous = current.replace(
-            "      github.event.pull_request.draft != true &&\n", "", 1
+        files[WORKFLOW_PATH] = _provider_parity_workflow_before_draft_skip("v4")
+        self.assertNotIn(
+            "github.event.pull_request.draft != true", files[WORKFLOW_PATH]
         )
-        self.assertNotEqual(previous, current)
-        files[".github/workflows/review-sensei-review.yml"] = previous
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
@@ -677,6 +676,26 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "created")
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_unreleased_resolve_trigger_without_draft_skip_is_not_overwritten(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        current = files[WORKFLOW_PATH]
+        previous = current.replace(
+            "      github.event.pull_request.draft != true &&\n", "", 1
+        )
+        self.assertNotEqual(previous, current)
+        self.assertIn("resolve-trigger:", previous)
+        files[WORKFLOW_PATH] = previous
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
 
     def test_released_provider_parity_v4_caller_without_resolve_trigger_is_migrated(
         self,

@@ -719,17 +719,6 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
-export function resolveTriggerWorkflowBeforeDraftSkip(
-  publicWorkflowTag: string,
-): string {
-  const current = resolveTriggerWorkflowTemplate(publicWorkflowTag);
-  const previous = current.replace(PROVIDER_PARITY_DRAFT_SKIP, "");
-  if (previous === current) {
-    throw new Error("draft skip gate is missing from the current caller");
-  }
-  return previous;
-}
-
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return workflowTemplate(sha).replace(
@@ -744,6 +733,8 @@ const PROVIDER_PARITY_DRAFT_SKIP =
 export function providerParityWorkflowBeforeDraftSkip(
   publicWorkflowTag: string,
 ): string {
+  // The exact draft-skip literal must remain byte-identical to the released
+  // caller. A mismatch throws so an unrecognized file is not migrated.
   const current = providerParityWorkflowTemplate(publicWorkflowTag);
   const previous = current.replace(PROVIDER_PARITY_DRAFT_SKIP, "");
   if (previous === current) {

@@ -249,7 +249,6 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
-                _resolve_trigger_workflow_before_draft_skip(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
                 _historical_tagged_v4_workflow(tag_matches[0]),
@@ -1061,18 +1060,12 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
     return _resolve_trigger_workflow(public_workflow_tag)
 
 
-def _resolve_trigger_workflow_before_draft_skip(public_workflow_tag: str) -> str:
-    """Return the resolve-trigger caller before draft PRs were skipped."""
-
-    current = _resolve_trigger_workflow(public_workflow_tag)
-    previous = current.replace(_PROVIDER_PARITY_DRAFT_SKIP, "", 1)
-    if previous == current:
-        raise GitHubSetupError("draft skip gate is missing from the current caller")
-    return previous
-
-
 def _provider_parity_workflow_before_draft_skip(public_workflow_tag: str) -> str:
-    """Return the released provider-parity caller before draft PRs were skipped."""
+    """Return the released provider-parity caller before draft PRs were skipped.
+
+    The exact draft-skip literal must remain byte-identical to the released
+    caller. A mismatch fails closed so an unrecognized file is not migrated.
+    """
 
     current = _provider_parity_workflow(public_workflow_tag)
     previous = current.replace(_PROVIDER_PARITY_DRAFT_SKIP, "", 1)

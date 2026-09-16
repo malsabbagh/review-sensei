@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -227,6 +228,18 @@ class InactiveLensDocumentationTests(unittest.TestCase):
         self.assertIn("pull-request head", text.lower())
 
 
+def runner_stage_path_gate_script(text: str) -> str:
+    marker = 'for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do'
+    start = text.find(marker)
+    if start < 0:
+        raise AssertionError("runner is missing the stage/category path gate")
+    end = text.find("done\n", start)
+    if end < 0:
+        raise AssertionError("runner path gate is incomplete")
+    block = textwrap.dedent(text[start : end + len("done")])
+    return "set -euo pipefail\n" + block + "\n"
+
+
 class TrustedStageIntegrationTests(unittest.TestCase):
     def test_workflow_rejects_unsafe_stage_paths_before_provider_jobs(self):
         text = RUNNER.read_text(encoding="utf-8")
@@ -234,19 +247,17 @@ class TrustedStageIntegrationTests(unittest.TestCase):
             "trusted stage/category paths must be repository-relative",
             text,
         )
+        self.assertEqual(
+            text.count('for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do'),
+            1,
+        )
         self.assertIn('"$config_path" = /*', text)
         self.assertIn("\"$config_path\" == *'..'*", text)
+        script = runner_stage_path_gate_script(text)
+        self.assertIn('"$config_path" = /*', script)
+        self.assertIn("\"$config_path\" == *'..'*", script)
         if sys.platform == "win32":
             return
-        script = r"""
-set -euo pipefail
-for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do
-  if [[ -n "$config_path" && ( "$config_path" = /* || "$config_path" == *'..'* || ! "$config_path" =~ ^[A-Za-z0-9._/-]+$ ) ]]; then
-    echo '::error::trusted stage/category paths must be repository-relative' >&2
-    exit 1
-  fi
-done
-"""
         allowed = ("", "stages", ".github/review-sensei/stages", "review/stages_v2")
         rejected = (
             "/tmp/stages",
