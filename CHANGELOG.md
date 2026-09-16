@@ -21,7 +21,10 @@
   and model probes, optional repository-metadata checks that reuse an existing
   token, and compatibility-manifest validation. `plan` now records supplied
   base/head snapshot SHAs and still performs zero provider or GitHub writes.
-
+- Added tag-ruleset readback for immutable `vMAJOR.MINOR.PATCH` tags and the
+  movable `v4` channel, plus a validated `v4_promotion` JSONL record in the
+  existing publication ledger. Live GitHub ruleset application remains
+  maintainer-operator evidence.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

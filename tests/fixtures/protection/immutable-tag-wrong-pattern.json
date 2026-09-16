@@ -1,0 +1,20 @@
+{
+  "id": 21068962,
+  "name": "Over-broad tag pattern",
+  "target": "tag",
+  "source_type": "Repository",
+  "source": "malsabbagh/review-sensei",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/v*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "update" },
+    { "type": "required_signatures" }
+  ],
+  "bypass_actors": []
+}

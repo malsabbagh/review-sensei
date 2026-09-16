@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import re
 import tempfile
@@ -9,6 +10,7 @@ from unittest import mock
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
+PROTECTION_FIXTURES = ROOT / "tests" / "fixtures" / "protection"
 
 
 def _load_script(name: str):
@@ -1049,6 +1051,262 @@ class ProtectionPolicyTests(unittest.TestCase):
         }
         errors = module.compare_readback(policy, readback)
         self.assertTrue(any("duplicate pull_request" in error for error in errors))
+
+    def test_github_fnmatch_translation_is_conservative(self):
+        module = _load_script("check_protection_policy.py")
+        self.assertEqual(
+            module._GITHUB_IMMUTABLE_TAG_INCLUDE,
+            ("refs/tags/v[0-9]*.[0-9]*.[0-9]*",),
+        )
+        self.assertEqual(module._GITHUB_CHANNEL_TAG_INCLUDE, ("refs/tags/v4",))
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        self.assertEqual(
+            policy["tags"]["immutable_pattern"], module._IMMUTABLE_TAG_PATTERN
+        )
+
+    def test_complete_tag_and_channel_readback_match_policy(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        immutable = module.load_object(
+            PROTECTION_FIXTURES / "immutable-tag-ruleset.json"
+        )
+        channel = module.load_object(PROTECTION_FIXTURES / "v4-channel-ruleset.json")
+        self.assertEqual(module.compare_tag_readback(policy, immutable), [])
+        self.assertEqual(module.compare_channel_readback(policy, channel), [])
+
+    def test_immutable_tag_deletion_allowed_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "immutable-tag-deletion-allowed.json"
+        )
+        errors = module.compare_tag_readback(policy, readback)
+        self.assertTrue(any("allows deletion" in error for error in errors))
+
+    def test_immutable_tag_unsigned_replacement_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "immutable-tag-unsigned-replacement.json"
+        )
+        errors = module.compare_tag_readback(policy, readback)
+        self.assertTrue(any("unsigned replacement" in error for error in errors))
+
+    def test_immutable_tag_wrong_pattern_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "immutable-tag-wrong-pattern.json"
+        )
+        errors = module.compare_tag_readback(policy, readback)
+        self.assertTrue(any("fnmatch translation" in error for error in errors))
+
+    def test_v4_channel_always_bypass_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "v4-channel-always-bypass.json"
+        )
+        errors = module.compare_channel_readback(policy, readback)
+        self.assertTrue(any("blanket always bypass" in error for error in errors))
+
+    def test_v4_channel_update_restricted_is_not_movable(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "v4-channel-update-restricted.json"
+        )
+        errors = module.compare_channel_readback(policy, readback)
+        self.assertTrue(any("must remain movable" in error for error in errors))
+
+    def test_v4_channel_deletion_allowed_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        readback = module.load_object(
+            PROTECTION_FIXTURES / "v4-channel-deletion-allowed.json"
+        )
+        errors = module.compare_channel_readback(policy, readback)
+        self.assertTrue(any("allows deletion" in error for error in errors))
+
+    def test_readback_dir_compares_branch_and_tag_rulesets(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        errors = module.compare_readback_dir(
+            policy, PROTECTION_FIXTURES / "readback-dir"
+        )
+        self.assertEqual(errors, [])
+
+    def test_readback_dir_missing_tag_protection_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        policy = module.load_object(ROOT / ".github" / "protection-policy.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "branch-ruleset.json").write_text(
+                (PROTECTION_FIXTURES / "branch-ruleset.json").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            errors = module.compare_readback_dir(policy, directory)
+        self.assertTrue(any("missing tag protection" in error for error in errors))
+
+    def test_cli_branch_readback_does_not_require_tags(self):
+        module = _load_script("check_protection_policy.py")
+        status = module.main(
+            [
+                "--policy",
+                str(ROOT / ".github" / "protection-policy.json"),
+                "--readback",
+                str(PROTECTION_FIXTURES / "branch-ruleset.json"),
+            ]
+        )
+        self.assertEqual(status, 0)
+
+    def test_cli_tag_readback_without_channel_fails_closed(self):
+        module = _load_script("check_protection_policy.py")
+        captured = io.StringIO()
+        with mock.patch.object(module.sys, "stderr", captured):
+            status = module.main(
+                [
+                    "--policy",
+                    str(ROOT / ".github" / "protection-policy.json"),
+                    "--tag-readback",
+                    str(PROTECTION_FIXTURES / "immutable-tag-ruleset.json"),
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("missing tag protection", captured.getvalue())
+        self.assertIn("--channel-readback", captured.getvalue())
+
+    def test_cli_tag_and_channel_readback_pass(self):
+        module = _load_script("check_protection_policy.py")
+        status = module.main(
+            [
+                "--policy",
+                str(ROOT / ".github" / "protection-policy.json"),
+                "--readback",
+                str(PROTECTION_FIXTURES / "branch-ruleset.json"),
+                "--tag-readback",
+                str(PROTECTION_FIXTURES / "immutable-tag-ruleset.json"),
+                "--channel-readback",
+                str(PROTECTION_FIXTURES / "v4-channel-ruleset.json"),
+            ]
+        )
+        self.assertEqual(status, 0)
+
+    def test_cli_readback_dir_passes(self):
+        module = _load_script("check_protection_policy.py")
+        status = module.main(
+            [
+                "--policy",
+                str(ROOT / ".github" / "protection-policy.json"),
+                "--readback-dir",
+                str(PROTECTION_FIXTURES / "readback-dir"),
+            ]
+        )
+        self.assertEqual(status, 0)
+
+    def test_v4_promotion_entry_rejects_missing_and_equal_shas(self):
+        module = _load_script("check_protection_policy.py")
+        base = {
+            "record_type": "v4_promotion",
+            "tag": "v4",
+            "operator": "malsabbagh",
+            "timestamp": "2026-09-16T00:00:00Z",
+            "reason": "Promote setup-v4",
+        }
+        missing_previous = dict(base, new_sha="a" * 40)
+        missing_new = dict(base, previous_sha="b" * 40)
+        equal = dict(base, previous_sha="a" * 40, new_sha="a" * 40)
+        self.assertTrue(
+            any(
+                "missing previous_sha" in error
+                for error in module.validate_v4_promotion_entry(missing_previous)
+            )
+        )
+        self.assertTrue(
+            any(
+                "missing new_sha" in error
+                for error in module.validate_v4_promotion_entry(missing_new)
+            )
+        )
+        self.assertTrue(
+            any(
+                "must differ" in error
+                for error in module.validate_v4_promotion_entry(equal)
+            )
+        )
+
+    def test_promotion_ledger_rejects_malformed_jsonl_and_accepts_mixed(self):
+        module = _load_script("check_protection_policy.py")
+        self.assertEqual(
+            module.validate_promotion_ledger(
+                PROTECTION_FIXTURES / "ledger" / "valid-mixed.jsonl"
+            ),
+            [],
+        )
+        missing = module.validate_promotion_ledger(
+            PROTECTION_FIXTURES / "ledger" / "missing-sha.jsonl"
+        )
+        self.assertTrue(any("missing previous_sha" in error for error in missing))
+        self.assertTrue(any("missing new_sha" in error for error in missing))
+        equal = module.validate_promotion_ledger(
+            PROTECTION_FIXTURES / "ledger" / "equal-sha.jsonl"
+        )
+        self.assertTrue(any("must differ" in error for error in equal))
+        malformed = module.validate_promotion_ledger(
+            PROTECTION_FIXTURES / "ledger" / "malformed.jsonl"
+        )
+        self.assertTrue(any("malformed JSON" in error for error in malformed))
+
+    def test_checked_in_publication_ledger_is_valid_mixed_file(self):
+        module = _load_script("check_protection_policy.py")
+        self.assertEqual(
+            module.validate_promotion_ledger(
+                ROOT / ".publication" / "publication-ledger.jsonl"
+            ),
+            [],
+        )
+
+    def test_append_v4_promotion_writes_validated_record(self):
+        module = _load_script("check_protection_policy.py")
+        entry = module.build_v4_promotion_entry(
+            previous_sha="b" * 40,
+            new_sha="a" * 40,
+            operator="malsabbagh",
+            timestamp="2026-09-16T12:00:00Z",
+            reason="Promote setup-v4 after reviewed public sync",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "publication-ledger.jsonl"
+            path.write_text(
+                (ROOT / ".publication" / "publication-ledger.jsonl").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            module.append_v4_promotion_entry(path, entry)
+            errors = module.validate_promotion_ledger(path)
+            self.assertEqual(errors, [])
+            lines = [
+                line for line in path.read_text(encoding="utf-8").splitlines() if line
+            ]
+            self.assertEqual(len(lines), 2)
+            recorded = json.loads(lines[-1])
+            self.assertEqual(recorded["record_type"], "v4_promotion")
+            self.assertEqual(recorded["previous_sha"], "b" * 40)
+            self.assertEqual(recorded["new_sha"], "a" * 40)
+
+    def test_append_v4_promotion_rejects_secret_operator_identity(self):
+        module = _load_script("check_protection_policy.py")
+        with self.assertRaises(ValueError):
+            module.build_v4_promotion_entry(
+                previous_sha="b" * 40,
+                new_sha="a" * 40,
+                operator="ghp_notarealtoken",
+                timestamp="2026-09-16T12:00:00Z",
+                reason="Promote setup-v4",
+            )
 
 
 class CommittedCodeQLFixtureTests(unittest.TestCase):
