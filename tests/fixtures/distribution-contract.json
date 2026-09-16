@@ -57,9 +57,14 @@
     }
   },
   "import_guard": {
-    "environment": ["REVIEWSENSEI_CHECKOUT_ROOT", "REVIEWSENSEI_DIST_SAFE_LANE"],
-    "armed": "Setting either variable arms the guard. Every documented dist-safe command exports both. With neither set the guard is disarmed so the checkout lane can import an editable install.",
-    "rule": "While armed, review_sensei.__file__ must resolve under sys.prefix, and must not resolve under $REVIEWSENSEI_CHECKOUT_ROOT/src when that variable is set."
+    "environment": [
+      "REVIEWSENSEI_CHECKOUT_ROOT",
+      "REVIEWSENSEI_DIST_SAFE_LANE",
+      "REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT"
+    ],
+    "armed": "Armed by default, with no arming variable. REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1 is the only opt-out. The checkout lane is separated by test discovery rather than by disarming: unittest discover skips the non-package lane directories and tests/conftest.py makes pytest match it.",
+    "rule": "review_sensei.__file__ must resolve under sys.prefix. When REVIEWSENSEI_CHECKOUT_ROOT is set it adds a second rule, that the package must not resolve under that checkout's src/, and the variable must name a directory containing src/ so misconfiguration fails closed.",
+    "lane_marker": "REVIEWSENSEI_DIST_SAFE_LANE=1 marks the suite as the packaged one extracted from the sdist. It no longer arms the guard and is used only to assert checkout-only modules are absent."
   },
   "reproduction": {
     "baseline_commit": "3f9ca4ecdd49a398645561daf403f0569b07ddcc",

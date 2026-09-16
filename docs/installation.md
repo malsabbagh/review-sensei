@@ -91,11 +91,16 @@ packaged or generated assets. After `python -m build --outdir dist`, record
 `sha256sum dist/*.tar.gz dist/*.whl`, install **only** the wheel into a clean
 virtualenv, extract the sdist, and run the dist-safe suite from that unpacked
 `tests/` tree with `REVIEWSENSEI_DIST_SAFE_LANE=1` and
-`REVIEWSENSEI_CHECKOUT_ROOT` pointing at the developer checkout. Setting either
-variable arms the import guard, and both commands below export both. While
-armed, `review_sensei.__file__` must resolve under `sys.prefix` so an unrelated
-site-packages install cannot stand in for the wheel you just built, and it must
-not resolve under the checkout's `src/`. Either violation fails the suite.
+`REVIEWSENSEI_CHECKOUT_ROOT` pointing at the developer checkout.
+
+The import guard is armed by default, so it cannot be lost by forgetting a
+variable: `review_sensei.__file__` must resolve under `sys.prefix`, meaning an
+editable install or an unrelated checkout cannot stand in for the wheel you just
+built. `REVIEWSENSEI_CHECKOUT_ROOT` adds the stricter rule that the package must
+not resolve under that checkout's `src/`, and must name a directory containing
+`src/` so a typo fails closed. `REVIEWSENSEI_DIST_SAFE_LANE=1` marks the suite as
+the packaged one so checkout-only modules are asserted absent. Set
+`REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1` only to opt out deliberately.
 
 ```bash
 python -m build --outdir dist

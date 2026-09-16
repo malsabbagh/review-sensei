@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
@@ -12,6 +14,7 @@ if str(_TESTS_ROOT) not in sys.path:
 
 from packaging_guard import (  # noqa: E402
     assert_distribution_import,
+    is_disarmed,
     is_loaded_from_checkout_src,
 )
 
@@ -87,15 +90,42 @@ class DistributionContractTests(unittest.TestCase):
         )
         self.assertFalse(is_loaded_from_checkout_src(installed, checkout))
 
-    def test_loaded_package_is_not_checkout_src_when_lane_is_armed(self) -> None:
+    def test_loaded_package_is_the_installed_distribution(self) -> None:
         package_file = assert_distribution_import()
         self.assertTrue(package_file.is_file())
-        if os.environ.get("REVIEWSENSEI_DIST_SAFE_LANE") == "1":
-            prefix = Path(sys.prefix).resolve()
-            self.assertIn(prefix, package_file.parents)
-            checkout = os.environ.get("REVIEWSENSEI_CHECKOUT_ROOT")
-            self.assertTrue(checkout)
+        if is_disarmed():
+            self.skipTest("guard disarmed by REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1")
+        # Armed by default, so this holds however the lane was invoked.
+        self.assertTrue(package_file.is_relative_to(Path(sys.prefix).resolve()))
+        checkout = os.environ.get("REVIEWSENSEI_CHECKOUT_ROOT")
+        if checkout:
             self.assertFalse(is_loaded_from_checkout_src(package_file, checkout))
+
+    def test_misconfigured_checkout_root_fails_closed(self) -> None:
+        """A root without ``src/`` must error rather than skip the rule."""
+
+        missing = Path(tempfile.gettempdir()) / "review-sensei-absent-checkout"
+        self.assertFalse((missing / "src").is_dir())
+        with patch.dict(
+            os.environ,
+            {
+                "REVIEWSENSEI_CHECKOUT_ROOT": str(missing),
+                "REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT": "",
+            },
+        ):
+            with self.assertRaises(AssertionError) as caught:
+                assert_distribution_import()
+        self.assertIn("does not contain a src/ directory", str(caught.exception))
+
+    def test_explicit_opt_out_is_the_only_way_to_disarm_the_guard(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT": "1",
+                "REVIEWSENSEI_CHECKOUT_ROOT": "/review-sensei-nonexistent",
+            },
+        ):
+            self.assertTrue(assert_distribution_import().is_file())
 
 
 if __name__ == "__main__":

@@ -83,12 +83,17 @@ and checkout-only lane are recorded in
 new lane helper or fixture means editing that contract and `MANIFEST.in`; CI and
 the checkout lane tests read the contract rather than repeating the allowlist.
 
-Do not make the clean-wheel environment import the checkout. Setting either
-`REVIEWSENSEI_CHECKOUT_ROOT` or `REVIEWSENSEI_DIST_SAFE_LANE=1` arms the import
-guard: while armed, `review_sensei.__file__` must be beneath `sys.prefix` and
-must not be beneath `$REVIEWSENSEI_CHECKOUT_ROOT/src`. All packaged schemas must
-stay readable through `importlib.resources`. Broad checkout tests remain
-`python -m unittest discover -s tests -v`.
+Do not make the clean-wheel environment import the checkout. The import guard is
+armed by default rather than by environment variable: `review_sensei.__file__`
+must be beneath `sys.prefix`, and beneath `$REVIEWSENSEI_CHECKOUT_ROOT/src` is
+additionally rejected when that variable is set. Only
+`REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT=1` disarms it. All packaged schemas must stay
+readable through `importlib.resources`.
+
+Broad checkout tests remain `python -m unittest discover -s tests -v`, which
+skips `tests/dist_safe` and `tests/downstream` because they are not packages;
+`tests/conftest.py` makes `pytest` skip them too, so the packaged lanes only run
+the documented way, from an unpacked sdist against an installed wheel.
 
 ## Deterministic evaluation changes
 

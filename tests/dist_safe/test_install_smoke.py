@@ -16,7 +16,7 @@ _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
 
-from packaging_guard import assert_distribution_import  # noqa: E402
+from packaging_guard import assert_distribution_import, is_disarmed  # noqa: E402
 
 assert_distribution_import()
 
@@ -69,8 +69,8 @@ class InstallSmokeTests(unittest.TestCase):
             main(["--help"])
         self.assertEqual(caught.exception.code, 0)
         self.assertIn("review-sensei", stdout.getvalue())
-        if os.environ.get("REVIEWSENSEI_DIST_SAFE_LANE") == "1":
-            self.assertIn(Path(sys.prefix).resolve(), package_file.parents)
+        if not is_disarmed():
+            self.assertTrue(package_file.is_relative_to(Path(sys.prefix).resolve()))
 
     def test_fixture_provider_does_not_require_live_credentials(self) -> None:
         payload = json.dumps({"summary": "Fixture review.", "comments": []})
