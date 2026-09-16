@@ -8,7 +8,6 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.error import URLError
 
 from review_sensei import ProviderResponse
 from review_sensei.cli import (
@@ -21,6 +20,7 @@ from review_sensei.cli import (
     _plan_parser,
     main,
 )
+from review_sensei.errors import ReviewInputError
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -1723,8 +1723,8 @@ class DoctorPlanCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
                 with patch(
-                    "review_sensei.diagnostics.urlopen",
-                    side_effect=URLError("connection refused"),
+                    "review_sensei.diagnostics._bounded_probe_get",
+                    side_effect=ReviewInputError("unreachable endpoint: URLError"),
                 ):
                     status = main(["doctor", "--network", "--json"])
         self.assertEqual(status, 2)

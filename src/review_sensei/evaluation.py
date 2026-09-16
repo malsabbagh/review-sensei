@@ -608,8 +608,9 @@ def validate_profile_promotion(
 ) -> None:
     """Reject fixture-only or mismatched evidence for a named provider profile.
 
-    When ``reports`` are supplied, each live report's ``endpoint_scope`` must
-    match the profile's declared endpoint policy. Callers promoting with live
+    Remote profiles require at least one live report whose ``endpoint_scope``
+    matches the profile's declared endpoint policy. Local profiles validate live
+    report scopes when ``reports`` are supplied. Callers promoting with live
     evidence should pass reports or use ``require_supported_promotion``.
     """
 
@@ -626,7 +627,23 @@ def validate_profile_promotion(
         )
     if record.model not in profile.allowed_models():
         raise ReviewInputError("promotion record model does not match profile")
-    if reports:
+    if profile.endpoint_scope == "remote":
+        live_reports = [
+            report
+            for report in reports
+            if _report_promotion_fields(report)["mode"] == "live"
+        ]
+        if not live_reports:
+            raise ReviewInputError(
+                "remote profile promotion requires live evaluation reports"
+            )
+        expected = _profile_report_endpoint_scopes(profile)
+        for report in live_reports:
+            if _report_endpoint_scope(report) not in expected:
+                raise ReviewInputError(
+                    "promotion record endpoint scope does not match profile"
+                )
+    elif reports:
         expected = _profile_report_endpoint_scopes(profile)
         for report in reports:
             fields = _report_promotion_fields(report)

@@ -103,9 +103,6 @@ class PromotionAndReleaseTests(unittest.TestCase):
             "2026-01-01",
             {"seed": "fixed"},
         )
-        validate_profile_promotion("fast-triage", live)
-        with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
-            validate_profile_promotion("local-private", live)
         fixture_path = (
             Path(__file__).resolve().parent
             / "fixtures/schemas/golden/evaluation-report.json"
@@ -117,6 +114,12 @@ class PromotionAndReleaseTests(unittest.TestCase):
         remote_report["run"]["endpoint_scope"] = "remote"
         remote_report["run"]["invocation_id"] = "a" * 32
         validate_profile_promotion("fast-triage", live, [remote_report])
+        with self.assertRaisesRegex(
+            ReviewInputError, "requires live evaluation reports"
+        ):
+            validate_profile_promotion("fast-triage", live)
+        with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
+            validate_profile_promotion("local-private", live)
         loopback_report = json.loads(fixture_path.read_text(encoding="utf-8"))
         loopback_report["run"]["mode"] = "live"
         loopback_report["run"]["provider"] = "openai-compatible"

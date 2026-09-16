@@ -39,7 +39,11 @@ class ProviderError(ReviewSenseiError):
 
 
 class UnknownProviderProfileError(ProviderError):
-    """Raised when a named provider profile does not exist."""
+    """Raised when a named provider profile does not exist.
+
+    Configuration callers such as ``Stage`` translate this to
+    ``ReviewInputError``; routing code may catch the broader ``ProviderError``.
+    """
 
     error_category = "provider"
 

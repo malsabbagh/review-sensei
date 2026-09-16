@@ -88,6 +88,16 @@ class ProviderRoutingTests(unittest.TestCase):
         self.assertEqual(provider.name, "ollama")
         self.assertEqual(dict(mapping), {})
 
+    def test_alias_stage_profile_does_not_rebuild_matching_provider(self) -> None:
+        stages = [_stage("Summary", profile="local")]
+        provider, mapping = bind_stage_providers(
+            registry=default_registry(),
+            settings=ProviderSettings.for_profile("local"),
+            stages=stages,
+        )
+        self.assertEqual(provider.name, "ollama")
+        self.assertEqual(dict(mapping), {})
+
     def test_bind_does_not_forward_remote_credential_when_narrowing(self) -> None:
         stages = [_stage("Summary", profile="local-private")]
         provider, mapping = bind_stage_providers(
@@ -129,12 +139,15 @@ class ProviderRoutingTests(unittest.TestCase):
                 return profile
             return selected
 
-        with patch(
-            "review_sensei.providers.routing.get_provider_profile",
-            side_effect=profile_lookup,
-        ), patch(
-            "review_sensei.providers.registry.get_provider_profile",
-            side_effect=profile_lookup,
+        with (
+            patch(
+                "review_sensei.providers.routing.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
+            patch(
+                "review_sensei.providers.registry.get_provider_profile",
+                side_effect=profile_lookup,
+            ),
         ):
             run_provider, mapping = bind_stage_providers(
                 registry=default_registry(),
@@ -183,7 +196,9 @@ class ProviderRoutingTests(unittest.TestCase):
         workflow_path = root / ".github" / "workflows" / "review-sensei-run.yml"
         example_path = root / "examples" / "github-actions" / "review-sensei-review.yml"
         if not workflow_path.is_file() or not example_path.is_file():
-            self.skipTest("workflow fixtures are only available in a repository checkout")
+            self.skipTest(
+                "workflow fixtures are only available in a repository checkout"
+            )
         workflow = workflow_path.read_text(encoding="utf-8")
         example = example_path.read_text(encoding="utf-8")
         for text in (workflow, example):

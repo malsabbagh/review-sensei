@@ -606,7 +606,41 @@ class ReviewServiceTests(unittest.TestCase):
             stages=stages,
             budget=ResourceBudget.create(max_provider_calls=1, max_retry_attempts=0),
         )
-        with self.assertRaisesRegex(ProviderError, "transient provider failure"):
+        with self.assertRaises(ProviderError) as raised:
             service.review(ReviewRequest(diff=DIFF))
+        self.assertTrue(raised.exception.transient)
+        self.assertEqual(str(raised.exception), "transient provider failure")
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(service._provider_calls, 0)
+
+    def test_structural_recovery_uses_retry_budget_not_provider_call_budget(self):
+        class RecoveringProvider(FakeProvider):
+            def __init__(self) -> None:
+                super().__init__('{"comments":[]}')
+                self.attempts = 0
+
+            def complete(self, request):
+                self.requests.append(request)
+                self.attempts += 1
+                if self.attempts == 1:
+                    return ProviderResponse(
+                        text='{"comments":[{"body":"x"}]}',
+                        provider="fake",
+                        model="fake-model",
+                    )
+                return ProviderResponse(
+                    text='{"summary":"recovered","comments":[]}',
+                    provider="fake",
+                    model="fake-model",
+                )
+
+        provider = RecoveringProvider()
+        stages = [Stage(name="one", prompt_template="{diff}", outputs=("summary",))]
+        result = ReviewService(
+            provider,
+            stages=stages,
+            budget=ResourceBudget.create(max_provider_calls=2, max_retry_attempts=1),
+        ).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(provider.attempts, 2)
+        self.assertEqual(result.summary, "recovered")
+        self.assertEqual(len(provider.requests), 2)

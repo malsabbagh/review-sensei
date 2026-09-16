@@ -459,13 +459,16 @@ class OpenAICompatibleProvider:
                 try:
                     validate_bounded_text(
                         candidate.strip(),
-                        request.limits.max_model_bytes,
+                        request.limits.max_revision_bytes,
                         label="OpenAI-compatible observed revision",
                         allow_empty=False,
                     )
-                    revision = candidate.strip()
-                except ReviewInputError:
-                    revision = None
+                except ReviewInputError as exc:
+                    raise ProviderError(
+                        "OpenAI-compatible observed revision exceeded the "
+                        "configured size limit"
+                    ) from exc
+                revision = candidate.strip()
         return ProviderResponse(
             text=text,
             provider=self.name,

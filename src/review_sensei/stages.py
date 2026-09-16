@@ -324,15 +324,15 @@ class Stage:
                     "stage provider_profile must be a non-empty string"
                 )
             from .errors import UnknownProviderProfileError
-            from .providers.profiles import get_provider_profile
+            from .providers.profiles import canonical_profile_name
 
             try:
-                selected = get_provider_profile(self.provider_profile)
+                canonical = canonical_profile_name(self.provider_profile)
             except UnknownProviderProfileError as exc:
                 raise ReviewInputError("stage provider_profile is unknown") from exc
             except ProviderError as exc:
                 raise ReviewInputError(str(exc)) from exc
-            object.__setattr__(self, "provider_profile", selected.name)
+            object.__setattr__(self, "provider_profile", canonical)
         if (
             not isinstance(self.prompt_template, str)
             or not self.prompt_template.strip()

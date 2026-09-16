@@ -178,10 +178,7 @@ class ProviderConformanceTests(unittest.TestCase):
             with self.subTest(adapter=label):
                 provider = factory(
                     lambda request, timeout, context: (_ for _ in ()).throw(
-                        URLError(
-                            "dns failure",
-                            socket.gaierror(8, f"dns {secret}"),
-                        )
+                        URLError(socket.gaierror(socket.EAI_AGAIN, f"dns {secret}"))
                     ),
                     api_key=secret if label == "Ollama" else "secret",
                 )

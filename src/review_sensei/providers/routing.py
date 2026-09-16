@@ -15,7 +15,7 @@ from dataclasses import replace
 from ..errors import ProviderError
 from ..stages import Stage
 from .base import ReviewProvider
-from .profiles import get_provider_profile
+from .profiles import canonical_profile_name, get_provider_profile
 from .registry import ProviderRegistry, ProviderSettings
 
 
@@ -31,6 +31,8 @@ def resolve_stage_profile_name(
     remote stage profile.  Remote runs may narrow to ``local-private``.
     """
 
+    if run_profile is not None:
+        run_profile = canonical_profile_name(run_profile)
     if stage_profile is None:
         return run_profile
     selected = get_provider_profile(stage_profile)
@@ -56,6 +58,21 @@ def resolve_stage_profile_name(
     return selected.name
 
 
+def _stage_provider_settings(
+    *,
+    resolved: str,
+    model: str,
+    api_key: str | None,
+) -> ProviderSettings:
+    """Build canonical profile settings for one stage provider."""
+
+    selected = get_provider_profile(resolved)
+    settings = ProviderSettings.for_profile(resolved, api_key=api_key)
+    if model != selected.model:
+        settings = replace(settings, model=model)
+    return settings
+
+
 def bind_stage_providers(
     *,
     registry: ProviderRegistry,
@@ -67,9 +84,9 @@ def bind_stage_providers(
     The default provider serves every stage unless the stage explicitly sets
     ``provider_profile`` or the run profile declares a per-stage model that
     differs from the run default.  Profile narrowing always builds a fresh
-    credential-free adapter from ``ProviderSettings.for_profile``; caller
-    overrides such as ``api_key`` or ``base_url`` are not forwarded across
-    endpoints.
+    credential-free adapter from ``ProviderSettings.for_profile``; per-stage
+    providers on the same profile re-derive canonical profile settings and only
+    reuse the run ``api_key`` when the profile requires one.
     """
 
     if settings.name.strip().lower() == "fixture" and any(
@@ -80,7 +97,7 @@ def bind_stage_providers(
         )
     default_provider = registry.create(settings)
     run_profile_name = (
-        get_provider_profile(settings.profile).name
+        canonical_profile_name(settings.profile)
         if settings.profile is not None
         else None
     )
@@ -105,9 +122,19 @@ def bind_stage_providers(
                 continue
             if model != default_model:
                 mapping[stage.name] = registry.create(
-                    replace(settings, model=model)
+                    _stage_provider_settings(
+                        resolved=resolved,
+                        model=model,
+                        api_key=settings.api_key,
+                    )
                 )
             continue
         if model != profile.model:
-            mapping[stage.name] = registry.create(replace(settings, model=model))
+            mapping[stage.name] = registry.create(
+                _stage_provider_settings(
+                    resolved=resolved,
+                    model=model,
+                    api_key=settings.api_key,
+                )
+            )
     return default_provider, mapping

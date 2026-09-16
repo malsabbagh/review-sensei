@@ -1253,7 +1253,7 @@ class ProviderResponse:
         if self.revision is not None:
             validate_bounded_text(
                 self.revision,
-                self.limits.max_model_bytes,
+                self.limits.max_revision_bytes,
                 label="provider response revision",
                 allow_empty=False,
             )

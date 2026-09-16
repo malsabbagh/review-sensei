@@ -19,13 +19,18 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:
-    """Return whether ``exc`` represents a retryable transport failure."""
+    """Return whether ``exc`` represents a retryable transport failure.
+
+    DNS lookups that may succeed on retry (``EAI_AGAIN``) and connection-class
+    failures are treated as transient; permanent resolver or URL configuration
+    errors are not.
+    """
 
     reason = exc.reason
     if isinstance(reason, (TimeoutError, ConnectionError)):
         return True
     if isinstance(reason, socket.gaierror):
-        return True
+        return reason.errno == socket.EAI_AGAIN
     if isinstance(reason, OSError) and getattr(reason, "errno", None) in (
         _TRANSIENT_NETWORK_ERRNOS
     ):

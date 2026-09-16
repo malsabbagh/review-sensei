@@ -247,13 +247,15 @@ class OllamaProvider:
             try:
                 validate_bounded_text(
                     observed.strip(),
-                    request.limits.max_model_bytes,
+                    request.limits.max_revision_bytes,
                     label="Ollama observed revision",
                     allow_empty=False,
                 )
-                revision = observed.strip()
-            except ReviewInputError:
-                revision = None
+            except ReviewInputError as exc:
+                raise ProviderError(
+                    "Ollama observed revision exceeded the configured size limit"
+                ) from exc
+            revision = observed.strip()
 
         return ProviderResponse(
             text=text,

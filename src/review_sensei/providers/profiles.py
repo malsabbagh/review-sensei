@@ -146,6 +146,12 @@ _ALIASES = {
 }
 
 
+def canonical_profile_name(name: str) -> str:
+    """Return the canonical profile name, resolving aliases."""
+
+    return get_provider_profile(name).name
+
+
 def get_provider_profile(name: str) -> ProviderProfile:
     """Return a canonical profile, rejecting unknown names before any call."""
 
