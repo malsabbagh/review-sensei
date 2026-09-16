@@ -676,3 +676,14 @@ single-item page, overfull page, or pagination-incomplete response still fails
 closed.
 See ADR 0026 and the learning publisher implementation for the complete
 candidate precedence and recovery rules.
+
+## Ownership, licensing, and commercial boundary
+
+Copyright licensing, trademark usage, and the Community / official-ops /
+prospective commercial boundary are documented in
+[`docs/ownership-and-licensing.md`](ownership-and-licensing.md),
+[`TRADEMARKS.md`](../TRADEMARKS.md), and
+[ADR 0040](adr/0040-community-managed-enterprise-boundary.md). Public
+App/broker source remains MIT; official channel control does not reclassify
+that source as proprietary. Package identities and runtime contracts are
+unchanged by that documentation.

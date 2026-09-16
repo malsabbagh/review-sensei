@@ -48,6 +48,7 @@ Process: `docs/process/adr-process.md`
 | [0037](0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40 | Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited v4 promotion/rollback |
 | [0039](0039-verify-candidate-findings-before-publication.md) | Proposed | Verify candidate findings against snapshot evidence before publication | #37 | Legacy single-pass remains default; confirmed policy publishes only deterministic evidence-backed findings. |
+| [0040](0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89 | Preserve MIT Community source; official ops ≠ proprietary code; future commercial layer is separate |
 
 ## Policy
 

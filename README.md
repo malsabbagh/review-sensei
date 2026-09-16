@@ -651,4 +651,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 
 ## License
 
-ReviewSensei is released under the [MIT License](LICENSE).
+ReviewSensei is released under the [MIT License](LICENSE). The synthetic
+evaluation corpus under `evaluation/v1/` is CC0-1.0. For the ownership
+inventory, trademark usage, contribution licensing (DCO; no CLA), and
+Community / Managed / Enterprise boundary, see
+[`docs/ownership-and-licensing.md`](docs/ownership-and-licensing.md),
+[`TRADEMARKS.md`](TRADEMARKS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and
+[ADR 0040](docs/adr/0040-community-managed-enterprise-boundary.md).

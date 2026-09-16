@@ -20,6 +20,13 @@ technical policy. See [`architecture.md`](architecture.md) and the
 authentication, persistence, deployment, or dependency direction need an ADR;
 documentation-only changes generally do not.
 
+Ownership, trademark usage, and the Community / Managed / Enterprise boundary
+are documented in [`ownership-and-licensing.md`](ownership-and-licensing.md),
+[`TRADEMARKS.md`](../TRADEMARKS.md), and
+[ADR 0040](adr/0040-community-managed-enterprise-boundary.md). Contributions
+remain under the applicable file license with DCO sign-off; no CLA is required
+(see [`CONTRIBUTING.md`](../CONTRIBUTING.md)).
+
 ## Issue triage
 
 Use the [bug](../.github/ISSUE_TEMPLATE/bug_report.yml),
