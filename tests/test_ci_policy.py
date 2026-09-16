@@ -111,6 +111,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
         self.assertIn("id-token: write", text)
+        self.assertIn("github.event.pull_request.draft != true", text)
         for block in run_blocks:
             self.assertNotIn("${{ inputs.", block)
         for input_name in (
@@ -163,6 +164,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
             text,
         )
+        self.assertIn("github.event.pull_request.draft != true", text)
+        self.assertEqual(text.count("github.event.pull_request.draft != true"), 2)
         self.assertIn("persist-credentials: false", text)
         self.assertIn(
             "ref: ${{ github.event.repository.default_branch }}",
@@ -250,6 +253,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("validate-provider-mode:", text)
+        self.assertIn(
+            "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
+            text,
+        )
         self.assertEqual(text.count("needs: validate-provider-mode"), 2)
         self.assertIn('case "$PROVIDER_MODE" in', text)
         self.assertEqual(text.count("github reply \\\n"), 2)

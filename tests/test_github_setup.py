@@ -253,6 +253,7 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn(
             "types: [opened, reopened, synchronize, ready_for_review]", workflow
         )
+        self.assertIn("github.event.pull_request.draft != true", workflow)
         self.assertIn(
             "source_kind:\n        description: Source kind for manual dispatch",
             workflow,
@@ -647,10 +648,30 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         files = {file.path: file.content for file in plan.files}
         files[".github/workflows/review-sensei-review.yml"] = (
             files[".github/workflows/review-sensei-review.yml"]
+            .replace("      github.event.pull_request.draft != true &&\n", "", 1)
             .replace(current_operation, historical_operation, 1)
             .replace("pull-requests: write", "pull-requests: read", 1)
             .replace("issues: write", "issues: read", 1)
         )
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_released_v4_setup_without_draft_skip_is_migrated(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        current = files[".github/workflows/review-sensei-review.yml"]
+        previous = current.replace(
+            "      github.event.pull_request.draft != true &&\n", "", 1
+        )
+        self.assertNotEqual(previous, current)
+        files[".github/workflows/review-sensei-review.yml"] = previous
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
