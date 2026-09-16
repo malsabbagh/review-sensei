@@ -4,6 +4,7 @@ import ast
 import importlib.util
 import io
 import json
+import shlex
 import sys
 import tarfile
 import tempfile
@@ -99,24 +100,42 @@ class DistributionLaneTests(unittest.TestCase):
     def test_ci_lane_commands_match_the_contract_modulo_the_extracted_suite(self):
         """Tie the CI invocation to the contract's canonical command.
 
-        CI runs the suite from the unpacked sdist, so the paths differ by the
-        ``$suite`` prefix only. Comparing the rest keeps an edit to either copy
-        from satisfying both tests independently.
+        Compared as argument lists rather than substrings, so shell quoting and
+        the interpreter path are free to change while a dropped or reordered
+        flag still fails. CI runs the suite from the unpacked sdist, so the only
+        normalisation is the ``$suite`` prefix standing in for ``tests``.
         """
 
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         command = CONTRACT["supported_command"]
+        invocations = [
+            shlex.split(line.strip())
+            for line in ci.splitlines()
+            if "unittest discover" in line
+        ]
+        self.assertTrue(invocations)
         for key, lane in (
             ("run_dist_safe", "dist_safe"),
             ("run_downstream", "downstream"),
         ):
-            canonical = command[key]
+            canonical = shlex.split(command[key])
             self.assertIn(f"tests/{lane}", canonical)
-            expected = canonical.replace(
-                f"tests/{lane}", f'"$suite/{lane}"'
-            ).removeprefix("python ")
+            matching = [
+                argv
+                for argv in invocations
+                if f"$suite/{lane}" in argv or f"tests/{lane}" in argv
+            ]
             with self.subTest(lane=lane):
-                self.assertIn(expected, ci)
+                self.assertEqual(len(matching), 1)
+                normalised = [
+                    "python" if index == 0 else argument
+                    for index, argument in enumerate(matching[0])
+                ]
+                normalised = [
+                    f"tests/{lane}" if argument == f"$suite/{lane}" else argument
+                    for argument in normalised
+                ]
+                self.assertEqual(normalised, canonical)
 
     def test_ci_verifies_the_sdist_through_the_contract_verifier(self):
         """CI must not repeat the packaged allowlist as inline tar assertions."""

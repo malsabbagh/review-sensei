@@ -6,6 +6,11 @@
 # Environment `downstream-canary` with required reviewers, and only against a
 # disposable repository that uses reviewed synthetic data, bounded privileges,
 # and cleanup.
+#
+# The job inherits the repository-wide runner selector, so it uses the private
+# `ubicloud-standard-2` runner when `ENABLE_UBICLOUD_HOSTED` is `true` and
+# `ubuntu-latest` otherwise. The selector is required for every job by
+# tests/test_ci_policy.py, so this placeholder cannot pin `ubuntu-latest`.
 name: Downstream canary
 
 on:

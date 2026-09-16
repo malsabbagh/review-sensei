@@ -359,8 +359,10 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
             state="closed",
         )
         self.assertFalse(plan.eligible)
-        if plan.eligible:
-            ReviewService(provider).review(ReviewRequest(diff=DIFF))
+        self.assertEqual(plan.skip_reason, "pr_not_open")
+        # The plan gates the provider call, so a closed pull request must reach
+        # publication without any model request having been made.
+        self.assertEqual(provider.requests, [])
         outcome = application.publish_review(
             options=GitHubWriteOptions(auto_review=True),
             oidc_token=None,
