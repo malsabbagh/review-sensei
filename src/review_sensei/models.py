@@ -721,8 +721,12 @@ class ReviewResult:
         if self.source_context_coverage is not None:
             from .context import SourceContextCoverage
 
-            if isinstance(self.source_context_coverage, SourceContextCoverage):
-                value["source_context"] = self.source_context_coverage.to_dict()
+            # ``__post_init__`` already rejects any other type, so the field is
+            # always emitted once set and the document cannot drift from the
+            # schema's required set on read-back.
+            value["source_context"] = cast(
+                SourceContextCoverage, self.source_context_coverage
+            ).to_dict()
         return value
 
     @classmethod

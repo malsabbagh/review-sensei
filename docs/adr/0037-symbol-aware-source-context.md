@@ -48,6 +48,14 @@ ordering. Ambiguous parses, unsupported languages, excluded paths, and
 exhausted budgets appear in coverage/outcomes; exhausted budgets fail closed
 when the opt-in policy is enabled.
 
+Relationship bounds are reported by cause rather than as one undifferentiated
+status. A capped caller-directory listing records `directory-truncated`, a
+capped import or caller candidate set records `relations-truncated`, and both
+are recorded as a comma-joined pair when both bounds are reached. Only Python
+sources count toward the caller-directory cap, so a directory padded with
+data or fixture files is not reported as truncated when every Python file in
+it was inspected.
+
 ## Scope
 
 In scope:

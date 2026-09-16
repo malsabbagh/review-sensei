@@ -169,9 +169,13 @@ additive field as an optional extension during the deprecation window.
 
 When `--enable-symbol-context` is set, results may also include optional
 `source_context` coverage (enabled flag, completeness, trusted-base snapshot,
-languages, excerpt counts, and per-path outcomes). This field is omitted on
-the default document/learning path. It never includes source text and does not
-change GitHub write, egress, or approval defaults.
+languages, excerpt counts, and per-path outcomes). Per-path outcomes name the
+bound that was reached, including `directory-truncated` for a capped
+caller-directory listing and `relations-truncated` for a capped import or
+caller candidate set. This field is omitted on the default document/learning
+path. It never includes source text and does not change GitHub write, egress,
+or approval defaults. The loader requires the schema's exact types and rejects
+a malformed record rather than coercing it to defaults.
 
 ### Finding classification and presentation
 

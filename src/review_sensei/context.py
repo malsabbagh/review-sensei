@@ -681,10 +681,10 @@ class SourceContextCoverage:
         if not isinstance(snapshot_value, Mapping):
             raise ContextLoadError("source context coverage snapshot is invalid")
         revision = snapshot_value.get("revision")
-        kind = snapshot_value.get("kind", "base")
+        kind = snapshot_value.get("kind")
         if not isinstance(revision, str) or not isinstance(kind, str):
             raise ContextLoadError("source context coverage snapshot is invalid")
-        raw_outcomes = value.get("outcomes", ())
+        raw_outcomes = value.get("outcomes")
         if not isinstance(raw_outcomes, (list, tuple)):
             raise ContextLoadError("source context coverage outcomes are invalid")
         outcomes: list[tuple[str, str]] = []
@@ -696,23 +696,34 @@ class SourceContextCoverage:
             if not isinstance(path, str) or not isinstance(status, str):
                 raise ContextLoadError("source context coverage outcomes are invalid")
             outcomes.append((path, status))
+        # The schema requires these fields and constrains their types, so the
+        # publisher-facing boundary rejects anything else instead of coercing a
+        # malformed document into a plausible-looking record.
         enabled = value.get("enabled")
         complete = value.get("complete")
-        excerpt_count = value.get("excerpt_count", 0)
-        head_sha = value.get("untrusted_head_sha")
-        languages = value.get("languages", list(SUPPORTED_SYMBOL_LANGUAGES))
-        if not isinstance(languages, (list, tuple)):
+        if not isinstance(enabled, bool) or not isinstance(complete, bool):
+            raise ContextLoadError("source context coverage flags are invalid")
+        excerpt_count = value.get("excerpt_count")
+        if isinstance(excerpt_count, bool) or not isinstance(excerpt_count, int):
+            raise ContextLoadError("source context coverage excerpt_count is invalid")
+        languages = value.get("languages")
+        if not isinstance(languages, (list, tuple)) or not all(
+            isinstance(item, str) for item in languages
+        ):
             raise ContextLoadError(
                 "source context coverage language set is unsupported"
             )
+        head_sha = value.get("untrusted_head_sha")
+        if head_sha is not None and not isinstance(head_sha, str):
+            raise ContextLoadError("untrusted head SHA must be a commit SHA")
         return cls(
-            enabled=enabled is True,
-            complete=complete is True,
+            enabled=enabled,
+            complete=complete,
             snapshot=ContextSnapshot(revision, kind),
             outcomes=tuple(outcomes),
-            excerpt_count=excerpt_count if isinstance(excerpt_count, int) else 0,
-            languages=tuple(str(item) for item in languages),
-            untrusted_head_sha=head_sha if isinstance(head_sha, str) else None,
+            excerpt_count=excerpt_count,
+            languages=tuple(languages),
+            untrusted_head_sha=head_sha,
         )
 
 
@@ -1224,11 +1235,16 @@ class SymbolAwareContextSelector:
                         return True
         return False
 
-    def _caller_candidates(self, source: Path) -> tuple[tuple[str, ...], bool]:
+    def _caller_candidates(self, source: Path) -> tuple[tuple[str, ...], str | None]:
         """Return bounded same-directory callers discovered by static imports.
 
-        Directory listing is capped independently of repository size.  The
-        selector never executes the scanned files.
+        Directory listing is capped independently of repository size.  Only
+        Python sources count toward ``MAX_CALLER_DIRECTORY_ENTRIES`` so a
+        directory padded with data, fixture, or compiled files does not report
+        truncation when every Python file in it was inspected.  The returned
+        reason distinguishes a capped directory listing from a capped candidate
+        set so coverage records which bound was reached.  The selector never
+        executes the scanned files.
         """
 
         names = self._importable_module_names(source)
@@ -1236,17 +1252,17 @@ class SymbolAwareContextSelector:
         try:
             entries = sorted(os.listdir(directory))
         except OSError:
-            return (), False
-        truncated = len(entries) > MAX_CALLER_DIRECTORY_ENTRIES
+            return (), None
+        truncated: str | None = None
         candidates: set[str] = set()
         inspected = 0
         for name in entries:
-            if inspected >= MAX_CALLER_DIRECTORY_ENTRIES:
-                truncated = True
-                break
             suffix = Path(name).suffix.lower()
             if suffix not in _PYTHON_SOURCE_SUFFIXES:
                 continue
+            if inspected >= MAX_CALLER_DIRECTORY_ENTRIES:
+                truncated = "directory-truncated"
+                break
             inspected += 1
             candidate = directory / name
             if candidate == source:
@@ -1264,7 +1280,7 @@ class SymbolAwareContextSelector:
                 if relative is not None:
                     candidates.add(relative)
                     if len(candidates) >= MAX_RELATION_CANDIDATES_PER_FILE:
-                        truncated = True
+                        truncated = "relations-truncated"
                         break
         return tuple(sorted(candidates)), truncated
 
@@ -1526,8 +1542,17 @@ class SymbolAwareContextSelector:
             related = tuple(
                 sorted(set(import_candidates) | set(associated_tests) | set(callers))
             )
-            if imports_truncated or callers_truncated:
-                outcomes[path] = "partially-reviewed"
+            # Record which bound was reached rather than collapsing every
+            # truncation into one status.  Both causes are reported when both
+            # trigger so an operator cannot read a capped graph as a complete
+            # one.
+            truncation_reasons: set[str] = set()
+            if imports_truncated:
+                truncation_reasons.add("relations-truncated")
+            if callers_truncated is not None:
+                truncation_reasons.add(callers_truncated)
+            if truncation_reasons:
+                outcomes[path] = ",".join(sorted(truncation_reasons))
                 incomplete = True
             if depth >= self.max_depth:
                 # We intentionally include the changed/selected file but mark
@@ -1537,7 +1562,8 @@ class SymbolAwareContextSelector:
                     candidate not in seen and candidate not in queued
                     for candidate in related
                 ):
-                    outcomes[path] = "partially-reviewed"
+                    if not truncation_reasons:
+                        outcomes[path] = "partially-reviewed"
                     incomplete = True
                 continue
             for candidate in related:
@@ -1553,7 +1579,8 @@ class SymbolAwareContextSelector:
                 if not enqueue(
                     candidate, depth + 1, reason_for_candidate, candidate_names
                 ):
-                    outcomes[path] = "partially-reviewed"
+                    if not truncation_reasons:
+                        outcomes[path] = "partially-reviewed"
                     incomplete = True
         ordered_outcomes = tuple(sorted(outcomes.items()))
         complete = not incomplete

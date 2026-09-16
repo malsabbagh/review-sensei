@@ -299,8 +299,10 @@ deterministic AST parsing; JavaScript/TypeScript receive a bounded fallback
 and an explicit `unsupported-language` outcome. Selection is static: files are
 never executed. Exhausted budgets fail closed; other incomplete coverage is
 recorded on the review result as `source_context` without changing GitHub
-write, egress, or approval defaults. Default enablement requires evaluation
-under issue #33.
+write, egress, or approval defaults. Bounded relationship expansion reports
+`directory-truncated` or `relations-truncated` so a capped graph cannot be
+read as a complete one, and only Python sources count toward the
+caller-directory cap. Default enablement requires evaluation under issue #33.
 
 Custom stage and category directories are operator-selected configuration. They
 must come from a trusted checkout or deployment bundle, not the pull-request

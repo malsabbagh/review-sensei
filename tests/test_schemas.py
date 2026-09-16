@@ -112,6 +112,82 @@ class PublicSchemaTests(unittest.TestCase):
         restored = ReviewResult.from_dict(document)
         self.assertIsNotNone(restored.source_context_coverage)
 
+    def test_review_result_source_context_round_trips_untrusted_head_sha(self) -> None:
+        from review_sensei.context import ContextSnapshot, SourceContextCoverage
+
+        result = ReviewResult(
+            summary="ok",
+            comments=(),
+            provider="ollama",
+            source_context_coverage=SourceContextCoverage(
+                enabled=True,
+                complete=True,
+                snapshot=ContextSnapshot("a" * 40),
+                outcomes=(("src/app.py", "reviewed"),),
+                excerpt_count=2,
+                untrusted_head_sha="b" * 40,
+            ),
+        )
+        document = result.to_dict()
+        validate_public_document(document, "review-result")
+        self.assertEqual(document["source_context"]["untrusted_head_sha"], "b" * 40)
+        restored = ReviewResult.from_dict(document)
+        coverage = restored.source_context_coverage
+        assert coverage is not None
+        self.assertEqual(coverage.untrusted_head_sha, "b" * 40)
+        self.assertEqual(coverage.snapshot.revision, "a" * 40)
+        self.assertEqual(coverage.excerpt_count, 2)
+        self.assertTrue(coverage.complete)
+        # The field is schema-constrained, so a non-SHA value must not survive
+        # the publisher-facing boundary.
+        document["source_context"]["untrusted_head_sha"] = "not-a-sha"
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(document)
+
+    def test_review_result_source_context_rejects_coerced_types(self) -> None:
+        from review_sensei.context import ContextSnapshot, SourceContextCoverage
+
+        result = ReviewResult(
+            summary="ok",
+            comments=(),
+            provider="ollama",
+            source_context_coverage=SourceContextCoverage(
+                enabled=True,
+                complete=False,
+                snapshot=ContextSnapshot("a" * 40),
+                outcomes=(("src/app.py", "reviewed"),),
+                excerpt_count=1,
+            ),
+        )
+        document = result.to_dict()
+        validate_public_document(document, "review-result")
+        for field, invalid in (
+            ("enabled", 1),
+            ("complete", "yes"),
+            ("excerpt_count", "1"),
+            ("excerpt_count", True),
+            ("languages", ["python", 2]),
+            ("outcomes", "src/app.py"),
+        ):
+            with self.subTest(field=field, invalid=invalid):
+                broken = json.loads(json.dumps(document))
+                broken["source_context"][field] = invalid
+                with self.assertRaises(ReviewInputError):
+                    ReviewResult.from_dict(broken)
+        for missing in (
+            "enabled",
+            "complete",
+            "excerpt_count",
+            "languages",
+            "outcomes",
+            "snapshot",
+        ):
+            with self.subTest(missing=missing):
+                broken = json.loads(json.dumps(document))
+                del broken["source_context"][missing]
+                with self.assertRaises(ReviewInputError):
+                    ReviewResult.from_dict(broken)
+
     def test_conversation_reply_resolution_flag_is_optional_boolean(self) -> None:
         validate_public_document({"body": "ok"}, "conversation-reply")
         validate_public_document({"body": "ok", "resolve": True}, "conversation-reply")

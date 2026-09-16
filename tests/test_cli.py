@@ -1377,6 +1377,112 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("--base-sha", stderr.getvalue())
 
+    def test_cli_symbol_context_rejects_malformed_base_sha(self):
+        for value in ("a" * 39, "a" * 41, "z" * 40, "not-a-sha"):
+            with self.subTest(base_sha=value):
+                stderr = io.StringIO()
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    diff_path = root / "review.patch"
+                    diff_path.write_text(DIFF, encoding="utf-8")
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                str(diff_path),
+                                "--learning-root",
+                                str(root),
+                                "--enable-symbol-context",
+                                "--base-sha",
+                                value,
+                            ]
+                        )
+
+                self.assertEqual(status, 1)
+                message = stderr.getvalue()
+                self.assertIn("context snapshot revision must be a commit SHA", message)
+                # The sanitized boundary names the offending input without a
+                # traceback.
+                self.assertNotIn("Traceback", message)
+
+    def test_cli_symbol_context_rejects_malformed_head_sha(self):
+        for value in ("b" * 39, "b" * 41, "z" * 40, "not-a-sha"):
+            with self.subTest(head_sha=value):
+                stderr = io.StringIO()
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    src = root / "src"
+                    src.mkdir()
+                    (src / "app.py").write_text("import helper\nkeep\nchange\n")
+                    (src / "helper.py").write_text("VALUE = 1\n")
+                    diff_path = root / "review.patch"
+                    diff_path.write_text(DIFF, encoding="utf-8")
+                    provider = SymbolContextProvider()
+                    with patch(
+                        "review_sensei.cli.default_registry",
+                        return_value=FakeRegistry(provider),
+                    ):
+                        with redirect_stderr(stderr):
+                            status = main(
+                                [
+                                    "--diff",
+                                    str(diff_path),
+                                    "--learning-root",
+                                    str(root),
+                                    "--enable-symbol-context",
+                                    "--base-sha",
+                                    "a" * 40,
+                                    "--head-sha",
+                                    value,
+                                ]
+                            )
+
+                self.assertEqual(status, 1)
+                message = stderr.getvalue()
+                self.assertIn("untrusted_head_sha must be a commit SHA", message)
+                self.assertNotIn("Traceback", message)
+                self.assertEqual(provider.requests, [])
+
+    def test_cli_symbol_context_normalizes_uppercase_shas(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            src = root / "src"
+            src.mkdir()
+            (src / "app.py").write_text("import helper\nkeep\nchange\n")
+            (src / "helper.py").write_text("VALUE = 1\n")
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            output_path = root / "review.json"
+            provider = SymbolContextProvider()
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=FakeRegistry(provider),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--learning-root",
+                        str(root),
+                        "--enable-symbol-context",
+                        "--base-sha",
+                        "A" * 40,
+                        "--head-sha",
+                        "B" * 40,
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            # Uppercase input is normalized rather than rejected, so the
+            # recorded identity stays canonical lowercase hex.
+            coverage = json.loads(output_path.read_text(encoding="utf-8"))[
+                "source_context"
+            ]
+            self.assertEqual(coverage["snapshot"]["revision"], "a" * 40)
+            self.assertEqual(coverage["untrusted_head_sha"], "b" * 40)
+
     def test_cli_symbol_context_rejects_malicious_allowed_path(self):
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:

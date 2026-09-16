@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from review_sensei.context import (
+    MAX_CALLER_DIRECTORY_ENTRIES,
     ContextSnapshot,
     FindingLifecycle,
     ReviewContextCache,
@@ -218,7 +219,9 @@ class ContextLifecycleTests(unittest.TestCase):
             result = SymbolAwareContextSelector(root).select(("main.py",))
 
         self.assertFalse(result.complete)
-        self.assertEqual(dict(result.outcomes)["main.py"], "partially-reviewed")
+        # Import-node truncation is reported distinctly from a capped caller
+        # directory listing.
+        self.assertEqual(dict(result.outcomes)["main.py"], "relations-truncated")
 
     def test_symbol_selection_is_deterministic_and_records_blob_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -330,10 +333,40 @@ class ContextLifecycleTests(unittest.TestCase):
 
         self.assertLessEqual(len(result.excerpts), 16)
         self.assertFalse(result.complete)
-        self.assertIn(
+        # Both the relation cap and the caller-directory cap trigger here, and
+        # coverage names each one instead of collapsing them into a single
+        # undifferentiated status.
+        self.assertEqual(
             dict(result.outcomes)["main.py"],
-            {"partially-reviewed", "reviewed"},
+            "directory-truncated,relations-truncated",
         )
+
+    def test_caller_directory_cap_counts_only_python_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.py").write_text("VALUE = 1\n")
+            (root / "caller.py").write_text("from main import VALUE\n")
+            # Far more directory entries than the cap, but only two are Python
+            # sources, so the directory was inspected exhaustively.
+            for index in range(200):
+                (root / f"fixture{index:03d}.json").write_text("{}\n")
+            result = SymbolAwareContextSelector(root, max_depth=1).select(("main.py",))
+
+        outcomes = dict(result.outcomes)
+        self.assertEqual(outcomes["main.py"], "reviewed")
+        self.assertTrue(result.complete)
+        self.assertIn("caller.py", {excerpt.path for excerpt in result.excerpts})
+
+    def test_caller_directory_cap_reports_directory_truncation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main.py").write_text("VALUE = 1\n")
+            for index in range(MAX_CALLER_DIRECTORY_ENTRIES + 4):
+                (root / f"mod{index:03d}.py").write_text("VALUE = 1\n")
+            result = SymbolAwareContextSelector(root, max_depth=1).select(("main.py",))
+
+        self.assertEqual(dict(result.outcomes)["main.py"], "directory-truncated")
+        self.assertFalse(result.complete)
 
     def test_selector_parses_statically_and_does_not_execute_files(self):
         with tempfile.TemporaryDirectory() as temporary:

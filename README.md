@@ -411,6 +411,9 @@ Each excerpt records path, base commit SHA, Git blob object id, line range,
 selection reason, and SHA-256 digest. Ambiguous parses, excluded paths,
 unsupported languages, and exhausted budgets appear in result
 `source_context` coverage; they are not presented as complete understanding.
+Bounded relationship expansion names the bound it reached, using
+`directory-truncated` for a capped caller-directory listing and
+`relations-truncated` for a capped import or caller candidate set.
 When the opt-in policy is enabled, exhausting the configured file or byte
 budget fails closed. Evaluation under
 [#33](https://github.com/malsabbagh/review-sensei/issues/33) is required
