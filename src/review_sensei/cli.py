@@ -1563,27 +1563,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
-        from .planning import DEFAULT_TOTAL_WORK_BUDGET
-
         orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
-        maximum = (
-            DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes
-            if orchestrate
-            else limits.max_diff_bytes
-        )
         # Read and preflight before loading any provider adapter.  The helper
         # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
-        diff = read_bounded_utf8(
-            args.diff,
-            maximum=maximum,
-            label="diff",
-        )
         if orchestrate:
-            from .planning import plan_change
+            from .planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
 
+            diff = read_bounded_utf8(
+                args.diff,
+                maximum=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
+                label="diff",
+            )
             analysis = plan_change(diff, limits=limits, orchestrate=True).analysis
         else:
+            diff = read_bounded_utf8(
+                args.diff,
+                maximum=limits.max_diff_bytes,
+                label="diff",
+            )
             analysis = analyze_diff(diff, limits=limits)
         changed_paths = analysis.changed_paths
         learnings: tuple[LearningEntry, ...] = ()

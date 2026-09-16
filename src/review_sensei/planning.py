@@ -12,14 +12,14 @@ from dataclasses import dataclass, field, replace
 from .coverage import CoverageManifest, FileCoverage, HunkCoverage
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, utf8_size
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    DEFAULT_TOTAL_WORK_BUDGET,
+    ReviewLimits,
+    TotalWorkBudget,
+    utf8_size,
+)
 
-DEFAULT_TOTAL_WORK_MAX_DIFF_BYTES = 8_388_608
-DEFAULT_TOTAL_WORK_MAX_DIFF_LINES = 400_000
-DEFAULT_TOTAL_WORK_MAX_FILES = 4_000
-DEFAULT_TOTAL_WORK_MAX_HUNKS = 40_000
-DEFAULT_TOTAL_WORK_MAX_CHUNKS = 8
-DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS = 8
 MAX_RELATED_PATHS = 32
 
 GENERATED_FILE_NAMES = frozenset(
@@ -51,37 +51,6 @@ def is_generated_path(path: str) -> bool:
         lowered == prefix[:-1] or lowered.startswith(prefix)
         for prefix in GENERATED_PATH_PREFIXES
     )
-
-
-@dataclass(frozen=True)
-class TotalWorkBudget:
-    """Aggregate ceilings for one planned change, distinct from per-request limits."""
-
-    max_total_diff_bytes: int = DEFAULT_TOTAL_WORK_MAX_DIFF_BYTES
-    max_total_diff_lines: int = DEFAULT_TOTAL_WORK_MAX_DIFF_LINES
-    max_total_files: int = DEFAULT_TOTAL_WORK_MAX_FILES
-    max_total_hunks: int = DEFAULT_TOTAL_WORK_MAX_HUNKS
-    max_chunks: int = DEFAULT_TOTAL_WORK_MAX_CHUNKS
-    max_provider_calls: int = DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS
-
-    def __post_init__(self) -> None:
-        defaults = {
-            "max_total_diff_bytes": DEFAULT_TOTAL_WORK_MAX_DIFF_BYTES,
-            "max_total_diff_lines": DEFAULT_TOTAL_WORK_MAX_DIFF_LINES,
-            "max_total_files": DEFAULT_TOTAL_WORK_MAX_FILES,
-            "max_total_hunks": DEFAULT_TOTAL_WORK_MAX_HUNKS,
-            "max_chunks": DEFAULT_TOTAL_WORK_MAX_CHUNKS,
-            "max_provider_calls": DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
-        }
-        for name, ceiling in defaults.items():
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ReviewInputError(f"{name} must be a positive integer")
-            if value > ceiling:
-                raise ReviewInputError(f"{name} exceeds the total-work ceiling")
-
-
-DEFAULT_TOTAL_WORK_BUDGET = TotalWorkBudget()
 
 
 @dataclass(frozen=True)
@@ -393,12 +362,19 @@ def plan_change(
                     hunk_outcomes[hunk.index] = (outcome, reason)
         for record in reviewable:
             for path in record.coverage_paths:
+                # A path can appear in both a packed chunk and an overflow
+                # record when only some of its hunks fit the per-request budget.
+                # Treat that as partial coverage rather than fully reviewed.
                 if path in packed_paths and path not in overflow_paths:
                     file_outcomes[path] = ("reviewed", None)
             for hunk in record.hunks:
                 if hunk.index in packed_hunks:
                     hunk_outcomes[hunk.index] = ("reviewed", None)
     else:
+        if not analysis.enumeration_complete:
+            raise ReviewInputError(
+                "non-orchestrated reviews require complete diff enumeration"
+            )
         # Single-request reviews still emit coverage.  Files that fit the
         # per-request inventory are reviewed; the parser has already failed
         # closed when they would not fit.

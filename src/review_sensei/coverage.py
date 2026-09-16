@@ -244,12 +244,25 @@ class CoverageManifest:
             HunkCoverage.from_dict(item) if isinstance(item, Mapping) else item
             for item in hunks
         )
-        return cls(
+        declared_fully_reviewed = value.get("fully_reviewed")
+        if declared_fully_reviewed is not None and not isinstance(
+            declared_fully_reviewed, bool
+        ):
+            raise ReviewInputError("coverage fully_reviewed must be a boolean")
+        manifest = cls(
             files=parsed_files,
             hunks=parsed_hunks,
             enumeration_complete=enumeration_complete,
             schema_version=schema_version,
         )
+        if (
+            declared_fully_reviewed is not None
+            and declared_fully_reviewed != manifest.fully_reviewed
+        ):
+            raise ReviewInputError(
+                "coverage fully_reviewed disagrees with file and hunk outcomes"
+            )
+        return manifest
 
 
 def coverage_approval_state(coverage: CoverageManifest | None) -> str:

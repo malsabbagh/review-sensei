@@ -8,10 +8,11 @@ from typing import Mapping, cast
 
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
-from .planning import DEFAULT_TOTAL_WORK_BUDGET, TotalWorkBudget
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
+    DEFAULT_TOTAL_WORK_BUDGET,
     ReviewLimits,
+    TotalWorkBudget,
     utf8_size,
     validate_bounded_text,
     validate_repository_path,

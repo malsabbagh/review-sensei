@@ -9,6 +9,7 @@ from review_sensei.coverage import (
     coverage_approval_state,
 )
 from review_sensei.diff import analyze_diff
+from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import compare_chunked_against_baseline
 from review_sensei.models import (
     ProviderResponse,
@@ -62,6 +63,17 @@ rename from docs/old.md
 rename to guides/new.md
 """
 
+MULTI_HUNK = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ line1
++add1
+@@ -10 +11,2 @@
+ line10
++add10
+"""
+
 
 class FakeProvider:
     name = "fake"
@@ -100,6 +112,33 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertFalse(plan.coverage.enumeration_complete)
         self.assertFalse(plan.coverage.fully_reviewed)
         self.assertEqual(plan.coverage.approval_state(), "incomplete")
+
+    def test_packed_and_overflow_hunks_on_one_path_are_partially_reviewed(self):
+        plan = plan_change(
+            MULTI_HUNK,
+            limits=ReviewLimits(max_diff_bytes=120),
+            orchestrate=True,
+            work_budget=TotalWorkBudget(max_chunks=1),
+        )
+        outcomes = {entry.path: entry.outcome for entry in plan.coverage.files}
+        self.assertEqual(outcomes["src/a.py"], "partially-reviewed")
+
+    def test_rejects_contradictory_fully_reviewed_flag(self):
+        with self.assertRaises(ReviewInputError):
+            CoverageManifest.from_dict(
+                {
+                    "files": [
+                        {
+                            "path": "src/a.py",
+                            "outcome": "budget-exhausted",
+                            "reason": "provider-call-budget",
+                        }
+                    ],
+                    "hunks": [],
+                    "enumeration_complete": True,
+                    "fully_reviewed": True,
+                }
+            )
 
     def test_chunk_order_is_deterministic(self):
         limits = ReviewLimits(max_diff_files=1)

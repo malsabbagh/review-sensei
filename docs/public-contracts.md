@@ -273,7 +273,11 @@ always emits it. Legacy documents without the field have unknown coverage and
 cannot be auto-approved. Every enumerated changed path has one outcome:
 `reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
 `budget-exhausted`. Incomplete enumeration marks the plan incomplete and is
-never fully reviewed.
+never fully reviewed. When enumeration is incomplete, ``ReviewService`` sets
+``review_status`` to ``incomplete``; partial per-path outcomes with complete
+enumeration use ``partial``. Both values block auto-approval via
+``review-incomplete`` / ``review-partial`` and ``coverage-incomplete`` /
+``coverage-partial`` blockers.
 
 `ReviewComment.side` is optional. Omitted or `RIGHT` is a new-file line, the
 legacy right-side contract. `LEFT` is a deleted old-file line. `FILE` is a

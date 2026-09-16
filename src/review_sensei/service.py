@@ -285,6 +285,11 @@ class ReviewService:
         incremental: IncrementalReviewPlan | None,
         profile: str,
     ) -> ReviewRun:
+        """Run bounded chunk orchestration against one shared resource budget.
+
+        This method temporarily replaces ``self.provider`` with a call-counting
+        wrapper and is not reentrant on the same ``ReviewService`` instance.
+        """
         budgeted = _BudgetedProvider(
             self.provider, max_calls=request.work_budget.max_provider_calls
         )
@@ -321,11 +326,11 @@ class ReviewService:
                         chunk_request,
                         incremental=incremental,
                         profile=profile,
-                        budget=tracker.budget,
-                        monotonic=tracker.monotonic,
-                        sleeper=tracker.sleeper,
+                        tracker=tracker,
                     )
-                except ReviewInputError:
+                except ReviewInputError as exc:
+                    if str(exc) != "diff failed bounded preflight":
+                        raise
                     coverage = apply_chunk_outcomes(
                         coverage,
                         paths=chunk.paths,
@@ -458,17 +463,20 @@ class ReviewService:
         incremental: IncrementalReviewPlan | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
+        tracker: ResourceBudgetTracker | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
         """Execute one review and always return a structured ``RunOutcome``."""
 
-        effective_budget = budget if budget is not None else self.budget
-        tracker = ResourceBudgetTracker(
-            effective_budget,
-            monotonic=monotonic or time.monotonic,
-            sleeper=sleeper or time.sleep,
-        )
+        if tracker is None:
+            effective_budget = budget if budget is not None else self.budget
+            tracker = ResourceBudgetTracker(
+                effective_budget,
+                monotonic=monotonic or time.monotonic,
+                sleeper=sleeper or time.sleep,
+            )
+        effective_budget = tracker.budget
         accumulated_summary: str = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []

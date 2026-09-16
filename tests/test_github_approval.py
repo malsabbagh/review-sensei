@@ -295,6 +295,37 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("review-incomplete", "coverage-unknown"))
 
+    def test_incomplete_enumeration_blocks_with_review_and_coverage_blockers(self):
+        from review_sensei.coverage import FileCoverage
+
+        result = ReviewResult(
+            summary="Enumeration incomplete.",
+            comments=(),
+            provider="fixture",
+            review_status="incomplete",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage(
+                        path="src/a.py",
+                        outcome="unsupported",
+                        reason="incomplete-enumeration",
+                    ),
+                ),
+                enumeration_complete=False,
+            ),
+        )
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=result,
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(
+            decision.blockers,
+            ("review-incomplete", "coverage-incomplete"),
+        )
+
     def test_unknown_and_partial_coverage_block_complete_reviews(self):
         unknown = ReviewResult(
             summary="Summary.",

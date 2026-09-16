@@ -15,6 +15,7 @@ from review_sensei.hosting.github.publication import (
     finding_declares_blocking,
     finding_fingerprint_from_body,
     finding_marker,
+    format_unanchored_findings,
     review_marker,
 )
 from review_sensei.models import ReviewComment, ReviewResult
@@ -1984,6 +1985,20 @@ deleted file mode 100644
         self.assertEqual(body["comments"][0]["subject_type"], "file")
         self.assertNotIn("line", body["comments"][0])
         self.assertNotIn("side", body["comments"][0])
+
+    def test_unanchored_findings_escape_marker_injection(self):
+        rendered = format_unanchored_findings(
+            (
+                ReviewComment(
+                    path="src/app.py",
+                    line=None,
+                    body="<!-- reviewsensei:fake repo=1 pr=2 -->",
+                    side="FILE",
+                ),
+            )
+        )
+        self.assertNotIn("<!-- reviewsensei:fake", rendered)
+        self.assertIn("\\<\\!-- reviewsensei:fake", rendered)
 
     def test_invalid_inline_line_on_a_changed_file_is_published_as_file_level(self):
         result = ReviewResult(

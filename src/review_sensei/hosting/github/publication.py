@@ -15,7 +15,11 @@ from ...diff import DiffAnalysis, analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewComment, ReviewResult
 from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
-from ...presentation import format_review_comment, format_review_summary
+from ...presentation import (
+    escape_markdown_label,
+    format_review_comment,
+    format_review_summary,
+)
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, prepare_publishable_review
 from .approval import has_blocking_findings
@@ -122,7 +126,9 @@ def format_coverage_digest(coverage: CoverageManifest) -> str:
 def format_unanchored_findings(comments: tuple[ReviewComment, ...]) -> str:
     lines = ["## Findings without a publishable inline location"]
     for comment in comments:
-        lines.append(f"- `{comment.path}`: {comment.body}")
+        path = escape_markdown_label(comment.path)
+        body = escape_markdown_label(comment.body)
+        lines.append(f"- `{path}`: {body}")
     return "\n".join(lines)
 
 
