@@ -60,7 +60,7 @@ containing `/v1/`.
 | `promotion-record.schema.json` | Real-provider promotion evidence |
 | `recovery-artifact.schema.json` | Publication-only recovery artifact |
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
-| `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence |
+| `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |

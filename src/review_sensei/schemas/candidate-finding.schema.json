@@ -16,7 +16,11 @@
     "schema_version": {"const": "1.0"},
     "claim": {"type": "string", "minLength": 1, "maxLength": 1024},
     "triggering_conditions": {"type": "string", "minLength": 1, "maxLength": 1024},
-    "impacted_path": {"type": "string", "minLength": 1},
+    "impacted_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Structural bounds only; CandidateFinding.from_dict enforces canonical repository-relative path rules (no absolute paths, no .., NFC, etc.)."
+    },
     "severity_rationale": {"type": "string", "minLength": 1, "maxLength": 1024},
     "assumptions": {
       "type": "array",
@@ -32,7 +36,11 @@
         "additionalProperties": false,
         "required": ["path", "line", "snapshot_sha256"],
         "properties": {
-          "path": {"type": "string", "minLength": 1},
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Structural bounds only; CandidateFinding.from_dict enforces the same canonical repository-relative path rules as impacted_path."
+          },
           "line": {"type": "integer", "minimum": 1},
           "snapshot_sha256": {
             "type": "string",
