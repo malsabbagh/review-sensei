@@ -30,9 +30,12 @@ CHANGES_REQUESTED_MARKER_PREFIX = "<!-- reviewsensei:changes-requested:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
 PUBLISHED_REVIEW_STATES = frozenset({"COMMENTED", "APPROVED", "CHANGES_REQUESTED"})
 CHANGES_REQUESTED_BODY = "Blocking ReviewSensei findings remain unresolved."
+CHANGES_REQUESTED_INLINE_POINTER = "See the inline ReviewSensei comments on this head."
 DISCUSSION_INSTRUCTION = (
     "To discuss this finding, reply with @sensei followed by your question."
 )
+MAX_CHANGE_REQUEST_EXCERPTS = 8
+MAX_CHANGE_REQUEST_EXCERPT_CHARS = 200
 # GitHub's review body limit is independent of the provider-neutral summary
 # profile. The formatted summary is checked against ReviewLimits first, then
 # the complete body (including framing and the idempotency marker) is checked
@@ -70,6 +73,7 @@ _FINDING_MARKER_RE = re.compile(
     r"base=(?P<base_sha>[a-f0-9]{40}) result=(?P<result>[a-f0-9]{64}) "
     r"blocking=(?P<blocking>true|false) -->"
 )
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def _with_discussion_instruction(text: str) -> str:
@@ -150,6 +154,43 @@ def changes_requested_marker(
     )
 
 
+def _change_request_excerpt(body: object) -> str:
+    """Return one bounded, marker-stripped blocking-root excerpt."""
+
+    if not isinstance(body, str) or not body.strip():
+        return ""
+    text = _HTML_COMMENT_RE.sub("", body)
+    text = text.replace(DISCUSSION_INSTRUCTION, "")
+    text = " ".join(text.split())
+    if len(text) > MAX_CHANGE_REQUEST_EXCERPT_CHARS:
+        text = text[: MAX_CHANGE_REQUEST_EXCERPT_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def changes_requested_review_body(*, excerpts: tuple[str, ...], marker: str) -> str:
+    """Return one bounded exact-head change-request review body."""
+
+    parts = [CHANGES_REQUESTED_BODY, ""]
+    if excerpts:
+        parts.extend(f"- {excerpt}" for excerpt in excerpts)
+    else:
+        parts.append(CHANGES_REQUESTED_INLINE_POINTER)
+    parts.extend(["", marker])
+    body = "\n".join(parts)
+    try:
+        validate_bounded_text(
+            body,
+            MAX_PUBLISHED_REVIEW_BODY_BYTES,
+            label="published change-request body",
+            allow_empty=False,
+        )
+    except ReviewInputError as exc:
+        raise GitHubPublicationError(
+            "formatted review exceeds the configured publication limit"
+        ) from exc
+    return body
+
+
 def finding_review_event(
     *, auto_approve: bool, result: ReviewResult
 ) -> tuple[str, str]:
@@ -226,6 +267,12 @@ class _FinalizationPreflight:
     app_authored: bool = False
 
 
+@dataclass(frozen=True)
+class _BlockingThreadScan:
+    open_blocking: bool
+    excerpts: tuple[str, ...] = ()
+
+
 class ReviewApprovalFinalizer:
     """Converge an eligible exact-head PR to one App approval or change request.
 
@@ -271,15 +318,21 @@ class ReviewApprovalFinalizer:
         if preflight.app_authored:
             return PublicationResult(status="skipped_app_authored")
         assert preflight.repository_id is not None and preflight.base_sha is not None
-        open_blocking = known_blocking_finding or self._scan_blocking_threads(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            repository_id=preflight.repository_id,
-            head_sha=head_sha,
-            base_sha=preflight.base_sha,
-            app_slug=app_slug,
-        )
+        excerpts: tuple[str, ...] = ()
+        if known_blocking_finding:
+            open_blocking = True
+        else:
+            scan = self._scan_blocking_threads(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                repository_id=preflight.repository_id,
+                head_sha=head_sha,
+                base_sha=preflight.base_sha,
+                app_slug=app_slug,
+            )
+            open_blocking = scan.open_blocking
+            excerpts = scan.excerpts
         # The thread scan can paginate, so bind the write to the same exact PR
         # identity immediately before emitting APPROVE or REQUEST_CHANGES.
         write_preflight = self._preflight(
@@ -321,7 +374,7 @@ class ReviewApprovalFinalizer:
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                body=f"{CHANGES_REQUESTED_BODY}\n\n{marker}",
+                body=changes_requested_review_body(excerpts=excerpts, marker=marker),
                 event="REQUEST_CHANGES",
                 already=lambda: self._is_already_changes_requested(
                     token=token,
@@ -441,7 +494,7 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             base_sha=base_sha,
             app_slug=app_slug,
-        )
+        ).open_blocking
         write_preflight = self._preflight(
             token=token,
             repository=repository,
@@ -611,7 +664,7 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             base_sha=base_sha,
             app_slug=app_slug,
-        )
+        ).open_blocking
 
     def _scan_blocking_threads(
         self,
@@ -623,11 +676,13 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         base_sha: str,
         app_slug: str,
-    ) -> bool:
+    ) -> _BlockingThreadScan:
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
             raise GitHubPublicationError("review thread repository is invalid")
         after: str | None = None
+        open_blocking = False
+        excerpts: list[str] = []
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
                 status, payload = self.http.request(
@@ -696,12 +751,19 @@ class ReviewApprovalFinalizer:
                     base_sha=base_sha,
                 )
                 if blocking is not False:
-                    return True
+                    open_blocking = True
+                    excerpt = _change_request_excerpt(root.get("body"))
+                    if excerpt and len(excerpts) < MAX_CHANGE_REQUEST_EXCERPTS:
+                        excerpts.append(excerpt)
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return False
+                return _BlockingThreadScan(
+                    open_blocking=open_blocking, excerpts=tuple(excerpts)
+                )
+            if open_blocking and len(excerpts) >= MAX_CHANGE_REQUEST_EXCERPTS:
+                return _BlockingThreadScan(open_blocking=True, excerpts=tuple(excerpts))
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")

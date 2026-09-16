@@ -260,6 +260,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["commit_id"], head)
         self.assertIn("<!-- reviewsensei:changes-requested:v1", body["body"])
+        self.assertIn("unclassified App root", body["body"])
         self.assertFalse(
             any(
                 method == "POST"
@@ -270,6 +271,28 @@ class ReviewPublisherTests(unittest.TestCase):
                 if payload
             )
         )
+
+    def test_change_request_body_includes_stripped_blocking_excerpts(self):
+        head = "b" * 40
+        root = (
+            "[🚫 Blocking]\n\nRotate the leaked token.\n\n"
+            "To discuss this finding, reply with @sensei followed by your question.\n\n"
+            f"{finding_marker(repository_id=1, pull_request=2, head_sha=head, base_sha='a' * 40, result=result(), blocking=True)}"
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(body=root),)
+                ),
+                *request_changes_write_responses(head),
+            ]
+        )
+        self.assertEqual(outcome.status, "changes_requested")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))["body"]
+        self.assertIn("Rotate the leaked token.", body)
+        self.assertNotIn("reviewsensei:finding:v1", body)
+        self.assertNotIn("To discuss this finding", body)
 
     def test_finalizer_reconciles_an_existing_exact_head_approval(self):
         head = "b" * 40
@@ -336,6 +359,9 @@ class ReviewPublisherTests(unittest.TestCase):
         body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertNotIn("comments", body)
+        self.assertIn(
+            "See the inline ReviewSensei comments on this head.", body["body"]
+        )
 
     def test_finalizer_rejects_invalid_controls_before_networking(self):
         for overrides in (
@@ -861,6 +887,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(change_request["event"], "REQUEST_CHANGES")
         self.assertEqual(change_request["commit_id"], head)
         self.assertNotIn("comments", change_request)
+        self.assertIn("[🚫 Blocking] must fix", change_request["body"])
 
     def test_resolved_review_threads_do_not_block_clean_review(self):
         head = "b" * 40
@@ -1156,6 +1183,8 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             auto_approve=True,
         )
+        # Publisher returns already_published after reconciling the existing
+        # identity review; the nested finalizer write is APPROVE.
         self.assertEqual(outcome.status, "already_published")
         body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "APPROVE")
@@ -1195,11 +1224,49 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             auto_approve=True,
         )
+        # Publisher returns already_published after reconciling the existing
+        # identity review; the nested finalizer write is APPROVE.
         self.assertEqual(outcome.status, "already_published")
         body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "APPROVE")
         self.assertEqual(body["commit_id"], head)
         self.assertNotIn("comments", body)
+
+    def test_finalizer_promotes_resolved_change_request_as_approved(self):
+        head = "b" * 40
+        existing = published_review(
+            marker=review_marker(
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                result=result(),
+            ),
+            head_sha=head,
+            state="CHANGES_REQUESTED",
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 6}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "approved")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
 
     def test_change_request_posted_after_second_sweep_is_not_dismissed(self):
         head = "b" * 40
