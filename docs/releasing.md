@@ -147,7 +147,7 @@ python scripts/build_compatibility_manifest.py \
   --worker dist/review-sensei-worker \
   --schemas-version 1.0 \
   --compatible-worker-range '>=0.1.1 <0.2.0' \
-  --provenance github-artifact-attestation \
+  --provenance-kind github-artifact-attestation \
   --output release/compatibility-manifest.json
 python scripts/validate_compatibility_manifest.py release/compatibility-manifest.json
 ```

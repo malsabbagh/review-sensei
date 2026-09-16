@@ -85,6 +85,7 @@ def _build_manifest(
         schemas_version="1.0",
         compatible_worker_range=">=1.0.0 <2.0.0",
         provenance=PROVENANCE,
+        provenance_kind=PROVENANCE,
     )
 
 
@@ -123,6 +124,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     schemas_version="1.0",
                     compatible_worker_range=">=1.0.0",
                     provenance=PROVENANCE,
+                    provenance_kind=PROVENANCE,
                 )
 
     def test_duplicate_npm_names_are_ambiguous(self) -> None:
@@ -145,6 +147,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     schemas_version="1.0",
                     compatible_worker_range=">=1.0.0",
                     provenance=PROVENANCE,
+                    provenance_kind=PROVENANCE,
                 )
 
     def test_mismatched_digest_is_rejected(self) -> None:
@@ -176,6 +179,51 @@ class CompatibilityManifestContractTests(unittest.TestCase):
             ):
                 verify_worker_compatibility(manifest, "0.9.0")
             verify_worker_compatibility(manifest, "1.0.0")
+
+    def test_build_rejects_missing_or_untrusted_provenance_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            kwargs = dict(
+                release="1.0.0",
+                workflow_path=_write(directory / "workflow.yml", b"workflow"),
+                workflow_name="workflow.yml",
+                workflow_commit=COMMIT,
+                python_path=_write(directory / "pkg.whl", b"python"),
+                python_name="review-sensei",
+                npm_artifacts=(
+                    ("@reviewsensei/cli", _write(directory / "cli.tgz", b"npm")),
+                ),
+                worker_path=_write(directory / "worker.js", b"worker"),
+                worker_name="review-sensei-worker",
+                schemas_version="1.0",
+                compatible_worker_range=">=1.0.0",
+                provenance="signed",
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "explicit trusted mechanism"
+            ):
+                build_compatibility_manifest(**kwargs, provenance_kind="signed")
+            with self.assertRaises(TypeError):
+                build_compatibility_manifest(**kwargs)
+
+    def test_provenance_kind_disagreement_is_rejected(self) -> None:
+        manifest = {
+            "schema_version": "1.0",
+            "release": "1.0.0",
+            "workflow_commit": COMMIT,
+            "compatible_worker_range": ">=1.0.0",
+            "provenance": "pypi-trusted-publishing",
+            "provenance_kind": "github-artifact-attestation",
+            "artifacts": {
+                "workflow": {"name": "wf", "version": "1.0.0", "sha256": SHA},
+                "python": {"name": "py", "version": "1.0.0", "sha256": SHA},
+                "npm": [{"name": "cli", "version": "1.0.0", "sha256": SHA}],
+                "schemas_version": "1.0",
+                "worker": {"name": "worker", "version": "1.0.0", "sha256": SHA},
+            },
+        }
+        with self.assertRaisesRegex(ReviewInputError, "disagrees with provenance"):
+            validate_compatibility_manifest(manifest)
 
     def test_legacy_v1_schema_accepts_open_provenance_without_workflow_commit(self) -> None:
         legacy = {
@@ -287,6 +335,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 schemas_version="1.0",
                 compatible_worker_range="^1.0.0",
                 provenance=PROVENANCE,
+                provenance_kind=PROVENANCE,
             )
             verify_worker_compatibility(caret_manifest, "1.0.0")
             verify_worker_compatibility(caret_manifest, "1.2.9")
@@ -311,6 +360,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 schemas_version="1.0",
                 compatible_worker_range="~1.0.0",
                 provenance=PROVENANCE,
+                provenance_kind=PROVENANCE,
             )
             verify_worker_compatibility(tilde_manifest, "1.0.9")
             with self.assertRaisesRegex(
@@ -460,15 +510,20 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 ledger=(in_flight,),
             )
             validate_channel_promotion_record(completed.to_dict())
+            restored_canary = bind_canary_evidence(restored, "fixture-downstream")
             rollback = record_channel_rollback(
                 current=completed,
                 restored=restored,
+                canary=restored_canary,
                 recorded_at="2026-09-15T00:03:00Z",
                 ledger=(in_flight, completed),
             )
             self.assertEqual(rollback.action, "rollback")
             self.assertEqual(rollback.previous_target, COMMIT)
             self.assertEqual(rollback.new_target, PREVIOUS)
+            self.assertEqual(
+                rollback.canary_manifest_sha256, restored_canary.manifest_sha256
+            )
 
     def test_complete_promotion_requires_in_flight_record_in_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -516,6 +571,41 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 record_channel_rollback(
                     current=completed,
                     restored=restored,
+                    canary=bind_canary_evidence(restored, "fixture-downstream"),
+                    recorded_at="2026-09-15T00:02:00Z",
+                    ledger=(in_flight, completed),
+                )
+
+    def test_rollback_refuses_canary_that_does_not_bind_restored_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            restored = _build_manifest(
+                directory / "restored",
+                python_bytes=b"old",
+                workflow_commit=PREVIOUS,
+            )
+            current_manifest = _build_manifest(directory / "current")
+            canary = bind_canary_evidence(current_manifest, "fixture-downstream")
+            in_flight = begin_channel_promotion(
+                manifest=current_manifest,
+                canary=canary,
+                previous_target=PREVIOUS,
+                publication_state="complete",
+                recorded_at="2026-09-15T00:00:00Z",
+            )
+            completed = complete_channel_promotion(
+                in_flight,
+                recorded_at="2026-09-15T00:01:00Z",
+                ledger=(in_flight,),
+            )
+            wrong_canary = bind_canary_evidence(current_manifest, "fixture-downstream")
+            with self.assertRaisesRegex(
+                ReviewInputError, "does not bind the restored manifest"
+            ):
+                record_channel_rollback(
+                    current=completed,
+                    restored=restored,
+                    canary=wrong_canary,
                     recorded_at="2026-09-15T00:02:00Z",
                     ledger=(in_flight, completed),
                 )
@@ -570,7 +660,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                             "1.0",
                             "--compatible-worker-range",
                             ">=1.0.0 <2.0.0",
-                            "--provenance",
+                            "--provenance-kind",
                             PROVENANCE,
                             "--output",
                             str(output),

@@ -22,7 +22,10 @@ from review_sensei.release_manifest import (  # noqa: E402
 def _named_path(value: str) -> tuple[str, Path]:
     name, separator, remainder = value.partition("=")
     if not separator or not name.strip() or not remainder:
-        raise argparse.ArgumentTypeError("npm artifacts must be specified as name=path")
+        raise argparse.ArgumentTypeError(
+            "npm artifacts must be specified as name=path; only the first '=' "
+            "separates the package name from the filesystem path"
+        )
     return name, Path(remainder)
 
 
@@ -39,7 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worker-name", default="review-sensei-worker")
     parser.add_argument("--schemas-version", required=True)
     parser.add_argument("--compatible-worker-range", required=True)
-    parser.add_argument("--provenance", required=True)
+    parser.add_argument("--provenance-kind", required=True)
+    parser.add_argument(
+        "--provenance",
+        help="Optional legacy annotation; defaults to --provenance-kind",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -55,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
             worker_name=args.worker_name,
             schemas_version=args.schemas_version,
             compatible_worker_range=args.compatible_worker_range,
-            provenance=args.provenance,
+            provenance=args.provenance or args.provenance_kind,
+            provenance_kind=args.provenance_kind,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n"

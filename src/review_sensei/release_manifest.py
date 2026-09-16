@@ -235,9 +235,15 @@ class Artifact:
 
 def _resolve_provenance_kind(value: Mapping[str, Any]) -> str:
     explicit = value.get("provenance_kind")
-    if isinstance(explicit, str) and explicit in TRUSTED_PROVENANCE:
-        return explicit
     legacy = value.get("provenance")
+    if isinstance(explicit, str) and explicit in TRUSTED_PROVENANCE:
+        if (
+            isinstance(legacy, str)
+            and legacy in TRUSTED_PROVENANCE
+            and legacy != explicit
+        ):
+            raise ReviewInputError("manifest provenance_kind disagrees with provenance")
+        return explicit
     if isinstance(legacy, str) and legacy in TRUSTED_PROVENANCE:
         return legacy
     raise ReviewInputError(
@@ -330,6 +336,8 @@ class CompatibilityManifest:
                 provenance=value["provenance"],
                 provenance_kind=provenance_kind,
             )
+        except ReviewInputError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewInputError("compatibility manifest is incomplete") from exc
 
@@ -425,10 +433,14 @@ def build_compatibility_manifest(
     schemas_version: str,
     compatible_worker_range: str,
     provenance: str,
-    provenance_kind: str | None = None,
+    provenance_kind: str,
 ) -> CompatibilityManifest:
     """Build a validated manifest from exact on-disk artifact bytes."""
 
+    if provenance_kind not in TRUSTED_PROVENANCE:
+        raise ReviewInputError(
+            "manifest provenance must be an explicit trusted mechanism"
+        )
     if not npm_artifacts:
         raise ReviewInputError("npm artifacts are required")
     names = [name for name, _path in npm_artifacts]
@@ -449,7 +461,7 @@ def build_compatibility_manifest(
             worker=_artifact_from_file(worker_name, release, worker_path),
             compatible_worker_range=compatible_worker_range,
             provenance=provenance,
-            provenance_kind=provenance_kind or provenance,
+            provenance_kind=provenance_kind,
         )
     except (TypeError, ValueError) as exc:
         raise ReviewInputError("compatibility manifest is incomplete") from exc
@@ -872,6 +884,7 @@ def record_channel_rollback(
     *,
     current: ChannelPromotionRecord,
     restored: CompatibilityManifest,
+    canary: CanaryBinding,
     recorded_at: str,
     ledger: Sequence[ChannelPromotionRecord] = (),
 ) -> ChannelPromotionRecord:
@@ -886,6 +899,13 @@ def record_channel_rollback(
         raise ReviewInputError(
             "rollback must target the previous immutable channel SHA"
         )
+    if canary.status != "bound":
+        raise ReviewInputError("rollback requires bound canary evidence")
+    if (
+        canary.manifest_sha256 != digest
+        or canary.workflow_commit != restored.workflow_commit
+    ):
+        raise ReviewInputError("canary evidence does not bind the restored manifest")
     record = ChannelPromotionRecord(
         channel=MOVABLE_CHANNEL,
         action="rollback",
@@ -893,7 +913,7 @@ def record_channel_rollback(
         previous_target=current.new_target,
         new_target=current.previous_target,
         manifest_sha256=digest,
-        canary_manifest_sha256=digest,
+        canary_manifest_sha256=canary.manifest_sha256,
         publication_state="complete",
         recorded_at=recorded_at,
     )
