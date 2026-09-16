@@ -453,3 +453,11 @@ class ProviderAdmissionTests(unittest.TestCase):
             ProviderAdmission(group, max_waiters=True)
         with self.assertRaises(ReviewInputError):
             ProviderAdmission(group, max_waiters=10_000)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=0)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=True)
+        with self.assertRaises(ReviewInputError):
+            ProviderAdmission(group, waiter_poll_interval=2)
+        admission = ProviderAdmission(group, waiter_poll_interval=0.01)
+        self.assertEqual(admission.waiter_poll_interval, 0.01)

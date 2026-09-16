@@ -1052,6 +1052,10 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertNotIn("OLLAMA_API_KEY", revalidate)
                 self.assertIn("github review", publish)
 
+        cloud_confirm = _step_block(_job_section(text, "cloud"), confirm_name)
+        local_confirm = _step_block(_job_section(text, "local"), confirm_name)
+        self.assertEqual(cloud_confirm, local_confirm)
+
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
     def test_python_and_workflow_review_groups_are_pr_scoped_sha_free_and_latest_wins(

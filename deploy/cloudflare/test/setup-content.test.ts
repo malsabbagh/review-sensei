@@ -58,9 +58,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain(
       "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
     );
-    expect(workflow).not.toMatch(/^concurrency:/m);
-    expect(workflow).not.toContain("group:");
-    expect(workflow).not.toContain("cancel-in-progress:");
+    expect(workflow).not.toMatch(/^\s*group:.*head_sha/m);
     expect(workflow).not.toContain("source_comment_id || head_sha");
     expect(workflow).not.toContain("head_sha || head_ref || run_id");
     expect(workflow).not.toContain("head_sha || github.run_id");

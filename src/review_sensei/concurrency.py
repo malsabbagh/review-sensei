@@ -26,8 +26,11 @@ from .models import ReviewRequest
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_WAITERS = 1024
-# Condition.wait cannot observe a separate cancel Event; this is the bound
-# on how long a waiter may take to notice cancellation or a timeout.
+_MAX_WAITER_POLL_SECONDS = 1.0
+# Default cancel/timeout observation bound. ``Condition.wait`` cannot be
+# woken by a separate ``threading.Event``, so acquire() polls at this
+# interval. 50ms keeps cancellation latency bounded without a busy loop.
+# Embedders can pass ``waiter_poll_interval`` for a tighter or looser bound.
 _WAITER_POLL_SECONDS = 0.05
 ADMISSION_STATUSES = frozenset(
     {
@@ -295,6 +298,10 @@ class AdmissionLease:
             # release() or context-manager __exit__ calls cannot drop active twice.
             return self._admission._release(outcome)
 
+    def _abandon_unreturned(self) -> None:
+        # Exclusive reference: this lease was never published to the caller.
+        self._released = True
+
     def __enter__(self) -> "AdmissionLease":
         return self
 
@@ -325,6 +332,13 @@ class ProviderAdmission:
     Waiters are bounded.  A request that would grow the waiter set past
     ``max_waiters`` is rejected immediately instead of accumulating.
     Cancelled or failed work releases the slot so a later review can run.
+
+    Waiters observe ``cancel_event`` by polling ``Condition.wait``.  A
+    ``threading.Event`` cannot wake that condition, so ``waiter_poll_interval``
+    (default 50ms, max 1s) is the cancellation and timeout observation bound:
+    shorter values reduce latency and increase wakeups; longer values do the
+    reverse.  After a slot opens, cancellation is checked again before the
+    lease is returned so a cancelled waiter cannot take a freed slot.
     """
 
     def __init__(
@@ -332,6 +346,7 @@ class ProviderAdmission:
         group: ConcurrencyGroup,
         *,
         max_waiters: int | None = None,
+        waiter_poll_interval: float | None = None,
     ) -> None:
         if not isinstance(group, ConcurrencyGroup):
             raise ReviewInputError("admission requires a ConcurrencyGroup")
@@ -348,8 +363,23 @@ class ProviderAdmission:
             raise ReviewInputError(
                 f"admission max_waiters is too large (maximum is {_MAX_WAITERS})"
             )
+        poll = (
+            _WAITER_POLL_SECONDS
+            if waiter_poll_interval is None
+            else waiter_poll_interval
+        )
+        if isinstance(poll, bool) or not isinstance(poll, (int, float)) or poll <= 0:
+            raise ReviewInputError(
+                "admission waiter_poll_interval must be a positive number"
+            )
+        if poll > _MAX_WAITER_POLL_SECONDS:
+            raise ReviewInputError(
+                "admission waiter_poll_interval is too large "
+                f"(maximum is {_MAX_WAITER_POLL_SECONDS})"
+            )
         self._group = group
         self._max_waiters = waiter_bound
+        self._waiter_poll_seconds = float(poll)
         self._lock = threading.Lock()
         self._slots = threading.Condition(self._lock)
         self._active = 0
@@ -362,6 +392,10 @@ class ProviderAdmission:
     @property
     def max_waiters(self) -> int:
         return self._max_waiters
+
+    @property
+    def waiter_poll_interval(self) -> float:
+        return self._waiter_poll_seconds
 
     @property
     def active(self) -> int:
@@ -419,12 +453,7 @@ class ProviderAdmission:
                 queued = True
                 while True:
                     if self._active < self._group.max_active:
-                        if cancel_event is not None and cancel_event.is_set():
-                            self._log_locked("cancelled")
-                            raise AdmissionCancelled(
-                                "provider admission wait was cancelled"
-                            )
-                        return self._grant_locked()
+                        return self._grant_unless_cancelled_locked(cancel_event)
                     if cancel_event is not None and cancel_event.is_set():
                         self._log_locked("cancelled")
                         raise AdmissionCancelled(
@@ -436,7 +465,7 @@ class ProviderAdmission:
                         if remaining <= 0:
                             self._log_locked("rejected_capacity")
                             raise AdmissionRejected("provider admission timed out")
-                    wait_for = _WAITER_POLL_SECONDS
+                    wait_for = self._waiter_poll_seconds
                     if remaining is not None:
                         wait_for = min(wait_for, remaining)
                     self._slots.wait(timeout=wait_for)
@@ -444,18 +473,34 @@ class ProviderAdmission:
                 if queued:
                     self._waiters -= 1
 
+    def _grant_unless_cancelled_locked(
+        self, cancel_event: threading.Event | None
+    ) -> AdmissionLease:
+        if cancel_event is not None and cancel_event.is_set():
+            self._log_locked("cancelled")
+            raise AdmissionCancelled("provider admission wait was cancelled")
+        lease = self._grant_locked()
+        if cancel_event is not None and cancel_event.is_set():
+            lease._abandon_unreturned()
+            self._drop_active_locked("cancelled")
+            raise AdmissionCancelled("provider admission wait was cancelled")
+        return lease
+
     def _grant_locked(self) -> AdmissionLease:
         self._active += 1
         self._log_locked("admitted")
         return AdmissionLease(self)
 
+    def _drop_active_locked(self, outcome: str) -> None:
+        if self._active < 1:
+            raise ReviewInputError("admission lease is not active")
+        self._active -= 1
+        self._slots.notify()
+        self._log_locked(outcome)
+
     def _release(self, outcome: str) -> AdmissionOutcome:
         with self._lock:
-            if self._active < 1:
-                raise ReviewInputError("admission lease is not active")
-            self._active -= 1
-            self._slots.notify()
-            self._log_locked(outcome)
+            self._drop_active_locked(outcome)
             return self._outcome_locked(outcome)
 
     def _outcome_locked(self, status: str) -> AdmissionOutcome:
