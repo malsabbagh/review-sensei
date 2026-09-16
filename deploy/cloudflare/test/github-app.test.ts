@@ -14,6 +14,8 @@ import {
   buildHistoricalProviderParityV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  providerParityWorkflowBeforeDraftSkip,
+  providerParityWorkflowTemplate,
 } from "../src/setup-content";
 
 const SHA = "a".repeat(40);
@@ -545,6 +547,25 @@ describe("setup repository reconciliation", () => {
     ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
+  it("migrates the released provider-parity v4 caller without resolve-trigger", async () => {
+    const fake = new FakeGitHub();
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    files[SETUP_FILE_PATHS[0]] = providerParityWorkflowTemplate(TAG);
+    expect(files[SETUP_FILE_PATHS[0]]).not.toContain("resolve-trigger:");
+    fake.files = files;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
   it("migrates the released provider-parity v4 caller with the reply default", async () => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(
@@ -590,13 +611,10 @@ describe("setup repository reconciliation", () => {
     const files = Object.fromEntries(
       buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
     );
-    const current = files[SETUP_FILE_PATHS[0]]!;
-    const previous = current.replace(
-      "      github.event.pull_request.draft != true &&\n",
-      "",
+    files[SETUP_FILE_PATHS[0]] = providerParityWorkflowBeforeDraftSkip(TAG);
+    expect(files[SETUP_FILE_PATHS[0]]).not.toContain(
+      "github.event.pull_request.draft != true",
     );
-    expect(previous).not.toBe(current);
-    files[SETUP_FILE_PATHS[0]] = previous;
     fake.files = files;
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
@@ -607,6 +625,27 @@ describe("setup repository reconciliation", () => {
         ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
       ),
     ).toBe(true);
+  });
+
+  it("does not migrate an unreleased resolve-trigger caller with the draft skip removed", async () => {
+    const fake = new FakeGitHub();
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const current = files[SETUP_FILE_PATHS[0]]!;
+    const previous = current.replace(
+      "      github.event.pull_request.draft != true &&\n",
+      "",
+    );
+    expect(previous).not.toBe(current);
+    expect(previous).toContain("resolve-trigger:");
+    files[SETUP_FILE_PATHS[0]] = previous;
+    fake.files = files;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "skipped_unknown_setup" },
+    ]);
+    expect(mutationRequests(fake)).toEqual([]);
   });
 
   it("does not replace customized partial setup-v4 content", async () => {

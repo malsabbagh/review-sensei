@@ -219,8 +219,26 @@ The command is `review-sensei`. Supported flags are:
 | `--context-root` | `REVIEWSENSEI_CONTEXT_ROOT` | Trusted target-branch context root |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
-| `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Stage directory |
+| `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
+
+Stage and category catalogs are trusted operator configuration. Hosted reviews
+read them only from the reviewed trusted base checkout (the validated base
+SHA), never from the pull-request head. Manual dispatch `stages_dir` /
+`categories_dir` override repository variables `REVIEWSENSEI_STAGES_DIR` /
+`REVIEWSENSEI_CATEGORIES_DIR`. Empty values keep the packaged defaults. Unsafe
+paths, symlinks, malformed schemas, unknown keys or category references, and
+budgets above the public ceilings fail before any provider call.
+
+A pipeline stage whose configured lenses are all inactive for the changed paths
+makes zero provider calls. A category-less stage that declares an independent
+output (for example a summary-only stage) still makes one provider call. Cloud
+and local CLI/workflow invocation share this applicability rule.
+
+Generated callers pass `stages_dir` and `categories_dir` only when those inputs
+exist on the public reusable runner they reference. Compatibility tests fail
+before release if a caller `with:` key is absent from
+`review-sensei-run.yml` `workflow_call.inputs`.
 
 `REVIEWSENSEI_PROVIDER_MODE` defaults to `local`. The default local model is
 `qwen3.5:4b`; setting the mode to `cloud` selects

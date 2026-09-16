@@ -75,6 +75,62 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertTrue(result.summary)
         self.assertEqual(result.review_status, "partial")
 
+    def test_all_inactive_category_stage_makes_zero_provider_calls(self):
+        docs = ReviewCategory(
+            id="docs",
+            title="Documentation",
+            focus=("Documentation accuracy",),
+            applies_to=("docs/**",),
+        )
+        tests = ReviewCategory(
+            id="tests",
+            title="Tests",
+            focus=("Coverage for changed behavior",),
+            applies_to=("tests/**",),
+        )
+        stage = Stage(
+            name="Inactive lenses",
+            prompt_template="Categories: {review_categories}\nDiff: {diff}",
+            outputs=("summary", "comments"),
+            categories=(docs, tests),
+        )
+        provider = FakeProvider('{"summary":"unused","comments":[]}')
+        result = ReviewService(provider, stages=[stage]).review(
+            ReviewRequest(diff=DIFF, active_category_ids=())
+        )
+        self.assertEqual(len(provider.requests), 0)
+        self.assertEqual(result.comments, ())
+        self.assertTrue(result.summary)
+        self.assertNotIn("unused", result.summary)
+        self.assertEqual(result.review_status, "partial")
+
+    def test_category_less_independent_output_stage_makes_one_provider_call(self):
+        inactive = ReviewCategory(
+            id="docs",
+            title="Documentation",
+            focus=("Documentation accuracy",),
+            applies_to=("docs/**",),
+        )
+        skipped = Stage(
+            name="Inactive docs",
+            prompt_template="Categories: {review_categories}\nDiff: {diff}",
+            outputs=("comments",),
+            categories=(inactive,),
+        )
+        independent = Stage(
+            name="Independent summary",
+            prompt_template="Summarize independently: {diff}",
+            outputs=("summary",),
+        )
+        provider = FakeProvider('{"summary":"Independent overview."}')
+        result = ReviewService(provider, stages=[skipped, independent]).review(
+            ReviewRequest(diff=DIFF, active_category_ids=())
+        )
+        self.assertEqual(len(provider.requests), 1)
+        self.assertIn("Summarize independently:", provider.requests[0].prompt)
+        self.assertIn("Independent overview.", result.summary)
+        self.assertEqual(result.review_status, "partial")
+
     def test_summary_only_stage_is_not_approval_eligible(self):
         stage = Stage(
             name="Summary only",

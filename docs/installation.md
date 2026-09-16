@@ -131,8 +131,14 @@ head branch.
 The App creates repository variables for provider mode/model selection, package
 version, independent analysis/publication controls, learning proposals and
 learning PRs, mention replies, artifact upload, and optional trusted stage and
-category directories. Feature switches default to `false`; empty stage/category
-paths preserve the packaged defaults.
+category directories (`REVIEWSENSEI_STAGES_DIR`, `REVIEWSENSEI_CATEGORIES_DIR`).
+Feature switches default to `false`; empty stage/category paths preserve the
+packaged defaults. Manual dispatch may override those directories; both the
+variable and the input are repository-relative paths loaded from the trusted
+base checkout after authoritative PR preflight. Pull-request head edits to
+custom stage or category JSON cannot change the instructions used for that
+review. A stage whose lenses are all inactive for the diff makes zero provider
+calls; a category-less independent-output stage still runs once.
 The generated setup exposes nine independent operational controls so analysis,
 publication, approval, learning, replies, and artifact retention can be enabled
 separately.
