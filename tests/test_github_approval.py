@@ -280,6 +280,21 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("review-incomplete",))
 
+    def test_duck_typed_result_without_status_fails_closed(self):
+        class DuckResult:
+            comments = ()
+
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=DuckResult(),  # type: ignore[arg-type]
+            has_open_review_threads=False,
+        )
+        self.assertFalse(decision.approved)
+        self.assertIn("review-result-invalid", decision.blockers)
+        self.assertIn("review-incomplete", decision.blockers)
+        self.assertIn("evidence-policy-invalid", decision.blockers)
+
     def test_incompletely_verified_review_cannot_be_approved(self):
         result = ReviewResult(
             summary="Verification coverage: confirmed=0, rejected=1.",

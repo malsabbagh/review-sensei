@@ -1053,11 +1053,7 @@ def run_case(
                 actual_compare = dict(actual_document)
                 if "evidence_policy" not in expected_compare:
                     expected_compare["evidence_policy"] = expected_policy
-                status = (
-                    "passed"
-                    if expected_compare == actual_compare
-                    else "failed"
-                )
+                status = "passed" if expected_compare == actual_compare else "failed"
         else:
             status = "passed" if expected_document == actual_document else "failed"
     location_valid = all(

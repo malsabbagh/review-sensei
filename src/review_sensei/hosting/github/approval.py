@@ -56,20 +56,27 @@ def evaluate_auto_approval(
         blockers.append("review-threads-incomplete")
     elif has_open_review_threads is True:
         blockers.append("review-threads-open")
-    if isinstance(result, ReviewResult):
-        status = result.review_status
-        if status in {"partial", "incomplete", "summary-only"}:
-            blockers.append(f"review-{status}")
-        elif status != "complete":
-            blockers.append("review-status-invalid")
-        policy = result.evidence_policy
-        if policy not in {"legacy", "confirmed"}:
-            blockers.append("evidence-policy-invalid")
-        # Confirmed reviews that are not fully verified keep the status blocker
-        # above and add review-unverified so callers can distinguish evidence-
-        # gated partial coverage from other partial reviews.
-        elif policy == "confirmed" and status != "complete":
-            blockers.append("review-unverified")
+    status = (
+        result.review_status
+        if isinstance(result, ReviewResult)
+        else getattr(result, "review_status", "incomplete")
+    )
+    if status in {"partial", "incomplete", "summary-only"}:
+        blockers.append(f"review-{status}")
+    elif status != "complete":
+        blockers.append("review-status-invalid")
+    policy = (
+        result.evidence_policy
+        if isinstance(result, ReviewResult)
+        else getattr(result, "evidence_policy", None)
+    )
+    if policy not in {"legacy", "confirmed"}:
+        blockers.append("evidence-policy-invalid")
+    # Confirmed reviews that are not fully verified keep the status blocker
+    # above and add review-unverified so callers can distinguish evidence-
+    # gated partial coverage from other partial reviews.
+    elif policy == "confirmed" and status != "complete":
+        blockers.append("review-unverified")
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 

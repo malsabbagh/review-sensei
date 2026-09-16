@@ -451,7 +451,7 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
         raise ReviewInputError("candidate must be a CandidateFinding")
     evidence_parts: list[str] = []
     for reference in candidate.evidence:
-        location = f"{reference.path}:{reference.line}"
+        location = f"{_escape_published_text(reference.path)}:{reference.line}"
         if reference.excerpt:
             excerpt = _escape_inline_excerpt(reference.excerpt)
             evidence_parts.append(f"{location} (`{excerpt}`)")
@@ -465,7 +465,9 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
         f"Evidence: {'; '.join(evidence_parts)}",
     ]
     if candidate.assumptions:
-        escaped = "; ".join(_escape_published_text(assumption) for assumption in candidate.assumptions)
+        escaped = "; ".join(
+            _escape_published_text(assumption) for assumption in candidate.assumptions
+        )
         lines.append(f"Assumptions: {escaped}")
     return "\n".join(lines)
 
@@ -489,7 +491,11 @@ def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
     )
 
 
-def _verification_coverage(verifications: Sequence[VerificationResult]) -> str:
+def _verification_coverage(
+    verifications: Sequence[VerificationResult],
+    *,
+    dropped_legacy: int = 0,
+) -> str:
     counts = {"confirmed": 0, "rejected": 0, "insufficient-evidence": 0}
     reason_counts: Counter[str] = Counter()
     for item in verifications:
@@ -497,18 +503,24 @@ def _verification_coverage(verifications: Sequence[VerificationResult]) -> str:
         if item.disposition != "confirmed":
             for reason in item.reasons:
                 reason_counts[reason] += 1
-    parts = [
-        "Verification coverage: "
-        f"confirmed={counts['confirmed']}, "
-        f"rejected={counts['rejected']}, "
-        f"insufficient-evidence={counts['insufficient-evidence']}."
-    ]
-    if reason_counts:
-        breakdown = ", ".join(
-            f"{reason}={count}"
-            for reason, count in sorted(reason_counts.items())
+    parts: list[str] = []
+    if verifications:
+        parts.append(
+            "Verification coverage: "
+            f"confirmed={counts['confirmed']}, "
+            f"rejected={counts['rejected']}, "
+            f"insufficient-evidence={counts['insufficient-evidence']}."
         )
-        parts.append(f"Rejection reasons: {breakdown}.")
+        if reason_counts:
+            breakdown = ", ".join(
+                f"{reason}={count}" for reason, count in sorted(reason_counts.items())
+            )
+            parts.append(f"Rejection reasons: {breakdown}.")
+    if dropped_legacy:
+        parts.append(
+            f"Dropped legacy comments: {dropped_legacy}. "
+            "Legacy single-pass comments are not findings under confirmed policy."
+        )
     parts.append(_COVERAGE_NOTE)
     return " ".join(parts)
 
@@ -543,6 +555,7 @@ def prepare_publishable_review(
     if evidence_policy not in EVIDENCE_POLICIES:
         raise ReviewInputError("evidence policy is unsupported")
     if evidence_policy == "legacy":
+        # Rebuild only when upstream tagged a non-legacy policy on the result.
         if result.evidence_policy != "legacy":
             result = ReviewResult(
                 summary=result.summary,
@@ -569,20 +582,23 @@ def prepare_publishable_review(
         limits=review_limits,
     )
     published: list[ReviewComment] = []
-    unpublished = 0
+    unpublished_candidates = 0
     for candidate, verification in zip(candidates, verifications, strict=True):
         if verification.disposition == "confirmed":
             published.append(_candidate_to_comment(candidate))
         else:
-            unpublished += 1
-    if result.comments and not candidates:
-        unpublished += len(result.comments)
-    incomplete = unpublished > 0
+            unpublished_candidates += 1
+    dropped_legacy = len(result.comments) if result.comments and not candidates else 0
+    unpublished = unpublished_candidates + dropped_legacy
+    incomplete = unpublished_candidates > 0 or dropped_legacy > 0
     summary = result.summary
     status = result.review_status
     if incomplete:
         status = _downgrade_incomplete_status(status)
-        coverage = _verification_coverage(verifications)
+        coverage = _verification_coverage(
+            verifications,
+            dropped_legacy=dropped_legacy,
+        )
         summary = f"{summary}\n\n{coverage}" if summary else coverage
     prepared = ReviewResult(
         summary=summary,

@@ -76,6 +76,14 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
             )
+        if evidence_policy not in {"legacy", "confirmed"}:
+            raise GitHubPublicationError("evidence policy is unsupported")
+        if evidence_policy == "confirmed" and (
+            snapshot is None or snapshot_sha256 is None
+        ):
+            raise GitHubPublicationError(
+                "confirmed evidence policy requires a reviewed snapshot"
+            )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",

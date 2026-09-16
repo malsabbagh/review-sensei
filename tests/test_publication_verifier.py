@@ -139,7 +139,10 @@ class PublishableReviewTests(unittest.TestCase):
             "Unpublished candidates are not findings", prepared.result.summary
         )
         self.assertIn("Rejection reasons:", prepared.result.summary)
-        self.assertIn("evidence excerpt does not match reviewed snapshot=", prepared.result.summary)
+        self.assertIn(
+            "evidence excerpt does not match reviewed snapshot=",
+            prepared.result.summary,
+        )
         self.assertEqual(
             [item.disposition for item in prepared.verifications],
             ["confirmed", "rejected", "rejected", "rejected"],
@@ -189,6 +192,8 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.result.review_status, "partial")
         self.assertEqual(prepared.unpublished, 1)
         self.assertEqual(prepared.result.evidence_policy, "confirmed")
+        self.assertIn("Dropped legacy comments: 1", prepared.result.summary)
+        self.assertNotIn("Verification coverage: confirmed=0", prepared.result.summary)
 
     def test_candidate_text_is_untrusted_data_and_does_not_expand_permissions(
         self,
