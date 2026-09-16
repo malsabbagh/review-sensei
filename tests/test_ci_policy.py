@@ -264,10 +264,23 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("Prove CodeQL findings gate on committed fixtures", text)
         proof = _run_block_containing(text, "tests/fixtures/codeql/seeded-warning")
+        self.assertLess(
+            proof.index("set +e"),
+            proof.index("tests/fixtures/codeql/clean"),
+        )
+        self.assertLess(
+            proof.rindex("set -e"),
+            proof.index("failed=0"),
+        )
+        self.assertIn("clean_status=$?", proof)
+        self.assertIn("seeded_status=$?", proof)
+        self.assertIn("malformed_status=$?", proof)
         self.assertIn("tests/fixtures/codeql/clean", proof)
         self.assertIn("tests/fixtures/codeql/malformed", proof)
+        self.assertIn("clean fixture must pass the findings gate", proof)
         self.assertIn("seeded warning fixture must fail the findings gate", proof)
         self.assertIn("malformed SARIF fixture must fail the findings gate", proof)
+        self.assertEqual(proof.count("failed=1"), 3)
 
     def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
         workflow = (
