@@ -22,6 +22,12 @@
 
 ## Unreleased
 
+- Added the issue #35 compatibility-manifest contract that binds workflow
+  commit, Python, npm, schema, and Worker identities with exact digests and
+  trusted provenance. PyPI-primary and executing-commit fallback paths prove
+  that identity; live disposable-repository canary and `v4` movement stay
+  operator-only.
+
 - Skip automatic ReviewSensei runs on draft pull requests instead of failing
   preflight with "pull request is not eligible for review". Review starts when
   a draft is marked ready for review.

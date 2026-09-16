@@ -11,7 +11,9 @@ providers later.
 > Worker validates that tag before creating the setup PR and the broker resolves
 > it again when issuing a capability. The example workflow installs the
 > requested exact package from PyPI first and falls back to its executing commit
-> only when the distribution is unavailable. It
+> only when the distribution is unavailable. Both paths prove the intended
+> release identity against a compatibility manifest; live canary and `v4`
+> movement remain operator-only. It
 > defaults to a local Ollama endpoint and does not require a hosted backend.
 
 ## What it does

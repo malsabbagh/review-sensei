@@ -163,8 +163,18 @@ tries to install the exact `REVIEWSENSEI_VERSION` from PyPI in a separate
 `RUNNER_TEMP` environment. When that exact distribution/version is unavailable,
 it installs from the public ReviewSensei repository at the executing workflow
 commit SHA;
-other PyPI failures remain fatal. It then checks out only trusted base content,
-validates refs, and computes a bounded diff without installing or executing the
+other PyPI failures remain fatal, including network and authentication errors.
+Both paths must prove the intended release identity against a validated
+compatibility manifest through `prove_release_identity`, which checks the
+executing workflow commit, every manifest artifact digest, and Worker
+compatibility range membership. The reusable workflow still performs the
+version-string and executing-SHA checks; digest/manifest verification is the
+implemented release contract in `review_sensei.release_manifest` and is not
+satisfied by fetching a checksum beside an untrusted artifact. Live
+disposable-repository canary evidence from #34 is operator-only; fixture
+downstream tests bind the exact manifest digest before any `v4` promotion.
+It then checks out only trusted base content, validates refs, and computes a
+bounded diff without installing or executing the
 head branch.
 
 The App creates repository variables for provider mode/model selection, package

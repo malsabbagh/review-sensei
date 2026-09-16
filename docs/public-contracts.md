@@ -62,11 +62,30 @@ containing `/v1/`.
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
+| `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
+| `channel-promotion.schema.json` | Audited `v4` promotion or rollback record |
 
 Compatibility-manifest worker ranges support bounded numeric, caret, tilde, and
 wildcard forms. An unqualified `x` or `*` is intentionally an explicit
 all-non-negative-semver range; releases that need a compatibility gate should
-prefer a bounded range.
+prefer a bounded range. The manifest may also record the exact 40-character
+workflow commit and a closed `provenance_kind`
+(`github-artifact-attestation`, `pypi-trusted-publishing`, or
+`npm-oidc-provenance`) while keeping the legacy open `provenance` string for
+v1 schema compatibility. The JSON schema still accepts legacy open `provenance`
+values such as `"signed"`, but the binding loader in
+`validate_compatibility_manifest` is intentionally stricter: new binding
+manifests must include `workflow_commit` and a trusted `provenance_kind`, and
+legacy open provenance strings that are not trusted kinds fail at load time. A
+checksum fetched beside an untrusted artifact is rejected.
+
+Implemented now: validating and building that manifest, proving PyPI-primary
+and executing-commit install identity, binding fixture/downstream canary
+evidence from the #34 contract, recording serialized `v4` promotion/rollback,
+and failing closed on mismatched digests, outdated Worker ranges, partial
+publication, and in-flight tag movement. Operator-only / future: assembling
+the complete multi-lane artifact set, live disposable-repository canary,
+attestation verification at consumer install time, and actually moving `v4`.
 
 The `$id` policy is fixed: the path after the package namespace must include
 `/v1/` for v1 documents. Schema identity is the `$id`. Legacy review-result
@@ -156,6 +175,12 @@ These imports are public and stable within a major version:
 - `review_sensei.SourceContextSelection`
 - `review_sensei.SourceContextCoverage`
 - `review_sensei.errors.ReviewSenseiError`
+- `review_sensei.CompatibilityManifest`
+- `review_sensei.validate_compatibility_manifest`
+- `review_sensei.build_compatibility_manifest`
+- `review_sensei.prove_release_identity`
+- `review_sensei.CanaryBinding`
+- `review_sensei.ChannelPromotionRecord`
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.

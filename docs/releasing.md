@@ -130,6 +130,53 @@ workflow above. Publishing an npm package or deploying the Worker does not move
 the public `v4` tag or replay historical App deliveries; each is a separate,
 operator-owned cutoff step.
 
+## Compatibility manifest and release sequencing
+
+A supported cutoff binds workflow commit, Python distribution, npm artifacts,
+public schema version, and Worker identity in one compatibility manifest.
+Build the document from the exact artifact files after those lanes produce
+immutable bytes:
+
+```bash
+python scripts/build_compatibility_manifest.py \
+  --release 0.1.1 \
+  --workflow-commit <40-character-sha> \
+  --workflow .github/workflows/review-sensei-run.yml \
+  --python dist/review_sensei-0.1.1-py3-none-any.whl \
+  --npm @reviewsensei/cli=dist/reviewsensei-cli-0.1.1.tgz \
+  --worker dist/review-sensei-worker \
+  --schemas-version 1.0 \
+  --compatible-worker-range '>=0.1.1 <0.2.0' \
+  --provenance-kind github-artifact-attestation \
+  --output release/compatibility-manifest.json
+python scripts/validate_compatibility_manifest.py release/compatibility-manifest.json
+```
+
+The builder hashes file bytes. Missing files, duplicate npm names, untrusted
+sidecar provenance, and combinations that do not share one release version
+fail closed. GitHub artifact attestation remains the trust mechanism for the
+bundle; do not authenticate a release by fetching a digest beside an untrusted
+artifact.
+
+Sequencing is build → verify → canary bind → publish/promote. Fixture
+downstream evidence from #34 can bind the exact manifest digest. A live
+disposable-repository canary is operator-only and cannot authorize `v4`
+promotion in this contract. Promotion is serialized, records previous and new
+`v4` targets, and is refused when publication is partial or a package version
+would be replaced. A `partial` publication state means at least one lane is
+published but not all five; finish the remaining lanes (for example the npm
+launcher after platform packages per ADR 0031) before retrying promotion with
+the same manifest. A `failed` state means every lane is still unpublished and
+also blocks promotion until a fresh manifest is built from new artifact bytes.
+Rollback uses the previous immutable channel target and records both SHAs. If
+`v4` moves during a run, the default is fail-closed retry; bounded grace exists
+only as an explicit in-memory authorized record for that run.
+
+Implemented by this change: the manifest schema, digest builder, identity
+proof APIs, canary-binding record, and promotion/rollback records. Operator-only:
+assembling every lane's bytes, live canary, attestation verification on a
+consumer runner, and moving or protecting `v4` in GitHub (see #26).
+
 ## Local build and verification
 
 Run these commands from the repository root in a disposable Python 3.11+

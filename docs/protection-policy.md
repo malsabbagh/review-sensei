@@ -22,7 +22,9 @@ GitHub and retain the authoritative API response as evidence.
   recovery use.
 - Immutable semantic version tags (`vMAJOR.MINOR.PATCH`) cannot be deleted or
   replaced. `v4` is the sole movable operator-managed setup channel, and every
-  promotion is recorded in `.publication/publication-ledger.jsonl`.
+  promotion is recorded in `.publication/publication-ledger.jsonl`. Compatibility
+  manifests add an audited previous/new `v4` target pair bound to one digest;
+  actually moving the tag remains an operator action restricted by this policy.
 
 ## GitHub fnmatch versus policy regex
 

@@ -449,6 +449,15 @@ rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
 whether a maintainer should publish; those are explicit external operations.
 
+Supported release combinations are bound by a versioned compatibility
+manifest: workflow commit, Python distribution digest, npm artifact digests,
+public schema version, and Worker identity. Build output is valid only when
+every named artifact is present with an exact SHA-256 digest and an explicit
+trusted provenance mechanism. Missing or extra artifacts fail closed. The
+PyPI-primary and executing-commit install paths prove that identity in
+`review_sensei.release_manifest`; live disposable-repository canary and `v4`
+tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
+
 ## Public landing-page analytics boundary
 
 `docs/site/index.html` is a static GitHub Pages artifact. The Google Tag

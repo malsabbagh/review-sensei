@@ -209,8 +209,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
         value = {
             "schema_version": "1.0",
             "release": "1.0.0",
+            "workflow_commit": "c" * 40,
             "compatible_worker_range": ">=1.0.0",
-            "provenance": "signed",
+            "provenance": "github-artifact-attestation",
             "artifacts": {
                 "workflow": artifact,
                 "python": artifact,
@@ -227,8 +228,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
         value = {
             "schema_version": "1.0",
             "release": "1.0.0",
+            "workflow_commit": "c" * 40,
             "compatible_worker_range": ">=1.0.0",
-            "provenance": "signed",
+            "provenance": "github-artifact-attestation",
             "artifacts": {
                 "workflow": artifact,
                 "python": artifact,
@@ -250,8 +252,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
         value = {
             "schema_version": "1.0",
             "release": "1.0.0",
+            "workflow_commit": "c" * 40,
             "compatible_worker_range": ">=1",
-            "provenance": "signed",
+            "provenance": "github-artifact-attestation",
             "artifacts": {
                 "workflow": artifact,
                 "python": artifact,
@@ -268,8 +271,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
         value = {
             "schema_version": "1.0",
             "release": "1.0.0",
+            "workflow_commit": "c" * 40,
             "compatible_worker_range": ">=2.0.0",
-            "provenance": "signed",
+            "provenance": "github-artifact-attestation",
             "artifacts": {
                 "workflow": artifact,
                 "python": artifact,
@@ -286,8 +290,9 @@ class PromotionAndReleaseTests(unittest.TestCase):
         value = {
             "schema_version": "1.0",
             "release": "1.0.0",
+            "workflow_commit": "c" * 40,
             "compatible_worker_range": "not-a-range",
-            "provenance": "signed",
+            "provenance": "github-artifact-attestation",
             "artifacts": {
                 "workflow": artifact,
                 "python": artifact,
