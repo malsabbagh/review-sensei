@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import ReviewInputError, ReviewSenseiError
-from .learnings import learning_digest
+from .learnings import LearningStore, learning_digest
 from .models import (
     LearningEntry,
     ProviderRequest,
@@ -1113,19 +1113,20 @@ def evaluate_fixture(
 
 def compare_learning_effect(
     corpus: Corpus,
-    learnings: Sequence[LearningEntry] = (),
+    learnings: Sequence[LearningEntry] | LearningStore = (),
 ) -> dict[str, Any]:
     """Compare the same fixture cases with and without selected learnings.
 
-    Deltas are estimates, not causal proof. Sparse production feedback must not
-    be treated as a promotion or effectiveness claim.
+    Selection reuses ``LearningStore.selectable_entries`` so the comparison
+    reports on the same entries a review would use. Deltas are estimates, not
+    causal proof. Sparse production feedback must not be treated as a promotion
+    or effectiveness claim.
     """
 
-    selected = tuple(
-        entry
-        for entry in learnings
-        if entry.status == "active" and entry.superseded_by is None
+    store = (
+        learnings if isinstance(learnings, LearningStore) else LearningStore(learnings)
     )
+    selected = store.selectable_entries
     with_learnings = evaluate_fixture(corpus, learnings=selected)
     without_learnings = evaluate_fixture(corpus, learnings=())
     with_quality = dict(with_learnings["quality"])

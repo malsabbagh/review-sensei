@@ -660,7 +660,7 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
                 if args.learning_root
                 else LearningStore()
             )
-            selected = store.entries
+            selected = store.selectable_entries
             if args.learning_id:
                 wanted = set(args.learning_id)
                 selected = tuple(entry for entry in selected if entry.id in wanted)
@@ -1190,7 +1190,7 @@ def _run_learnings_command(arguments: list[str]) -> int:
                 )
             return 0
         records = load_learning_feedback(args.file)
-        known_ids: tuple[str, ...] = ()
+        known_ids: tuple[str, ...] | None = None
         if args.learning_root:
             store = load_repository_learnings(
                 args.learning_root, directory=args.learning_directory
@@ -1205,6 +1205,11 @@ def _run_learnings_command(arguments: list[str]) -> int:
             if isinstance(by_outcome, dict):
                 for outcome, count in by_outcome.items():
                     sys.stdout.write(f"{outcome} {count}\n")
+            if summary["known_learning_ids_scope"] == "unset":
+                sys.stdout.write(
+                    "No approved store loaded; pass --learning-root to list "
+                    "known learnings without feedback.\n"
+                )
             sys.stdout.write("Absence of feedback is not approval.\n")
         return 0
     except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:

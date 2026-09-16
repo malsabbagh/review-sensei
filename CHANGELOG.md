@@ -59,6 +59,11 @@
   to load without the new metadata; superseded/retired entries stay off the
   prompt; diagnostics never mutate approved knowledge; absence of feedback is
   not approval; comparison reports estimates rather than causal proof.
+  `LearningFeedback.from_dict` no longer coerces or drops non-string fields,
+  `load_learning_feedback` re-checks `schema_version` independent of the schema
+  layer, learning selection is shared through `LearningStore.selectable_entries`,
+  and `learnings feedback` reports `known_learning_ids_scope` so an empty
+  absence list cannot be read as approval.
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

@@ -338,9 +338,16 @@ review-sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json \
   --compare-learnings --learning-root /path/to/target-branch
 ```
 
-`--compare-learnings` is fixture-only. Reported precision/recall/false-positive
+`--compare-learnings` is fixture-only. Selection reuses the same
+`LearningStore.selectable_entries` rule a review uses, so active entries that
+are superseded stay out of both. Reported precision/recall/false-positive
 deltas are estimates from the same synthetic cases with and without selected
 approved learnings, not causal proof from production feedback.
+
+`learnings feedback` reports `known_learning_ids_scope`. It is `store` when
+`--learning-root` supplied an approved store and `unset` otherwise; when it is
+`unset`, `known_learning_ids_without_feedback` is empty because no store was
+loaded and must not be read as "every known learning has feedback".
 
 Exit codes are stable:
 

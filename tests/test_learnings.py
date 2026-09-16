@@ -265,6 +265,110 @@ class RepositoryLearningTests(unittest.TestCase):
             with self.assertRaises(LearningLoadError):
                 load_learning_feedback(path)
 
+    def _write_feedback(self, directory: Path, document: object) -> Path:
+        path = directory / "feedback.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def test_load_learning_feedback_rejects_unsupported_schema_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "2.0",
+                    "records": [
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": "finding-1",
+                            "outcome": "useful",
+                        }
+                    ],
+                },
+            )
+            with self.assertRaises(LearningLoadError):
+                load_learning_feedback(path)
+
+    def test_load_learning_feedback_rejects_non_object_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {"schema_version": "1.0", "records": ["provider-boundary"]},
+            )
+            with self.assertRaises(LearningLoadError):
+                load_learning_feedback(path)
+
+    def test_byte_bounds_reject_multibyte_values_within_maxlength(self):
+        # 256 characters satisfies the schema's maxLength but exceeds the
+        # authoritative 256-byte bound once a 4-byte character is included.
+        finding_id = ("a" * 255) + "\U0001f600"
+        self.assertEqual(len(finding_id), 256)
+        self.assertGreater(len(finding_id.encode("utf-8")), 256)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "1.0",
+                    "records": [
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": finding_id,
+                            "outcome": "useful",
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(LearningLoadError, "UTF-8 bytes"):
+                load_learning_feedback(path)
+
+        note = ("a" * 511) + "\U0001f600"
+        self.assertEqual(len(note), 512)
+        self.assertGreater(len(note.encode("utf-8")), 512)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._write_feedback(
+                Path(temporary),
+                {
+                    "schema_version": "1.0",
+                    "records": [
+                        {
+                            "learning_id": "provider-boundary",
+                            "finding_id": "finding-1",
+                            "outcome": "useful",
+                            "note": note,
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(LearningLoadError, "UTF-8 bytes"):
+                load_learning_feedback(path)
+
+    def test_from_dict_does_not_coerce_or_drop_non_string_fields(self):
+        with self.assertRaises(LearningLoadError):
+            LearningFeedback.from_dict(
+                {
+                    "learning_id": "provider-boundary",
+                    "finding_id": 7,
+                    "outcome": "useful",
+                }
+            )
+        with self.assertRaises(LearningLoadError):
+            LearningFeedback.from_dict(
+                {
+                    "learning_id": "provider-boundary",
+                    "finding_id": "finding-1",
+                    "outcome": "useful",
+                    "note": {"nested": "value"},
+                }
+            )
+
+    def test_feedback_summary_marks_known_id_scope_when_no_store_loaded(self):
+        records = (LearningFeedback("provider-boundary", "finding-1", "useful"),)
+        unset = summarize_learning_feedback(records)
+        self.assertEqual(unset["known_learning_ids_scope"], "unset")
+        self.assertEqual(unset["known_learning_ids_without_feedback"], [])
+        loaded = summarize_learning_feedback(records, known_learning_ids=("other",))
+        self.assertEqual(loaded["known_learning_ids_scope"], "store")
+        self.assertEqual(loaded["known_learning_ids_without_feedback"], ["other"])
+
     def test_diagnostic_report_is_advisory_and_does_not_mutate(self):
         store = LearningStore(
             (

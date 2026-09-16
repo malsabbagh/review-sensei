@@ -22,6 +22,7 @@ MAX_FEEDBACK_RECORDS = 256
 MAX_FEEDBACK_FINDING_ID_BYTES = 256
 MAX_FEEDBACK_NOTE_BYTES = 512
 MAX_SCOPE_WITNESSES = 256
+FEEDBACK_SCHEMA_VERSION = "1.0"
 FEEDBACK_OUTCOMES = ("useful", "incorrect", "obsolete", "unverified")
 _GLOB_TOKEN = re.compile(r"\*|\?|\[[^\]]*\]")
 _LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -59,20 +60,25 @@ class LearningFeedback:
             self.learning_id
         ):
             raise LearningLoadError("learning feedback learning_id is invalid")
-        if (
-            not isinstance(self.finding_id, str)
-            or not self.finding_id.strip()
-            or len(self.finding_id.encode("utf-8")) > MAX_FEEDBACK_FINDING_ID_BYTES
-        ):
+        if not isinstance(self.finding_id, str) or not self.finding_id.strip():
             raise LearningLoadError("learning feedback finding_id is invalid")
+        # The byte bound is authoritative; the schema's maxLength counts
+        # characters, so a multibyte value can satisfy the schema and fail here.
+        if len(self.finding_id.encode("utf-8")) > MAX_FEEDBACK_FINDING_ID_BYTES:
+            raise LearningLoadError(
+                "learning feedback finding_id exceeds "
+                f"{MAX_FEEDBACK_FINDING_ID_BYTES} UTF-8 bytes"
+            )
         if self.outcome not in FEEDBACK_OUTCOMES:
             raise LearningLoadError("learning feedback outcome is invalid")
-        if self.note is not None and (
-            not isinstance(self.note, str)
-            or not self.note.strip()
-            or len(self.note.encode("utf-8")) > MAX_FEEDBACK_NOTE_BYTES
-        ):
-            raise LearningLoadError("learning feedback note is invalid")
+        if self.note is not None:
+            if not isinstance(self.note, str) or not self.note.strip():
+                raise LearningLoadError("learning feedback note is invalid")
+            if len(self.note.encode("utf-8")) > MAX_FEEDBACK_NOTE_BYTES:
+                raise LearningLoadError(
+                    "learning feedback note exceeds "
+                    f"{MAX_FEEDBACK_NOTE_BYTES} UTF-8 bytes"
+                )
 
     @classmethod
     def from_dict(cls, value: object) -> "LearningFeedback":
@@ -83,11 +89,13 @@ class LearningFeedback:
             raise LearningLoadError(
                 "learning feedback record contains an unsupported field"
             )
+        # Raw values reach __post_init__ so direct construction fails closed the
+        # same way as the schema path instead of being coerced or dropped.
         return cls(
-            learning_id=str(value.get("learning_id", "")),
-            finding_id=str(value.get("finding_id", "")),
-            outcome=str(value.get("outcome", "")),
-            note=value.get("note") if isinstance(value.get("note"), str) else None,
+            learning_id=value.get("learning_id", ""),
+            finding_id=value.get("finding_id", ""),
+            outcome=value.get("outcome", ""),
+            note=value.get("note"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -194,6 +202,11 @@ class LearningStore:
         self.entries = tuple(
             entry for entry in sorted_entries if entry.status == "active"
         )
+        # Single selection rule for entries that may reach a review or an
+        # evaluation comparison, so those paths cannot drift apart.
+        self.selectable_entries = tuple(
+            entry for entry in self.entries if entry.superseded_by is None
+        )
 
     def for_paths(
         self,
@@ -206,10 +219,8 @@ class LearningStore:
         changed_paths = tuple(path for path in paths if path)
         selected = tuple(
             entry
-            for entry in self.entries
-            if entry.status == "active"
-            and entry.superseded_by is None
-            and (
+            for entry in self.selectable_entries
+            if (
                 (not changed_paths and "*" in entry.scope)
                 or any(
                     fnmatchcase(path, pattern)
@@ -343,6 +354,9 @@ def load_learning_feedback(path: Path) -> tuple[LearningFeedback, ...]:
         raise LearningLoadError("learning feedback failed schema validation") from exc
     if not isinstance(value, dict):
         raise LearningLoadError("learning feedback must be a JSON object")
+    # Re-checked here so the loader stays fail-closed independent of the schema.
+    if value.get("schema_version") != FEEDBACK_SCHEMA_VERSION:
+        raise LearningLoadError("learning feedback schema_version is unsupported")
     records = value.get("records")
     if not isinstance(records, list) or len(records) > MAX_FEEDBACK_RECORDS:
         raise LearningLoadError("learning feedback records are invalid")
@@ -352,9 +366,15 @@ def load_learning_feedback(path: Path) -> tuple[LearningFeedback, ...]:
 def summarize_learning_feedback(
     records: Iterable[LearningFeedback],
     *,
-    known_learning_ids: Iterable[str] = (),
+    known_learning_ids: Iterable[str] | None = None,
 ) -> dict[str, object]:
-    """Count feedback outcomes without treating silence as approval."""
+    """Count feedback outcomes without treating silence as approval.
+
+    ``known_learning_ids`` of ``None`` means no approved store was loaded. The
+    summary then reports ``known_learning_ids_scope="unset"`` so an empty
+    ``known_learning_ids_without_feedback`` cannot be read as "every known
+    learning has feedback".
+    """
 
     items = tuple(records)
     by_outcome = {outcome: 0 for outcome in FEEDBACK_OUTCOMES}
@@ -362,7 +382,7 @@ def summarize_learning_feedback(
     for item in items:
         by_outcome[item.outcome] += 1
         seen_ids.add(item.learning_id)
-    known = tuple(dict.fromkeys(known_learning_ids))
+    known = tuple(dict.fromkeys(known_learning_ids or ()))
     without_feedback = [
         identifier for identifier in known if identifier not in seen_ids
     ]
@@ -370,6 +390,7 @@ def summarize_learning_feedback(
         "record_count": len(items),
         "by_outcome": by_outcome,
         "absence_is_not_approval": True,
+        "known_learning_ids_scope": "unset" if known_learning_ids is None else "store",
         "known_learning_ids_without_feedback": without_feedback,
         "trusted_for_review": False,
     }

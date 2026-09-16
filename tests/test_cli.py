@@ -1487,6 +1487,33 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("Absence of feedback is not approval.", stdout.getvalue())
         self.assertIn("unverified 1", stdout.getvalue())
+        self.assertIn("No approved store loaded", stdout.getvalue())
+
+    def test_learnings_feedback_cli_marks_known_id_scope_unset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "feedback.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "learning_id": "provider-boundary",
+                                "finding_id": "finding-1",
+                                "outcome": "useful",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                status = main(["learnings", "feedback", "--file", str(path), "--json"])
+        self.assertEqual(status, 0)
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(summary["known_learning_ids_scope"], "unset")
+        self.assertEqual(summary["known_learning_ids_without_feedback"], [])
 
     def test_evaluate_compare_learnings_is_fixture_only(self):
         stderr = io.StringIO()
