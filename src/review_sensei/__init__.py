@@ -17,6 +17,7 @@ from .context import (
     stable_finding_fingerprint,
 )
 from .conversation import ConversationService
+from .diagnostics import build_plan, run_doctor
 from .evaluation import PromotionRecord, validate_promotion_record
 from .learnings import (
     LearningDiagnostic,
@@ -40,6 +41,7 @@ from .models import (
     ReviewResult,
 )
 from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
+from .patches import PatchSuggestion, create_patch_suggestion
 from .release_manifest import (
     Artifact,
     CompatibilityManifest,
@@ -62,6 +64,7 @@ from .verifier import (
     verify_candidate,
     verify_candidates,
 )
+from .workflow import ReviewExecutionPlan, plan_review_execution
 
 __all__ = [
     "ConcurrencyGroup",
@@ -71,13 +74,6 @@ __all__ = [
     "ConversationMessage",
     "ConversationReply",
     "ConversationService",
-    "ContextSnapshot",
-    "FindingLifecycle",
-    "PromotionRecord",
-    "validate_promotion_record",
-    "Artifact",
-    "CompatibilityManifest",
-    "validate_compatibility_manifest",
     "LearningEntry",
     "LearningProposal",
     "LearningStore",
@@ -87,11 +83,13 @@ __all__ = [
     "ProviderRequest",
     "ProviderResponse",
     "RepositoryContextStore",
+    "ContextSnapshot",
     "SourceContextExcerpt",
     "SourceContextSelection",
     "SymbolAwareContextSelector",
     "ReviewContextCache",
     "ReviewContextCacheKey",
+    "FindingLifecycle",
     "ReviewContextSelection",
     "ReviewComment",
     "ReviewDocument",
@@ -106,17 +104,28 @@ __all__ = [
     "stable_finding_fingerprint",
     "stable_concern_identity",
     "reconcile_finding_lifecycle",
+    "ReviewExecutionPlan",
+    "DEFAULT_REVIEW_LIMITS",
+    "Stage",
+    "build_review_context_selection",
+    "build_plan",
+    "run_doctor",
+    "PatchSuggestion",
+    "create_patch_suggestion",
+    "load_review_categories_from_dir",
+    "load_stages_from_dir",
+    "plan_review_execution",
+    "PromotionRecord",
+    "validate_promotion_record",
     "RecoveryArtifact",
     "ResourceBudget",
     "RunOutcome",
+    "Artifact",
+    "CompatibilityManifest",
+    "validate_compatibility_manifest",
     "CandidateFinding",
     "EvidenceReference",
     "VerificationResult",
     "verify_candidate",
     "verify_candidates",
-    "DEFAULT_REVIEW_LIMITS",
-    "Stage",
-    "build_review_context_selection",
-    "load_review_categories_from_dir",
-    "load_stages_from_dir",
 ]

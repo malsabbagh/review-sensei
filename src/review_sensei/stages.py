@@ -478,6 +478,21 @@ def load_review_categories_from_dir(directory: Path) -> ReviewCategoryCatalog:
     return ReviewCategoryCatalog(categories)
 
 
+def category_catalog_for_configured_stages(
+    categories_dir: Path | None,
+) -> ReviewCategoryCatalog | None:
+    """Select the category catalog the way the review CLI does.
+
+    Custom ``--stages-dir`` values do not silently fall back to the packaged
+    catalog.  ``None`` means the stage loader must reject ``category_ids``
+    unless the operator also supplied ``--categories-dir``.
+    """
+
+    if categories_dir is None:
+        return None
+    return load_review_categories_from_dir(categories_dir)
+
+
 def load_stages_from_dir(
     directory: Path,
     *,

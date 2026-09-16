@@ -131,6 +131,13 @@ These imports are public and stable within a major version:
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
 
+Operational results always include the optional `review_status` key. Directly
+constructed results default to `incomplete`; the trusted review service marks
+its stage aggregate `complete`. Results parsed from legacy JSON without the
+key are classified as `incomplete` and serialize explicitly, so approval paths
+fail closed. Consumers that enforce the original v1 shape should treat this
+additive field as an optional extension during the deprecation window.
+
 ### Finding classification and presentation
 
 `ReviewComment` accepts optional, independent classification fields. `blocking`
@@ -171,6 +178,24 @@ return a normalized `ProviderResponse`. They must not import GitHub SDKs, must
 read bounded response bodies, and must sanitize transport errors before they
 reach the review service. Timeout and network failures should raise
 `ProviderError(transient=True)`.
+
+The built-in `openai-compatible` adapter targets an explicit HTTPS
+`/v1/chat/completions` endpoint and requires a non-empty API key; it has no
+provider fallback. Named registry profiles are deterministic presets:
+`local-private`, `fast-triage`, and `deep-verification` (with `local`, `private`,
+and `local/private` aliases for the first). Profiles carry bounded timeout/output-token
+budgets and endpoint/credential policy. `ProviderSettings.for_profile()` never
+reads the environment or forwards a credential to a profile that disallows it.
+
+The adapter's default endpoint allowlist contains only `https://api.openai.com`.
+An operator who intentionally owns a different HTTPS-compatible service must
+construct the adapter with `allow_custom_endpoint=True`; this explicit opt-in
+acknowledges that review data and the supplied bearer credential leave the
+machine. The default opener rejects redirects and reuses a verified TLS context
+from the system CA store (or a regular file named by `SSL_CERT_FILE`). Injected
+openers are test/transport seams and are responsible for preserving the same
+no-redirect policy. Ollama local and Cloud profiles are independent paths; the
+Cloud profile is the explicit Ollama egress option.
 
 ## CLI Contract
 
@@ -243,12 +268,27 @@ workflow additionally binds checkout to the repository default branch and
 requires a maintainer-controlled `ollama` self-hosted runner for its local
 provider default.
 
+The command also supports bounded offline `doctor` and `plan` subcommands.
+They share the same top-level command dispatch as `prepare-diff`, `evaluate`,
+and `github` (`argv[0]` selects the parser) and never construct a provider or
+write to GitHub.
+
+```bash
+review-sensei doctor --json
+review-sensei plan --diff pr.patch --repository owner/repo --json
+```
+
+`plan` analyzes a supplied diff with the same bounded `analyze_diff` path as
+review. Without `--diff`, the plan is incomplete rather than ready.
+
 Exit codes are stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written |
+| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
+| `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
+| `3` | `doctor --network` (unprobed); `plan` incomplete (no diff) |
 
 ## Error Categories
 

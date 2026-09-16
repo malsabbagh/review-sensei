@@ -371,6 +371,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
         description="Run a provider-neutral AI review against a unified diff.",
+        epilog=(
+            "Additional commands use the same first-token dispatch as "
+            "prepare-diff, evaluate, and github: doctor, plan, prepare-diff, "
+            "evaluate, github."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -518,6 +523,38 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         help="Acknowledge that synthetic corpus data may leave the machine.",
     )
     parser.add_argument("--output", type=Path)
+    return parser
+
+
+def _doctor_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei doctor",
+        description="Run bounded, read-only installation diagnostics.",
+    )
+    parser.add_argument("--stages-dir", type=Path)
+    parser.add_argument("--categories-dir", type=Path)
+    parser.add_argument("--context-root", type=Path)
+    parser.add_argument(
+        "--network",
+        action="store_true",
+        help="Report optional network checks as unknown (never probes).",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei plan",
+        description="Preview a review execution plan without provider or GitHub calls.",
+    )
+    parser.add_argument("--diff", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--title")
+    parser.add_argument("--stage", action="append", default=[])
+    parser.add_argument("--provider-mode")
+    parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -827,8 +864,92 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     return 0
 
 
+def _print_offline_error(exc: BaseException) -> None:
+    print(f"review-sensei: {exc}", file=sys.stderr)
+
+
+def _run_doctor_command(arguments: list[str]) -> int:
+    args = _doctor_parser().parse_args(arguments)
+    try:
+        from .diagnostics import (
+            DOCTOR_ACTION_REQUIRED,
+            DOCTOR_UNKNOWN,
+            render_diagnostic,
+            run_doctor,
+        )
+
+        report = run_doctor(
+            stages_dir=args.stages_dir,
+            categories_dir=args.categories_dir,
+            context_root=args.context_root,
+            include_network=args.network,
+            provider_mode=os.getenv("REVIEWSENSEI_PROVIDER_MODE"),
+        )
+        sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
+        return (
+            DOCTOR_ACTION_REQUIRED
+            if report["status"] == "action"
+            else DOCTOR_UNKNOWN
+            if report["status"] == "unknown"
+            else 0
+        )
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+    except Exception as exc:  # pragma: no cover - unexpected diagnostic failure
+        _print_offline_error(
+            RuntimeError(f"unexpected diagnostic failure: {type(exc).__name__}")
+        )
+        return 2
+
+
+def _run_plan_command(arguments: list[str]) -> int:
+    args = _plan_parser().parse_args(arguments)
+    try:
+        from .diagnostics import build_plan, render_diagnostic
+
+        diff = (
+            read_bounded_utf8(
+                args.diff,
+                maximum=DEFAULT_REVIEW_LIMITS.max_diff_bytes,
+                label="diff",
+            )
+            if args.diff
+            else None
+        )
+        report = build_plan(
+            diff=diff,
+            repository=args.repository,
+            pull_request=args.pull_request,
+            title=args.title,
+            stages=args.stage,
+            provider_mode=args.provider_mode,
+        )
+        sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
+        return 0 if report["status"] == "ready" else 3
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+    except Exception as exc:  # pragma: no cover - unexpected diagnostic failure
+        _print_offline_error(
+            RuntimeError(f"unexpected diagnostic failure: {type(exc).__name__}")
+        )
+        return 2
+
+
+_OFFLINE_COMMANDS = {
+    "doctor": _run_doctor_command,
+    "plan": _run_plan_command,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
+    # The default review command is flag-based, so optional commands cannot be
+    # required argparse subparsers. doctor/plan use the same first-token
+    # command map as prepare-diff, evaluate, and github.
+    if args_list and args_list[0] in _OFFLINE_COMMANDS:
+        return _OFFLINE_COMMANDS[args_list[0]](args_list[1:])
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
         if args.version:
@@ -921,16 +1042,16 @@ def main(argv: list[str] | None = None) -> int:
             learnings = learning_store.for_paths(changed_paths)
         stages = None
         if args.stages_dir:
-            from .stages import load_review_categories_from_dir, load_stages_from_dir
-
-            category_catalog = (
-                load_review_categories_from_dir(args.categories_dir)
-                if args.categories_dir
-                else None
+            from .stages import (
+                category_catalog_for_configured_stages,
+                load_stages_from_dir,
             )
+
             stages = load_stages_from_dir(
                 args.stages_dir,
-                category_catalog=category_catalog,
+                category_catalog=category_catalog_for_configured_stages(
+                    args.categories_dir
+                ),
             )
         provider = default_registry().create(
             _provider_settings_from_args(
