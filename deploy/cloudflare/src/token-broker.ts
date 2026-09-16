@@ -1,5 +1,5 @@
 import type { WorkerEnv } from "./env";
-import { GitHubApi } from "./github-api";
+import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
 import { validatePublicWorkflowTag } from "./setup-content";
 
@@ -115,8 +115,8 @@ export class TokenBroker {
     const publicWorkflowTag = validatePublicWorkflowTag(
       this.env.PUBLIC_WORKFLOW_TAG ?? "",
     );
-    const publicWorkflowSha = await this.github.publicWorkflowSha(publicWorkflowTag);
-    this.authorizeClaims(claims, publicWorkflowTag, publicWorkflowSha);
+    const runtime = await this.github.publicWorkflowRuntimeShas(publicWorkflowTag);
+    this.authorizeClaims(claims, publicWorkflowTag, runtime);
     // Reject replay/rate abuse immediately after cryptographic and local
     // policy validation, before consuming shared GitHub App API capacity.
     const ledgerState = await claimLedger(
@@ -162,17 +162,21 @@ export class TokenBroker {
   private authorizeClaims(
     claims: OidcClaims,
     publicWorkflowTag: string,
-    publicWorkflowSha: string,
+    runtime: PublicWorkflowRuntimeShas,
   ): void {
     if (!REPOSITORY_PATTERN.test(claims.repository)) {
       throw new Error("broker_repository_rejected");
     }
     // v4 is the operator-managed update channel. Resolve its current commit
-    // above, then require both the tag ref and the runtime-resolved SHA so a
-    // caller cannot substitute a different ref or commit.
+    // above, then require both the tag ref and a runtime SHA bound to that tag.
+    // GitHub Actions emits the peeled commit for lightweight tags and the tag
+    // object SHA for annotated tags; accept either when it matches this tag.
+    const workflowShaAuthorized =
+      claims.job_workflow_sha === runtime.commitSha ||
+      claims.job_workflow_sha === runtime.refSha;
     const workflowAuthorized =
       claims.job_workflow_ref === workflowRef("malsabbagh/review-sensei", publicWorkflowTag) &&
-      claims.job_workflow_sha === publicWorkflowSha;
+      workflowShaAuthorized;
     if (!workflowAuthorized) {
       throw new Error("broker_workflow_rejected");
     }

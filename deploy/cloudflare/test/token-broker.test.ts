@@ -8,6 +8,7 @@ import type { WorkerEnv } from "../src/env";
 import { TokenBroker } from "../src/token-broker";
 
 const SHA = "a".repeat(40);
+const TAG_OBJECT_SHA = "b".repeat(40);
 const TAG = "v4";
 
 function claims(overrides: Record<string, unknown> = {}) {
@@ -55,6 +56,10 @@ function harness(ledgerState: "accepted" | "replay" | "rate_limited" = "accepted
     },
   } as unknown as WorkerEnv;
   const github = {
+    publicWorkflowRuntimeShas: vi.fn(async () => ({
+      commitSha: SHA,
+      refSha: SHA,
+    })),
     publicWorkflowSha: vi.fn(async () => SHA),
     repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
     installationFor: vi.fn(async () => 2468),
@@ -131,7 +136,7 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
       capability: "review_publish",
     });
-    expect(github.publicWorkflowSha).toHaveBeenCalledWith(TAG);
+    expect(github.publicWorkflowRuntimeShas).toHaveBeenCalledWith(TAG);
   });
 
   it("does not resolve the public tag for an invalid OIDC assertion", async () => {
@@ -141,12 +146,27 @@ describe("token broker authorization", () => {
     await expect(broker.exchange({ oidc_token: "forged-jwt" })).rejects.toThrow(
       "invalid OIDC assertion",
     );
-    expect(github.publicWorkflowSha).not.toHaveBeenCalled();
+    expect(github.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
+  });
+
+  it("accepts the annotated tag object SHA emitted by GitHub Actions", async () => {
+    oidc.verify.mockResolvedValue(claims({ job_workflow_sha: TAG_OBJECT_SHA }));
+    const { broker, github } = harness();
+    github.publicWorkflowRuntimeShas.mockResolvedValue({
+      commitSha: SHA,
+      refSha: TAG_OBJECT_SHA,
+    });
+    await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
+      capability: "review_publish",
+    });
   });
 
   it("rejects when the runtime SHA does not match the current tag", async () => {
     const { broker, github } = harness();
-    github.publicWorkflowSha.mockResolvedValue("c".repeat(40));
+    github.publicWorkflowRuntimeShas.mockResolvedValue({
+      commitSha: "c".repeat(40),
+      refSha: "d".repeat(40),
+    });
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
       "broker_workflow_rejected",
     );

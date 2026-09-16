@@ -63,7 +63,10 @@ describe("GitHubApi public workflow resolution", () => {
         data: { object: { type: "commit", sha: SHA } },
       });
 
-    await expect(client.publicWorkflowSha("v4")).resolves.toBe(SHA);
+    await expect(client.publicWorkflowRuntimeShas("v4")).resolves.toEqual({
+      commitSha: SHA,
+      refSha: TAG_OBJECT_SHA,
+    });
     expect(request).toHaveBeenNthCalledWith(
       2,
       "GET",
@@ -123,7 +126,10 @@ describe("GitHubApi public workflow resolution", () => {
     );
 
     try {
-      await expect(client.publicWorkflowSha("v4")).resolves.toBe(SHA);
+      await expect(client.publicWorkflowRuntimeShas("v4")).resolves.toEqual({
+        commitSha: SHA,
+        refSha: TAG_OBJECT_SHA,
+      });
     } finally {
       fetchMock.mockRestore();
     }
