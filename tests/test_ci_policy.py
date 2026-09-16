@@ -189,6 +189,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn('event_name == "pull_request_review_comment"', text)
+        self.assertIn("PULL_REQUEST_JSON:", text)
+        self.assertIn("printf '%s' \"$PULL_REQUEST_JSON\"", text)
+        self.assertNotIn(
+            "printf '%s' '${{ toJson(github.event.pull_request) }}'",
+            text,
+        )
         self.assertNotIn(
             "trusted trigger resolver is missing from the default branch", text
         )

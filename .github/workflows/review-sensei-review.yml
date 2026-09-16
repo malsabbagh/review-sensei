@@ -124,6 +124,7 @@ jobs:
           PULL_REQUEST_URL: ${{ github.event.comment.pull_request_url }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           AUTO_REVIEW: ${{ vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
+          PULL_REQUEST_JSON: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request) || '' }}
         run: |
           set -euo pipefail
           PULL_REQUEST="${PULL_REQUEST:-}"
@@ -138,7 +139,11 @@ jobs:
           fi
           pull_json="$RUNNER_TEMP/review-sensei-pull.json"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            printf '%s' '${{ toJson(github.event.pull_request) }}' > "$pull_json"
+            if [[ -z "${PULL_REQUEST_JSON}" ]]; then
+              echo "::error::pull request payload is unavailable"
+              exit 1
+            fi
+            printf '%s' "$PULL_REQUEST_JSON" > "$pull_json"
           else
             gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$pull_json"
           fi
