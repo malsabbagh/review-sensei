@@ -188,20 +188,55 @@ class PublishableReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "reviewed snapshot"):
             prepare_publishable_review(self.result, evidence_policy="confirmed")
 
-    def test_confirmed_policy_drops_unverified_legacy_comments(self) -> None:
+    def test_confirmed_policy_without_candidates_rejects_legacy_comments(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "requires candidates when legacy comments are present"
+        ):
+            prepare_publishable_review(
+                self.result,
+                candidates=(),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+            )
+
+    def test_confirmed_policy_with_none_candidates_rejects_legacy_comments(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "requires candidates when legacy comments are present"
+        ):
+            prepare_publishable_review(
+                self.result,
+                candidates=None,
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+            )
+
+    def test_confirmed_candidate_outside_reviewed_diff_is_unpublished(self) -> None:
         prepared = prepare_publishable_review(
-            self.result,
-            candidates=(),
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
             snapshot=self.snapshot,
             snapshot_sha256=self.snapshot_sha,
             evidence_policy="confirmed",
+            changed_lines={"src/other.py": frozenset({2})},
         )
         self.assertEqual(prepared.result.comments, ())
         self.assertEqual(prepared.result.review_status, "partial")
-        self.assertEqual(prepared.unpublished, 1)
-        self.assertEqual(prepared.result.evidence_policy, "confirmed")
-        self.assertIn("Dropped legacy comments: 1", prepared.result.summary)
-        self.assertNotIn("Verification coverage: confirmed=0", prepared.result.summary)
+        self.assertEqual(prepared.verifications[0].disposition, "rejected")
+        self.assertEqual(
+            prepared.verifications[0].reasons, ("location outside reviewed diff",)
+        )
+        self.assertIn("location outside reviewed diff=1", prepared.result.summary)
 
     def test_candidate_text_is_untrusted_data_and_does_not_expand_permissions(
         self,

@@ -926,12 +926,17 @@ class ReviewPublisher:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
         try:
+            analysis = analyze_diff(diff)
+        except ReviewInputError as exc:
+            raise GitHubPublicationError("review diff failed validation") from exc
+        try:
             prepared = prepare_publishable_review(
                 result,
                 candidates=candidates,
                 snapshot=snapshot,
                 snapshot_sha256=snapshot_sha256,
                 evidence_policy=evidence_policy,
+                changed_lines=analysis.changed_lines,
             )
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc

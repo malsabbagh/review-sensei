@@ -32,9 +32,13 @@ as a finding.
 - `legacy` is the compatible single-pass mode. Existing comments publish
   unchanged and are identified by `evidence_policy="legacy"`.
 - `confirmed` publishes only candidates whose evidence exists in the exact
-  reviewed snapshot, with matching paths, in-range lines, and excerpt
-  substrings. Rejected, duplicate, malformed, and insufficient-evidence
-  candidates are unpublished.
+  reviewed snapshot, with matching paths, in-range lines, excerpt substrings,
+  and a publishable location inside the reviewed diff. Rejected, duplicate,
+  malformed, insufficient-evidence, and out-of-diff candidates are
+  unpublished. Legacy single-pass comments are dropped once candidate
+  verification runs; callers must supply candidates whenever legacy comments
+  are present, otherwise publication fails closed instead of silently
+  emptying the review.
 - Incomplete verification downgrades `complete` / `summary-only` coverage to
   `partial` and records a deterministic coverage note. It is never a clean
   review.

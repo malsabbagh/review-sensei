@@ -287,6 +287,19 @@ class EvaluationTests(unittest.TestCase):
 
         self.assertEqual(outcome["status"], "failed")
 
+    def test_missing_evidence_policy_in_expected_document_fails(self) -> None:
+        expected = (
+            '{"summary":"ok","comments":[],"provider":"fixture",'
+            '"model":"fixture-v1","learning_proposals":[]}'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(
+                _write_corpus(Path(temp_dir), expected_result_text=expected)
+            )
+            report = evaluate_fixture(corpus)
+
+        self.assertFalse(report["passed"])
+
     def test_fixture_explicitly_matching_complete_status_passes(self) -> None:
         expected = (
             '{"summary":"ok","comments":[],"provider":"fixture",'

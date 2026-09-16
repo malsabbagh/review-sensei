@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
@@ -519,7 +519,8 @@ def _verification_coverage(
             parts.append(f"Rejection reasons: {breakdown}.")
     if dropped_legacy:
         parts.append(
-            f"Dropped legacy comments: {dropped_legacy}. "
+            f"Dropped legacy comments: {dropped_legacy} "
+            "(superseded by confirmed candidate verification). "
             "Legacy single-pass comments are not findings under confirmed policy."
         )
     parts.append(_COVERAGE_NOTE)
@@ -532,6 +533,14 @@ def _downgrade_incomplete_status(status: str) -> str:
     return status
 
 
+def _comment_in_changed_lines(
+    comment: ReviewComment,
+    changed_lines: Mapping[str, frozenset[int]],
+) -> bool:
+    allowed = changed_lines.get(comment.path)
+    return bool(allowed and comment.line in allowed)
+
+
 def prepare_publishable_review(
     result: ReviewResult,
     *,
@@ -540,17 +549,20 @@ def prepare_publishable_review(
     snapshot_sha256: str | None = None,
     evidence_policy: str = "legacy",
     limits: ReviewLimits | None = None,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
 ) -> PublishableReview:
     """Gate findings before publication using the configured evidence policy.
 
     ``legacy`` is the compatible single-pass mode: existing comments publish
     unchanged and are identified by ``evidence_policy="legacy"``. ``confirmed``
     publishes only candidates whose evidence exists in the exact reviewed
-    snapshot. Legacy single-pass comments are always dropped under confirmed
-    policy and counted in coverage when present. Rejected, duplicate,
-    malformed, and insufficient-evidence candidates never become findings, and
-    incomplete coverage cannot be a clean review. A confirmed review with no
-    legacy comments, no candidates, and no rejections remains ``complete``.
+    snapshot and, when ``changed_lines`` is supplied, targets a changed diff
+    hunk. Legacy single-pass comments are dropped once candidate verification
+    runs; callers must supply candidates whenever legacy comments are present.
+    Rejected, duplicate, malformed, insufficient-evidence, and out-of-diff
+    candidates never become findings, and incomplete coverage cannot be a clean
+    review. A confirmed review with no legacy comments, no candidates, and no
+    rejections remains ``complete``.
     """
 
     if not isinstance(result, ReviewResult):
@@ -560,23 +572,17 @@ def prepare_publishable_review(
     if evidence_policy == "legacy":
         # Rebuild only when upstream tagged a non-legacy policy on the result.
         if result.evidence_policy != "legacy":
-            result = ReviewResult(
-                summary=result.summary,
-                comments=result.comments,
-                provider=result.provider,
-                model=result.model,
-                learning_proposals=result.learning_proposals,
-                review_status=result.review_status,
-                limits=result.limits,
-                source_context_coverage=result.source_context_coverage,
-                evidence_policy="legacy",
-            )
+            result = replace(result, evidence_policy="legacy")
         return PublishableReview(result, (), "legacy", 0)
 
     if candidates is None:
         candidates = ()
     if snapshot is None or snapshot_sha256 is None:
         raise ReviewInputError("confirmed evidence policy requires a reviewed snapshot")
+    if not candidates and result.comments:
+        raise ReviewInputError(
+            "confirmed evidence policy requires candidates when legacy comments are present"
+        )
     review_limits = limits if limits is not None else result.limits
     verifications = verify_candidates(
         candidates,
@@ -585,13 +591,30 @@ def prepare_publishable_review(
         limits=review_limits,
     )
     published: list[ReviewComment] = []
+    final_verifications: list[VerificationResult] = []
     unpublished_candidates = 0
     for candidate, verification in zip(candidates, verifications, strict=True):
-        if verification.disposition == "confirmed":
-            published.append(_candidate_to_comment(candidate))
-        else:
+        if verification.disposition != "confirmed":
+            final_verifications.append(verification)
             unpublished_candidates += 1
-    dropped_legacy = len(result.comments)
+            continue
+        comment = _candidate_to_comment(candidate)
+        if changed_lines is not None and not _comment_in_changed_lines(
+            comment, changed_lines
+        ):
+            final_verifications.append(
+                VerificationResult(
+                    "rejected",
+                    ("location outside reviewed diff",),
+                    True,
+                    True,
+                )
+            )
+            unpublished_candidates += 1
+            continue
+        published.append(comment)
+        final_verifications.append(verification)
+    dropped_legacy = len(result.comments) if candidates else 0
     unpublished = unpublished_candidates + dropped_legacy
     incomplete = unpublished_candidates > 0 or dropped_legacy > 0
     summary = result.summary
@@ -599,7 +622,7 @@ def prepare_publishable_review(
     if incomplete:
         status = _downgrade_incomplete_status(status)
         coverage = _verification_coverage(
-            verifications,
+            tuple(final_verifications),
             dropped_legacy=dropped_legacy,
         )
         summary = f"{summary}\n\n{coverage}" if summary else coverage
@@ -614,4 +637,6 @@ def prepare_publishable_review(
         source_context_coverage=result.source_context_coverage,
         evidence_policy="confirmed",
     )
-    return PublishableReview(prepared, verifications, "confirmed", unpublished)
+    return PublishableReview(
+        prepared, tuple(final_verifications), "confirmed", unpublished
+    )
