@@ -150,7 +150,9 @@ def changes_requested_marker(
     )
 
 
-def finding_review_event(*, auto_approve: bool, result: ReviewResult) -> tuple[str, str]:
+def finding_review_event(
+    *, auto_approve: bool, result: ReviewResult
+) -> tuple[str, str]:
     """Return the GitHub review event and state for one finding publication."""
 
     if auto_approve and has_blocking_findings(result):
@@ -306,9 +308,7 @@ class ReviewApprovalFinalizer:
             or write_preflight.base_sha != preflight.base_sha
         ):
             return PublicationResult(status="skipped_stale_base")
-        blocking = known_blocking_finding or (
-            scan is not None and scan.open_blocking
-        )
+        blocking = known_blocking_finding or (scan is not None and scan.open_blocking)
         try:
             reviews = self.http.paginate(
                 path=self.http.repository_path(
@@ -321,7 +321,9 @@ class ReviewApprovalFinalizer:
                 "review decision reconciliation failed temporarily"
             ) from exc
         except GitHubHTTPError as exc:
-            raise GitHubPublicationError("review decision reconciliation failed") from exc
+            raise GitHubPublicationError(
+                "review decision reconciliation failed"
+            ) from exc
         has_changes_requested = self._reviews_have_app_head_state(
             reviews,
             head_sha=head_sha,
@@ -601,10 +603,7 @@ class ReviewApprovalFinalizer:
                         and isinstance(roots[0], dict)
                     ):
                         author = roots[0].get("author")
-                        if (
-                            isinstance(author, dict)
-                            and author.get("login") == app_slug
-                        ):
+                        if isinstance(author, dict) and author.get("login") == app_slug:
                             saw_app_finding = True
                     continue
                 if (
@@ -626,9 +625,7 @@ class ReviewApprovalFinalizer:
                     base_sha=base_sha,
                 )
                 if blocking is not False:
-                    return _ThreadBlockingScan(
-                        open_blocking=True, saw_app_finding=True
-                    )
+                    return _ThreadBlockingScan(open_blocking=True, saw_app_finding=True)
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")

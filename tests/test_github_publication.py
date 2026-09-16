@@ -149,9 +149,7 @@ def blocking_thread_node(
 ):
     return {
         "isResolved": resolved,
-        "comments": {
-            "nodes": [{"body": body, "author": {"login": author}}]
-        },
+        "comments": {"nodes": [{"body": body, "author": {"login": author}}]},
     }
 
 
@@ -250,9 +248,7 @@ class ReviewPublisherTests(unittest.TestCase):
             [
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(
-                    nodes=(
-                        blocking_thread_node(body="unclassified App root"),
-                    )
+                    nodes=(blocking_thread_node(body="unclassified App root"),)
                 ),
                 *request_changes_write_responses(head),
             ]
@@ -335,9 +331,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "changes_requested")
         self.assertEqual(outcome.review_id, 11)
-        self.assertEqual(
-            [call[0] for call in calls], ["GET", "GET", "GET", "POST"]
-        )
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
         body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertNotIn("comments", body)
@@ -969,9 +963,7 @@ class ReviewPublisherTests(unittest.TestCase):
                     has_next_page=True,
                     end_cursor="cursor-1",
                 ),
-                graphql_review_threads_response(
-                    nodes=(blocking_thread_node(),)
-                ),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
                 *request_changes_write_responses(head, review_id=8),
             ]
         )
