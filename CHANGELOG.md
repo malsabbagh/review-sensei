@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Documented ownership, licensing inventory, trademark usage, DCO-without-CLA
+  contribution licensing, and the Community / Managed / Enterprise boundary
+  (issue #89): `docs/ownership-and-licensing.md`, `TRADEMARKS.md`, and
+  ADR 0040. Root MIT text and package license metadata are unchanged.
+
 - Bound model, prompt, and routing promotions to real-provider evaluation
   evidence. `engine_digest` and `prompt_digest` are now computed from package
   identity, engine limits, and stage templates including full category

@@ -106,10 +106,33 @@ configuration, or corpus cases require maintainer review and documentation
 rationale. The live walkthrough in [`docs/evaluation.md`](docs/evaluation.md) is
 opt-in and never belongs in CI.
 
+## Licensing of contributions
+
+Contributions are submitted under the license that already applies to the files
+you touch (MIT for the project Software unless a file or directory states
+otherwise, such as the CC0-1.0 synthetic corpus under `evaluation/v1/`). You or
+your rightsholder retain copyright ownership of your contribution unless a
+separate written agreement provides otherwise. The root
+[`LICENSE`](LICENSE) copyright notice does not assign contributor copyright to
+the maintainer.
+
+This project uses the Developer Certificate of Origin (DCO) only. A DCO
+certifies that you have the right to submit the contribution under the
+applicable license; it is **not** copyright assignment. **Decision (issue #89):
+DCO retained; no CLA is introduced by that work.** MIT already permits
+commercial reuse and sublicensing subject to its notice conditions, so a CLA is
+not a prerequisite for building or selling a product on top of this project.
+
+Any future CLA or assignment must have a documented need, reviewed terms,
+maintainer approval, and prospective adoption only. It would not automatically
+cover past contributions or authorize removal of existing MIT (or other)
+notices. See [`docs/ownership-and-licensing.md`](docs/ownership-and-licensing.md)
+and [`TRADEMARKS.md`](TRADEMARKS.md) for ownership, brand, and commercial-boundary
+documentation.
+
 ## Commits and pull requests
 
-Use focused commits with clear imperative messages. This project uses the
-Developer Certificate of Origin (DCO): every commit must include a
+Use focused commits with clear imperative messages. Every commit must include a
 `Signed-off-by: Full Name <email@example.com>` trailer. Use `git commit -s` and
 ensure the email is one you are authorized to use. See the
 [DCO](https://developercertificate.org/) for the certification terms.

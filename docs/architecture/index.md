@@ -92,6 +92,11 @@ transport calls; future GitHub publishers consume only validated
 | [`0035`](../adr/0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | Blocking findings emit `REQUEST_CHANGES`; a later same-head `APPROVE` wins only after those roots resolve |
 | [`0036`](../adr/0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | Advisory stale/conflict signals; feedback is not trusted review context |
 | [`0037`](../adr/0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40; Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
+| [`0040`](../adr/0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89; MIT Community source preserved; official ops distinct from copyright; future commercial layer separate |
+
+Ownership, trademark, and licensing inventory:
+[`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),
+[`TRADEMARKS.md`](../../TRADEMARKS.md).
 
 The validation boundary is shared rather than adapter-specific: `ReviewLimits`
 can only tighten its public hard ceilings; canonical NFC UTF-8 paths and Git
