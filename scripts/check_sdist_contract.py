@@ -30,21 +30,39 @@ def resolve_archive(contract: dict, archive: Path | None) -> Path:
     pattern = contract["archive_identification"]["sdist_glob"]
     matches = sorted(ROOT.glob(pattern))
     if len(matches) != 1:
+        listed = ", ".join(match.name for match in matches) or "none"
         raise SystemExit(
-            f"expected exactly one sdist matching {pattern}, found {len(matches)}"
+            f"expected exactly one sdist matching {pattern}, found "
+            f"{len(matches)} ({listed}); remove stale archives and rebuild"
         )
     return matches[0]
 
 
 def archive_entries(archive: Path) -> set[str]:
-    """Return archive members with the ``review_sensei-<version>/`` root removed."""
+    """Return archive members relative to the single sdist root directory.
 
-    entries: set[str] = set()
+    The root is taken from the archive itself rather than by discarding the
+    first path segment, so a member emitted outside ``review_sensei-<version>/``
+    fails loudly instead of being silently skipped and weakening the
+    required/forbidden assertions below.
+    """
+
     with tarfile.open(archive, "r:gz") as tar:
-        for name in tar.getnames():
-            _, separator, relative = name.partition("/")
-            if separator and relative:
-                entries.add(relative)
+        names = tar.getnames()
+    roots = sorted({name.partition("/")[0] for name in names})
+    if len(roots) != 1:
+        raise SystemExit(
+            f"{archive.name}: expected exactly one top-level sdist directory, "
+            f"found {roots}"
+        )
+    root = roots[0]
+    if not root.startswith("review_sensei-"):
+        raise SystemExit(f"{archive.name}: unexpected sdist root directory {root!r}")
+    entries: set[str] = set()
+    for name in names:
+        _, separator, relative = name.partition("/")
+        if separator and relative:
+            entries.add(relative)
     return entries
 
 

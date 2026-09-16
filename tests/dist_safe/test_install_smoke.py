@@ -24,9 +24,31 @@ from review_sensei.cli import main  # noqa: E402
 from review_sensei.models import ProviderRequest  # noqa: E402
 from review_sensei.providers.fixture import FixtureProvider  # noqa: E402
 
-# Release versions must stay PEP 440 parseable. CI pins the exact artifact
-# through REVIEWSENSEI_EXPECTED_VERSION so a version bump does not edit tests.
-PEP440 = re.compile(r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$")
+CONTRACT = json.loads(
+    (_TESTS_ROOT / "fixtures" / "distribution-contract.json").read_text(
+        encoding="utf-8"
+    )
+)
+SCHEMA_PREFIX = "src/review_sensei/schemas/"
+# The contract is the single source of truth for packaged schemas, so adding one
+# does not need a matching edit here.
+PACKAGED_SCHEMAS = tuple(
+    relative.removeprefix(SCHEMA_PREFIX)
+    for relative in CONTRACT["sdist_entries"]["required"]
+    if relative.startswith(SCHEMA_PREFIX)
+)
+# Release versions must stay PEP 440 parseable, including combined forms such as
+# 0.1.0rc1.post1, 0.1.0.dev2, and 0.1.0+local. This lane may only rely on the
+# wheel and the standard library, so the canonical grammar is spelled out here
+# rather than imported from packaging, which the wheel venv does not install.
+PEP440 = re.compile(
+    r"^([1-9][0-9]*!)?"
+    r"(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))*"
+    r"((a|b|rc)(0|[1-9][0-9]*))?"
+    r"(\.post(0|[1-9][0-9]*))?"
+    r"(\.dev(0|[1-9][0-9]*))?"
+    r"(\+[a-z0-9]+([.-][a-z0-9]+)*)?$"
+)
 
 
 class InstallSmokeTests(unittest.TestCase):
@@ -38,13 +60,8 @@ class InstallSmokeTests(unittest.TestCase):
         if expected:
             self.assertEqual(installed_version, expected)
         package_root = importlib.resources.files("review_sensei")
-        for name in (
-            "review-category.schema.json",
-            "review-stage.schema.json",
-            "learning-entry.schema.json",
-            "evaluation-corpus.schema.json",
-            "evaluation-report.schema.json",
-        ):
+        self.assertIn("promotion-record.schema.json", PACKAGED_SCHEMAS)
+        for name in PACKAGED_SCHEMAS:
             with self.subTest(name=name):
                 self.assertTrue(package_root.joinpath("schemas", name).is_file())
         stdout = io.StringIO()

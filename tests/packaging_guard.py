@@ -45,7 +45,7 @@ def assert_distribution_import() -> Path:
         )
     if armed:
         prefix = Path(sys.prefix).resolve()
-        if prefix not in package_file.parents:
+        if not package_file.is_relative_to(prefix):
             raise AssertionError(
                 "review_sensei is not installed under sys.prefix: "
                 f"{package_file} prefix={prefix}"
