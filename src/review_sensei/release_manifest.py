@@ -233,6 +233,18 @@ class Artifact:
             raise ReviewInputError("release artifact identity is malformed")
 
 
+def _resolve_provenance_kind(value: Mapping[str, Any]) -> str:
+    explicit = value.get("provenance_kind")
+    if isinstance(explicit, str) and explicit in TRUSTED_PROVENANCE:
+        return explicit
+    legacy = value.get("provenance")
+    if isinstance(legacy, str) and legacy in TRUSTED_PROVENANCE:
+        return legacy
+    raise ReviewInputError(
+        "manifest provenance must be an explicit trusted mechanism"
+    )
+
+
 @dataclass(frozen=True)
 class CompatibilityManifest:
     release: str
@@ -244,6 +256,7 @@ class CompatibilityManifest:
     worker: Artifact
     compatible_worker_range: str
     provenance: str
+    provenance_kind: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.release, str) or not _VERSION.fullmatch(self.release):
@@ -272,10 +285,16 @@ class CompatibilityManifest:
             raise ReviewInputError(
                 "compatible worker range does not include the declared worker version"
             )
-        if self.provenance not in TRUSTED_PROVENANCE:
+        if self.provenance_kind not in TRUSTED_PROVENANCE:
             raise ReviewInputError(
                 "manifest provenance must be an explicit trusted mechanism"
             )
+        if (
+            not isinstance(self.provenance, str)
+            or not self.provenance.strip()
+            or len(self.provenance) > 256
+        ):
+            raise ReviewInputError("manifest provenance annotation is malformed")
         if (
             not isinstance(self.npm, tuple)
             or not self.npm
@@ -293,9 +312,15 @@ class CompatibilityManifest:
         try:
             artifacts = value["artifacts"]
             npm = tuple(Artifact(**item) for item in artifacts["npm"])
+            provenance_kind = _resolve_provenance_kind(value)
+            workflow_commit = value.get("workflow_commit")
+            if not isinstance(workflow_commit, str) or not _GIT_SHA.fullmatch(
+                workflow_commit
+            ):
+                raise ReviewInputError("workflow commit must be a 40-character git SHA")
             return cls(
                 release=value["release"],
-                workflow_commit=value["workflow_commit"],
+                workflow_commit=workflow_commit,
                 workflow=Artifact(**artifacts["workflow"]),
                 python=Artifact(**artifacts["python"]),
                 npm=npm,
@@ -303,6 +328,7 @@ class CompatibilityManifest:
                 worker=Artifact(**artifacts["worker"]),
                 compatible_worker_range=value["compatible_worker_range"],
                 provenance=value["provenance"],
+                provenance_kind=provenance_kind,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewInputError("compatibility manifest is incomplete") from exc
@@ -314,6 +340,7 @@ class CompatibilityManifest:
             "workflow_commit": self.workflow_commit,
             "compatible_worker_range": self.compatible_worker_range,
             "provenance": self.provenance,
+            "provenance_kind": self.provenance_kind,
             "artifacts": {
                 "workflow": self.workflow.__dict__,
                 "python": self.python.__dict__,
@@ -398,6 +425,7 @@ def build_compatibility_manifest(
     schemas_version: str,
     compatible_worker_range: str,
     provenance: str,
+    provenance_kind: str | None = None,
 ) -> CompatibilityManifest:
     """Build a validated manifest from exact on-disk artifact bytes."""
 
@@ -421,6 +449,7 @@ def build_compatibility_manifest(
             worker=_artifact_from_file(worker_name, release, worker_path),
             compatible_worker_range=compatible_worker_range,
             provenance=provenance,
+            provenance_kind=provenance_kind or provenance,
         )
     except (TypeError, ValueError) as exc:
         raise ReviewInputError("compatibility manifest is incomplete") from exc
@@ -478,7 +507,12 @@ def verify_worker_compatibility(
 
 
 def classify_install_failure(message: str) -> str:
-    """Classify a package-install failure without treating outages as missing packages."""
+    """Classify a package-install failure without treating outages as missing packages.
+
+    Precedence is fixed: unavailable distribution markers win over authentication
+    and network substrings so incidental network-like text cannot suppress the
+    GitHub executing-commit fallback when pip reports a missing package.
+    """
 
     if not isinstance(message, str) or not message.strip():
         return FAILURE_OTHER
@@ -509,7 +543,13 @@ def prove_release_identity(
     executing_commit: str,
     observed_python_sha256: str | None = None,
 ) -> None:
-    """Prove PyPI-primary or executing-commit identity against one validated manifest."""
+    """Prove PyPI-primary or executing-commit identity against one validated manifest.
+
+    This checks release/version alignment, executing workflow commit equality, and
+    (for PyPI) the observed Python artifact digest. It does not verify workflow,
+    npm, or worker digests, or worker compatibility range membership. Callers must
+    also invoke ``verify_artifact_digests`` and ``verify_worker_compatibility``.
+    """
 
     if requested_version != manifest.release or installed_version != manifest.release:
         raise ReviewInputError("installed package does not match the manifest release")
@@ -639,7 +679,12 @@ def evaluate_inflight_tag_movement(
     current_sha: str,
     authorized_grace: Mapping[str, Any] | None = None,
 ) -> None:
-    """Fail closed when ``v4`` moves during a run unless grace is explicitly authorized."""
+    """Fail closed when ``v4`` moves during a run unless grace is explicitly authorized.
+
+    ``authorized_grace`` is an in-memory per-run authorization only. It is not a
+    persisted or schema-validated public record and must not be written to audit
+    ledgers.
+    """
 
     start = _require_git_sha(start_sha, "start workflow commit")
     current = _require_git_sha(current_sha, "current workflow commit")
@@ -763,7 +808,12 @@ def begin_channel_promotion(
     ledger: Sequence[ChannelPromotionRecord] = (),
     published_version_digests: Mapping[str, str] | None = None,
 ) -> ChannelPromotionRecord:
-    """Start a serialized ``v4`` promotion after canary binding and complete publication."""
+    """Start a serialized ``v4`` promotion after canary binding and complete publication.
+
+    Immutable-version enforcement is digest-based: any artifact-byte or workflow
+    commit change for an already published release requires a new release
+    version instead of rebinding the same ``release`` value.
+    """
 
     if _ledger_has_inflight(ledger):
         raise ReviewInputError("v4 promotion is already in flight")
@@ -858,4 +908,6 @@ def refuse_immutable_tag_replacement(channel: str) -> None:
         return
     if isinstance(channel, str) and _IMMUTABLE_TAG.fullmatch(channel):
         raise ReviewInputError("immutable package tags cannot be replaced")
-    raise ReviewInputError("only the operator-managed v4 channel may move")
+    raise ReviewInputError(
+        "release channel must be the operator-managed v4 tag or an immutable vX.Y.Z package tag"
+    )

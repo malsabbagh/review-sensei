@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
+from review_sensei.schemas import validate_public_document
 from review_sensei.release_manifest import (
     FAILURE_AUTHENTICATION,
     FAILURE_NETWORK,
@@ -176,6 +177,24 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 verify_worker_compatibility(manifest, "0.9.0")
             verify_worker_compatibility(manifest, "1.0.0")
 
+    def test_legacy_v1_schema_accepts_open_provenance_without_workflow_commit(self) -> None:
+        legacy = {
+            "schema_version": "1.0",
+            "release": "1.0.0",
+            "compatible_worker_range": ">=1.0.0",
+            "provenance": "signed",
+            "artifacts": {
+                "workflow": {"name": "wf", "version": "1.0.0", "sha256": SHA},
+                "python": {"name": "py", "version": "1.0.0", "sha256": SHA},
+                "npm": [{"name": "cli", "version": "1.0.0", "sha256": SHA}],
+                "schemas_version": "1.0",
+                "worker": {"name": "worker", "version": "1.0.0", "sha256": SHA},
+            },
+        }
+        validate_public_document(legacy, "compatibility-manifest")
+        with self.assertRaises(ReviewInputError):
+            validate_compatibility_manifest(legacy)
+
     def test_malformed_manifest_and_sidecar_provenance_are_rejected(self) -> None:
         artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}
         malformed = {
@@ -236,6 +255,69 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                     manifest=manifest,
                     executing_commit=PREVIOUS,
                 )
+            with self.assertRaisesRegex(
+                ReviewInputError, "does not match the manifest release"
+            ):
+                prove_release_identity(
+                    source=INSTALL_SOURCE_PYPI,
+                    requested_version="1.0.0",
+                    installed_version="1.0.1",
+                    manifest=manifest,
+                    executing_commit=COMMIT,
+                    observed_python_sha256=manifest.python.sha256,
+                )
+
+    def test_worker_caret_and_tilde_ranges_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = _build_manifest(Path(temporary))
+            caret_manifest = build_compatibility_manifest(
+                release="1.0.0",
+                workflow_path=_write(
+                    Path(temporary) / "caret-workflow.yml", b"workflow"
+                ),
+                workflow_name="review-sensei-run.yml",
+                workflow_commit=COMMIT,
+                python_path=_write(Path(temporary) / "caret.whl", b"python"),
+                python_name="review-sensei",
+                npm_artifacts=(
+                    ("@reviewsensei/cli", _write(Path(temporary) / "caret.tgz", b"npm")),
+                ),
+                worker_path=_write(Path(temporary) / "caret-worker.js", b"worker"),
+                worker_name="review-sensei-worker",
+                schemas_version="1.0",
+                compatible_worker_range="^1.0.0",
+                provenance=PROVENANCE,
+            )
+            verify_worker_compatibility(caret_manifest, "1.0.0")
+            verify_worker_compatibility(caret_manifest, "1.2.9")
+            with self.assertRaisesRegex(
+                ReviewInputError, "outside the compatible range"
+            ):
+                verify_worker_compatibility(caret_manifest, "2.0.0")
+            tilde_manifest = build_compatibility_manifest(
+                release="1.0.0",
+                workflow_path=_write(
+                    Path(temporary) / "tilde-workflow.yml", b"workflow"
+                ),
+                workflow_name="review-sensei-run.yml",
+                workflow_commit=COMMIT,
+                python_path=_write(Path(temporary) / "tilde.whl", b"python"),
+                python_name="review-sensei",
+                npm_artifacts=(
+                    ("@reviewsensei/cli", _write(Path(temporary) / "tilde.tgz", b"npm")),
+                ),
+                worker_path=_write(Path(temporary) / "tilde-worker.js", b"worker"),
+                worker_name="review-sensei-worker",
+                schemas_version="1.0",
+                compatible_worker_range="~1.0.0",
+                provenance=PROVENANCE,
+            )
+            verify_worker_compatibility(tilde_manifest, "1.0.9")
+            with self.assertRaisesRegex(
+                ReviewInputError, "outside the compatible range"
+            ):
+                verify_worker_compatibility(tilde_manifest, "1.1.0")
+            verify_worker_compatibility(manifest, "1.0.0")
 
     def test_network_and_auth_failures_are_not_unavailable_distributions(self) -> None:
         unavailable = "ERROR: No matching distribution found for review-sensei==1.0.0"
@@ -244,11 +326,22 @@ class CompatibilityManifestContractTests(unittest.TestCase):
         other = (
             "ERROR: ResolutionImpossible: review-sensei 1.0.0 depends on missing extra"
         )
+        unavailable_with_network_substring = (
+            "INFO: upstream docs mention SSLError handling\n"
+            "ERROR: No matching distribution found for review-sensei==1.0.0"
+        )
         self.assertEqual(classify_install_failure(unavailable), FAILURE_UNAVAILABLE)
         self.assertEqual(classify_install_failure(network), FAILURE_NETWORK)
         self.assertEqual(classify_install_failure(auth), FAILURE_AUTHENTICATION)
         self.assertEqual(classify_install_failure(other), FAILURE_OTHER)
+        self.assertEqual(
+            classify_install_failure(unavailable_with_network_substring),
+            FAILURE_UNAVAILABLE,
+        )
         allow_executing_commit_fallback(FAILURE_UNAVAILABLE)
+        allow_executing_commit_fallback(
+            classify_install_failure(unavailable_with_network_substring)
+        )
         with self.assertRaises(ReviewInputError):
             allow_executing_commit_fallback(FAILURE_NETWORK)
         with self.assertRaises(ReviewInputError):
@@ -377,6 +470,56 @@ class CompatibilityManifestContractTests(unittest.TestCase):
             self.assertEqual(rollback.previous_target, COMMIT)
             self.assertEqual(rollback.new_target, PREVIOUS)
 
+    def test_complete_promotion_requires_in_flight_record_in_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = _build_manifest(Path(temporary))
+            canary = bind_canary_evidence(manifest, "fixture-downstream")
+            in_flight = begin_channel_promotion(
+                manifest=manifest,
+                canary=canary,
+                previous_target=PREVIOUS,
+                publication_state="complete",
+                recorded_at="2026-09-15T00:00:00Z",
+            )
+            with self.assertRaisesRegex(ReviewInputError, "not in the audit ledger"):
+                complete_channel_promotion(
+                    in_flight,
+                    recorded_at="2026-09-15T00:01:00Z",
+                    ledger=(),
+                )
+
+    def test_rollback_refuses_restored_manifest_with_wrong_channel_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            restored = _build_manifest(
+                directory / "restored",
+                python_bytes=b"old",
+                workflow_commit=COMMIT,
+            )
+            current_manifest = _build_manifest(directory / "current")
+            canary = bind_canary_evidence(current_manifest, "fixture-downstream")
+            in_flight = begin_channel_promotion(
+                manifest=current_manifest,
+                canary=canary,
+                previous_target=PREVIOUS,
+                publication_state="complete",
+                recorded_at="2026-09-15T00:00:00Z",
+            )
+            completed = complete_channel_promotion(
+                in_flight,
+                recorded_at="2026-09-15T00:01:00Z",
+                ledger=(in_flight,),
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "previous immutable channel SHA"
+            ):
+                record_channel_rollback(
+                    current=completed,
+                    restored=restored,
+                    recorded_at="2026-09-15T00:02:00Z",
+                    ledger=(in_flight, completed),
+                )
+
     def test_immutable_package_tags_and_version_bytes_cannot_be_replaced(self) -> None:
         refuse_immutable_tag_replacement("v4")
         with self.assertRaisesRegex(ReviewInputError, "cannot be replaced"):
@@ -439,6 +582,7 @@ class CompatibilityManifestContractTests(unittest.TestCase):
                 self.assertEqual(validate.main([str(directory / "missing.json")]), 1)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["workflow_commit"], COMMIT)
+            self.assertEqual(payload["provenance_kind"], PROVENANCE)
             self.assertIn("digest", stdout.getvalue())
             self.assertIn("validation failed", stderr.getvalue())
 

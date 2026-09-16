@@ -68,11 +68,12 @@ containing `/v1/`.
 Compatibility-manifest worker ranges support bounded numeric, caret, tilde, and
 wildcard forms. An unqualified `x` or `*` is intentionally an explicit
 all-non-negative-semver range; releases that need a compatibility gate should
-prefer a bounded range. The manifest also records the exact 40-character
-workflow commit and requires a trusted provenance mechanism
+prefer a bounded range. The manifest may also record the exact 40-character
+workflow commit and a closed `provenance_kind`
 (`github-artifact-attestation`, `pypi-trusted-publishing`, or
-`npm-oidc-provenance`). A checksum fetched beside an untrusted artifact is
-rejected.
+`npm-oidc-provenance`) while keeping the legacy open `provenance` string for
+v1 compatibility. Binding validation requires both fields for new manifests. A
+checksum fetched beside an untrusted artifact is rejected.
 
 Implemented now: validating and building that manifest, proving PyPI-primary
 and executing-commit install identity, binding fixture/downstream canary

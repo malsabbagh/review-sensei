@@ -163,9 +163,14 @@ downstream evidence from #34 can bind the exact manifest digest. A live
 disposable-repository canary is operator-only and cannot authorize `v4`
 promotion in this contract. Promotion is serialized, records previous and new
 `v4` targets, and is refused when publication is partial or a package version
-would be replaced. Rollback uses the previous immutable channel target and
-records both SHAs. If `v4` moves during a run, the default is fail-closed
-retry; bounded grace exists only as an explicit authorized record.
+would be replaced. A `partial` publication state means at least one lane is
+published but not all five; finish the remaining lanes (for example the npm
+launcher after platform packages per ADR 0031) before retrying promotion with
+the same manifest. A `failed` state means every lane is still unpublished and
+also blocks promotion until a fresh manifest is built from new artifact bytes.
+Rollback uses the previous immutable channel target and records both SHAs. If
+`v4` moves during a run, the default is fail-closed retry; bounded grace exists
+only as an explicit in-memory authorized record for that run.
 
 Implemented by this change: the manifest schema, digest builder, identity
 proof APIs, canary-binding record, and promotion/rollback records. Operator-only:

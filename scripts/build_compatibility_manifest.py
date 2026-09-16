@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,10 +58,18 @@ def main(argv: list[str] | None = None) -> int:
             provenance=args.provenance,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
+        payload = json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n"
+        with tempfile.NamedTemporaryFile(
+            "w",
             encoding="utf-8",
-        )
+            dir=args.output.parent,
+            delete=False,
+        ) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, args.output)
     except (OSError, UnicodeError, ReviewInputError) as exc:
         print(f"compatibility manifest build failed: {exc}", file=sys.stderr)
         return 1
