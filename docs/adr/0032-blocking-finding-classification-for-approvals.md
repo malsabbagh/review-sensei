@@ -35,8 +35,11 @@ every finding: `true` means the finding must be resolved before merge and
 is absent, only case-insensitive `critical`/`high` severity values block.
 Missing, lower-severity, and legacy free-form severity values are non-blocking.
 
-Review publication records findings as `COMMENT` reviews, with a hidden,
-exact-head-bound marker on each root that persists the typed blocking decision.
+Review publication records blocking findings as `REQUEST_CHANGES` when
+automatic approval is enabled, otherwise `COMMENT`. A hidden, exact-head-bound
+marker on each root persists the typed blocking decision. See
+[ADR 0035](0035-request-changes-for-blocking-findings.md) for the two-execution
+same-head event policy.
 Automatic approval defaults to enabled when automatic review and GitHub writes
 are enabled; `REVIEWSENSEI_AUTO_APPROVE=false` is the explicit opt-out. The
 shared approval finalizer then performs the only `APPROVE` write. It may

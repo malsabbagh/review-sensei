@@ -561,17 +561,20 @@ select a review step; unavailable GitHub metadata fails closed with an
 explicit error rather than allowing a stale or ambiguous review.
 
 The automatic-review and GitHub-writes caller path defaults to automatic
-approval. Findings publish as `COMMENT`; a shared deterministic finalizer then
-emits `APPROVE` only when an eligible exact-head PR has no unresolved
-ReviewSensei root classified blocking. Non-blocking ReviewSensei roots and
-human threads may remain open. Blocking or unclassified ReviewSensei roots,
-draft/closed/stale/fork targets, App-authored PRs, and malformed or unavailable
-thread state withhold approval or fail closed. The classification sweep asks
-only for bounded root data, is capped at ten pages, and runs before a final PR
-preflight. The finalizer runs after review publication and after the AI resolves
-a blocking root. The existing `pull_requests: write` capability and per-head
-approval marker/idempotency boundary are shared, so approval adds no credential
-or persistence boundary.
+approval. Blocking findings publish as `REQUEST_CHANGES`; non-blocking findings
+publish as `COMMENT`. A shared deterministic finalizer then emits `APPROVE`
+only when an eligible exact-head PR has no unresolved ReviewSensei root
+classified blocking. A later execution on the same head may still request
+changes after an earlier approval, and may approve after an earlier change
+request only once those blocking roots are resolved. Non-blocking ReviewSensei
+roots and human threads may remain open. Blocking or unclassified ReviewSensei
+roots, draft/closed/stale/fork targets, App-authored PRs, and malformed or
+unavailable thread state withhold approval or fail closed. The classification
+sweep asks only for bounded root data, is capped at ten pages, and runs before
+a final PR preflight. The finalizer runs after review publication and after the
+AI resolves a blocking root. The existing `pull_requests: write` capability and
+per-head approval marker/idempotency boundary are shared, so approval adds no
+credential or persistence boundary.
 
 Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the

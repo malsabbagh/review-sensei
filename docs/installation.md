@@ -164,11 +164,13 @@ learning PRs.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically by default. Set
-`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Findings are
-published as `COMMENT`, then a shared idempotent finalizer may emit `APPROVE`.
-It requires an eligible exact-head, same-repository, non-draft PR and no
-unresolved ReviewSensei root classified blocking. Non-blocking ReviewSensei
-follow-ups and human threads may remain open. An unclassified ReviewSensei root,
+`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Blocking
+findings are published as `REQUEST_CHANGES`, then a shared idempotent
+finalizer may emit `APPROVE` once no unresolved ReviewSensei root is classified
+blocking. A later execution on the same head can still request changes after
+an earlier approval, and can approve after an earlier change request only when
+those blocking roots are resolved. Non-blocking ReviewSensei follow-ups and
+human threads may remain open. An unclassified ReviewSensei root,
 partial/incomplete/summary-only result, incomplete/error thread response, or
 stale/fork/closed/App-authored target remains a comment or fails closed before
 writing. All `@sensei` replies remain ordinary comments.
