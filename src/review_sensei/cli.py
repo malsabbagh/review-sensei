@@ -1128,7 +1128,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 diagnostic = (
                     "publication_ambiguous"
                     if isinstance(exc, GitHubPublicationTransientError)
-                    else diagnostic_for_recovery_error(exc)
+                    else "publication_failed"
                 )
                 outcome = RunOutcome(
                     "publication_failed",
