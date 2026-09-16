@@ -1864,11 +1864,21 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_out_of_diff_comment_is_retained_in_the_summary(self):
+        from review_sensei.hosting.github.approval import has_blocking_findings
+
         bad = ReviewResult(
             summary="done",
-            comments=(ReviewComment(path="missing.py", line=1, body="unchanged"),),
+            comments=(
+                ReviewComment(
+                    path="missing.py",
+                    line=1,
+                    body="unchanged",
+                    blocking=True,
+                ),
+            ),
             provider="ollama",
         )
+        self.assertTrue(has_blocking_findings(bad))
         head = "b" * 40
         responses = [
             json_response(pr_payload(head_sha=head)),
@@ -1895,6 +1905,32 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(body["comments"], [])
         self.assertIn("Findings without a publishable inline location", body["body"])
         self.assertIn("unchanged", body["body"])
+
+        blocking_responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            json_response({"id": 6}, 200),
+        ]
+        blocking_http, blocking_calls = make_http(blocking_responses)
+        blocking_outcome = ReviewPublisher(http=blocking_http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=bad,
+            diff=DIFF,
+            app_slug="review-sensei[bot]",
+            auto_approve=True,
+        )
+        self.assertEqual(blocking_outcome.status, "published")
+        blocking_body = __import__("json").loads(
+            blocking_calls[3][2].decode("utf-8")
+        )
+        self.assertEqual(blocking_body["event"], "REQUEST_CHANGES")
 
     def test_deleted_line_comment_is_published_on_the_left_side(self):
         deletion = """diff --git a/src/legacy.py b/src/legacy.py

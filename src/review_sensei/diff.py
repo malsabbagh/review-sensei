@@ -766,14 +766,17 @@ def analyze_diff(
             paths[path] = None
 
         for scan_line in diff.splitlines():
-            if scan_line.startswith("+++ "):
-                note_unenumerated_path(
-                    _decode_marker(scan_line, prefix="+++ ", side=True)
-                )
-            elif scan_line.startswith("--- "):
-                note_unenumerated_path(
-                    _decode_marker(scan_line, prefix="--- ", side=True)
-                )
+            try:
+                if scan_line.startswith("+++ "):
+                    note_unenumerated_path(
+                        _decode_marker(scan_line, prefix="+++ ", side=True)
+                    )
+                elif scan_line.startswith("--- "):
+                    note_unenumerated_path(
+                        _decode_marker(scan_line, prefix="--- ", side=True)
+                    )
+            except ReviewInputError:
+                continue
     return DiffAnalysis(
         changed_lines={path: frozenset(values) for path, values in changed.items()},
         changed_paths=tuple(paths),

@@ -99,11 +99,11 @@ def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
         comment.path, frozenset()
     ):
         return "right"
-    if comment.side == "LEFT" and comment.line in analysis.deleted_lines.get(
-        comment.path, frozenset()
-    ):
-        return "left"
-    if comment.path in analysis.changed_paths:
+    if comment.side == "LEFT":
+        if comment.line in analysis.deleted_lines.get(comment.path, frozenset()):
+            return "left"
+        return "summary"
+    if comment.side == "FILE" and comment.path in analysis.changed_paths:
         return "file"
     return "summary"
 
