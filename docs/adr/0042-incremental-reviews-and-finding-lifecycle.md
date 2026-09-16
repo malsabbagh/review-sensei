@@ -64,7 +64,11 @@ remains the sole approval writer and still refuses to approve while unresolved
 blocking ReviewSensei roots exist on the pull request.
 
 Publication emits an explicit `coverage_mode` on the review marker. Inline
-findings use a v2 marker that carries the fingerprint. Already published
+findings use a v2 marker that carries the fingerprint. When every inline
+finding on a pass is already published on the pull request, duplicate
+suppression leaves no new inline comments; the publisher downgrades a would-be
+empty `REQUEST_CHANGES` to `COMMENT` because the existing threads already
+carry the blocking state. Already published
 ReviewSensei fingerprints are not posted again. Human comments and
 resolutions are ignored. Concurrent older generations cannot replace newer
 lifecycle state. Approvals, write permissions, egress, and trusted context

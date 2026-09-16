@@ -459,7 +459,13 @@ class ReviewService:
             previous_findings = incremental.previous_findings
             evidence_confirmed = incremental.evidence_confirmed_concerns
             related_paths = incremental.related_paths
-            if not cache_key_is_compatible(current_key, incremental.previous_key):
+            if incremental.previous_key.head_sha == current_key.head_sha:
+                # A previous key for the same head would stack reconciliation on
+                # top of itself on retry or replay; treat it as an unverifiable
+                # prior and run a clean bounded review instead.
+                mode = "fallback-full"
+                previous_findings = ()
+            elif not cache_key_is_compatible(current_key, incremental.previous_key):
                 mode = "fallback-full"
                 previous_findings = ()
             elif incremental.reviewed_paths is None:

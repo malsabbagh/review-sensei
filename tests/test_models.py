@@ -534,6 +534,22 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored.comments[0].defect_kind, "race")
         self.assertEqual(restored.coverage_mode, "incremental")
 
+    def test_from_dict_rejects_malformed_identity_fields(self):
+        payload = {
+            "summary": "ok",
+            "comments": [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "body": "finding",
+                    "defect_kind": 42,
+                }
+            ],
+            "provider": "fake",
+        }
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(payload)
+
     def test_full_result_round_trips_non_empty_finding_lifecycles(self):
         """A full pass also owns finding identities, so they must survive."""
 

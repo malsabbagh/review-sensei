@@ -886,6 +886,32 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(result.coverage_mode, "fallback-full")
         self.assertEqual(result.finding_lifecycles, ())
 
+    def test_same_head_previous_key_discards_stacked_reconciliation(self):
+        """A previous key for the same head must not reconcile against itself."""
+
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        previous = self._previous_finding()
+        request = ReviewRequest(
+            diff=DIFF,
+            repository="owner/repo",
+            pull_request_number=3,
+            base_sha="a" * 40,
+            head_sha="c" * 40,
+            model="fake-model",
+        )
+        result = service.review(
+            request,
+            incremental=IncrementalReviewPlan(
+                previous_key=self._previous_key(service, provider, head_sha="c" * 40),
+                previous_findings=(previous,),
+                reviewed_paths=("src/app.py",),
+                context_complete=True,
+            ),
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertEqual(result.finding_lifecycles, ())
+
     def test_missing_reviewed_paths_falls_back_to_full_review(self):
         """Incremental coverage requires a caller-supplied changed-path list."""
 

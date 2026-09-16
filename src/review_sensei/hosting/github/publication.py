@@ -1131,6 +1131,17 @@ class ReviewPublisher:
         event, published_state = finding_review_event(
             auto_approve=auto_approve, result=result
         )
+        if (
+            auto_approve
+            and prepared_comments
+            and not comments
+            and has_blocking_findings(result)
+        ):
+            # Every inline finding already has a thread on this pull request.
+            # REQUEST_CHANGES with an empty inline payload would mislead readers
+            # on a same-head re-review while the existing threads still carry
+            # the blocking state.
+            event, published_state = "COMMENT", "COMMENTED"
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",

@@ -879,6 +879,21 @@ class ReviewResult:
                 raise ReviewInputError(
                     f"review result comment {index} blocking must be a boolean"
                 )
+            symbol = comment.get("symbol")
+            if symbol is not None and not isinstance(symbol, str):
+                raise ReviewInputError(
+                    f"review result comment {index} symbol must be a string"
+                )
+            defect_kind = comment.get("defect_kind")
+            if defect_kind is not None and not isinstance(defect_kind, str):
+                raise ReviewInputError(
+                    f"review result comment {index} defect_kind must be a string"
+                )
+            evidence_id = comment.get("evidence_id")
+            if evidence_id is not None and not isinstance(evidence_id, str):
+                raise ReviewInputError(
+                    f"review result comment {index} evidence_id must be a string"
+                )
             comment_values.append(
                 ReviewComment(
                     path=path,
@@ -896,21 +911,9 @@ class ReviewResult:
                     ),
                     fix_effort=fix_effort,
                     blocking=blocking,
-                    symbol=(
-                        comment.get("symbol")
-                        if isinstance(comment.get("symbol"), str)
-                        else None
-                    ),
-                    defect_kind=(
-                        comment.get("defect_kind")
-                        if isinstance(comment.get("defect_kind"), str)
-                        else None
-                    ),
-                    evidence_id=(
-                        comment.get("evidence_id")
-                        if isinstance(comment.get("evidence_id"), str)
-                        else None
-                    ),
+                    symbol=symbol,
+                    defect_kind=defect_kind,
+                    evidence_id=evidence_id,
                 )
             )
         parsed_proposals: list[LearningProposal] = []
