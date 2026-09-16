@@ -133,9 +133,7 @@ class DiagnosticsTests(unittest.TestCase):
                 check for check in broken["checks"] if check["name"] == "categories"
             )
             self.assertEqual(category_check["status"], "action")
-            with patch(
-                "review_sensei.diagnostics.load_stages_from_dir"
-            ) as load_stages:
+            with patch("review_sensei.diagnostics.load_stages_from_dir") as load_stages:
                 skipped = run_doctor(
                     stages_dir=stages_dir, categories_dir=categories_dir
                 )
