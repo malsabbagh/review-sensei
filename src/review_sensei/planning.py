@@ -366,6 +366,9 @@ def plan_change(
         chunks = packed
         packed_paths = {path for chunk in packed for path in chunk.paths}
         packed_hunks = {index for chunk in packed for index in chunk.hunk_indexes}
+        overflow_paths = {
+            path for record in overflow for path in record.coverage_paths
+        }
         for record in overflow:
             reason = overflow_reason or (
                 "too-large-hunk" if record.hunks else "too-large-file"
@@ -376,12 +379,16 @@ def plan_change(
                 else "unsupported"
             )
             for path in record.coverage_paths:
-                file_outcomes[path] = (outcome, reason)
+                if path in packed_paths:
+                    file_outcomes[path] = ("partially-reviewed", reason)
+                else:
+                    file_outcomes[path] = (outcome, reason)
             for hunk in record.hunks:
-                hunk_outcomes[hunk.index] = (outcome, reason)
+                if hunk.index not in packed_hunks:
+                    hunk_outcomes[hunk.index] = (outcome, reason)
         for record in reviewable:
             for path in record.coverage_paths:
-                if path in packed_paths:
+                if path in packed_paths and path not in overflow_paths:
                     file_outcomes[path] = ("reviewed", None)
             for hunk in record.hunks:
                 if hunk.index in packed_hunks:

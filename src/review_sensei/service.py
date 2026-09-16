@@ -268,7 +268,7 @@ class ReviewService:
         if not coverage.fully_reviewed:
             if not coverage.enumeration_complete:
                 status = "incomplete"
-            elif status == "complete":
+            elif status in {"complete", "incomplete"}:
                 status = "partial"
         return replace(result, coverage=coverage, review_status=status)
 
@@ -379,7 +379,8 @@ class ReviewService:
             self.provider = original
         try:
             result = ReviewResult(
-                summary=accumulated_summary or "Review complete.",
+                summary=accumulated_summary
+                or "Review incomplete: no chunk produced a validated result.",
                 comments=tuple(accumulated_comments),
                 provider=budgeted.name,
                 model=last_model,
