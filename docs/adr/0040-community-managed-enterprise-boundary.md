@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-09-16
 GitHub Issue: #89
-Pull Request: not configured
+Pull Request: #90
 Owners/Reviewers: Maintainers
 Approved by: not configured
 
