@@ -1515,43 +1515,32 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(summary["known_learning_ids_scope"], "unset")
         self.assertEqual(summary["known_learning_ids_without_feedback"], [])
 
-    def test_evaluate_compare_learnings_preserves_fixture_pass_fail(self):
+    def _run_compare_learnings(self, *, passed: bool) -> tuple[int, str]:
+        # The corpus and comparison are stubbed so this exercises only the exit
+        # code contract, with no dependency on the working directory.
+        report = {"schema_version": "1.0", "with_learnings_passed": passed}
         stdout = io.StringIO()
-        with redirect_stderr(io.StringIO()):
-            with patch("sys.stdout", stdout):
-                status = main(
-                    [
-                        "evaluate",
-                        "--mode",
-                        "fixture",
-                        "--corpus",
-                        "evaluation/v1/corpus.json",
-                        "--compare-learnings",
-                    ]
-                )
-        report = json.loads(stdout.getvalue())
-        self.assertEqual(status, 0 if report["with_learnings_passed"] else 1)
+        with patch("review_sensei.evaluation.load_corpus", return_value=object()):
+            with patch(
+                "review_sensei.evaluation.compare_learning_effect",
+                return_value=report,
+            ):
+                with redirect_stderr(io.StringIO()):
+                    with patch("sys.stdout", stdout):
+                        status = main(
+                            ["evaluate", "--mode", "fixture", "--compare-learnings"]
+                        )
+        return status, stdout.getvalue()
+
+    def test_evaluate_compare_learnings_preserves_fixture_pass_fail(self):
+        status, rendered = self._run_compare_learnings(passed=True)
+        self.assertEqual(status, 0)
+        self.assertTrue(json.loads(rendered)["with_learnings_passed"])
 
         # Adding the flag must not mask failing fixture cases with exit 0.
-        failing = json.loads(json.dumps(report))
-        failing["with_learnings_passed"] = False
-        with patch(
-            "review_sensei.evaluation.compare_learning_effect",
-            return_value=failing,
-        ):
-            with redirect_stderr(io.StringIO()):
-                with patch("sys.stdout", io.StringIO()):
-                    status = main(
-                        [
-                            "evaluate",
-                            "--mode",
-                            "fixture",
-                            "--corpus",
-                            "evaluation/v1/corpus.json",
-                            "--compare-learnings",
-                        ]
-                    )
+        status, rendered = self._run_compare_learnings(passed=False)
         self.assertEqual(status, 1)
+        self.assertFalse(json.loads(rendered)["with_learnings_passed"])
 
     def test_evaluate_compare_learnings_is_fixture_only(self):
         stderr = io.StringIO()
