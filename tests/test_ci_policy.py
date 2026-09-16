@@ -46,6 +46,77 @@ def _run_block_containing(text: str, marker: str) -> str:
     return matches[0]
 
 
+def _reusable_workflow_text() -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "review-sensei-run.yml"
+    ).read_text(encoding="utf-8")
+
+
+def _job_section(text: str, job_id: str) -> str:
+    pattern = rf"^  {re.escape(job_id)}:\n"
+    match = re.search(pattern, text, flags=re.M)
+    if match is None:
+        raise AssertionError(f"job {job_id!r} was not found")
+    start = match.start()
+    next_job = re.search(r"^  [A-Za-z0-9_-]+:\n", text[match.end() :], flags=re.M)
+    end = match.end() + next_job.start() if next_job is not None else len(text)
+    return text[start:end]
+
+
+def _named_steps(job_text: str) -> list[str]:
+    return [
+        match.group(1)
+        for match in re.finditer(r"^      - name: (.+)$", job_text, flags=re.M)
+    ]
+
+
+def _step_block(job_text: str, name: str) -> str:
+    pattern = rf"^      - name: {re.escape(name)}\n"
+    match = re.search(pattern, job_text, flags=re.M)
+    if match is None:
+        raise AssertionError(f"step {name!r} was not found")
+    start = match.start()
+    next_step = re.search(r"^      - name: ", job_text[match.end() :], flags=re.M)
+    end = match.end() + next_step.start() if next_step is not None else len(job_text)
+    return job_text[start:end]
+
+
+def _hosted_workflow_group(
+    *,
+    operation: str,
+    repository: str,
+    event_pull_request: int | str | None,
+    run_id: str,
+) -> str:
+    """Evaluate the reusable workflow-level group expression for a trigger."""
+
+    op = "review" if operation == "review" else "reply"
+    identity = (event_pull_request or run_id) if operation == "review" else run_id
+    return f"reviewsensei-{op}-{repository}-{identity}"
+
+
+def _hosted_provider_group(
+    *,
+    operation: str,
+    repository: str,
+    preflight_pull_request: int | str | None,
+    event_pull_request: int | str | None,
+    run_id: str,
+) -> str:
+    """Evaluate the reusable provider-job group expression for a trigger."""
+
+    op = "review" if operation == "review" else "reply"
+    identity = (
+        (preflight_pull_request or event_pull_request or run_id)
+        if operation == "review"
+        else run_id
+    )
+    return f"reviewsensei-provider-{op}-{repository}-{identity}"
+
+
 class ActionPinPolicyTests(unittest.TestCase):
     def test_pinned_actions_with_release_comments_pass(self):
         text = """
@@ -793,6 +864,229 @@ class ActionPinPolicyTests(unittest.TestCase):
                         continue
                     self.assertIn("vars.ENABLE_UBICLOUD_HOSTED", line)
                     self.assertIn("ubicloud-standard-2", line)
+
+
+class ReusablePublishGuardTests(unittest.TestCase):
+    def test_cloud_and_local_publish_require_success_and_reject_cancelled_stale_runs(
+        self,
+    ):
+        text = _reusable_workflow_text()
+        publish_if = (
+            "if: success() && !cancelled() && inputs.operation == 'review' "
+            "&& inputs.enable_github_writes == 'true'"
+        )
+        self.assertEqual(text.count(publish_if), 4)
+        self.assertEqual(
+            text.count("Re-validate live pull-request head before publish"), 2
+        )
+        self.assertNotIn(
+            "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
+            text,
+        )
+
+        for job_id, publish_name in (
+            ("cloud", "Publish or promote validated review through the broker"),
+            ("local", "Publish or promote trusted local review and learnings"),
+        ):
+            with self.subTest(job=job_id):
+                job = _job_section(text, job_id)
+                names = _named_steps(job)
+                publish_index = names.index(publish_name)
+                self.assertEqual(
+                    names[publish_index - 1],
+                    "Re-validate live pull-request head before publish",
+                )
+                revalidate = _step_block(
+                    job, "Re-validate live pull-request head before publish"
+                )
+                publish = _step_block(job, publish_name)
+                self.assertIn(publish_if, revalidate)
+                self.assertIn(publish_if, publish)
+                self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)
+                self.assertIn(
+                    'gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}"',
+                    revalidate,
+                )
+                self.assertIn("--jq '.head.sha'", revalidate)
+                self.assertIn("echo 'skipped_stale'", revalidate)
+                self.assertIn("refusing publish", revalidate)
+                self.assertNotIn("--allow-write", revalidate)
+                self.assertNotIn("github review", revalidate)
+                self.assertNotIn("/github/token", revalidate)
+                self.assertNotIn("id-token", revalidate)
+                self.assertNotIn("OLLAMA_API_KEY", revalidate)
+                self.assertIn("github review", publish)
+
+
+class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
+    def test_python_and_workflow_review_groups_are_pr_scoped_sha_free_and_latest_wins(
+        self,
+    ):
+        from review_sensei.concurrency import ReviewConcurrencyPlan
+
+        text = _reusable_workflow_text()
+        plan = ReviewConcurrencyPlan.for_pull_request("acme/api", 7)
+        self.assertEqual(plan.workflow_key, "review-sensei:review:8:acme/api:1:7")
+        self.assertTrue(plan.workflow.cancel_in_progress)
+        self.assertNotIn("sha", plan.workflow_key.lower())
+        self.assertNotIn("head", plan.workflow_key)
+
+        first_head = "a" * 40
+        second_head = "b" * 40
+        automatic_a = _hosted_workflow_group(
+            operation="review",
+            repository="acme/api",
+            event_pull_request=7,
+            run_id=f"run-{first_head}",
+        )
+        automatic_b = _hosted_workflow_group(
+            operation="review",
+            repository="acme/api",
+            event_pull_request=7,
+            run_id=f"run-{second_head}",
+        )
+        self.assertEqual(automatic_a, "reviewsensei-review-acme/api-7")
+        self.assertEqual(automatic_a, automatic_b)
+        self.assertNotIn(first_head, automatic_a)
+        self.assertNotIn(second_head, automatic_b)
+
+        group_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertEqual(len(group_lines), 3)
+        for line in group_lines:
+            self.assertIn("github.repository", line)
+            self.assertIn("inputs.operation == 'review'", line)
+            self.assertNotIn("head_sha", line)
+            self.assertNotIn("inputs.head_sha", line)
+            self.assertNotIn("github.sha", line)
+            self.assertNotIn("github.event.pull_request.head.sha", line)
+
+        top_level, cloud, local = group_lines
+        self.assertIn("github.event.pull_request.number || github.run_id", top_level)
+        self.assertIn(
+            "needs.authoritative-preflight.outputs.pull_request_number", cloud
+        )
+        self.assertEqual(cloud, local)
+
+    def test_manual_and_automatic_reviews_share_the_provider_latest_wins_group(self):
+        automatic = _hosted_provider_group(
+            operation="review",
+            repository="acme/api",
+            preflight_pull_request=7,
+            event_pull_request=7,
+            run_id="auto-111",
+        )
+        manual = _hosted_provider_group(
+            operation="review",
+            repository="acme/api",
+            preflight_pull_request=7,
+            event_pull_request=None,
+            run_id="manual-222",
+        )
+        self.assertEqual(automatic, "reviewsensei-provider-review-acme/api-7")
+        self.assertEqual(automatic, manual)
+
+        workflow_automatic = _hosted_workflow_group(
+            operation="review",
+            repository="acme/api",
+            event_pull_request=7,
+            run_id="auto-111",
+        )
+        workflow_manual = _hosted_workflow_group(
+            operation="review",
+            repository="acme/api",
+            event_pull_request=None,
+            run_id="manual-222",
+        )
+        self.assertEqual(workflow_automatic, "reviewsensei-review-acme/api-7")
+        self.assertEqual(workflow_manual, "reviewsensei-review-acme/api-manual-222")
+
+    def test_different_pull_requests_are_isolated(self):
+        from review_sensei.concurrency import ReviewConcurrencyPlan
+
+        first = ReviewConcurrencyPlan.for_pull_request("acme/api", 7)
+        second = ReviewConcurrencyPlan.for_pull_request("acme/api", 8)
+        other_repo = ReviewConcurrencyPlan.for_pull_request("other/api", 7)
+        self.assertNotEqual(first.workflow_key, second.workflow_key)
+        self.assertNotEqual(first.workflow_key, other_repo.workflow_key)
+
+        hosted_first = _hosted_provider_group(
+            operation="review",
+            repository="acme/api",
+            preflight_pull_request=7,
+            event_pull_request=7,
+            run_id="shared",
+        )
+        hosted_second = _hosted_provider_group(
+            operation="review",
+            repository="acme/api",
+            preflight_pull_request=8,
+            event_pull_request=8,
+            run_id="shared",
+        )
+        hosted_other = _hosted_provider_group(
+            operation="review",
+            repository="other/api",
+            preflight_pull_request=7,
+            event_pull_request=7,
+            run_id="shared",
+        )
+        self.assertNotEqual(hosted_first, hosted_second)
+        self.assertNotEqual(hosted_first, hosted_other)
+
+    def test_reply_groups_use_run_id_and_do_not_share_the_review_cancel_group(self):
+        from review_sensei.concurrency import ReviewConcurrencyPlan
+
+        review = ReviewConcurrencyPlan.for_pull_request("acme/api", 7)
+        reply = ReviewConcurrencyPlan.for_non_review_trigger("acme/api", "run-99")
+        self.assertNotEqual(review.workflow_key, reply.workflow_key)
+        self.assertIsNone(reply.provider)
+        self.assertTrue(reply.workflow_key.startswith("review-sensei:trigger:"))
+
+        hosted_review = _hosted_workflow_group(
+            operation="review",
+            repository="acme/api",
+            event_pull_request=7,
+            run_id="run-99",
+        )
+        hosted_reply = _hosted_workflow_group(
+            operation="reply",
+            repository="acme/api",
+            event_pull_request=7,
+            run_id="run-99",
+        )
+        hosted_reply_provider = _hosted_provider_group(
+            operation="reply",
+            repository="acme/api",
+            preflight_pull_request=7,
+            event_pull_request=7,
+            run_id="run-99",
+        )
+        self.assertEqual(hosted_review, "reviewsensei-review-acme/api-7")
+        self.assertEqual(hosted_reply, "reviewsensei-reply-acme/api-run-99")
+        self.assertEqual(
+            hosted_reply_provider, "reviewsensei-provider-reply-acme/api-run-99"
+        )
+        self.assertNotEqual(hosted_review, hosted_reply)
+        self.assertNotEqual(hosted_review, hosted_reply_provider)
+
+        text = _reusable_workflow_text()
+        cancel_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("cancel-in-progress:")
+        ]
+        self.assertEqual(
+            cancel_lines,
+            [
+                "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+            ],
+        )
 
 
 if __name__ == "__main__":

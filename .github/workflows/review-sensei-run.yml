@@ -515,8 +515,36 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" --output review.json
 
+      - name: Re-validate live pull-request head before publish
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
+          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
+          if ! live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>/dev/null)"; then
+            echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
+            exit 1
+          fi
+          if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::live pull-request head identity is invalid; refusing publish' >&2
+            echo 'skipped_stale'
+            exit 1
+          fi
+          if [[ "$live_sha" != "$HEAD_SHA" ]]; then
+            echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
+            echo 'skipped_stale'
+            exit 1
+          fi
+          echo 'publish admission current'
+
       - name: Publish or promote validated review through the broker
-        if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -791,8 +819,36 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" --output review.json
 
+      - name: Re-validate live pull-request head before publish
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
+          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
+          if ! live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>/dev/null)"; then
+            echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
+            exit 1
+          fi
+          if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::live pull-request head identity is invalid; refusing publish' >&2
+            echo 'skipped_stale'
+            exit 1
+          fi
+          if [[ "$live_sha" != "$HEAD_SHA" ]]; then
+            echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
+            echo 'skipped_stale'
+            exit 1
+          fi
+          echo 'publish admission current'
+
       - name: Publish or promote trusted local review and learnings
-        if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}

@@ -121,6 +121,11 @@ These imports are public and stable within a major version:
 - `review_sensei.Stage`
 - `review_sensei.ReviewConcurrencyPlan`
 - `review_sensei.ConcurrencyGroup`
+- `review_sensei.ProviderAdmission`
+- `review_sensei.AdmissionLease`
+- `review_sensei.AdmissionOutcome`
+- `review_sensei.AdmissionRejected`
+- `review_sensei.AdmissionCancelled`
 - `review_sensei.ReviewService`
 - `review_sensei.RunOutcome`
 - `review_sensei.ResourceBudget`

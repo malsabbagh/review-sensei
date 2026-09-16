@@ -5,15 +5,37 @@ it exposes the stable groups and admission rules that an embedding application
 can enforce with its scheduler.  Keeping this policy in the review package
 lets different hosts agree on the same latest-wins and per-pull-request
 provider behavior without importing GitHub or provider SDKs.
+
+GitHub-hosted runs use native workflow ``concurrency`` groups: one active
+review per repository and pull request, with cancel-in-progress for latest
+wins.  ``ProviderAdmission`` is the in-process library contract for tests and
+local hosts.  It is not a global lock and does not coordinate separate
+processes or GitHub Actions jobs.
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 
-from .errors import ReviewInputError
+from .errors import AdmissionCancelled, AdmissionRejected, ReviewInputError
 from .models import ReviewRequest
+
+_LOGGER = logging.getLogger(__name__)
+_MAX_WAITERS = 1024
+_WAITER_POLL_SECONDS = 0.05
+ADMISSION_STATUSES = frozenset(
+    {
+        "admitted",
+        "released",
+        "failed",
+        "cancelled",
+        "rejected_capacity",
+    }
+)
 
 _SAFE_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 _SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -212,3 +234,240 @@ class ReviewConcurrencyPlan:
             "workflow": self.workflow.to_dict(),
             "provider": self.provider.to_dict() if self.provider is not None else None,
         }
+
+
+@dataclass(frozen=True)
+class AdmissionOutcome:
+    """Metadata-only result of an in-process admission decision."""
+
+    status: str
+    key: str
+    active: int
+    waiters: int
+    max_active: int
+    max_waiters: int
+
+    def __post_init__(self) -> None:
+        if self.status not in ADMISSION_STATUSES:
+            raise ReviewInputError("admission status is not a supported outcome")
+        if not isinstance(self.key, str) or not self.key.strip():
+            raise ReviewInputError("admission key must be a non-empty string")
+        for label, value in (
+            ("active", self.active),
+            ("waiters", self.waiters),
+            ("max_active", self.max_active),
+            ("max_waiters", self.max_waiters),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ReviewInputError(
+                    f"admission {label} must be a non-negative integer"
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "key": self.key,
+            "active": self.active,
+            "waiters": self.waiters,
+            "max_active": self.max_active,
+            "max_waiters": self.max_waiters,
+        }
+
+
+class AdmissionLease:
+    """One granted in-process slot that must be released exactly once."""
+
+    def __init__(self, admission: "ProviderAdmission") -> None:
+        self._admission = admission
+        self._released = False
+        self._lock = threading.Lock()
+
+    def release(self, *, outcome: str = "released") -> AdmissionOutcome:
+        if outcome not in {"released", "failed", "cancelled"}:
+            raise ReviewInputError("admission lease outcome is not supported")
+        with self._lock:
+            if self._released:
+                return self._admission.snapshot(outcome)
+            self._released = True
+        return self._admission._release(outcome)
+
+    def __enter__(self) -> "AdmissionLease":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> None:
+        if exc_type is None:
+            self.release(outcome="released")
+            return None
+        if exc_type in (AdmissionCancelled, KeyboardInterrupt, InterruptedError):
+            self.release(outcome="cancelled")
+            return None
+        self.release(outcome="failed")
+        return None
+
+
+class ProviderAdmission:
+    """Bounded in-process admission for one ``ConcurrencyGroup``.
+
+    GitHub-hosted reviews do not use this helper.  They join the reusable
+    workflow concurrency group (``max_active=1``, cancel-in-progress for
+    reviews).  Local hosts and tests use one ``ProviderAdmission`` per group
+    so unrelated pull requests and repositories stay independent.
+
+    Waiters are bounded.  A request that would grow the waiter set past
+    ``max_waiters`` is rejected immediately instead of accumulating.
+    Cancelled or failed work releases the slot so a later review can run.
+    """
+
+    def __init__(
+        self,
+        group: ConcurrencyGroup,
+        *,
+        max_waiters: int | None = None,
+    ) -> None:
+        if not isinstance(group, ConcurrencyGroup):
+            raise ReviewInputError("admission requires a ConcurrencyGroup")
+        waiter_bound = group.max_active if max_waiters is None else max_waiters
+        if (
+            isinstance(waiter_bound, bool)
+            or not isinstance(waiter_bound, int)
+            or waiter_bound < 0
+        ):
+            raise ReviewInputError(
+                "admission max_waiters must be a non-negative integer"
+            )
+        if waiter_bound > _MAX_WAITERS:
+            raise ReviewInputError(
+                f"admission max_waiters is too large (maximum is {_MAX_WAITERS})"
+            )
+        self._group = group
+        self._max_waiters = waiter_bound
+        self._lock = threading.Lock()
+        self._slots = threading.Condition(self._lock)
+        self._active = 0
+        self._waiters = 0
+
+    @property
+    def group(self) -> ConcurrencyGroup:
+        return self._group
+
+    @property
+    def max_waiters(self) -> int:
+        return self._max_waiters
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+    @property
+    def waiters(self) -> int:
+        with self._lock:
+            return self._waiters
+
+    def snapshot(self, status: str = "admitted") -> AdmissionOutcome:
+        with self._lock:
+            return self._outcome_locked(status)
+
+    def try_acquire(self) -> AdmissionLease | None:
+        """Grant a slot immediately or reject without enqueueing a waiter."""
+
+        with self._lock:
+            if self._active >= self._group.max_active:
+                self._log_locked("rejected_capacity")
+                return None
+            return self._grant_locked()
+
+    def acquire(
+        self,
+        *,
+        timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> AdmissionLease:
+        """Grant a slot, waiting up to the waiter bound.
+
+        ``timeout`` bounds how long one caller waits.  It does not grow the
+        waiter set past ``max_waiters``.
+        """
+
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout < 0
+        ):
+            raise ReviewInputError("admission timeout must be a non-negative number")
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        with self._lock:
+            if self._active < self._group.max_active:
+                return self._grant_locked()
+            if self._waiters >= self._max_waiters:
+                self._log_locked("rejected_capacity")
+                raise AdmissionRejected(
+                    "provider admission waiters are at the configured bound"
+                )
+            self._waiters += 1
+            acquired = False
+            try:
+                while self._active >= self._group.max_active:
+                    if cancel_event is not None and cancel_event.is_set():
+                        self._log_locked("cancelled")
+                        raise AdmissionCancelled(
+                            "provider admission wait was cancelled"
+                        )
+                    remaining = None
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            self._log_locked("rejected_capacity")
+                            raise AdmissionRejected("provider admission timed out")
+                    wait_for = _WAITER_POLL_SECONDS
+                    if remaining is not None:
+                        wait_for = min(wait_for, remaining)
+                    self._slots.wait(timeout=wait_for)
+                self._waiters -= 1
+                acquired = True
+                return self._grant_locked()
+            finally:
+                if not acquired:
+                    self._waiters -= 1
+
+    def _grant_locked(self) -> AdmissionLease:
+        self._active += 1
+        self._log_locked("admitted")
+        return AdmissionLease(self)
+
+    def _release(self, outcome: str) -> AdmissionOutcome:
+        with self._lock:
+            if self._active < 1:
+                raise ReviewInputError("admission lease is not active")
+            self._active -= 1
+            self._slots.notify()
+            self._log_locked(outcome)
+            return self._outcome_locked(outcome)
+
+    def _outcome_locked(self, status: str) -> AdmissionOutcome:
+        return AdmissionOutcome(
+            status=status,
+            key=self._group.key,
+            active=self._active,
+            waiters=self._waiters,
+            max_active=self._group.max_active,
+            max_waiters=self._max_waiters,
+        )
+
+    def _log_locked(self, status: str) -> None:
+        # Metadata only: group key, counts, and a closed-set status. Never log
+        # prompts, diffs, review bodies, or other source content.
+        _LOGGER.info(
+            "concurrency admission status=%s key=%s max_active=%s active=%s max_waiters=%s waiters=%s",
+            status,
+            self._group.key,
+            self._group.max_active,
+            self._active,
+            self._max_waiters,
+            self._waiters,
+        )

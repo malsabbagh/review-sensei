@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-09-14
+Last updated: 2026-09-16
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -13,7 +13,7 @@ Process: `docs/process/adr-process.md`
 | --- | --- | --- | --- | --- |
 | [0001](0001-provider-neutral-review-engine.md) | Accepted | Keep review behavior behind a provider-neutral service and protocol | Initial architecture | GitHub and model transports remain adapters |
 | [0002](0002-repository-local-review-learnings.md) | Accepted | Store approved learnings in the reviewed repository | #1 | Only target/base content is trusted |
-| [0003](0003-review-concurrency-policy.md) | Accepted | Expose deterministic concurrency policy for host enforcement | Initial architecture | Amended 2026-08-09 |
+| [0003](0003-review-concurrency-policy.md) | Accepted | Expose deterministic concurrency policy for host enforcement | Initial architecture, #27 | Amended 2026-08-09, 2026-09-16 |
 | [0004](0004-structured-review-stages.md) | Accepted | Configure ordered stages and reusable review categories | #2 | Operator-controlled configuration |
 | [0005](0005-lens-context-sources.md) | Accepted | Select bounded supplemental context per review lens | #2 | Explicit trusted context root |
 | [0006](0006-hosted-github-app-architecture.md) | Superseded | Hosted GitHub App as one release-unit modular service | #6 | Retained for history; open-source-first target does not include a hosted service |

@@ -1,6 +1,12 @@
 """Provider-neutral AI code review primitives for ReviewSensei."""
 
-from .concurrency import ConcurrencyGroup, ReviewConcurrencyPlan
+from .concurrency import (
+    AdmissionLease,
+    AdmissionOutcome,
+    ConcurrencyGroup,
+    ProviderAdmission,
+    ReviewConcurrencyPlan,
+)
 from .context import (
     ContextSnapshot,
     FindingLifecycle,
@@ -18,6 +24,7 @@ from .context import (
 )
 from .conversation import ConversationService
 from .diagnostics import build_plan, run_doctor
+from .errors import AdmissionCancelled, AdmissionRejected
 from .evaluation import (
     PromotionRecord,
     engine_digest,
@@ -75,7 +82,12 @@ from .verifier import (
 from .workflow import ReviewExecutionPlan, plan_review_execution
 
 __all__ = [
+    "AdmissionCancelled",
+    "AdmissionLease",
+    "AdmissionOutcome",
+    "AdmissionRejected",
     "ConcurrencyGroup",
+    "ProviderAdmission",
     "ContextDocumentSource",
     "ConversationContext",
     "ConversationFinding",

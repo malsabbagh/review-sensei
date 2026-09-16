@@ -1,6 +1,6 @@
 # ADR 0003: Expose host-enforced review concurrency policy
 
-- Status: accepted (amended 2026-08-09)
+- Status: accepted (amended 2026-08-09, 2026-09-16)
 - Date: 2026-08-03
 
 ## Context
@@ -81,6 +81,49 @@ Tradeoffs:
 - Hosts upgrading from the original delimiter-only key format must drain or
   explicitly migrate existing scheduler groups before switching formats. The
   new keys intentionally do not collide with the old namespace.
+
+## Amendment - issue #27 PR-scoped hosted admission and in-process leases
+
+Date: 2026-09-16
+GitHub Issue: #27
+Status: this additive amendment records the hosted and in-process contracts;
+the original decision remains in force. It is not a new ADR and does not
+change the Accepted status of other records.
+
+### Decision
+
+GitHub-hosted review admission is the reusable workflow concurrency group:
+repository + operation + pull-request number, `max_active=1`, and
+cancel-in-progress for reviews. Head SHAs remain exact-head publication
+identity and are not cancellation keys. Reply operations use the unique run
+id / non-review trigger identity and do not share the review cancel group.
+Manual and automatic reviews for the same pull request join the same
+provider latest-wins group after authoritative preflight.
+
+`ProviderAdmission` is an optional in-process helper for tests and local
+hosts. It enforces `ConcurrencyGroup.max_active`, bounds waiters so they
+cannot accumulate without a cap, and releases the lease after success,
+cancellation, or failure. It is provider-neutral, has no GitHub SDK, is not
+a cross-process scheduler, and must not be used as a global lock across
+repositories. GitHub Actions does not use this helper; hosted admission is
+native workflow `concurrency`.
+
+A cancelled or stale hosted run cannot publish even if the provider
+finished: publish steps require `success() && !cancelled()`, and a
+read-only live head SHA check immediately before publish fails closed with
+`skipped_stale` semantics. Exact-head publication preflight remains; the
+pre-publish check does not mint write tokens.
+
+Admission and cancellation logs are metadata-only. They record group keys,
+counts, and closed-set statuses, never prompts, diffs, or source content.
+The Cloudflare Worker still only bootstraps setup and does not invent a
+SHA-based concurrency key.
+
+### Consequences
+
+- Local hosts can exercise bounded provider capacity without GitHub SDKs.
+- Hosted latest-wins remains PR-scoped and SHA-free.
+- Cancelled provider work cannot publish a superseded head.
 
 ## Rollback
 

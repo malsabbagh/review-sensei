@@ -36,3 +36,15 @@ class ProviderError(ReviewSenseiError):
     def __init__(self, message: str = "", *, transient: bool = False) -> None:
         super().__init__(message)
         self.transient = bool(transient)
+
+
+class AdmissionRejected(ReviewSenseiError):
+    """Raised when in-process admission cannot grant a slot."""
+
+    error_category = "concurrency"
+
+
+class AdmissionCancelled(ReviewSenseiError):
+    """Raised when in-process admission waits are cancelled before a lease."""
+
+    error_category = "concurrency"
