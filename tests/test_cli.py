@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.util
 import io
 import json
 import tempfile
@@ -1418,8 +1419,15 @@ class DoctorPlanCliTests(unittest.TestCase):
 
 
 class PromotionCliTests(unittest.TestCase):
+    def _make_report(self, **kwargs):
+        path = Path(__file__).resolve().parent / "test_promotion_release.py"
+        spec = importlib.util.spec_from_file_location("promotion_release_helpers", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module._make_report(**kwargs)
+
     def test_promotion_cli_emits_supported_record_from_live_reports(self):
-        from test_promotion_release import _make_report
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1427,7 +1435,7 @@ class PromotionCliTests(unittest.TestCase):
             for index in (1, 2, 3):
                 path = root / f"live-{index}.json"
                 path.write_text(
-                    json.dumps(_make_report(elapsed_total_ms=index)),
+                    json.dumps(self._make_report(elapsed_total_ms=index)),
                     encoding="utf-8",
                 )
                 reports.append(path)
@@ -1473,8 +1481,6 @@ class PromotionCliTests(unittest.TestCase):
             self.assertEqual(validate_status, 0)
 
     def test_promotion_cli_rejects_fixture_reports_for_supported_status(self):
-        from test_promotion_release import _make_report
-
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             reports = []
@@ -1482,7 +1488,7 @@ class PromotionCliTests(unittest.TestCase):
                 path = root / f"fixture-{index}.json"
                 path.write_text(
                     json.dumps(
-                        _make_report(
+                        self._make_report(
                             mode="fixture",
                             provider="fixture",
                             model="fixture-v1",
