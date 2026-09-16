@@ -481,15 +481,18 @@ provider or broker access.
 
 When automatic review and GitHub writes are enabled, automatic approval is on by
 default; set `REVIEWSENSEI_AUTO_APPROVE=false` for an explicit opt-out.
-ReviewSensei publishes findings as `COMMENT` and then invokes one shared,
-idempotent approval finalizer. It emits `APPROVE` for an eligible exact head
-when no unresolved ReviewSensei root is classified blocking. Unresolved
-non-blocking ReviewSensei findings and human threads do not withhold approval.
-An unclassified ReviewSensei root, malformed or incomplete thread data, or a
-draft/closed/fork/stale/App-authored PR fails closed. The finalizer runs after
-review publication and after the AI resolves a blocking ReviewSensei thread;
-`@sensei` replies themselves remain ordinary comments. Existing approval
-markers prevent duplicate approvals.
+ReviewSensei publishes blocking findings as `REQUEST_CHANGES` and non-blocking
+findings as `COMMENT`, then invokes one shared, idempotent approval finalizer.
+It emits `APPROVE` for an eligible exact head when no unresolved ReviewSensei
+root is classified blocking. A later execution on the same commit still
+requests changes if blocking comments appear after an approval, and it
+approves after an earlier change request only once those blocking roots are
+resolved. Unresolved non-blocking ReviewSensei findings and human threads do
+not withhold approval. An unclassified ReviewSensei root, malformed or
+incomplete thread data, or a draft/closed/fork/stale/App-authored PR fails
+closed. The finalizer runs after review publication and after the AI resolves a
+blocking ReviewSensei thread; `@sensei` replies themselves remain ordinary
+comments. Existing approval markers prevent duplicate approvals.
 
 The approval policy is deliberately conservative: explicit blocking metadata,
 or an unclassified canonical `critical`/`high` severity, blocks approval.

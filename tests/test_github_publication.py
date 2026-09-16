@@ -8,6 +8,7 @@ from review_sensei.hosting.github import (
 from review_sensei.hosting.github.publication import (
     ReviewApprovalFinalizer,
     approval_marker,
+    changes_requested_marker,
     finding_blocks_approval,
     finding_declares_blocking,
     finding_marker,
@@ -144,6 +145,23 @@ def graphql_review_threads_response(
     )
 
 
+def blocking_thread_node(
+    *, body="[🚫 Blocking] must fix", author="reviewsensei[bot]", resolved=False
+):
+    return {
+        "isResolved": resolved,
+        "comments": {"nodes": [{"body": body, "author": {"login": author}}]},
+    }
+
+
+def request_changes_write_responses(head, *, review_id=9):
+    return [
+        json_response(pr_payload(head_sha=head)),
+        json_response([]),
+        json_response({"id": review_id}, 200),
+    ]
+
+
 class ReviewPublisherTests(unittest.TestCase):
     def publish(self, responses, **overrides):
         head = "b" * 40
@@ -231,24 +249,50 @@ class ReviewPublisherTests(unittest.TestCase):
             [
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(
-                    nodes=(
-                        {
-                            "isResolved": False,
-                            "comments": {
-                                "nodes": [
-                                    {
-                                        "body": "unclassified App root",
-                                        "author": {"login": "reviewsensei[bot]"},
-                                    }
-                                ]
-                            },
-                        },
-                    )
+                    nodes=(blocking_thread_node(body="unclassified App root"),)
                 ),
+                *request_changes_write_responses(head),
             ]
         )
-        self.assertEqual(outcome.status, "blocking_findings_open")
-        self.assertEqual([call[0] for call in calls], ["GET", "POST"])
+        self.assertEqual(outcome.status, "changes_requested")
+        self.assertEqual(outcome.review_id, 9)
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(body["commit_id"], head)
+        self.assertIn("<!-- reviewsensei:changes-requested:v1", body["body"])
+        self.assertIn("unclassified App root", body["body"])
+        self.assertFalse(
+            any(
+                method == "POST"
+                and url.endswith("/pulls/2/reviews")
+                and __import__("json").loads(payload.decode("utf-8")).get("event")
+                == "APPROVE"
+                for method, url, payload in calls
+                if payload
+            )
+        )
+
+    def test_change_request_body_includes_stripped_blocking_excerpts(self):
+        head = "b" * 40
+        root = (
+            "[🚫 Blocking]\n\nRotate the leaked token.\n\n"
+            "To discuss this finding, reply with @sensei followed by your question.\n\n"
+            f"{finding_marker(repository_id=1, pull_request=2, head_sha=head, base_sha='a' * 40, result=result(), blocking=True)}"
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(body=root),)
+                ),
+                *request_changes_write_responses(head),
+            ]
+        )
+        self.assertEqual(outcome.status, "changes_requested")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))["body"]
+        self.assertIn("Rotate the leaked token.", body)
+        self.assertNotIn("reviewsensei:finding:v1", body)
+        self.assertNotIn("To discuss this finding", body)
 
     def test_finalizer_reconciles_an_existing_exact_head_approval(self):
         head = "b" * 40
@@ -297,14 +341,27 @@ class ReviewPublisherTests(unittest.TestCase):
         )
 
     def test_finalizer_honors_explicit_opt_out_and_known_blocking_result(self):
-        for overrides, expected in (
-            ({"enabled": False}, "auto_approval_disabled"),
-            ({"known_blocking_finding": True}, "blocking_findings_open"),
-        ):
-            with self.subTest(overrides=overrides):
-                outcome, calls = self.finalize([], **overrides)
-                self.assertEqual(outcome.status, expected)
-                self.assertEqual(calls, [])
+        outcome, calls = self.finalize([], enabled=False)
+        self.assertEqual(outcome.status, "auto_approval_disabled")
+        self.assertEqual(calls, [])
+
+        head = "b" * 40
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                *request_changes_write_responses(head, review_id=11),
+            ],
+            known_blocking_finding=True,
+        )
+        self.assertEqual(outcome.status, "changes_requested")
+        self.assertEqual(outcome.review_id, 11)
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertNotIn("comments", body)
+        self.assertIn(
+            "See the inline ReviewSensei comments on this head.", body["body"]
+        )
 
     def test_finalizer_rejects_invalid_controls_before_networking(self):
         for overrides in (
@@ -604,7 +661,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["body"],
         )
         self.assertEqual(body["commit_id"], head)
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["comments"][0]["path"], "src/app.py")
         self.assertIn(
             "To discuss this finding, reply with @sensei followed by your question.",
@@ -640,7 +697,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["comments"][0]["body"],
         )
         self.assertEqual(body["commit_id"], head)
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
 
     def test_non_blocking_finding_can_publish_an_approval(self):
@@ -801,21 +858,8 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
-                graphql_review_threads_response(
-                    nodes=(
-                        {
-                            "isResolved": False,
-                            "comments": {
-                                "nodes": [
-                                    {
-                                        "body": "[🚫 Blocking] must fix",
-                                        "author": {"login": "reviewsensei[bot]"},
-                                    }
-                                ]
-                            },
-                        },
-                    )
-                ),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                *request_changes_write_responses(head, review_id=7),
             ]
         )
         outcome = ReviewPublisher(http=http).publish(
@@ -837,8 +881,13 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIn("reviewThreads", query["query"])
         self.assertIn("isResolved", query["query"])
         self.assertIn("body", query["query"])
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        finding_review = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(finding_review["event"], "COMMENT")
+        change_request = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(change_request["event"], "REQUEST_CHANGES")
+        self.assertEqual(change_request["commit_id"], head)
+        self.assertNotIn("comments", change_request)
+        self.assertIn("[🚫 Blocking] must fix", change_request["body"])
 
     def test_resolved_review_threads_do_not_block_clean_review(self):
         head = "b" * 40
@@ -942,21 +991,8 @@ class ReviewPublisherTests(unittest.TestCase):
                     has_next_page=True,
                     end_cursor="cursor-1",
                 ),
-                graphql_review_threads_response(
-                    nodes=(
-                        {
-                            "isResolved": False,
-                            "comments": {
-                                "nodes": [
-                                    {
-                                        "body": "[🚫 Blocking] must fix",
-                                        "author": {"login": "reviewsensei[bot]"},
-                                    }
-                                ]
-                            },
-                        },
-                    )
-                ),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                *request_changes_write_responses(head, review_id=8),
             ]
         )
         outcome = ReviewPublisher(http=http).publish(
@@ -975,8 +1011,10 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         second_query = __import__("json").loads(calls[6][2].decode("utf-8"))
         self.assertEqual(second_query["variables"]["after"], "cursor-1")
-        body = __import__("json").loads(calls[3][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        finding_review = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(finding_review["event"], "COMMENT")
+        change_request = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(change_request["event"], "REQUEST_CHANGES")
 
     def test_app_authored_clean_review_falls_back_to_comment_event(self):
         head = "b" * 40
@@ -1033,6 +1071,291 @@ class ReviewPublisherTests(unittest.TestCase):
 
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET"])
+
+    def test_disabled_auto_approve_keeps_blocking_findings_as_comments(self):
+        head = "b" * 40
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ],
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertNotEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(
+            sum(1 for method, url, _ in calls if method == "POST"),
+            1,
+        )
+
+    def test_blocking_result_overrides_same_head_approval(self):
+        head = "b" * 40
+        prior = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=clean_result(),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(
+                    [published_review(marker=prior, head_sha=head, state="APPROVED")]
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(body["comments"][0]["path"], "src/app.py")
+
+    def test_change_request_does_not_yield_to_a_racy_later_approval(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                json_response(pr_payload(head_sha=head)),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertFalse(
+            any(
+                method == "POST"
+                and url.endswith("/pulls/2/reviews")
+                and payload
+                and __import__("json").loads(payload.decode("utf-8")).get("event")
+                == "APPROVE"
+                for method, url, payload in calls
+                if payload
+            )
+        )
+
+    def test_deleted_blocking_roots_do_not_deadlock_an_existing_change_request(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 6}, 200),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+        # Publisher returns already_published after reconciling the existing
+        # identity review; the nested finalizer write is APPROVE.
+        self.assertEqual(outcome.status, "already_published")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+
+    def test_change_request_promotes_to_approve_after_blocking_roots_resolve(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 6}, 200),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+        # Publisher returns already_published after reconciling the existing
+        # identity review; the nested finalizer write is APPROVE.
+        self.assertEqual(outcome.status, "already_published")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+        self.assertEqual(body["commit_id"], head)
+        self.assertNotIn("comments", body)
+
+    def test_finalizer_promotes_resolved_change_request_as_approved(self):
+        head = "b" * 40
+        existing = published_review(
+            marker=review_marker(
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                result=result(),
+            ),
+            head_sha=head,
+            state="CHANGES_REQUESTED",
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(
+                    nodes=(blocking_thread_node(resolved=True),)
+                ),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 6}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "approved")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "APPROVE")
+
+    def test_change_request_posted_after_second_sweep_is_not_dismissed(self):
+        head = "b" * 40
+        marker = review_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            result=result(),
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                json_response(pr_payload(head_sha=head)),
+            ],
+            result=clean_result(),
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertFalse(
+            any(
+                method == "POST"
+                and url.endswith("/pulls/2/reviews")
+                and payload
+                and __import__("json").loads(payload.decode("utf-8")).get("event")
+                == "APPROVE"
+                for method, url, payload in calls
+                if payload
+            )
+        )
+
+    def test_unmarked_app_change_request_does_not_skip_owned_marker(self):
+        head = "b" * 40
+        foreign = published_review(
+            marker="not a reviewsensei change-request marker",
+            head_sha=head,
+            state="CHANGES_REQUESTED",
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([foreign]),
+                json_response({"id": 11}, 200),
+            ],
+            known_blocking_finding=True,
+        )
+        self.assertEqual(outcome.status, "changes_requested")
+        body = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertIn("<!-- reviewsensei:changes-requested:v1", body["body"])
+
+    def test_owned_change_request_marker_is_idempotent(self):
+        head = "b" * 40
+        marker = changes_requested_marker(
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_sha="a" * 40,
+        )
+        existing = published_review(
+            marker=marker, head_sha=head, state="CHANGES_REQUESTED"
+        )
+        outcome, calls = self.finalize(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response(pr_payload(head_sha=head)),
+                json_response([existing]),
+            ],
+            known_blocking_finding=True,
+        )
+        self.assertEqual(outcome.status, "already_changes_requested")
+        self.assertFalse(
+            any(
+                method == "POST" and url.endswith("/pulls/2/reviews")
+                for method, url, _ in calls
+            )
+        )
 
     def test_head_is_rechecked_after_marker_pagination_before_write(self):
         head = "b" * 40
@@ -1219,33 +1542,27 @@ class ReviewPublisherTests(unittest.TestCase):
                     [published_review(marker=marker, head_sha=head, state="COMMENTED")]
                 ),
                 json_response(pr_payload(head_sha=head)),
-                graphql_review_threads_response(
-                    nodes=(
-                        {
-                            "isResolved": False,
-                            "comments": {
-                                "nodes": [
-                                    {
-                                        "body": "[🚫 Blocking] must fix",
-                                        "author": {"login": "reviewsensei[bot]"},
-                                    }
-                                ]
-                            },
-                        },
-                    )
-                ),
+                graphql_review_threads_response(nodes=(blocking_thread_node(),)),
+                *request_changes_write_responses(head, review_id=8),
             ],
             result=clean_result(),
             auto_approve=True,
         )
         self.assertEqual(outcome.status, "already_published")
-        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "POST"])
-        self.assertEqual(calls[3][1], "https://api.github.test/graphql")
-        self.assertFalse(
-            any(
-                method == "POST" and url.endswith("/pulls/2/reviews")
-                for method, url, _ in calls
-            )
+        change_request = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(change_request["event"], "REQUEST_CHANGES")
+        self.assertEqual(change_request["commit_id"], head)
+        self.assertEqual(
+            sum(
+                1
+                for method, url, payload in calls
+                if method == "POST"
+                and url.endswith("/pulls/2/reviews")
+                and payload
+                and __import__("json").loads(payload.decode("utf-8")).get("event")
+                == "REQUEST_CHANGES"
+            ),
+            1,
         )
 
     def test_finding_rerun_does_not_duplicate_same_head_comment(self):
@@ -1262,10 +1579,14 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(
                     [published_review(marker=marker, head_sha=head, state="COMMENTED")]
                 ),
+                json_response(pr_payload(head_sha=head)),
+                *request_changes_write_responses(head, review_id=8),
             ]
         )
         self.assertEqual(outcome.status, "already_published")
-        self.assertEqual([call[0] for call in calls], ["GET", "GET"])
+        change_request = __import__("json").loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(change_request["event"], "REQUEST_CHANGES")
+        self.assertNotIn("comments", change_request)
 
     def test_promotion_failure_does_not_reconcile_to_prior_comment(self):
         head = "b" * 40

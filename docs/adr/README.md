@@ -43,6 +43,7 @@ Process: `docs/process/adr-process.md`
 | [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; a shared finalizer ignores open non-blocking and human threads, while unknown ReviewSensei roots fail closed. |
 | [0033](0033-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 | [0034](0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | not configured | Typed resolve decision with exact-head and ReviewSensei-root guards; a blocking resolution invokes the shared finalizer. |
+| [0035](0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | #86 | Blocking findings emit `REQUEST_CHANGES`; a later same-head approve wins only after those roots resolve. |
 
 ## Policy
 
