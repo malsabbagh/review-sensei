@@ -652,12 +652,16 @@ class ActionPinPolicyTests(unittest.TestCase):
             'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)',
             review_step,
         )
-        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', review_step)
+        self.assertIn(
+            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', review_step
+        )
         self.assertNotIn("--allow-unqualified-profile \\\n", review_step)
         reply_step = _step_block(
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
-        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', reply_step)
+        self.assertIn(
+            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', reply_step
+        )
         self.assertNotIn(
             '--allow-unqualified-profile \\\n            --repository "$REPOSITORY"',
             reply_step,
