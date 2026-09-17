@@ -203,11 +203,12 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "historical-parity": _provider_parity_workflow("v4"),
         }
         self.assertEqual(callers["example"], callers["generated"])
-        self.assertIn("./.github/workflows/review-sensei-run.yml", callers["repo"])
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
-            callers["example"],
+            callers["repo"],
         )
+        self.assertNotIn("model:", callers["repo"])
+        self.assertIn("model:", callers["example"])
         self.assertNotEqual(callers["generated"], callers["historical-parity"])
         for name, text in callers.items():
             with self.subTest(caller=name):
