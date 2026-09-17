@@ -10,7 +10,7 @@ from urllib.request import Request
 
 import certifi
 
-from review_sensei.errors import ProviderError
+from review_sensei.errors import ProviderError, ReviewInputError
 from review_sensei.models import ProviderRequest
 from review_sensei.providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
@@ -485,6 +485,17 @@ class ProviderConfigTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(openrouter_timeout_default(), 300.0)
+
+    def test_openrouter_upstream_slug_is_validated(self):
+        from review_sensei.provider_config import openrouter_policy_from_env
+
+        with patch.dict(
+            "os.environ",
+            {"OPENROUTER_UPSTREAM_PROVIDER": "not a slug!"},
+            clear=True,
+        ):
+            with self.assertRaises(ReviewInputError):
+                openrouter_policy_from_env()
 
 
 if __name__ == "__main__":

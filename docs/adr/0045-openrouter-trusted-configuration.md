@@ -27,7 +27,10 @@ offline doctor/plan, and fixture mode never require or print the key.
 `qualification_status` (`qualified` or `unqualified`). New OpenRouter profiles
 start `unqualified` until separate qualification evidence (issue O4) promotes
 them. `ProviderSettings.for_profile()` and the registry pass
-`openrouter_policy` from the profile without environment lookup.
+`openrouter_policy` from the profile without environment lookup. For
+unprofiled `--provider openrouter`, the CLI resolves routing policy from
+`OPENROUTER_UPSTREAM_PROVIDER` and `ProviderRegistry.create` rejects settings
+whose explicit policy disagrees with that env-derived default.
 
 Precedence remains deterministic:
 

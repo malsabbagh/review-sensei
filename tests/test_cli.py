@@ -2193,6 +2193,32 @@ class PromotionCliTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("openrouter endpoint is not allowlisted", stderr.getvalue())
 
+    def test_openrouter_rejects_non_allowlisted_openrouter_base_url_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENROUTER_API_KEY": "router-secret",
+                    "OPENROUTER_BASE_URL": "https://evil.example/api/v1",
+                },
+                clear=True,
+            ):
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openrouter",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+        self.assertIn("openrouter endpoint is not allowlisted", stderr.getvalue())
+
     def test_openrouter_upstream_provider_selects_routing_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"

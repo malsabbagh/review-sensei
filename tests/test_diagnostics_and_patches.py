@@ -247,6 +247,14 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(endpoint["status"], "unknown")
         self.assertIn("data-egress authorization", endpoint["detail"])
 
+    def test_doctor_reports_missing_openrouter_credential(self):
+        doctor = run_doctor(profile="openrouter-sonnet", provider="openrouter")
+        credential = next(
+            check for check in doctor["checks"] if check["name"] == "credential"
+        )
+        self.assertEqual(credential["status"], "action")
+        self.assertIn("OPENROUTER_API_KEY", credential["detail"])
+
     def test_doctor_and_plan_include_provider_configuration(self):
         doctor = run_doctor(profile="local-private", provider="ollama")
         self.assertIn("provider_configuration", doctor)

@@ -171,7 +171,8 @@ OpenRouter is an explicit CLI-only remote path in this release:
 
 `doctor` and `plan` report credential presence only; they never print the key.
 OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile`
-for live review until separate qualification evidence exists.
+for live review, live evaluation, and provider-backed GitHub reply generation
+until separate qualification evidence exists.
 
 ## GitHub workflow example
 

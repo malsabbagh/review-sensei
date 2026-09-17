@@ -42,13 +42,13 @@ from .provider_config import (
     openrouter_policy_from_env,
     openrouter_timeout_default,
     openrouter_upstream_default,
+    resolve_effective_provider_configuration,
     validate_profile_provider_match,
 )
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.openrouter import (
     OpenRouterRoutingPolicy,
-    is_allowlisted_openrouter_endpoint,
 )
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
@@ -327,6 +327,26 @@ def _add_allow_custom_endpoint_argument(parser: argparse.ArgumentParser) -> None
     )
 
 
+def _validate_live_profile_gates(args: argparse.Namespace, argv: list[str]) -> None:
+    _validate_profile_cli_args(args, argv)
+    _validate_unqualified_profile_gate(args)
+
+
+def _require_allowlisted_openrouter_configuration(args: argparse.Namespace) -> None:
+    """Reject non-allowlisted OpenRouter endpoints using effective defaults."""
+
+    provider = str(getattr(args, "provider", "")).strip().lower()
+    if provider != "openrouter":
+        return
+    resolve_effective_provider_configuration(
+        profile=getattr(args, "profile", None),
+        provider=provider,
+        base_url=getattr(args, "base_url", None),
+        model=getattr(args, "model", None),
+        api_key_env=getattr(args, "api_key_env", None),
+    )
+
+
 def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
     """Reject non-allowlisted OpenAI endpoints at the CLI boundary."""
 
@@ -341,17 +361,6 @@ def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
             "openai-compatible endpoint is not allowlisted; pass "
             "--allow-custom-endpoint only for an explicitly trusted service"
         )
-
-
-def _require_allowlisted_openrouter_endpoint(args: argparse.Namespace) -> None:
-    """Reject non-allowlisted OpenRouter endpoints at the CLI boundary."""
-
-    provider = str(getattr(args, "provider", "")).strip().lower()
-    if provider != "openrouter":
-        return
-    base_url = str(getattr(args, "base_url", "") or "")
-    if not is_allowlisted_openrouter_endpoint(base_url):
-        raise ReviewInputError("openrouter endpoint is not allowlisted")
 
 
 def _openrouter_policy_from_args(args: argparse.Namespace) -> OpenRouterRoutingPolicy:
@@ -424,6 +433,8 @@ def _provider_settings_from_args(
     openrouter_policy = (
         _openrouter_policy_from_args(args) if provider_name == "openrouter" else None
     )
+    if provider_name == "openrouter":
+        _require_allowlisted_openrouter_configuration(args)
     if profile_name:
         return ProviderSettings(
             name=provider_name,
@@ -450,8 +461,6 @@ def _provider_settings_from_args(
         )
     if provider_name == "openai-compatible":
         _require_allowlisted_openai_endpoint(args)
-    elif provider_name == "openrouter":
-        _require_allowlisted_openrouter_endpoint(args)
     return ProviderSettings(
         name=provider_name,
         model=args.model,
@@ -724,6 +733,14 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
     _add_allow_custom_endpoint_argument(parser)
+    parser.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live provider use with an unqualified profile before "
+            "qualification evidence exists"
+        ),
+    )
     parser.add_argument("--provider-version")
     parser.add_argument(
         "--allow-live-model",
@@ -905,7 +922,7 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError("--mode live requires --allow-live-model")
         if not args.provider_version:
             raise ReviewInputError("--mode live requires --provider-version")
-        _validate_profile_cli_args(args, argv)
+        _validate_live_profile_gates(args, argv)
         if args.profile:
             profile = get_provider_profile(args.profile)
             scope = "loopback" if profile.endpoint_scope == "local" else "remote"
@@ -1147,6 +1164,14 @@ def _github_parser() -> argparse.ArgumentParser:
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
     reply.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live provider use with an unqualified profile before "
+            "qualification evidence exists"
+        ),
+    )
+    reply.add_argument(
         "--allow-write",
         action="store_true",
         help="Acknowledge that GitHub writes may be enabled for this invocation.",
@@ -1375,7 +1400,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError(
                 f"GitHub read token environment variable {args.github_token_env} is unavailable"
             )
-        _validate_profile_cli_args(args, argv)
+        _validate_live_profile_gates(args, argv)
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
@@ -1675,8 +1700,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.diff:
             raise ReviewInputError("--diff is required")
-        _validate_profile_cli_args(args, args_list)
-        _validate_unqualified_profile_gate(args)
+        _validate_live_profile_gates(args, args_list)
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
             if not args.fixture_response:

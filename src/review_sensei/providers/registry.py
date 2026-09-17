@@ -52,8 +52,7 @@ class ProviderSettings:
                 )
         elif selected.openrouter_policy is not None:
             raise ProviderError(
-                f"provider profile '{selected.name}' must not declare "
-                "openrouter_policy"
+                f"provider profile '{selected.name}' must not declare openrouter_policy"
             )
         if not selected.requires_api_key and api_key is not None:
             raise ProviderError(
@@ -169,11 +168,9 @@ class ProviderRegistry:
                 openrouter_policy=profile.openrouter_policy,
             )
         name = settings.name.strip().lower()
-        if (
-            name == "openrouter"
-            and settings.profile is None
-            and settings.openrouter_policy is not None
-        ):
+        if name == "openrouter" and settings.profile is None:
+            if settings.openrouter_policy is None:
+                raise ProviderError("openrouter provider requires a routing policy")
             try:
                 env_policy = openrouter_policy_from_env()
             except ReviewInputError as exc:

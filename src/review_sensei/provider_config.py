@@ -79,10 +79,6 @@ def validate_profile_provider_match(
 
 
 def provider_mode_default(provider_mode: str | None) -> str:
-    return _provider_mode_default(provider_mode)
-
-
-def _provider_mode_default(provider_mode: str | None) -> str:
     mode = (
         (
             provider_mode
@@ -144,7 +140,7 @@ def resolve_effective_provider_configuration(
 ) -> dict[str, Any]:
     """Return the effective provider configuration without reading secret values."""
 
-    mode = _provider_mode_default(provider_mode)
+    mode = provider_mode_default(provider_mode)
     selected_profile: ProviderProfile | None = None
     if profile is not None:
         if not isinstance(profile, str) or not profile.strip():
@@ -205,6 +201,12 @@ def resolve_effective_provider_configuration(
             openrouter_policy = None
             timeout_seconds = None
         qualification_status = "unknown"
+    if selected_profile is not None:
+        credential_required = selected_profile.requires_api_key
+    elif provider_name in {"openrouter", "openai-compatible"}:
+        credential_required = True
+    else:
+        credential_required = False
     credential_present = bool(credential_env and os.getenv(credential_env))
     if provider_name == "openrouter" and not is_allowlisted_openrouter_endpoint(
         resolved_base_url
@@ -218,6 +220,7 @@ def resolve_effective_provider_configuration(
         "execution_location": "local",
         "inference_location": _inference_location(resolved_base_url),
         "credential_env": credential_env,
+        "credential_required": credential_required,
         "credential_present": credential_present,
         "openrouter_policy": _openrouter_policy_summary(openrouter_policy),
         "timeout_seconds": timeout_seconds,

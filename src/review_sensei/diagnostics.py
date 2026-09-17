@@ -95,10 +95,6 @@ def _is_loopback_url(url: str) -> bool:
     return host in LOCAL_LOOPBACK_HOSTS
 
 
-def _provider_mode_default(provider_mode: str | None) -> str:
-    return provider_mode_default(provider_mode)
-
-
 def _provider_network_probe_checks(
     *,
     base_url: str,
@@ -401,7 +397,7 @@ def run_doctor(
         )
     )
     try:
-        mode = _provider_mode_default(provider_mode)
+        mode = provider_mode_default(provider_mode)
         provider_configuration = resolve_effective_provider_configuration(
             profile=profile,
             provider=provider,
@@ -413,17 +409,20 @@ def run_doctor(
         checks.append(
             DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)")
         )
+        if provider_configuration.get(
+            "credential_required"
+        ) and not provider_configuration.get("credential_present"):
+            credential_env = provider_configuration.get("credential_env")
+            checks.append(
+                DiagnosticCheck(
+                    "credential",
+                    "action",
+                    f"environment variable {credential_env} is unavailable",
+                )
+            )
     except ReviewInputError as exc:
         provider_configuration = None
-        checks.append(
-            DiagnosticCheck(
-                "provider-mode",
-                "action",
-                str(exc)
-                if "provider mode" in str(exc)
-                else "provider mode must be local or cloud",
-            )
-        )
+        checks.append(DiagnosticCheck("provider-mode", "action", str(exc)))
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -648,7 +647,7 @@ def build_plan(
         raise ReviewInputError("stages must contain non-empty strings")
     if len(selected_stages) != len(set(selected_stages)):
         raise ReviewInputError("stages must be unique")
-    mode = _provider_mode_default(provider_mode)
+    mode = provider_mode_default(provider_mode)
     provider_configuration = resolve_effective_provider_configuration(
         profile=profile,
         provider=provider,

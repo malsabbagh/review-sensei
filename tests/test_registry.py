@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest, ProviderResponse
@@ -343,3 +344,29 @@ class ProviderRegistryTests(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_openrouter_unprofiled_requires_routing_policy(self):
+        with self.assertRaisesRegex(ProviderError, "requires a routing policy"):
+            default_registry().create(
+                ProviderSettings(
+                    name="openrouter",
+                    model="anthropic/claude-3.5-sonnet",
+                    api_key="secret",
+                )
+            )
+
+    def test_openrouter_unprofiled_accepts_env_matched_policy(self):
+        with patch.dict(
+            "os.environ", {"OPENROUTER_UPSTREAM_PROVIDER": "openai"}, clear=True
+        ):
+            provider = default_registry().create(
+                ProviderSettings(
+                    name="openrouter",
+                    model="anthropic/claude-3.5-sonnet",
+                    api_key="secret",
+                    openrouter_policy=OpenRouterRoutingPolicy(
+                        upstream_provider="openai"
+                    ),
+                )
+            )
+        self.assertEqual(provider.routing_policy.upstream_provider, "openai")
