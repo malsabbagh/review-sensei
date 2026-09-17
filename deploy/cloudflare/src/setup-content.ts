@@ -3,9 +3,8 @@
  *
  * The Worker receives the public reusable-workflow git tag as the update
  * channel and validates that it resolves before generating these files. The
- * customer-owned OLLAMA_API_KEY and OPENROUTER_API_KEY secrets are referenced
- * by name in the caller and passed to the workflow; this module never handles
- * their values.
+ * customer-owned OLLAMA_API_KEY is referenced by name in the caller and passed
+ * to the workflow; this module never handles its value.
  */
 
 const GITHUB_EXPRESSION = "@@";
@@ -190,7 +189,6 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 
   trusted-local-manual:
     if: >-
@@ -235,7 +233,6 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 `.replaceAll("__PUBLIC_WORKFLOW_REF__", publicWorkflowRef).replaceAll(GITHUB_EXPRESSION, "$");
 }
 
@@ -348,7 +345,6 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
-      provider_profile: @@{{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}
       operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
@@ -375,7 +371,6 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 `
     .replaceAll("__PUBLIC_WORKFLOW_TAG__", tag)
     .replaceAll(GITHUB_EXPRESSION, "$");
@@ -696,7 +691,6 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
-      provider_profile: @@{{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}
       operation: @@{{ needs.resolve-trigger.outputs.operation }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
@@ -723,7 +717,6 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
-      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 `
     .replaceAll("__PUBLIC_WORKFLOW_TAG__", tag)
     .replaceAll(GITHUB_EXPRESSION, "$");

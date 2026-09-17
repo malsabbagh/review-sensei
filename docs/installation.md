@@ -159,10 +159,12 @@ an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
 the reusable workflow.
 
 OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
-Hosted OpenRouter requires **both** `REVIEWSENSEI_PROVIDER_MODE=cloud` and
-`REVIEWSENSEI_PROVIDER_PROFILE=openrouter-sonnet` or `openrouter-gpt`, plus
-`OPENROUTER_API_KEY`. Setting only the profile with `local` mode fails the
-workflow during `validate-provider-mode`.
+The reusable workflow requires **both** `provider_mode=cloud` and
+`provider_profile=openrouter-sonnet` or `openrouter-gpt`, plus
+`OPENROUTER_API_KEY`. Setting only the profile with `local` mode fails during
+`validate-provider-mode`. Generated setup-v4 callers do not yet forward
+`provider_profile` or `OPENROUTER_API_KEY`; that caller wiring lands after the
+public `v4` tag includes this reusable-workflow contract.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -315,13 +317,13 @@ Issue comments and human-authored roots remain open. Add another standalone
 successful AI resolution automatically causes one fresh same-head review pass;
 approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
-The generated caller may contain the literal name-only mappings
-`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}` and
-`OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}`. This does not read
+The generated caller may contain the literal name-only mapping
+`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read
 secret values during setup and the App never creates, retrieves, logs,
 persists, or interpolates a secret value into generated output. Add the
-customer-owned secrets yourself only when explicitly enabling cloud mode or an
-OpenRouter profile.
+customer-owned `OLLAMA_API_KEY` yourself only when explicitly enabling cloud
+mode. `OPENROUTER_API_KEY` is forwarded by generated callers only after the
+public `v4` tag includes the reusable-workflow contract.
 
 Setup reconciliation is PR-only and changes only the three generated paths.
 `installation.created` (including reinstall),

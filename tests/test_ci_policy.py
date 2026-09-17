@@ -309,8 +309,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
-        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
-        self.assertIn(
+        self.assertNotIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertNotIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
         )
         self.assertIn("id-token: write", text)
@@ -571,18 +571,13 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(generated_caller, caller_template)
 
+        # Caller wiring for provider_profile is deferred until the v4 tag moves;
+        # until then the reusable workflow default keeps OpenRouter off the path.
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
             generated_caller,
         )
-        self.assertIn(
-            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
-            generated_caller,
-        )
-        self.assertIn(
-            "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}",
-            generated_caller,
-        )
+        self.assertNotIn("provider_profile:", generated_caller)
         self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
         self.assertIn(
             "provider_profile:\n        required: false\n        default: ''",

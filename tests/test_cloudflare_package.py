@@ -101,7 +101,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
         self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
         self.assertIn("secrets.OLLAMA_API_KEY", source)
-        self.assertIn("secrets.OPENROUTER_API_KEY", source)
+        self.assertNotIn("secrets.OPENROUTER_API_KEY", source)
         self.assertIn("REVIEWSENSEI_PROVIDER_PROFILE", source)
         self.assertIn("github.event.comment.author_association == 'OWNER'", source)
         self.assertIn("github.event.comment.user.type != 'Bot'", source)
