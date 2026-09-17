@@ -189,7 +189,9 @@ class OpenRouterProvider:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("OpenRouter provider requires an API key")
         if not isinstance(routing_policy, OpenRouterRoutingPolicy):
-            raise ValueError("OpenRouter routing_policy must be an OpenRouterRoutingPolicy")
+            raise ValueError(
+                "OpenRouter routing_policy must be an OpenRouterRoutingPolicy"
+            )
         try:
             validate_bounded_text(
                 api_key,
@@ -205,22 +207,32 @@ class OpenRouterProvider:
             unicodedata.category(character) in {"Cc", "Cf", "Cs"}
             for character in api_key
         ):
-            raise ValueError("OpenRouter API key contains a forbidden control character")
+            raise ValueError(
+                "OpenRouter API key contains a forbidden control character"
+            )
         try:
             api_key.encode("ascii")
         except UnicodeEncodeError as exc:
-            raise ValueError("OpenRouter API key must contain only ASCII characters") from exc
+            raise ValueError(
+                "OpenRouter API key must contain only ASCII characters"
+            ) from exc
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
             or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0
         ):
-            raise ValueError("OpenRouter timeout_seconds must be a finite positive number")
-        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int):
+            raise ValueError(
+                "OpenRouter timeout_seconds must be a finite positive number"
+            )
+        if isinstance(max_output_tokens, bool) or not isinstance(
+            max_output_tokens, int
+        ):
             raise ValueError("OpenRouter max_output_tokens must be a positive integer")
         if max_output_tokens < 1 or max_output_tokens > 16_384:
-            raise ValueError("OpenRouter max_output_tokens exceeds the configured limit")
+            raise ValueError(
+                "OpenRouter max_output_tokens exceeds the configured limit"
+            )
         if not is_allowlisted_openrouter_endpoint(base_url):
             raise ValueError("OpenRouter endpoint is not allowlisted")
         parsed = urlsplit(base_url)
@@ -396,16 +408,24 @@ class OpenRouterProvider:
                     transient=_http_failure_is_transient(exc.code),
                 ) from exc
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
-                raise ProviderError("OpenRouter request timed out", transient=True) from exc
+                raise ProviderError(
+                    "OpenRouter request timed out", transient=True
+                ) from exc
             transient = isinstance(exc, URLError) and urllib_error_is_transient(exc)
-            raise ProviderError("OpenRouter request failed", transient=transient) from exc
+            raise ProviderError(
+                "OpenRouter request failed", transient=transient
+            ) from exc
         except TypeError as exc:
             raise ProviderError("OpenRouter response could not be opened") from exc
         except OSError as exc:
             if "timed out" in str(exc).lower():
-                raise ProviderError("OpenRouter request timed out", transient=True) from exc
+                raise ProviderError(
+                    "OpenRouter request timed out", transient=True
+                ) from exc
             if isinstance(exc, ConnectionError):
-                raise ProviderError("OpenRouter request failed", transient=True) from exc
+                raise ProviderError(
+                    "OpenRouter request failed", transient=True
+                ) from exc
             raise ProviderError("OpenRouter request failed") from exc
 
         try:

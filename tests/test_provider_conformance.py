@@ -13,7 +13,10 @@ from review_sensei.models import ProviderRequest, ProviderResponse
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.providers.ollama import OllamaProvider
 from review_sensei.providers.openai_compatible import OpenAICompatibleProvider
-from review_sensei.providers.openrouter import OpenRouterProvider, OpenRouterRoutingPolicy
+from review_sensei.providers.openrouter import (
+    OpenRouterProvider,
+    OpenRouterRoutingPolicy,
+)
 from review_sensei.validation import ReviewLimits
 
 
