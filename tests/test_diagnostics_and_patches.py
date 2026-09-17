@@ -203,6 +203,50 @@ class DiagnosticsTests(unittest.TestCase):
         rendered = render_diagnostic({"provider_configuration": config})
         self.assertNotIn("router-secret", rendered)
 
+    def test_resolve_openrouter_provider_without_profile(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENROUTER_UPSTREAM_PROVIDER": "openai",
+                "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS": "300",
+            },
+            clear=True,
+        ):
+            config = resolve_effective_provider_configuration(provider="openrouter")
+        self.assertEqual(config["provider"], "openrouter")
+        self.assertEqual(config["timeout_seconds"], 300.0)
+        self.assertEqual(
+            config["openrouter_policy"]["upstream_provider"],
+            "openai",
+        )
+
+    def test_resolve_rejects_unallowlisted_openrouter_base_url(self):
+        with self.assertRaisesRegex(ReviewInputError, "not allowlisted"):
+            resolve_effective_provider_configuration(
+                provider="openrouter",
+                base_url="https://evil.example/api/v1",
+            )
+
+    def test_resolve_rejects_mismatched_profile_and_provider(self):
+        with self.assertRaisesRegex(ReviewInputError, "does not match profile"):
+            resolve_effective_provider_configuration(
+                profile="openrouter-sonnet",
+                provider="ollama",
+            )
+
+    def test_doctor_remote_openrouter_requires_data_egress_authorization(self):
+        doctor = run_doctor(
+            include_network=True,
+            profile="openrouter-sonnet",
+            provider="openrouter",
+            allow_data_egress=False,
+        )
+        endpoint = next(
+            check for check in doctor["checks"] if check["name"] == "endpoint"
+        )
+        self.assertEqual(endpoint["status"], "unknown")
+        self.assertIn("data-egress authorization", endpoint["detail"])
+
     def test_doctor_and_plan_include_provider_configuration(self):
         doctor = run_doctor(profile="local-private", provider="ollama")
         self.assertIn("provider_configuration", doctor)

@@ -472,5 +472,20 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertIsNone(provider._test_opener)
 
 
+class ProviderConfigTests(unittest.TestCase):
+    def test_openrouter_timeout_prefers_reviewsensei_env(self):
+        from review_sensei.provider_config import openrouter_timeout_default
+
+        with patch.dict(
+            "os.environ",
+            {
+                "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS": "300",
+                "OPENROUTER_TIMEOUT_SECONDS": "120",
+            },
+            clear=True,
+        ):
+            self.assertEqual(openrouter_timeout_default(), 300.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2165,7 +2165,135 @@ class PromotionCliTests(unittest.TestCase):
                         ]
                     )
         self.assertEqual(status, 1)
-        self.assertIn("OPENROUTER_API_KEY is unavailable", stderr.getvalue())
+        self.assertIn(
+            "environment variable OPENROUTER_API_KEY is unavailable",
+            stderr.getvalue(),
+        )
+
+    def test_openrouter_rejects_non_allowlisted_base_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.dict(
+                "os.environ", {"OPENROUTER_API_KEY": "router-secret"}, clear=True
+            ):
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openrouter",
+                            "--base-url",
+                            "https://evil.example/api/v1",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+        self.assertIn("openrouter endpoint is not allowlisted", stderr.getvalue())
+
+    def test_openrouter_upstream_provider_selects_routing_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENROUTER_API_KEY": "router-secret",
+                    "OPENROUTER_UPSTREAM_PROVIDER": "openai",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openrouter",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].openrouter_policy.upstream_provider, "openai")
+
+    def test_openrouter_timeout_prefers_reviewsensei_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENROUTER_API_KEY": "router-secret",
+                    "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS": "300",
+                    "OPENROUTER_TIMEOUT_SECONDS": "120",
+                },
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openrouter",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].timeout_seconds, 300.0)
+
+    def test_openrouter_api_key_env_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ",
+                {"CUSTOM_ROUTER_KEY": "router-secret"},
+                clear=True,
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openrouter",
+                            "--api-key-env",
+                            "CUSTOM_ROUTER_KEY",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].api_key, "router-secret")
 
     def test_openrouter_profile_wires_policy_and_credential(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2192,6 +2320,7 @@ class PromotionCliTests(unittest.TestCase):
                             "openrouter-sonnet",
                             "--provider",
                             "openrouter",
+                            "--allow-unqualified-profile",
                             "--no-learning-proposals",
                         ]
                     )
@@ -2217,6 +2346,45 @@ class PromotionCliTests(unittest.TestCase):
             )
         self.assertEqual(status, 1)
         self.assertIn("requires --provider openrouter", stderr.getvalue())
+
+    def test_openrouter_profile_rejects_mismatched_explicit_provider(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "openrouter-sonnet",
+                    "--provider",
+                    "ollama",
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("does not match profile", stderr.getvalue())
+
+    def test_openrouter_profile_requires_unqualified_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.dict(
+                "os.environ", {"OPENROUTER_API_KEY": "router-secret"}, clear=True
+            ):
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "openrouter-sonnet",
+                            "--provider",
+                            "openrouter",
+                            "--no-learning-proposals",
+                        ]
+                    )
+        self.assertEqual(status, 1)
+        self.assertIn("is unqualified", stderr.getvalue())
 
     def test_promotion_cli_does_not_accept_live_model_flags(self):
         stderr = io.StringIO()

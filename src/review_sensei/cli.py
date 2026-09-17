@@ -38,6 +38,12 @@ from .outcomes import (
     run_outcome_exit_code,
 )
 from .planning import DEFAULT_TOTAL_WORK_BUDGET
+from .provider_config import (
+    openrouter_policy_from_env,
+    openrouter_timeout_default,
+    openrouter_upstream_default,
+    validate_profile_provider_match,
+)
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.openrouter import (
@@ -252,22 +258,11 @@ def _openai_timeout_default() -> float:
 
 
 def _openrouter_timeout_default() -> float:
-    configured = os.getenv("REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS")
-    source = "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS"
-    if configured is None:
-        configured = os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120")
-        source = "OPENROUTER_TIMEOUT_SECONDS"
-    try:
-        return _positive_float(configured)
-    except argparse.ArgumentTypeError as exc:
-        raise ReviewInputError(f"{source} must be a positive number") from exc
+    return openrouter_timeout_default()
 
 
 def _openrouter_upstream_default() -> str:
-    configured = os.getenv("OPENROUTER_UPSTREAM_PROVIDER", DEFAULT_OPENROUTER_UPSTREAM)
-    if not isinstance(configured, str) or not configured.strip():
-        raise ReviewInputError("OPENROUTER_UPSTREAM_PROVIDER must be non-empty")
-    return configured.strip()
+    return openrouter_upstream_default()
 
 
 def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
@@ -362,16 +357,17 @@ def _require_allowlisted_openrouter_endpoint(args: argparse.Namespace) -> None:
 def _openrouter_policy_from_args(args: argparse.Namespace) -> OpenRouterRoutingPolicy:
     profile_name = getattr(args, "profile", None)
     if profile_name:
+        validate_profile_provider_match(
+            profile_name=profile_name,
+            provider_name=str(getattr(args, "provider", "")),
+        )
         profile = get_provider_profile(profile_name)
         if profile.openrouter_policy is None:
             raise ReviewInputError(
                 f"profile '{profile.name}' does not declare an OpenRouter routing policy"
             )
         return profile.openrouter_policy
-    try:
-        return OpenRouterRoutingPolicy(upstream_provider=_openrouter_upstream_default())
-    except ValueError as exc:
-        raise ReviewInputError(str(exc)) from exc
+    return openrouter_policy_from_env()
 
 
 def _resolve_api_key(
@@ -394,13 +390,25 @@ def _resolve_api_key(
     if provider_name == "fixture":
         return None
     api_key_env = args.api_key_env
-    if provider_name == "openrouter":
-        api_key = os.getenv(api_key_env or "OPENROUTER_API_KEY")
-        if not api_key:
-            env_name = api_key_env or "OPENROUTER_API_KEY"
-            raise ReviewInputError(f"environment variable {env_name} is unavailable")
-        return api_key
-    return os.getenv(api_key_env)
+    api_key = os.getenv(api_key_env)
+    if provider_name == "openrouter" and not api_key:
+        raise ReviewInputError(f"environment variable {api_key_env} is unavailable")
+    return api_key
+
+
+def _validate_unqualified_profile_gate(args: argparse.Namespace) -> None:
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return
+    profile = get_provider_profile(profile_name)
+    if profile.qualification_status != "unqualified":
+        return
+    if getattr(args, "allow_unqualified_profile", False):
+        return
+    raise ReviewInputError(
+        f"profile '{profile.name}' is unqualified; pass --allow-unqualified-profile "
+        "to authorize remote egress before qualification evidence exists"
+    )
 
 
 def _provider_settings_from_args(
@@ -532,6 +540,14 @@ def _parser() -> argparse.ArgumentParser:
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
     _add_allow_custom_endpoint_argument(parser)
+    parser.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live review with an unqualified provider profile before "
+            "qualification evidence exists"
+        ),
+    )
     parser.add_argument("--repository")
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--title")
@@ -1660,6 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         _validate_profile_cli_args(args, args_list)
+        _validate_unqualified_profile_gate(args)
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
             if not args.fixture_response:

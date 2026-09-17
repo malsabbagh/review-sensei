@@ -22,12 +22,11 @@ from urllib.request import Request, urlopen
 
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
-from .providers.openrouter import (
-    DEFAULT_OPENROUTER_BASE_URL,
-    OpenRouterRoutingPolicy,
-    is_allowlisted_openrouter_endpoint,
+from .provider_config import (
+    LOCAL_LOOPBACK_HOSTS,
+    provider_mode_default,
+    resolve_effective_provider_configuration,
 )
-from .providers.profiles import ProviderProfile, get_provider_profile
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
 from .stages import (
@@ -48,15 +47,6 @@ _SAFE_REPOSITORY_RE = re.compile(
 )
 MAX_PROBE_BYTES = 8192
 PROBE_TIMEOUT_SECONDS = 2.0
-LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
-DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
-DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/api"
-DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
-DEFAULT_OPENROUTER_UPSTREAM = "anthropic"
 
 
 @dataclass(frozen=True)
@@ -106,141 +96,50 @@ def _is_loopback_url(url: str) -> bool:
 
 
 def _provider_mode_default(provider_mode: str | None) -> str:
-    mode = (
-        (
-            provider_mode
-            if provider_mode is not None
-            else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
-        )
-        .strip()
-        .lower()
-    )
-    if mode not in {"local", "cloud"}:
-        raise ReviewInputError("provider mode must be local or cloud")
-    return mode
+    return provider_mode_default(provider_mode)
 
 
-def _default_ollama_base_url(provider_mode: str) -> str:
-    configured = os.getenv("OLLAMA_BASE_URL")
-    if configured:
-        return configured
-    return (
-        DEFAULT_CLOUD_BASE_URL if provider_mode == "cloud" else DEFAULT_LOCAL_BASE_URL
-    )
-
-
-def _default_ollama_model(provider_mode: str) -> str:
-    configured = os.getenv("OLLAMA_MODEL")
-    if configured:
-        return configured
-    if provider_mode == "cloud":
-        return os.getenv("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL)
-    return os.getenv("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL)
-
-
-def _inference_location(base_url: str) -> str:
-    return "local" if _is_loopback_url(base_url) else "remote"
-
-
-def _openrouter_policy_summary(
-    policy: OpenRouterRoutingPolicy | None,
-) -> dict[str, object] | None:
-    if policy is None:
-        return None
-    return dict(policy.identity_fields())
-
-
-def resolve_effective_provider_configuration(
+def _provider_network_probe_checks(
     *,
-    profile: str | None = None,
-    provider: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
-    api_key_env: str | None = None,
-    provider_mode: str | None = None,
-) -> dict[str, Any]:
-    """Return the effective provider configuration without reading secret values."""
-
-    mode = _provider_mode_default(provider_mode)
-    selected_profile: ProviderProfile | None = None
-    if profile is not None:
-        if not isinstance(profile, str) or not profile.strip():
-            raise ReviewInputError("profile must be a non-empty string")
-        selected_profile = get_provider_profile(profile)
-        provider_name = selected_profile.provider
-        resolved_model = selected_profile.model
-        resolved_base_url = selected_profile.base_url
-        credential_env = selected_profile.api_key_env
-        qualification_status: str = selected_profile.qualification_status
-        openrouter_policy = selected_profile.openrouter_policy
-    else:
-        provider_name = (
-            (
-                provider
-                if provider is not None
-                else os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
-            )
-            .strip()
-            .lower()
+    base_url: str,
+    model: str,
+    provider: str,
+    allow_data_egress: bool,
+    opener: Callable[..., Any],
+) -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    remote = not _is_loopback_url(base_url)
+    if remote and not allow_data_egress:
+        return (
+            DiagnosticCheck(
+                "endpoint",
+                "unknown",
+                "remote endpoint not probed without explicit data-egress authorization",
+            ),
+            DiagnosticCheck(
+                "model",
+                "unknown",
+                "model inventory not probed for a remote endpoint",
+            ),
         )
-        if not provider_name:
-            raise ReviewInputError("provider must be non-empty")
-        if provider_name == "openai-compatible":
-            resolved_base_url = (
-                base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
-            ).strip()
-            resolved_model = (
-                model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
-            ).strip()
-            credential_env = api_key_env or "OPENAI_API_KEY"
-            openrouter_policy = None
-        elif provider_name == "openrouter":
-            resolved_base_url = (
-                base_url
-                or os.getenv("OPENROUTER_BASE_URL")
-                or DEFAULT_OPENROUTER_BASE_URL
-            ).strip()
-            resolved_model = (
-                model or os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
-            ).strip()
-            credential_env = api_key_env or "OPENROUTER_API_KEY"
-            upstream = (
-                os.getenv("OPENROUTER_UPSTREAM_PROVIDER") or DEFAULT_OPENROUTER_UPSTREAM
-            )
-            try:
-                openrouter_policy = OpenRouterRoutingPolicy(
-                    upstream_provider=upstream.strip()
-                )
-            except ValueError as exc:
-                raise ReviewInputError(str(exc)) from exc
-        elif provider_name == "fixture":
-            resolved_base_url = (base_url or "").strip()
-            resolved_model = (model or "fixture-v1").strip()
-            credential_env = None
-            openrouter_policy = None
-        else:
-            resolved_base_url = (base_url or _default_ollama_base_url(mode)).strip()
-            resolved_model = (model or _default_ollama_model(mode)).strip()
-            credential_env = api_key_env or "OLLAMA_API_KEY"
-            openrouter_policy = None
-        qualification_status = "unknown"
-    credential_present = bool(credential_env and os.getenv(credential_env))
-    if provider_name == "openrouter" and not is_allowlisted_openrouter_endpoint(
-        resolved_base_url
-    ):
-        raise ReviewInputError("openrouter endpoint is not allowlisted")
-    return {
-        "profile": selected_profile.name if selected_profile is not None else None,
-        "provider": provider_name,
-        "model": resolved_model,
-        "base_url": resolved_base_url,
-        "execution_location": "local",
-        "inference_location": _inference_location(resolved_base_url),
-        "credential_env": credential_env,
-        "credential_present": credential_present,
-        "openrouter_policy": _openrouter_policy_summary(openrouter_policy),
-        "qualification_status": qualification_status,
-    }
+    if provider in {"openrouter", "openai-compatible", "fixture"}:
+        return (
+            DiagnosticCheck(
+                "endpoint",
+                "unknown",
+                f"{provider} endpoint not probed without a dedicated read-only probe",
+            ),
+            DiagnosticCheck(
+                "model",
+                "unknown",
+                f"{provider} model inventory not probed offline",
+            ),
+        )
+    return probe_provider_endpoint(
+        base_url=base_url,
+        model=model,
+        opener=opener,
+        allow_remote=allow_data_egress,
+    )
 
 
 def _bounded_probe_get(
@@ -644,50 +543,15 @@ def run_doctor(
     if include_network or manifest_path is not None:
         checks.append(check_compatibility_manifest(manifest_path))
     if include_network and provider_configuration is not None:
-        probe_base = provider_configuration["base_url"]
-        probe_model = provider_configuration["model"]
-        if provider_configuration["provider"] == "openrouter":
-            checks.append(
-                DiagnosticCheck(
-                    "endpoint",
-                    "unknown",
-                    "openrouter endpoint not probed without a dedicated read-only probe",
-                )
-            )
-            checks.append(
-                DiagnosticCheck(
-                    "model",
-                    "unknown",
-                    "openrouter model inventory not probed offline",
-                )
-            )
-        elif provider_configuration["provider"] in {
-            "openai-compatible",
-            "fixture",
-        }:
-            checks.append(
-                DiagnosticCheck(
-                    "endpoint",
-                    "unknown",
-                    "remote provider endpoint not probed without a dedicated read-only probe",
-                )
-            )
-            checks.append(
-                DiagnosticCheck(
-                    "model",
-                    "unknown",
-                    "remote provider model inventory not probed offline",
-                )
-            )
-        else:
-            endpoint_check, model_check = probe_provider_endpoint(
-                base_url=probe_base,
-                model=probe_model,
-                opener=opener,
-                allow_remote=allow_data_egress,
-            )
-            checks.append(endpoint_check)
-            checks.append(model_check)
+        endpoint_check, model_check = _provider_network_probe_checks(
+            base_url=str(provider_configuration["base_url"]),
+            model=str(provider_configuration["model"]),
+            provider=str(provider_configuration["provider"]),
+            allow_data_egress=allow_data_egress,
+            opener=opener,
+        )
+        checks.append(endpoint_check)
+        checks.append(model_check)
         token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         checks.append(probe_repository_metadata(repository, token=token, opener=opener))
     else:
@@ -876,6 +740,9 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         qualification = provider_configuration.get("qualification_status")
         if qualification:
             lines.append(f"qualification: {qualification}")
+        timeout_seconds = provider_configuration.get("timeout_seconds")
+        if timeout_seconds is not None:
+            lines.append(f"timeout_seconds: {timeout_seconds}")
     identity = document.get("identity")
     if isinstance(identity, dict):
         if identity.get("base_sha") or identity.get("head_sha"):

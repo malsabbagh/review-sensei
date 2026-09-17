@@ -328,3 +328,18 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_openrouter_profile_is_unqualified(self):
         profile = get_provider_profile("openrouter-sonnet")
         self.assertEqual(profile.qualification_status, "unqualified")
+
+    def test_openrouter_unprofiled_policy_must_match_env(self):
+        with self.assertRaisesRegex(
+            ProviderError, "does not match OPENROUTER_UPSTREAM_PROVIDER"
+        ):
+            default_registry().create(
+                ProviderSettings(
+                    name="openrouter",
+                    model="anthropic/claude-3.5-sonnet",
+                    api_key="secret",
+                    openrouter_policy=OpenRouterRoutingPolicy(
+                        upstream_provider="openai"
+                    ),
+                )
+            )

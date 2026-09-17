@@ -167,10 +167,11 @@ OpenRouter is an explicit CLI-only remote path in this release:
 | `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |
 | `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
+| `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
 
 `doctor` and `plan` report credential presence only; they never print the key.
-OpenRouter profiles start `unqualified` and are not approval-eligible until
-separate qualification evidence exists.
+OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile`
+for live review until separate qualification evidence exists.
 
 ## GitHub workflow example
 

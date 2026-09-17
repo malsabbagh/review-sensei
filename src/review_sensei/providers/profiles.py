@@ -15,6 +15,7 @@ from ..errors import ProviderError, UnknownProviderProfileError
 from .openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterRoutingPolicy,
+    is_allowlisted_openrouter_endpoint,
 )
 
 EndpointScope = Literal["local", "remote"]
@@ -75,6 +76,10 @@ class ProviderProfile:
             if self.openrouter_policy is None:
                 raise ValueError(
                     "openrouter provider profiles require openrouter_policy"
+                )
+            if not is_allowlisted_openrouter_endpoint(self.base_url):
+                raise ValueError(
+                    "openrouter provider profiles require an allowlisted base_url"
                 )
         elif self.openrouter_policy is not None:
             raise ValueError(
