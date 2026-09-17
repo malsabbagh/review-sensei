@@ -107,10 +107,14 @@ def _is_loopback_url(url: str) -> bool:
 
 def _provider_mode_default(provider_mode: str | None) -> str:
     mode = (
-        provider_mode
-        if provider_mode is not None
-        else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
-    ).strip().lower()
+        (
+            provider_mode
+            if provider_mode is not None
+            else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
+        )
+        .strip()
+        .lower()
+    )
     if mode not in {"local", "cloud"}:
         raise ReviewInputError("provider mode must be local or cloud")
     return mode
@@ -120,7 +124,9 @@ def _default_ollama_base_url(provider_mode: str) -> str:
     configured = os.getenv("OLLAMA_BASE_URL")
     if configured:
         return configured
-    return DEFAULT_CLOUD_BASE_URL if provider_mode == "cloud" else DEFAULT_LOCAL_BASE_URL
+    return (
+        DEFAULT_CLOUD_BASE_URL if provider_mode == "cloud" else DEFAULT_LOCAL_BASE_URL
+    )
 
 
 def _default_ollama_model(provider_mode: str) -> str:
@@ -169,10 +175,14 @@ def resolve_effective_provider_configuration(
         openrouter_policy = selected_profile.openrouter_policy
     else:
         provider_name = (
-            provider
-            if provider is not None
-            else os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
-        ).strip().lower()
+            (
+                provider
+                if provider is not None
+                else os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
+            )
+            .strip()
+            .lower()
+        )
         if not provider_name:
             raise ReviewInputError("provider must be non-empty")
         if provider_name == "openai-compatible":
@@ -186,13 +196,16 @@ def resolve_effective_provider_configuration(
             openrouter_policy = None
         elif provider_name == "openrouter":
             resolved_base_url = (
-                base_url or os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+                base_url
+                or os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
             ).strip()
             resolved_model = (
                 model or os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
             ).strip()
             credential_env = api_key_env or "OPENROUTER_API_KEY"
-            upstream = os.getenv("OPENROUTER_UPSTREAM_PROVIDER", DEFAULT_OPENROUTER_UPSTREAM)
+            upstream = os.getenv(
+                "OPENROUTER_UPSTREAM_PROVIDER", DEFAULT_OPENROUTER_UPSTREAM
+            )
             try:
                 openrouter_policy = OpenRouterRoutingPolicy(
                     upstream_provider=upstream.strip()
@@ -852,14 +865,12 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         if credential_env:
             present = provider_configuration.get("credential_present")
             lines.append(
-                f"credential: {credential_env} "
-                f"({'present' if present else 'missing'})"
+                f"credential: {credential_env} ({'present' if present else 'missing'})"
             )
         policy = provider_configuration.get("openrouter_policy")
         if isinstance(policy, dict) and policy.get("upstream_provider"):
             lines.append(
-                "openrouter_policy: "
-                f"upstream={policy.get('upstream_provider')}"
+                f"openrouter_policy: upstream={policy.get('upstream_provider')}"
             )
         qualification = provider_configuration.get("qualification_status")
         if qualification:

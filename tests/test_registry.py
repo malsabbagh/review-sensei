@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderRequest, ProviderResponse
+from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.profiles import (
     ProviderProfile,
     get_provider_profile,
     profile_names,
 )
-from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import (
     ProviderRegistry,
     ProviderSettings,

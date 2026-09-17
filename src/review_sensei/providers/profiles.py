@@ -73,7 +73,9 @@ class ProviderProfile:
             )
         if self.provider == "openrouter":
             if self.openrouter_policy is None:
-                raise ValueError("openrouter provider profiles require openrouter_policy")
+                raise ValueError(
+                    "openrouter provider profiles require openrouter_policy"
+                )
         elif self.openrouter_policy is not None:
             raise ValueError(
                 "openrouter_policy is only valid for openrouter provider profiles"
