@@ -141,12 +141,8 @@ jobs:
     # non-pull_request operations continue.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
@@ -238,7 +234,54 @@ jobs:
               *) echo "::error::${flag} must be true or false" >&2; exit 1 ;;
             esac
           done
-          PYTHONPATH=src python - <<'PY'
+
+      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
+        env:
+          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/review-sensei-venv"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          expected_version="${REVIEW_SENSEI_VERSION#v}"
+          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+            exit 1
+          fi
+          if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
+            "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee -a "$pypi_log"; then
+            install_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
+          else
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
+          "$python_bin" -m pip check
+          echo "Installed ReviewSensei $installed_version from $install_source."
+
+      - name: Validate model input for selected backend
+        env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          MODE: ${{ inputs.mode }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 

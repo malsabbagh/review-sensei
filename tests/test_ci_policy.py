@@ -907,11 +907,15 @@ class ActionPinPolicyTests(unittest.TestCase):
     def test_validate_provider_mode_job_validates_model_input(self):
         workflow_text = _reusable_workflow_text()
         job = _job_section(workflow_text, "validate-provider-mode")
+        self.assertNotIn("actions/checkout@", job)
+        self.assertIn("permissions: {}", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
-        block = _run_block_containing(
-            workflow_text, "ReviewSensei provider mode is unsupported"
+        self.assertIn("Install ReviewSensei package (PyPI first, GitHub fallback)", job)
+        model_block = _run_block_containing(
+            workflow_text, "validate_hosted_workflow_model"
         )
-        self.assertIn("validate_hosted_workflow_model", block)
+        self.assertIn('"$RUNNER_TEMP/review-sensei-venv/bin/python"', model_block)
+        self.assertNotIn("PYTHONPATH=src", job)
 
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
         root = Path(__file__).resolve().parents[1]

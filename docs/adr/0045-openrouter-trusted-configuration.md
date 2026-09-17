@@ -38,7 +38,7 @@ Precedence remains deterministic:
    routing policy, credential env var).
 2. Explicit CLI flags must match the profile or are rejected.
 3. Unprofiled `--provider openrouter` uses allowlisted defaults and
-   `OPENROUTER_UPSTREAM_PROVIDER` (default `anthropic`) for the routing policy.
+   `OPENROUTER_UPSTREAM_PROVIDER` (default `deepseek`) for the routing policy.
 4. `REVIEWSENSEI_PROVIDER_MODE=local|cloud` continues to map only to Ollama
    defaults; it is not reinterpreted as OpenRouter.
 
