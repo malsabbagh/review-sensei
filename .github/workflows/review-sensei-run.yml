@@ -1054,7 +1054,6 @@ jobs:
               raise SystemExit(1) from exc
           PY
           )"
-          unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
@@ -1066,7 +1065,7 @@ jobs:
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],
-                      configured_upstream=None,
+                      configured_upstream=os.environ.get("OPENROUTER_UPSTREAM_PROVIDER"),
                   )
               )
           except ReviewInputError as exc:
@@ -1238,7 +1237,6 @@ jobs:
               raise SystemExit(1) from exc
           PY
           )"
-          unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
@@ -1250,7 +1248,7 @@ jobs:
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],
-                      configured_upstream=None,
+                      configured_upstream=os.environ.get("OPENROUTER_UPSTREAM_PROVIDER"),
                   )
               )
           except ReviewInputError as exc:
