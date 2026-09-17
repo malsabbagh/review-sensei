@@ -149,6 +149,15 @@ evaluation reports do not carry either value. The gate always rejects an
 `evaluated_at` that is not an RFC 3339 UTC instant or that is dated in the
 future, but it cannot derive the window from the reports themselves.
 
+There is a limit to what the gate can check about `evaluated_at`. Evaluation
+reports carry no timestamp of their own, so the gate cannot verify that
+`evaluated_at` falls at or after the runs it describes. It rejects a value that
+is malformed or dated in the future, and it rejects one that disagrees with the
+caller's attested `expected_evaluated_at`, but a record bearing a real past
+instant earlier than the runs is accepted. Treat `evaluated_at` as an
+operator attestation bounded by those checks, not as a derived observation
+time.
+
 The gate therefore requires `expected_target`, `expected_evaluated_at`, and
 `expected_reproducibility` by default, so the comparison record is minted from
 the caller's own mint inputs instead of from the record under test. A consumer

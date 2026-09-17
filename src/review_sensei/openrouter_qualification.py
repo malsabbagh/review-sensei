@@ -29,7 +29,6 @@ from .evaluation import (
 from .providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterRoutingPolicy,
-    is_allowlisted_openrouter_endpoint,
 )
 from .schemas import validate_public_document
 
@@ -61,9 +60,9 @@ _DEFAULT_LIMITATIONS = (
 # model, upstream provider, and base URL. A new model, upstream provider, or
 # endpoint stays outside the qualified slice until its target and evidence set
 # are published, so the harness refuses to mint records for unlisted
-# combinations. Pinning the base URL here rather than leaning on
-# ``is_allowlisted_openrouter_endpoint`` alone keeps the slice from widening if
-# that allowlist is ever extended for an unrelated deployment.
+# combinations. Pinning the base URL here rather than leaning on the provider
+# module's endpoint allowlist keeps the slice from widening if that allowlist
+# is ever extended for an unrelated deployment.
 PUBLISHED_QUALIFICATION_SLICES = frozenset(
     {(_INITIAL_MODEL, _INITIAL_UPSTREAM, DEFAULT_OPENROUTER_BASE_URL)}
 )
@@ -85,10 +84,10 @@ class OpenRouterQualificationTarget:
             raise ReviewInputError(
                 "OpenRouter qualification target fields are required"
             )
-        if not is_allowlisted_openrouter_endpoint(self.base_url):
-            raise ReviewInputError(
-                "OpenRouter qualification base_url is not allowlisted"
-            )
+        # The slice map is the only boundary here. It pins the base URL as part
+        # of the key, so an endpoint allowlist check in front of it could never
+        # reject a URL the slice map would accept, and having two gates would
+        # invite a reader to treat the looser one as authoritative.
         slice_key = (self.model, self.upstream_provider, self.base_url)
         if slice_key not in PUBLISHED_QUALIFICATION_SLICES:
             raise ReviewInputError(
@@ -204,6 +203,14 @@ def _evidence_references_from_artifacts(
                 "over the retained bytes"
             )
         digests.append(digest)
+    if len(set(digests)) != len(digests):
+        # Named for the artifacts rather than the digest list, because on this
+        # path the operator's fixable mistake is having retained the same file
+        # twice, not having typed a duplicate digest.
+        raise ReviewInputError(
+            "report_artifacts must be distinct retained reports; two artifacts "
+            "hash to the same digest"
+        )
     return _digest_list(digests, label="evidence_references")
 
 
@@ -327,20 +334,10 @@ class OpenRouterQualificationRecord:
         return value
 
 
-_PROMOTION_RECORD_KEYS = (
-    "engine_digest",
-    "prompt_digest",
-    "configuration_digest",
-    "corpus_digest",
-    "provider",
-    "model",
-    "observed_revision",
-    "run_count",
-    "evaluated_at",
-    "reproducibility",
-    "status",
-    "rollback_decision",
-)
+# Derived from the dataclass rather than restated, so a new promotion field
+# cannot be silently dropped by the parser or skipped by the gate's comparison
+# loop. `schema_version` is absent from the dataclass and handled separately.
+_PROMOTION_RECORD_KEYS = tuple(PromotionRecord.__dataclass_fields__)
 
 
 def validate_openrouter_qualification_record(
@@ -526,7 +523,10 @@ def require_supported_openrouter_qualification(
     ``evaluated_at`` and ``reproducibility`` are operator attestations that
     evaluation reports do not carry, so the gate cannot derive them from
     ``reports``. It always rejects an ``evaluated_at`` that is not an RFC 3339
-    UTC instant or that is dated in the future.
+    UTC instant or that is dated in the future. It cannot bound the value from
+    below: reports carry no timestamp, so a real past instant earlier than the
+    runs it describes is accepted unless it disagrees with
+    ``expected_evaluated_at``.
 
     Beyond that, the caller must supply ``expected_target``,
     ``expected_evaluated_at``, and ``expected_reproducibility``: the comparison

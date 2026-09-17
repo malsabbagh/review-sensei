@@ -12,12 +12,14 @@ from datetime import datetime, timezone
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
+    PromotionRecord,
     engine_digest,
     promotion_record_from_reports,
     prompt_digest,
     require_supported_promotion,
 )
 from review_sensei.openrouter_qualification import (
+    _PROMOTION_RECORD_KEYS,
     EVIDENCE_REFERENCE_KIND,
     INITIAL_OPENROUTER_QUALIFICATION_TARGET,
     OpenRouterQualificationRecord,
@@ -30,7 +32,10 @@ from review_sensei.openrouter_qualification import (
     validate_openrouter_qualification_against_report,
     validate_openrouter_qualification_record,
 )
-from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
+from review_sensei.providers.openrouter import (
+    DEFAULT_OPENROUTER_BASE_URL,
+    OpenRouterRoutingPolicy,
+)
 from review_sensei.schemas import validate_public_document
 
 SHA = "a" * 64
@@ -545,6 +550,13 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 record, reports, report_artifacts=artifacts, **ATTESTED
             )
 
+    def test_promotion_key_projection_tracks_the_dataclass(self) -> None:
+        """A new promotion field must not be silently dropped by the parser."""
+
+        self.assertEqual(
+            _PROMOTION_RECORD_KEYS, tuple(PromotionRecord.__dataclass_fields__)
+        )
+
     def test_support_gate_refuses_to_run_without_artifacts(self) -> None:
         """A support claim is never granted on a document's own say-so."""
 
@@ -564,6 +576,16 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                     load_supported_openrouter_qualification(
                         published, reports, **{"report_artifacts": None}, **ATTESTED
                     )
+        # The missing artifacts must be reported even when the attestations
+        # would also fail, so the check cannot drift behind the comparisons.
+        with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+            require_supported_openrouter_qualification(
+                published,
+                reports,
+                expected_target=TARGET,
+                expected_evaluated_at="2020-01-01T00:00:00Z",
+                expected_reproducibility={"temperature": 99},
+            )
 
     def test_published_supported_record_declares_its_evidence_kind(self) -> None:
         reports = _supported_live_reports()
@@ -669,15 +691,33 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             ).promotion.evaluated_at,
             "2025-01-01T00:00:00Z",
         )
-        # The evidence binding still holds on the weaker path.
-        record["evidence_references"] = [SHA, "b" * 64, "c" * 64]
+        # The evidence binding still holds on the weaker path: neither the
+        # references nor the report-derived digests are taken on trust.
+        forged = _supported_record(reports, artifacts).to_dict()
+        forged["evidence_references"] = [SHA, "b" * 64, "c" * 64]
         with self.assertRaises(ReviewInputError):
             require_supported_openrouter_qualification(
-                record,
+                forged,
                 reports,
                 report_artifacts=artifacts,
                 allow_self_attested_inputs=True,
             )
+        for field in (
+            "engine_digest",
+            "prompt_digest",
+            "configuration_digest",
+            "corpus_digest",
+        ):
+            tampered = _supported_record(reports, artifacts).to_dict()
+            tampered[field] = "9" * 64
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ReviewInputError, field):
+                    require_supported_openrouter_qualification(
+                        tampered,
+                        reports,
+                        report_artifacts=artifacts,
+                        allow_self_attested_inputs=True,
+                    )
 
     def test_load_supported_qualification_parses_and_gates(self) -> None:
         reports = _supported_live_reports()
@@ -793,13 +833,23 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "remote endpoint_scope"):
             validate_openrouter_qualification_against_report(record, loopback)
 
-    def test_non_allowlisted_base_url_is_rejected(self) -> None:
-        with self.assertRaisesRegex(ReviewInputError, "allowlisted"):
-            OpenRouterQualificationTarget(
-                model=TARGET.model,
-                upstream_provider=TARGET.upstream_provider,
-                base_url="https://evil.example/api/v1",
-            )
+    def test_base_url_outside_the_published_slice_is_rejected(self) -> None:
+        """The slice map is the single boundary, including for the endpoint."""
+
+        for base_url in (
+            "https://evil.example/api/v1",
+            # Allowlisted by the provider module, but not the published slice.
+            DEFAULT_OPENROUTER_BASE_URL.rstrip("/") + "/",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "published qualification slice"
+                ):
+                    OpenRouterQualificationTarget(
+                        model=TARGET.model,
+                        upstream_provider=TARGET.upstream_provider,
+                        base_url=base_url,
+                    )
 
 
 if __name__ == "__main__":
