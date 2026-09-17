@@ -126,6 +126,8 @@ class CloudflarePackageTests(unittest.TestCase):
         )
 
     def test_setup_builders_share_constants_and_variables(self):
+        import re
+
         from review_sensei.hosting.github.setup import (
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
@@ -145,8 +147,27 @@ class CloudflarePackageTests(unittest.TestCase):
             ("DEFAULT_OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
         ):
             self.assertIn(f'{const_name} = "{value}"', ts_source)
-        for name, _value in SETUP_VARIABLES:
-            self.assertIn(f'name: "{name}"', ts_source)
+        ts_constants = {
+            "DEFAULT_PROVIDER_MODE": DEFAULT_PROVIDER_MODE,
+            "DEFAULT_LOCAL_MODEL": DEFAULT_LOCAL_MODEL,
+            "DEFAULT_CLOUD_MODEL": DEFAULT_CLOUD_MODEL,
+            "DEFAULT_OPENROUTER_MODEL": DEFAULT_OPENROUTER_MODEL,
+        }
+        block_match = re.search(
+            r"export const SETUP_VARIABLES.*?=\s*\[(.*?)\];",
+            ts_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block_match)
+        ts_variables: list[tuple[str, str]] = []
+        for match in re.finditer(
+            r'\{\s*name:\s*"([^"]+)"\s*,\s*value:\s*(?:"([^"]*)"|([A-Z][A-Z0-9_]*))\s*\}',
+            block_match.group(1),
+        ):
+            name, literal, const_ref = match.groups()
+            value = literal if literal is not None else ts_constants[const_ref]
+            ts_variables.append((name, value))
+        self.assertEqual(ts_variables, list(SETUP_VARIABLES))
         py_workflow = SetupPlanBuilder().build("owner/repo").files[0].content
         example = (
             ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
