@@ -80,6 +80,10 @@ jobs:
         run: python scripts/validate_public_schemas.py
       - name: Validate evaluation corpus
         run: python scripts/validate_evaluation_corpus.py
+      - name: Validate site manifest
+        run: python scripts/validate_site_manifest.py
+      - name: Check generated site pages
+        run: python scripts/build_site_pages.py --check
       - name: Validate protection policy contract
         run: python scripts/check_protection_policy.py --policy .github/protection-policy.json --promotion-ledger .publication/publication-ledger.jsonl
       - name: Prove CodeQL findings gate on committed fixtures

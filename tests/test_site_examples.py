@@ -33,10 +33,7 @@ PENDING_SITE_ROUTES: dict[Path, frozenset[str]] = {
     HOMEPAGE: frozenset(),
     EXAMPLES_PAGE: frozenset(),
     SECURITY_PAGE: frozenset(),
-    # Inherited from the getting-started page on main, which links to routes
-    # that do not exist yet. Listed here so this page's links are still
-    # checked instead of skipped outright.
-    GETTING_STARTED_PAGE: frozenset({"/providers/", "/releases/"}),
+    GETTING_STARTED_PAGE: frozenset(),
 }
 
 

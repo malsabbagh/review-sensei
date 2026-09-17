@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#070913" />
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+<link rel="canonical" href="https://reviewsensei.dev/providers/" />
+<title>ReviewSensei providers</title>
+<meta name="description" content="Conservative provider matrix for Ollama local, Ollama Cloud, OpenAI-compatible, and planned OpenRouter support." />
+<style>
+:root{
+  --ink:#090a0c;--paper:#f2efe7;--muted:#8f928f;--line:#262a2f;
+  --red:#e15a42;--red-soft:#f07a63;--jade:#55b89b;--jade-bright:#74cdb1;
+  --amber:#d9a24d;--radius:18px;--shadow:0 24px 70px rgba(0,0,0,.34);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;color:var(--paper);
+  background:linear-gradient(180deg,#08090b 0%,#0a0b0e 48%,#090a0c 100%);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  letter-spacing:-.01em;
+}
+body:before{
+  content:"";position:fixed;inset:0;z-index:-3;pointer-events:none;
+  background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:64px 64px;
+  mask-image:linear-gradient(to bottom,rgba(0,0,0,.45),transparent 86%);
+}
+body:after{
+  content:"";position:fixed;left:0;top:0;bottom:0;width:3px;z-index:80;
+  background:linear-gradient(180deg,var(--red),rgba(225,90,66,.15),transparent 85%);
+}
+a{color:inherit;text-decoration:none}
+.container{width:min(1180px,calc(100% - 36px));margin-inline:auto}
+.skip-link{
+  position:absolute;left:-9999px;top:0;z-index:100;padding:10px 16px;
+  background:var(--red);color:#0b0c0e;font-weight:700;border-radius:0 0 8px 0;
+}
+.skip-link:focus{left:0}
+.nav{
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(16px);
+  background:rgba(9,10,12,.82);border-bottom:1px solid rgba(255,255,255,.055);
+}
+.nav-inner{display:flex;align-items:center;justify-content:space-between;height:72px}
+.brand{display:flex;align-items:center;gap:12px;font-weight:760;letter-spacing:-.03em}
+.dev{color:var(--red)}
+.nav-links{display:flex;align-items:center;gap:26px;color:#a5aaa7;font-size:14px}
+.nav-links a:hover{color:#fff}
+.nav-links a[aria-current="page"]{color:#fff;font-weight:700}
+.section{padding:72px 0 92px}
+.section-head{max-width:760px;margin-bottom:36px}
+.kicker{
+  color:var(--red-soft);font-size:12px;text-transform:uppercase;
+  letter-spacing:.18em;font-weight:850;
+}
+h1{font-size:clamp(40px,5vw,64px);line-height:1.02;letter-spacing:-.05em;margin:12px 0 14px}
+h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:0 0 12px}
+.section-head p,.lede{color:#969b96;font-size:17px;line-height:1.7;margin:0}
+.grid{display:grid;gap:14px}
+.provider-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{
+  padding:22px;border-radius:16px;background:#0f1114;border:1px solid #24292f;
+}
+.card h3{margin:0 0 8px;font-size:18px;letter-spacing:-.02em}
+.card p,.card li,.card dd{color:#858a85;line-height:1.65;font-size:14px}
+.meta-list{margin:14px 0 0;padding:0;list-style:none;display:grid;gap:8px}
+.meta-list li{display:grid;grid-template-columns:140px 1fr;gap:10px}
+.meta-list strong{color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.label-row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 0}
+.label{
+  font-size:10px;padding:4px 8px;border-radius:999px;border:1px solid #2b2f35;
+  background:#13161a;color:#b4b0a6;
+}
+.label.positive{color:var(--jade-bright);border-color:rgba(85,184,155,.22);background:rgba(85,184,155,.05)}
+.label.warn{color:#efc56f;border-color:rgba(217,162,77,.22);background:rgba(217,162,77,.05)}
+.label.muted{color:#ee7589;border-color:rgba(223,95,115,.22);background:rgba(223,95,115,.05)}
+.evidence{margin-top:14px}
+.evidence code,.path-chip{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:11px;color:#b7bbb6;
+}
+.path-chip{display:inline-block;padding:4px 7px;border-radius:7px;background:#07090b;border:1px solid #252a30;margin:4px 6px 0 0}
+.release-panel{
+  padding:28px;border-radius:18px;border:1px solid #272c32;background:#0d0f12;
+  box-shadow:0 22px 60px rgba(0,0,0,.22);max-width:860px;
+}
+.release-panel dl{display:grid;grid-template-columns:180px 1fr;gap:10px 16px;margin:0}
+.release-panel dt{color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.release-panel dd{margin:0;color:#a6aba7;font-size:14px;line-height:1.6}
+.footer{border-top:1px solid #24282d;padding:28px 0 40px;color:#70756f;font-size:12px}
+.footer-inner{display:flex;justify-content:space-between;gap:20px;align-items:center;flex-wrap:wrap}
+.footer-links{display:flex;gap:18px;flex-wrap:wrap}
+@media (max-width:980px){.provider-grid{grid-template-columns:1fr}}
+@media (max-width:640px){
+  .container{width:min(100% - 24px,1180px)}
+  .meta-list li{grid-template-columns:1fr}
+  .release-panel dl{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/" aria-label="ReviewSensei home">
+      <span>ReviewSensei<span class="dev">.dev</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/">Home</a>
+      <a href="/providers/" aria-current="page">Providers</a>
+      <a href="/releases/">Releases</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="section">
+  <div class="container">
+    <div class="section-head">
+      <div class="kicker">Provider matrix</div>
+      <h1>Release-aware provider support</h1>
+      <p class="lede">Conservative labels derived from the shipped registry, named profiles, and installed workflow contract. Planned adapters stay explicitly not implemented.</p>
+    </div>
+    <div class="grid provider-grid">
+      
+<article class="card">
+  <h3>Ollama (local)</h3>
+  <div class="label-row"><span class="label positive">implemented on main</span><span class="label positive">available in distribution</span><span class="label positive">supported</span></div>
+  <ul class="meta-list">
+    <li><strong>Provider</strong><span>ollama</span></li>
+    <li><strong>Profile</strong><span>local-private</span></li>
+    <li><strong>Destination</strong><span>http://127.0.0.1:11434/api (local)</span></li>
+    <li><strong>Model</strong><span>qwen3.5:4b</span></li>
+    <li><strong>Credential</strong><span>none</span></li>
+    <li><strong>Workflow</strong><span>local · reusable workflow yes</span></li>
+  </ul>
+  <p>Default installed workflow path via REVIEWSENSEI_PROVIDER_MODE=local and local model variables.</p>
+  <ul class="meta-list">
+    <li><strong>CLI</strong><span>yes</span></li>
+    <li><strong>evaluate</strong><span>yes</span></li>
+    <li><strong>npx launcher</strong><span>yes</span></li>
+  </ul>
+  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/profiles.py</code><code class="path-chip">docs/installation.md</code></div></div>
+  <ul style="margin-top:12px;padding-left:18px"><li>Requires a reachable local Ollama runner on loopback.</li><li>No bearer credential is used for the default local-private profile.</li></ul>
+</article>
+<article class="card">
+  <h3>Ollama Cloud</h3>
+  <div class="label-row"><span class="label positive">implemented on main</span><span class="label positive">available in distribution</span><span class="label positive">supported</span></div>
+  <ul class="meta-list">
+    <li><strong>Provider</strong><span>ollama</span></li>
+    <li><strong>Profile</strong><span>deep-verification</span></li>
+    <li><strong>Destination</strong><span>https://ollama.com/api (remote)</span></li>
+    <li><strong>Model</strong><span>deepseek-v4-flash:cloud</span></li>
+    <li><strong>Credential</strong><span>OLLAMA_API_KEY</span></li>
+    <li><strong>Workflow</strong><span>cloud · reusable workflow yes</span></li>
+  </ul>
+  <p>Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=cloud and repository OLLAMA_API_KEY secret.</p>
+  <ul class="meta-list">
+    <li><strong>CLI</strong><span>yes</span></li>
+    <li><strong>evaluate</strong><span>yes</span></li>
+    <li><strong>npx launcher</strong><span>yes</span></li>
+  </ul>
+  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/profiles.py</code><code class="path-chip">docs/installation.md</code><code class="path-chip">docs/data-handling.md</code></div></div>
+  <ul style="margin-top:12px;padding-left:18px"><li>Requires a provisioned Ollama Cloud account and OLLAMA_API_KEY.</li><li>Cloud egress is explicit opt-in; local runs cannot silently fail over to Ollama Cloud.</li></ul>
+</article>
+<article class="card">
+  <h3>OpenAI-compatible (Python boundary)</h3>
+  <div class="label-row"><span class="label positive">implemented on main</span><span class="label positive">available in distribution</span></div>
+  <ul class="meta-list">
+    <li><strong>Provider</strong><span>openai-compatible</span></li>
+    <li><strong>Profile</strong><span>fast-triage</span></li>
+    <li><strong>Destination</strong><span>https://api.openai.com/v1 (remote)</span></li>
+    <li><strong>Model</strong><span>gpt-4o-mini</span></li>
+    <li><strong>Credential</strong><span>OPENAI_API_KEY</span></li>
+    <li><strong>Workflow</strong><span>not applicable · reusable workflow no</span></li>
+  </ul>
+  <p>Installed GitHub workflows do not pass --profile; fast-triage is an explicit CLI/evaluate path only.</p>
+  <ul class="meta-list">
+    <li><strong>CLI</strong><span>yes</span></li>
+    <li><strong>evaluate</strong><span>yes</span></li>
+    <li><strong>npx launcher</strong><span>yes</span></li>
+  </ul>
+  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/openai_compatible.py</code><code class="path-chip">docs/public-contracts.md</code><code class="path-chip">docs/adr/0041-production-provider-adapters-and-per-stage-profiles.md</code></div></div>
+  <ul style="margin-top:12px;padding-left:18px"><li>Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.</li><li>Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings.</li><li>The npx launcher forwards argv to the Python CLI; reaching openai-compatible still requires explicit --profile fast-triage (or unprofiled flags) plus OPENAI_API_KEY.</li></ul>
+</article>
+<article class="card">
+  <h3>OpenRouter</h3>
+  <div class="label-row"><span class="label warn">planned</span><span class="label warn">source only</span><span class="label muted">not implemented</span><span class="label warn">experimental</span></div>
+  <ul class="meta-list">
+    <li><strong>Provider</strong><span>openrouter</span></li>
+    <li><strong>Profile</strong><span>none</span></li>
+    <li><strong>Destination</strong><span>https://openrouter.ai/api/v1 (remote)</span></li>
+    <li><strong>Model</strong><span>not fixed</span></li>
+    <li><strong>Credential</strong><span>OPENROUTER_API_KEY</span></li>
+    <li><strong>Workflow</strong><span>not applicable · reusable workflow no</span></li>
+  </ul>
+  <p>Adapter source exists on main, but no named profile, CLI flags, or reusable-workflow path expose OpenRouter yet.</p>
+  <ul class="meta-list">
+    <li><strong>CLI</strong><span>no</span></li>
+    <li><strong>evaluate</strong><span>no</span></li>
+    <li><strong>npx launcher</strong><span>no</span></li>
+  </ul>
+  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/openrouter.py</code></div></div>
+  <ul style="margin-top:12px;padding-left:18px"><li>Registry registers openrouter, but engine surfaces remain disabled until routing policy and operator docs ship.</li><li>No named profile or workflow provider mode selects OpenRouter in installed callers.</li></ul>
+</article>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="brand" style="font-size:13px"><span>ReviewSensei<span class="dev">.dev</span></span></div>
+    <div class="footer-links">
+      <a href="https://github.com/malsabbagh/review-sensei">GitHub</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/site/MAINTAINERS.md">Site maintainers</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">Docs</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
