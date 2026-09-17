@@ -1982,6 +1982,51 @@ deleted file mode 100644
         self.assertEqual(body["comments"][0]["side"], "LEFT")
         self.assertNotIn("subject_type", body["comments"][0])
 
+    def test_file_level_blocking_findings_are_retained_in_summary_for_request_changes(
+        self,
+    ):
+        result = ReviewResult(
+            summary="Blocking file-wide finding.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=None,
+                    body="This file needs a tighter contract.",
+                    side="FILE",
+                    blocking=True,
+                ),
+            ),
+            provider="ollama",
+        )
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            json_response({"id": 5}, 200),
+        ]
+        http, calls = make_http(responses)
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=result,
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            auto_approve=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(body["comments"], [])
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("`src/app.py`", body["body"])
+        self.assertIn("tighter contract", body["body"])
+
     def test_file_level_comment_is_published_with_subject_type_file(self):
         result = ReviewResult(
             summary="File-wide finding.",
