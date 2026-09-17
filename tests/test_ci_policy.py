@@ -947,7 +947,6 @@ class ActionPinPolicyTests(unittest.TestCase):
             + "vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud'"
         )
         local_model = shared_prefix + "vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b'"
-        openrouter_model = shared_prefix + "''"
         self.assertGreaterEqual(
             workflow_text.count(f"OLLAMA_MODEL: ${{{{ {cloud_model} }}}}"), 2
         )
@@ -955,7 +954,20 @@ class ActionPinPolicyTests(unittest.TestCase):
             workflow_text.count(f"OLLAMA_MODEL: ${{{{ {local_model} }}}}"), 2
         )
         self.assertGreaterEqual(
-            workflow_text.count(f"REVIEW_MODEL: ${{{{ {openrouter_model} }}}}"), 2
+            workflow_text.count(
+                "HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}"
+            ),
+            6,
+        )
+
+    def test_provider_jobs_validate_resolved_hosted_job_model(self):
+        workflow_text = _reusable_workflow_text()
+        self.assertGreaterEqual(
+            workflow_text.count("validate_resolved_hosted_job_model"), 6
+        )
+        self.assertIn(
+            "resolved hosted model does not match workflow env",
+            workflow_text,
         )
 
     def test_validate_provider_mode_job_validates_model_input(self):

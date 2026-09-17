@@ -88,6 +88,58 @@ def resolve_hosted_workflow_model(
     return ""
 
 
+def resolve_hosted_job_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+    backend_default: str = "",
+) -> str:
+    """Return the model a hosted provider job resolves from its fallback chain."""
+
+    for candidate in (caller_model, reviewsensei_model, backend_model):
+        value = candidate.strip()
+        if value:
+            return value
+    default = backend_default.strip()
+    if default:
+        return default
+    return resolve_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model="",
+    )
+
+
+def validate_resolved_hosted_job_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+    backend_default: str = "",
+) -> str:
+    """Validate the resolved hosted job model for the selected backend."""
+
+    resolved = resolve_hosted_job_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        caller_model=caller_model,
+        reviewsensei_model=reviewsensei_model,
+        backend_model=backend_model,
+        backend_default=backend_default,
+    )
+    validate_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model=resolved,
+    )
+    return resolved
+
+
 def validate_hosted_workflow_model(
     *,
     provider_mode: str,
@@ -363,7 +415,9 @@ __all__ = [
     "provider_mode_default",
     "published_hosted_openrouter_models",
     "resolve_effective_provider_configuration",
+    "resolve_hosted_job_model",
     "resolve_hosted_workflow_model",
     "validate_hosted_workflow_model",
+    "validate_resolved_hosted_job_model",
     "validate_profile_provider_match",
 ]

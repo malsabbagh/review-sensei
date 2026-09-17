@@ -613,6 +613,10 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
+          BACKEND_DEFAULT: deepseek-v4.1-flash:cloud
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -635,17 +639,26 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_hosted_workflow_model
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
           try:
-              validate_hosted_workflow_model(
+              resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
-                  model=os.environ["OLLAMA_MODEL"],
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
+          if resolved != os.environ["OLLAMA_MODEL"]:
+              print(
+                  "::error::resolved hosted model does not match workflow env",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
           PY
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
@@ -772,6 +785,10 @@ jobs:
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
+          BACKEND_DEFAULT: deepseek-v4.1-flash:cloud
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -785,17 +802,26 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_hosted_workflow_model
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
           try:
-              validate_hosted_workflow_model(
+              resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
-                  model=os.environ["OLLAMA_MODEL"],
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
+          if resolved != os.environ["OLLAMA_MODEL"]:
+              print(
+                  "::error::resolved hosted model does not match workflow env",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
           PY
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
@@ -1010,7 +1036,8 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          REVIEW_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || '' }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -1030,23 +1057,15 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import (
-              resolve_hosted_workflow_model,
-              validate_hosted_workflow_model,
-          )
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
-          raw_model = os.environ.get("REVIEW_MODEL", "")
           try:
-              validate_hosted_workflow_model(
-                  provider_mode="openrouter",
-                  workflow_mode="",
-                  model=raw_model,
-              )
               print(
-                  resolve_hosted_workflow_model(
+                  validate_resolved_hosted_job_model(
                       provider_mode="openrouter",
                       workflow_mode="",
-                      model=raw_model,
+                      caller_model=os.environ.get("CALLER_MODEL", ""),
+                      reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   )
               )
           except ReviewInputError as exc:
@@ -1202,7 +1221,8 @@ jobs:
           SOURCE_KIND: ${{ inputs.source_kind }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          REVIEW_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || '' }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
         run: |
           if [[ -z "$OPENROUTER_API_KEY" ]]; then
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
@@ -1213,23 +1233,15 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import (
-              resolve_hosted_workflow_model,
-              validate_hosted_workflow_model,
-          )
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
-          raw_model = os.environ.get("REVIEW_MODEL", "")
           try:
-              validate_hosted_workflow_model(
-                  provider_mode="openrouter",
-                  workflow_mode="",
-                  model=raw_model,
-              )
               print(
-                  resolve_hosted_workflow_model(
+                  validate_resolved_hosted_job_model(
                       provider_mode="openrouter",
                       workflow_mode="",
-                      model=raw_model,
+                      caller_model=os.environ.get("CALLER_MODEL", ""),
+                      reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   )
               )
           except ReviewInputError as exc:
@@ -1452,6 +1464,10 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
+          BACKEND_DEFAULT: qwen3.5:4b
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
@@ -1473,17 +1489,26 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_hosted_workflow_model
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
           try:
-              validate_hosted_workflow_model(
+              resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
-                  model=os.environ["OLLAMA_MODEL"],
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
+          if resolved != os.environ["OLLAMA_MODEL"]:
+              print(
+                  "::error::resolved hosted model does not match workflow env",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
           PY
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
@@ -1607,6 +1632,10 @@ jobs:
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
+          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
+          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
+          BACKEND_DEFAULT: qwen3.5:4b
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1623,17 +1652,26 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_hosted_workflow_model
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
 
           try:
-              validate_hosted_workflow_model(
+              resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
-                  model=os.environ["OLLAMA_MODEL"],
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
+          if resolved != os.environ["OLLAMA_MODEL"]:
+              print(
+                  "::error::resolved hosted model does not match workflow env",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
           PY
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null

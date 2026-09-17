@@ -2,13 +2,17 @@ import unittest
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.provider_config import (
+    DEFAULT_CLOUD_MODEL,
+    DEFAULT_LOCAL_MODEL,
     DEFAULT_OPENROUTER_MODEL,
     DEFAULT_OPENROUTER_UPSTREAM,
     HOSTED_OPENROUTER_DEFAULTS,
     hosted_openrouter_upstream,
     published_hosted_openrouter_models,
+    resolve_hosted_job_model,
     resolve_hosted_workflow_model,
     validate_hosted_workflow_model,
+    validate_resolved_hosted_job_model,
 )
 
 
@@ -171,6 +175,72 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 }
             ),
         )
+
+    def test_resolve_hosted_job_model_uses_backend_specific_fallbacks(self) -> None:
+        self.assertEqual(
+            resolve_hosted_job_model(
+                provider_mode="cloud-ollama",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="",
+                backend_model="custom-cloud:cloud",
+                backend_default=DEFAULT_CLOUD_MODEL,
+            ),
+            "custom-cloud:cloud",
+        )
+        self.assertEqual(
+            resolve_hosted_job_model(
+                provider_mode="local-ollama",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="",
+                backend_model="",
+                backend_default=DEFAULT_LOCAL_MODEL,
+            ),
+            DEFAULT_LOCAL_MODEL,
+        )
+        self.assertEqual(
+            resolve_hosted_job_model(
+                provider_mode="openrouter",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="",
+            ),
+            DEFAULT_OPENROUTER_MODEL,
+        )
+
+    def test_resolved_openrouter_rejects_ollama_shared_model(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "vendor/model slug"):
+            validate_resolved_hosted_job_model(
+                provider_mode="openrouter",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="qwen3.5:4b",
+            )
+
+    def test_resolved_cloud_rejects_openrouter_shared_model(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "must not use vendor/model openrouter slug"
+        ):
+            validate_resolved_hosted_job_model(
+                provider_mode="cloud-ollama",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="deepseek/deepseek-v4.1-flash",
+                backend_default=DEFAULT_CLOUD_MODEL,
+            )
+
+    def test_resolved_local_rejects_openrouter_shared_model(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "must not use vendor/model openrouter slug"
+        ):
+            validate_resolved_hosted_job_model(
+                provider_mode="local-ollama",
+                workflow_mode="",
+                caller_model="",
+                reviewsensei_model="anthropic/claude-3.5-sonnet",
+                backend_default=DEFAULT_LOCAL_MODEL,
+            )
 
 
 if __name__ == "__main__":

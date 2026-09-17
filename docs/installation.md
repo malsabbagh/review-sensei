@@ -168,8 +168,11 @@ model:
 | `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
 
 Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
-selected. When `REVIEWSENSEI_MODEL` is empty, the hosted workflow resolves
-the model per backend:
+selected. The slug must match the active backend shape (Ollama slugs for
+local/cloud jobs, vendor/model slugs for OpenRouter); cross-backend values
+fail closed when each provider job resolves and validates its fallback chain.
+When `REVIEWSENSEI_MODEL` is empty, the hosted workflow resolves the model
+per backend:
 
 - **Local Ollama jobs** use `REVIEWSENSEI_LOCAL_MODEL`, then `qwen3.5:4b`.
 - **Cloud Ollama jobs** use `REVIEWSENSEI_CLOUD_MODEL`, then
