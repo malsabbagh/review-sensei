@@ -9,6 +9,7 @@ from .base import ReviewProvider, validate_provider_contract
 from .fixture import FixtureProvider
 from .ollama import OllamaProvider
 from .openai_compatible import OpenAICompatibleProvider
+from .openrouter import OpenRouterProvider, OpenRouterRoutingPolicy
 from .profiles import ProviderProfile, get_provider_profile
 
 
@@ -23,6 +24,7 @@ class ProviderSettings:
     max_output_tokens: int | None = None
     profile: str | None = None
     allow_custom_endpoint: bool = False
+    openrouter_policy: OpenRouterRoutingPolicy | None = None
 
     @classmethod
     def for_profile(
@@ -193,6 +195,31 @@ def default_registry() -> ProviderRegistry:
         )
 
     registry.register("openai-compatible", openai_compatible_factory)
+
+    def openrouter_factory(settings: ProviderSettings) -> ReviewProvider:
+        if settings.api_key is None:
+            raise ProviderError("openrouter provider requires an API key")
+        if settings.openrouter_policy is None:
+            raise ProviderError("openrouter provider requires a routing policy")
+        return OpenRouterProvider(
+            base_url=settings.base_url or "https://openrouter.ai/api/v1",
+            model=settings.model or "anthropic/claude-3.5-sonnet",
+            api_key=settings.api_key,
+            routing_policy=settings.openrouter_policy,
+            timeout_seconds=(
+                settings.timeout_seconds
+                if settings.timeout_seconds is not None
+                else 120
+            ),
+            max_output_tokens=(
+                settings.max_output_tokens
+                if settings.max_output_tokens is not None
+                else 2048
+            ),
+            allow_model_override=settings.profile is None,
+        )
+
+    registry.register("openrouter", openrouter_factory)
 
     def fixture_factory(settings: ProviderSettings) -> ReviewProvider:
         if settings.fixture_response is None:

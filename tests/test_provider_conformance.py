@@ -13,6 +13,7 @@ from review_sensei.models import ProviderRequest, ProviderResponse
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.providers.ollama import OllamaProvider
 from review_sensei.providers.openai_compatible import OpenAICompatibleProvider
+from review_sensei.providers.openrouter import OpenRouterProvider, OpenRouterRoutingPolicy
 from review_sensei.validation import ReviewLimits
 
 
@@ -51,8 +52,17 @@ def _openai(opener, **kwargs):
     )
 
 
+def _openrouter(opener, **kwargs):
+    return OpenRouterProvider(
+        model="anthropic/claude-3.5-sonnet",
+        api_key=kwargs.get("api_key", "secret"),
+        routing_policy=OpenRouterRoutingPolicy(upstream_provider="anthropic"),
+        opener=opener,
+    )
+
+
 class ProviderConformanceTests(unittest.TestCase):
-    """Shared adapter contracts for fixture, Ollama, and openai-compatible."""
+    """Shared adapter contracts for fixture, Ollama, openai-compatible, and openrouter."""
 
     def test_successful_complete_returns_provider_and_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -106,6 +116,17 @@ class ProviderConformanceTests(unittest.TestCase):
         self.assertEqual(openai_result.model, "gpt-4o-mini")
         self.assertEqual(openai_result.revision, "fp_test")
 
+        openrouter = _openrouter(
+            lambda request, timeout, context: _Response(
+                b'{"choices":[{"message":{"content":"ok"}}],'
+                b'"model":"anthropic/claude-3.5-sonnet",'
+                b'"system_fingerprint":"fp_or"}'
+            )
+        )
+        openrouter_result = openrouter.complete(ProviderRequest(prompt="review"))
+        self.assertEqual(openrouter_result.provider, "openrouter")
+        self.assertEqual(openrouter_result.revision, "fp_or")
+
     def test_malformed_output_is_sanitized(self) -> None:
         prompt = "private prompt with secret"
         ollama = _ollama(lambda request, timeout, context: _Response(b"{}"))
@@ -122,6 +143,13 @@ class ProviderConformanceTests(unittest.TestCase):
             openai.complete(ProviderRequest(prompt=prompt))
         self.assertNotIn(prompt, str(raised.exception))
 
+        openrouter = _openrouter(lambda request, timeout, context: _Response(b"{}"))
+        with self.assertRaisesRegex(
+            ProviderError, "did not contain review text"
+        ) as raised:
+            openrouter.complete(ProviderRequest(prompt=prompt))
+        self.assertNotIn(prompt, str(raised.exception))
+
     def test_resource_limit_rejects_oversized_bodies(self) -> None:
         secret = "oversized-response-secret"
         limits = ReviewLimits(max_provider_response_bytes=8)
@@ -135,6 +163,11 @@ class ProviderConformanceTests(unittest.TestCase):
             (
                 _openai,
                 "OpenAI-compatible",
+                b'{"choices":[{"message":{"content":"' + secret.encode() + b'"}}]}',
+            ),
+            (
+                _openrouter,
+                "OpenRouter",
                 b'{"choices":[{"message":{"content":"' + secret.encode() + b'"}}]}',
             ),
         ):
@@ -165,7 +198,11 @@ class ProviderConformanceTests(unittest.TestCase):
 
     def test_timeout_and_cancellation_are_transient_and_sanitized(self) -> None:
         secret = "private-secret"
-        for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
+        for factory, label in (
+            (_ollama, "Ollama"),
+            (_openai, "OpenAI-compatible"),
+            (_openrouter, "OpenRouter"),
+        ):
             with self.subTest(adapter=label):
                 provider = factory(
                     lambda request, timeout, context: (_ for _ in ()).throw(
@@ -190,7 +227,7 @@ class ProviderConformanceTests(unittest.TestCase):
                 self.assertNotIn(secret, str(raised.exception))
 
     def test_rate_limit_and_server_failures_are_transient(self) -> None:
-        for factory in (_ollama, _openai):
+        for factory in (_ollama, _openai, _openrouter):
             for code in (429, 503):
                 with self.subTest(adapter=factory.__name__, code=code):
                     provider = factory(
@@ -215,7 +252,11 @@ class ProviderConformanceTests(unittest.TestCase):
 
     def test_network_failure_does_not_echo_secret(self) -> None:
         secret = "credential-value"
-        for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
+        for factory, label in (
+            (_ollama, "Ollama"),
+            (_openai, "OpenAI-compatible"),
+            (_openrouter, "OpenRouter"),
+        ):
             with self.subTest(adapter=label):
                 provider = factory(
                     lambda request, timeout, context: (_ for _ in ()).throw(
@@ -229,7 +270,11 @@ class ProviderConformanceTests(unittest.TestCase):
                 self.assertNotIn(secret, str(raised.exception))
 
     def test_permanent_url_error_is_not_transient(self) -> None:
-        for factory, label in ((_ollama, "Ollama"), (_openai, "OpenAI-compatible")):
+        for factory, label in (
+            (_ollama, "Ollama"),
+            (_openai, "OpenAI-compatible"),
+            (_openrouter, "OpenRouter"),
+        ):
             with self.subTest(adapter=label):
                 provider = factory(
                     lambda request, timeout, context: (_ for _ in ()).throw(
@@ -267,6 +312,18 @@ class ProviderConformanceTests(unittest.TestCase):
             ProviderRequest(prompt="review", json_mode=True)
         )
         self.assertEqual(captured["openai"]["response_format"], {"type": "json_object"})
+
+        def openrouter_opener(request, timeout, context):
+            captured["openrouter"] = json.loads(request.data)
+            return _Response(b'{"choices":[{"message":{"content":"ok"}}]}')
+
+        _openrouter(openrouter_opener).complete(
+            ProviderRequest(prompt="review", json_mode=True)
+        )
+        self.assertEqual(
+            captured["openrouter"]["response_format"], {"type": "json_object"}
+        )
+        self.assertEqual(captured["openrouter"]["provider"]["zdr"], True)
 
 
 if __name__ == "__main__":
