@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#070913" />
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="canonical" href="https://reviewsensei.dev/security/" />
+<title>Security &amp; data flow — ReviewSensei</title>
+<meta name="description" content="How ReviewSensei handles review data: execution boundaries, inference destinations, retention locations, and what the engine does and does not guarantee." />
+<link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/" aria-label="ReviewSensei home">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="none">
+          <path d="M14 14 31 3v17L17 29v18L6 40V24L14 14Z" fill="#B83D2D"/>
+          <path d="m50 14-17-11v17l14 9v18l11-7V24L50 14Z" fill="#E15A42"/>
+          <path d="M21 45 32 55l11-10 7 4-18 12L14 49l7-4Z" fill="#55B89B"/>
+          <path d="m25 33 5 5 10-12" stroke="#74CDB1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span>ReviewSensei<span class="dev">.dev</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/getting-started/">Getting started</a>
+      <a href="/providers/">Providers</a>
+      <a href="/examples/">Examples</a>
+      <a class="nav-cta" href="/getting-started/">Set up reviews</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-hero">
+    <div class="container">
+      <div class="kicker">Trust boundaries</div>
+      <h1>Security &amp; data flow</h1>
+      <p class="lede">ReviewSensei is an open-source review engine you run in your own GitHub Actions environment or locally. This page explains what crosses each boundary, what may persist, and what the project does <em>not</em> guarantee about model quality or provider retention.</p>
+      <p class="callout" style="margin-top:20px"><strong>Alpha software.</strong> Capabilities, defaults, and distribution channels evolve. Treat public examples as illustrative unless they link to retained evaluation or live-run evidence.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <h2>What ReviewSensei validates</h2>
+      <p>These are separate layers. A finding passing one layer is not proof of another.</p>
+      <table class="data-table">
+        <thead>
+          <tr><th>Layer</th><th>What it means</th><th>What it does <em>not</em> prove</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>JSON / schema validation</strong></td>
+            <td>Provider output conforms to the versioned review-result contract.</td>
+            <td>That a reported defect exists in your code.</td>
+          </tr>
+          <tr>
+            <td><strong>Diff / location validation</strong></td>
+            <td>Inline comments target paths and lines present in the supplied diff.</td>
+            <td>That coverage is complete or that omitted files are safe.</td>
+          </tr>
+          <tr>
+            <td><strong>Deterministic evidence checks</strong></td>
+            <td>Opt-in verifier paths can require bounded evidence for specific finding types when enabled in trusted configuration.</td>
+            <td>That every finding was independently verified; default pipelines may not run all evidence paths.</td>
+          </tr>
+          <tr>
+            <td><strong>Model evaluation</strong></td>
+            <td>Live promotion records bind specific model/policy/distribution combinations to retained evaluation evidence.</td>
+            <td>Broad model superiority or absence of security issues.</td>
+          </tr>
+          <tr>
+            <td><strong>Approval eligibility</strong></td>
+            <td>Automatic approval or request-changes requires completeness, current head, resolved threads, and promotion gates where applicable.</td>
+            <td>That a clean approval means no bugs remain.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <h2>Execution vs inference</h2>
+      <div class="content-block">
+        <h3>Where review logic runs</h3>
+        <p>ReviewSensei executes in <strong>your</strong> GitHub Actions runner, self-hosted runner, or local CLI environment. The open-source engine prepares bounded prompts, validates responses, and produces review artifacts.</p>
+      </div>
+      <div class="content-block">
+        <h3>Where model inference runs</h3>
+        <p>Inference runs at the endpoint you configure. Local Ollama keeps payloads on your machine. Ollama Cloud and other remote endpoints receive the selected diff, metadata, and trusted context. <strong>A local CLI configured for a remote service still sends review payloads to that service.</strong></p>
+      </div>
+      <div class="content-block">
+        <h3>GitHub App / Cloudflare broker</h3>
+        <p>The optional setup App and token broker issue scoped GitHub capability tokens. The broker is <strong>not</strong> the review or inference service. It does not receive model credentials or full review payloads for inference.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <h2>What may persist</h2>
+      <p>The core engine does not persist raw prompts or raw provider responses. Other data has its own retention location and controls:</p>
+      <table class="data-table">
+        <thead>
+          <tr><th>Data</th><th>Typical location</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Validated review results</td>
+            <td>CLI <code>--output</code>, workflow artifacts, optional publication to GitHub</td>
+            <td>Retention depends on your workflow artifact settings and repository policies.</td>
+          </tr>
+          <tr>
+            <td>Published PR comments / reviews</td>
+            <td>GitHub</td>
+            <td>Controlled by publication switches and GitHub permissions.</td>
+          </tr>
+          <tr>
+            <td>Approved learnings</td>
+            <td>Repository files on the trusted base branch</td>
+            <td>Maintainer-approved; versioned in Git.</td>
+          </tr>
+          <tr>
+            <td>Recovery / coverage artifacts</td>
+            <td>Workflow artifacts when enabled</td>
+            <td>Bounded operational metadata; not a substitute for source control.</td>
+          </tr>
+          <tr>
+            <td>Provider-side copies</td>
+            <td>Your configured model service</td>
+            <td>ReviewSensei does not guarantee provider retention, training, residency, or deletion. Read your provider's current terms.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <h2>Canonical documentation</h2>
+      <p>For implementation detail, credential handling, and workflow-specific egress policy, use the repository docs:</p>
+      <ul>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/data-handling.md" style="color:var(--red-soft);font-weight:700">Data handling</a></li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/github-app-auth.md" style="color:var(--red-soft);font-weight:700">GitHub App authentication</a></li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md" style="color:var(--red-soft);font-weight:700">Security policy &amp; reporting</a></li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/evaluation.md" style="color:var(--red-soft);font-weight:700">Evaluation &amp; promotion evidence</a></li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/ownership-and-licensing.md" style="color:var(--red-soft);font-weight:700">Ownership &amp; licensing</a></li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="brand" style="font-size:13px"><span>ReviewSensei<span class="dev">.dev</span></span></div>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/getting-started/">Getting started</a>
+      <a href="/examples/">Examples</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md">Security policy</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/LICENSE">License</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/TRADEMARKS.md">Trademarks</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="theme-color" content="#070913" />
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="canonical" href="https://reviewsensei.dev/examples/" />
+<title>Review walkthroughs — ReviewSensei</title>
+<meta name="description" content="Reproducible fixture walkthroughs for ReviewSensei review results, @sensei follow-ups, finding disposition, learning lifecycle, and partial coverage outcomes." />
+<link rel="stylesheet" href="../assets/site.css" />
+<style>
+.example{
+  padding:28px;border-radius:18px;border:1px solid #272c32;background:#0d0f12;margin-bottom:28px;
+}
+.example h2{margin:0 0 8px;font-size:clamp(22px,2.5vw,30px);letter-spacing:-.03em}
+.example .meta-row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 16px}
+.pill{
+  font-size:10px;padding:5px 8px;border-radius:999px;border:1px solid #2b2f35;
+  background:#13161a;color:#b4b0a6;text-transform:uppercase;letter-spacing:.06em;font-weight:750;
+}
+.pill.fixture{border-color:rgba(225,90,66,.35);color:var(--red-soft)}
+.pill.illustration{border-color:rgba(217,162,77,.35);color:#e0b665}
+.example p{margin:0 0 14px}
+.command{
+  position:relative;background:#07090b;border:1px solid #252a30;border-radius:11px;
+  padding:16px 18px;color:#b7bbb6;margin:14px 0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;
+  line-height:1.6;overflow:auto;white-space:pre-wrap;
+}
+.json-block{
+  background:#07090b;border:1px solid #252a30;border-radius:11px;padding:16px 18px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
+  line-height:1.55;color:#b7bbb6;overflow:auto;margin:14px 0;
+}
+.thread{
+  border:1px solid #272c32;border-radius:12px;background:#111419;padding:14px 16px;margin:14px 0;
+}
+.thread .who{font-size:11px;font-weight:800;color:#8f948f;margin-bottom:6px}
+.thread .body{font-size:13px;color:#a6aba7;line-height:1.55}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:760px){.grid-2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/" aria-label="ReviewSensei home">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="none">
+          <path d="M14 14 31 3v17L17 29v18L6 40V24L14 14Z" fill="#B83D2D"/>
+          <path d="m50 14-17-11v17l14 9v18l11-7V24L50 14Z" fill="#E15A42"/>
+          <path d="M21 45 32 55l11-10 7 4-18 12L14 49l7-4Z" fill="#55B89B"/>
+          <path d="m25 33 5 5 10-12" stroke="#74CDB1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span>ReviewSensei<span class="dev">.dev</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/getting-started/">Getting started</a>
+      <a href="/security/">Security</a>
+      <a href="/examples/">Examples</a>
+      <a class="nav-cta" href="/getting-started/">Set up reviews</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-hero">
+    <div class="container">
+      <div class="kicker">Fixture walkthroughs</div>
+      <h1>Reproducible review examples</h1>
+      <p class="lede">Every walkthrough on this page is a <strong>fixture demonstration</strong> or <strong>illustration</strong> using the CC0-1.0 synthetic corpus in <code>evaluation/v1/</code>. Nothing here is a live public pull request, retained production run, or measured quality claim.</p>
+      <p class="callout" style="margin-top:20px"><strong>Alpha software.</strong> Capabilities and defaults evolve. Re-run the commands below from a checkout of the matching source release to reproduce fixture output byte-for-byte.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+
+      <article class="example" id="finding-from-change">
+        <div class="meta-row">
+          <span class="pill fixture">Fixture</span>
+          <span class="pill">evaluation/v1</span>
+          <span class="pill">provider: fixture</span>
+          <span class="pill">model: fixture-v1</span>
+        </div>
+        <h2>1. A sanitized change produces a specific finding</h2>
+        <p>The <code>off-by-one</code> case changes pagination in synthetic <code>src/pagination.py</code>. The fixture provider replays a deterministic response; the engine validates locations against the supplied diff and emits a review result with per-file coverage (legacy evidence policy on this corpus).</p>
+        <div class="command" aria-label="Reproduction command">review-sensei --provider fixture \
+  --fixture-response evaluation/v1/responses/off-by-one.json \
+  --diff evaluation/v1/diffs/off-by-one.patch \
+  --model fixture-v1 \
+  --no-learning-proposals \
+  --output /tmp/review-sensei-off-by-one.json
+
+cmp /tmp/review-sensei-off-by-one.json \
+  evaluation/v1/expected/off-by-one.review.json</div>
+        <p>Validate the full corpus:</p>
+        <div class="command" aria-label="Corpus evaluation command">python -m review_sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json</div>
+        <p>Expected review result (schema: <code>review-result</code>):</p>
+        <script type="application/json" data-schema="review-result" id="example-off-by-one">{
+  "summary": "The pagination change introduces an off-by-one error for page numbers greater than one.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "body": "The start index is correct, but the slice end should be start plus page_size.",
+      "severity": "bug",
+      "category": "correctness"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": [],
+  "evidence_policy": "legacy"
+}</script>
+        <pre class="json-block" aria-label="Expected off-by-one review JSON"><code>{
+  "summary": "The pagination change introduces an off-by-one error for page numbers greater than one.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "body": "The start index is correct, but the slice end should be start plus page_size.",
+      "severity": "bug",
+      "category": "correctness"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "learning_proposals": [],
+  "evidence_policy": "legacy"
+}</code></pre>
+      </article>
+
+      <article class="example" id="sensei-follow-up">
+        <div class="meta-row">
+          <span class="pill illustration">Illustration</span>
+          <span class="pill">conversation reply</span>
+          <span class="pill">not a live PR</span>
+        </div>
+        <h2>2. Authorized <code>@sensei</code> follow-up in thread</h2>
+        <p>When conversation controls are enabled, an authorized <code>@sensei</code> mention in an existing review thread can receive a bounded, thread-aware reply. The processing reaction clears when the validated reply is published. This example is <strong>illustrative only</strong> — it does not link to a public comment thread.</p>
+        <div class="thread" aria-label="Illustrative PR thread (not live)">
+          <div class="who">ReviewSensei bot · src/pagination.py:3</div>
+          <div class="body">The start index is correct, but the slice end should be start plus page_size.</div>
+        </div>
+        <div class="thread">
+          <div class="who">maintainer · reply</div>
+          <div class="body"><code>@sensei</code> would this also affect <code>total_pages</code> when <code>page_size</code> is zero?</div>
+        </div>
+        <div class="thread">
+          <div class="who">ReviewSensei bot · bounded reply</div>
+          <div class="body"><code>total_pages</code> is unchanged by this diff. The finding targets the slice end on line 3 only. A zero <code>page_size</code> is a separate guard concern not introduced here.</div>
+        </div>
+        <p>Validated reply payload shape (schema: <code>conversation-reply</code>):</p>
+        <script type="application/json" data-schema="conversation-reply" id="example-conversation-reply">{
+  "body": "`total_pages` is unchanged by this diff. The finding targets the slice end on line 3 only. A zero `page_size` is a separate guard concern not introduced here."
+}</script>
+        <pre class="json-block" aria-label="Illustrative conversation reply JSON"><code>{
+  "body": "`total_pages` is unchanged by this diff. The finding targets the slice end on line 3 only. A zero `page_size` is a separate guard concern not introduced here."
+}</code></pre>
+        <p>Conversation publication is a separate control from analysis. See <a href="/getting-started/" style="color:var(--red-soft);font-weight:700">getting started</a> for the control matrix.</p>
+      </article>
+
+      <article class="example" id="disposition-and-learning">
+        <div class="meta-row">
+          <span class="pill illustration">Illustration</span>
+          <span class="pill">finding lifecycle</span>
+          <span class="pill">learning proposal</span>
+        </div>
+        <h2>3. Finding disposition and learning are separate</h2>
+        <p><strong>Stable finding identities</strong> track disposition across review runs (<code>new</code>, <code>still-present</code>, <code>fixed</code>, <code>outdated</code>, <code>uncertain</code>). Resolving a GitHub thread or merging without a code change does <em>not</em> automatically mark a finding <code>fixed</code>. A later model omitting a concern is not proof the defect is gone.</p>
+        <p><strong>Learning</strong> follows a separate lifecycle: proposed in the review result → draft learning PR → maintainer approval on the trusted base → future selection for matching paths. Approving a learning does not close a finding or imply the underlying code was corrected.</p>
+        <div class="grid-2">
+          <div>
+            <p><strong>Finding lifecycle metadata</strong> (schema: <code>review-result</code>, illustrative fields):</p>
+            <script type="application/json" data-schema="review-result" id="example-lifecycle">{
+  "summary": "Pagination finding persists with stable identity across an incremental re-run.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "body": "The start index is correct, but the slice end should be start plus page_size.",
+      "severity": "bug",
+      "category": "correctness"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "review_status": "complete",
+  "evidence_policy": "legacy",
+  "finding_lifecycles": [
+    {
+      "fingerprint": "7c3b2a1f9e8d4c6b5a4039281f0e5d7c9b8a7065f4e3d2c1b0a9f8e7d6c5b4a3",
+      "state": "still-present"
+    }
+  ],
+  "learning_proposals": [
+    {
+      "title": "Pagination slices use start + page_size",
+      "rule": "Page slices must end at start + page_size, not start + page_size - 1.",
+      "scope": ["src/pagination.py"],
+      "rationale": "Off-by-one pagination bugs recur when slice ends are hand-calculated.",
+      "category": "correctness"
+    }
+  ]
+}</script>
+            <pre class="json-block" aria-label="Illustrative finding lifecycle JSON"><code>"finding_lifecycles": [
+  {
+    "fingerprint": "7c3b2a1f…b4a3",
+    "state": "still-present"
+  }
+]</code></pre>
+          </div>
+          <div>
+            <p><strong>Approved learning entry</strong> (schema: <code>learning-entry</code>, after maintainer merge — illustrative):</p>
+            <script type="application/json" data-schema="learning-entry" id="example-learning-entry">{
+  "id": "pagination-slice-end",
+  "title": "Pagination slices use start + page_size",
+  "rule": "Page slices must end at start + page_size, not start + page_size - 1.",
+  "scope": ["src/pagination.py"],
+  "rationale": "Off-by-one pagination bugs recur when slice ends are hand-calculated.",
+  "category": "correctness",
+  "source": "https://github.com/owner/repository/pull/42",
+  "status": "active"
+}</script>
+            <pre class="json-block" aria-label="Illustrative approved learning JSON"><code>{
+  "id": "pagination-slice-end",
+  "status": "active",
+  "scope": ["src/pagination.py"]
+}</code></pre>
+          </div>
+        </div>
+        <p>Inspect approved learnings offline (zero-write):</p>
+        <div class="command" aria-label="Learning diagnostics command">review-sensei learnings diagnose \
+  --learning-root /path/to/trusted-base-checkout \
+  --json</div>
+      </article>
+
+      <article class="example" id="partial-coverage">
+        <div class="meta-row">
+          <span class="pill illustration">Illustration</span>
+          <span class="pill">partial review</span>
+          <span class="pill">approval withheld</span>
+        </div>
+        <h2>4. Partial / budget-limited review retains findings and blocks approval</h2>
+        <p>When per-file coverage is present, <code>budget-exhausted</code> and other incomplete outcomes are explicit. Valid findings from reviewed paths are retained, but automatic approval is withheld when coverage is partial or <code>fully_reviewed</code> is false. There is no fabricated confidence score — only outcome fields.</p>
+        <script type="application/json" data-schema="review-result" id="example-partial">{
+  "summary": "Partial review: findings retained from reviewed paths before the provider-call budget was exhausted.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "body": "The start index is correct, but the slice end should be start plus page_size.",
+      "severity": "bug",
+      "category": "correctness"
+    }
+  ],
+  "provider": "fixture",
+  "model": "fixture-v1",
+  "review_status": "partial",
+  "evidence_policy": "legacy",
+  "coverage": {
+    "schema_version": "1.0",
+    "enumeration_complete": true,
+    "fully_reviewed": false,
+    "enumerated_paths": ["src/pagination.py", "src/runner.py"],
+    "files": [
+      {"path": "src/pagination.py", "outcome": "reviewed"},
+      {"path": "src/runner.py", "outcome": "budget-exhausted", "reason": "provider-call-budget"}
+    ],
+    "hunks": [
+      {"index": 1, "path": "src/pagination.py", "outcome": "reviewed"},
+      {"index": 2, "path": "src/runner.py", "outcome": "budget-exhausted", "reason": "provider-call-budget"}
+    ]
+  },
+  "learning_proposals": []
+}</script>
+        <pre class="json-block" aria-label="Illustrative partial review JSON"><code>{
+  "review_status": "partial",
+  "coverage": {
+    "fully_reviewed": false,
+    "files": [
+      {"path": "src/pagination.py", "outcome": "reviewed"},
+      {"path": "src/runner.py", "outcome": "budget-exhausted", "reason": "provider-call-budget"}
+    ]
+  }
+}</code></pre>
+        <p>Preview bounded coverage and zero-write plan output (no provider calls):</p>
+        <div class="command" aria-label="Zero-write plan command">review-sensei plan \
+  --diff evaluation/v1/diffs/off-by-one.patch \
+  --repository owner/repo \
+  --pull-request 42 \
+  --json
+
+review-sensei doctor --json</div>
+        <p>Approval blockers for this shape include <code>coverage-partial</code> and <code>review-partial</code> when publication and approval controls are enabled. See <a href="/security/" style="color:var(--red-soft);font-weight:700">security &amp; data flow</a> for what approval does and does not guarantee.</p>
+      </article>
+
+      <div class="content-block">
+        <h3>Feature ↔ source mapping</h3>
+        <ul>
+          <li><strong>Fixture evaluation corpus</strong> — <code>evaluation/v1/</code> (CC0-1.0 synthetic)</li>
+          <li><strong>Review result schema</strong> — <code>src/review_sensei/schemas/review-result.schema.json</code></li>
+          <li><strong>Coverage manifest</strong> — ADR 0044; default opt-in for large-change orchestration</li>
+          <li><strong>Finding lifecycles</strong> — incremental reviews (#83); derived metadata on re-runs</li>
+          <li><strong>Learning lifecycle</strong> — proposals in review result; approval via trusted-base PR</li>
+          <li><strong>Bounded diagnostics</strong> — <code>doctor</code> and <code>plan</code> subcommands (zero provider/GitHub writes)</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="brand" style="font-size:13px"><span>ReviewSensei<span class="dev">.dev</span></span></div>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/getting-started/">Getting started</a>
+      <a href="/security/">Security</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/evaluation.md">Evaluation docs</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
