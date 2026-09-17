@@ -34,7 +34,9 @@ REQUIRED_QUALIFIERS = {
     EXAMPLES: ("illustrative", "schema", "alpha"),
 }
 
-INTERNAL_LINK = re.compile(r'href="(/[^"#?]*)"')
+ANY_LINK = re.compile(r'href="([^"]+)"')
+# Schemes and in-page targets that do not resolve to a file in this repository.
+EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "tel:", "#", "//", "data:")
 
 
 def _is_deployed(page: Path) -> bool:
@@ -67,13 +69,31 @@ def _published_routes() -> set[str]:
     return routes
 
 
-def _route_target(route: str) -> Path:
-    """Map a site-absolute route to the file GitHub Pages would serve."""
+def _internal_links(page: Path) -> list[str]:
+    """Return every href on ``page`` that must resolve to a file in the repo."""
 
-    relative = route.lstrip("/")
-    if not relative or route.endswith("/"):
-        return SITE_ROOT / relative / "index.html"
-    return SITE_ROOT / relative
+    links = []
+    for href in ANY_LINK.findall(_read(page)):
+        if href.startswith(EXTERNAL_PREFIXES):
+            continue
+        target = href.split("#", 1)[0].split("?", 1)[0]
+        if target:
+            links.append(target)
+    return links
+
+
+def _route_target(page: Path, href: str) -> Path:
+    """Map an href to the file GitHub Pages would serve for it.
+
+    Site-absolute hrefs resolve against the site root; relative ones resolve
+    against the directory of the page that contains them.
+    """
+
+    base = SITE_ROOT if href.startswith("/") else page.parent
+    resolved = (base / href.lstrip("/")).resolve()
+    if href.endswith("/") or resolved.suffix == "":
+        return resolved / "index.html"
+    return resolved
 
 
 class SiteClaimsTests(unittest.TestCase):
@@ -96,14 +116,29 @@ class SiteClaimsTests(unittest.TestCase):
                     )
 
     def test_internal_links_resolve_to_published_pages(self) -> None:
+        """Covers site-absolute and page-relative hrefs, ignoring off-site ones."""
+
         for page in _pages():
-            for route in INTERNAL_LINK.findall(_read(page)):
-                target = _route_target(route)
-                with self.subTest(page=page.name, route=route):
+            for href in _internal_links(page):
+                target = _route_target(page, href)
+                with self.subTest(page=page.name, href=href):
                     self.assertTrue(
                         target.exists(),
-                        f"{page} links to {route}, which is not published",
+                        f"{page} links to {href}, which is not published",
                     )
+
+    def test_link_check_covers_relative_hrefs(self) -> None:
+        """Guard the extractor itself, so the link check cannot go blind."""
+
+        self.assertEqual(
+            _internal_links(SECURITY).count("../assets/site.css"),
+            1,
+            "relative asset links must be collected for existence checking",
+        )
+        self.assertNotIn(
+            "https://github.com/malsabbagh/review-sensei",
+            _internal_links(SECURITY),
+        )
 
     def test_sitemap_and_published_pages_agree(self) -> None:
         sitemap = SITEMAP.read_text(encoding="utf-8")

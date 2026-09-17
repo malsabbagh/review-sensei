@@ -511,6 +511,31 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             list(parsed.evidence_references), published["evidence_references"]
         )
 
+    def test_out_of_slice_published_document_is_rejected(self) -> None:
+        """The schema accepts any bounded model string; the validator must not."""
+
+        value = _insufficient_harness_record()
+        value["model"] = "openai/gpt-4o-mini"
+        value["qualification_target"] = {
+            **value["qualification_target"],
+            "model": "openai/gpt-4o-mini",
+            "upstream_provider": "openai",
+        }
+        validate_public_document(value, "openrouter-qualification")
+        with self.assertRaisesRegex(ReviewInputError, "published qualification slice"):
+            validate_openrouter_qualification_record(value)
+
+    def test_support_gate_rejects_non_supported_promotion(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = _supported_record(reports, artifacts).to_dict()
+        record["status"] = "insufficient"
+        record["rollback_decision"] = "hold"
+        with self.assertRaises(ReviewInputError):
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts, **ATTESTED
+            )
+
     def test_support_gate_requires_attested_mint_inputs_by_default(self) -> None:
         reports = _supported_live_reports()
         artifacts = _retained_artifacts(reports)

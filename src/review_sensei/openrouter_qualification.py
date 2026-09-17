@@ -525,6 +525,13 @@ def require_supported_openrouter_qualification(
         else validate_openrouter_qualification_record(record)
     )
     require_supported_promotion(parsed.promotion, reports)
+    # Stated at the gate boundary rather than left implicit in the minted
+    # record, so removing the hard-coded status below cannot silently let an
+    # insufficient record through a comparison of two insufficient records.
+    if parsed.promotion.status != "supported":
+        raise ReviewInputError(
+            "OpenRouter support gate requires a supported promotion record"
+        )
     if parsed.qualification_target.model != parsed.promotion.model:
         raise ReviewInputError(
             "OpenRouter qualification target model does not match promotion record"
@@ -567,6 +574,11 @@ def require_supported_openrouter_qualification(
             raise ReviewInputError(
                 f"OpenRouter qualification {name} does not match live evaluation evidence"
             )
+    if minted.qualification_target.to_dict() != parsed.qualification_target.to_dict():
+        raise ReviewInputError(
+            "OpenRouter qualification target does not match the target the "
+            "live evaluation evidence was produced against"
+        )
     if minted.evidence_references != parsed.evidence_references:
         raise ReviewInputError(
             "OpenRouter qualification evidence_references do not match the "
