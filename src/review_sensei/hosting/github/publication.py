@@ -104,8 +104,6 @@ def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
     if comment.side == "RIGHT":
         if comment.line in analysis.changed_lines.get(comment.path, frozenset()):
             return "right"
-        if comment.path in analysis.changed_paths:
-            return "file"
     return "summary"
 
 

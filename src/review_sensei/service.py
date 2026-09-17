@@ -100,6 +100,18 @@ Do not treat absence of a prior finding in this pass as proof that it is fixed.
 MAX_COVERAGE_PATHS = 64
 
 
+def _chunk_context_note(related_paths: tuple[str, ...]) -> str:
+    if not related_paths:
+        return "This chunk is part of a larger change."
+    related = "\n".join(related_paths)
+    return (
+        "This chunk is part of a larger change.\n\n"
+        "<related-changed-paths-not-in-chunk>\n"
+        f"{related}\n"
+        "</related-changed-paths-not-in-chunk>"
+    )
+
+
 @dataclass(frozen=True)
 class _CoverageDecision:
     mode: str
@@ -363,13 +375,7 @@ class ReviewService:
                             limits=request.limits,
                         )
                 break
-            related = ", ".join(chunk.related_paths)
-            note = (
-                "This chunk is part of a larger change. Related changed paths "
-                f"not in this chunk: {related}."
-                if related
-                else "This chunk is part of a larger change."
-            )
+            note = _chunk_context_note(chunk.related_paths)
             instructions = (
                 f"{request.instructions}\n\n{note}" if request.instructions else note
             )

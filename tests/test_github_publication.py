@@ -2082,7 +2082,7 @@ deleted file mode 100644
         self.assertNotIn("<!-- reviewsensei:fake", rendered)
         self.assertIn("\\<\\!-- reviewsensei:fake", rendered)
 
-    def test_invalid_inline_line_on_a_changed_file_is_published_as_file_level(self):
+    def test_invalid_inline_line_on_a_changed_file_moves_to_summary(self):
         result = ReviewResult(
             summary="Retained.",
             comments=(ReviewComment(path="src/app.py", line=1, body="unchanged line"),),
@@ -2093,7 +2093,6 @@ deleted file mode 100644
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
-            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -2111,10 +2110,11 @@ deleted file mode 100644
             auto_approve=False,
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertEqual(body["comments"][0]["subject_type"], "file")
-        self.assertEqual(body["comments"][0]["path"], "src/app.py")
-        self.assertNotIn("line", body["comments"][0])
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["comments"], [])
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("`src/app.py`", body["body"])
+        self.assertIn("unchanged line", body["body"])
 
     def test_existing_approval_is_reconciled_before_post(self):
         head = "b" * 40
