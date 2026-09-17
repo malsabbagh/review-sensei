@@ -516,6 +516,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
+        self.assertIn("inputs.provider_profile == ''", text)
         self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
         self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
         self.assertIn(
