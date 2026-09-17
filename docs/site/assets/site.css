@@ -1,22 +1,9 @@
+/* Only load-bearing tokens live here. Add a custom property together with the
+   rule that first consumes it; test_site_examples.py fails on unused tokens. */
 :root{
-  --ink:#090a0c;
-  --ink-2:#0f1114;
-  --ink-3:#15181d;
   --paper:#f2efe7;
-  --paper-dim:#c9c5ba;
-  --muted:#8f928f;
-  --muted-2:#696d6a;
-  --line:#262a2f;
-  --line-strong:#343941;
   --red:#e15a42;
-  --red-deep:#b83d2d;
   --red-soft:#f07a63;
-  --jade:#55b89b;
-  --jade-bright:#74cdb1;
-  --amber:#d9a24d;
-  --danger:#df5f73;
-  --radius:18px;
-  --shadow:0 24px 70px rgba(0,0,0,.34);
 }
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
