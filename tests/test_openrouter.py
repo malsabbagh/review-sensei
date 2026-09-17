@@ -243,25 +243,35 @@ class OpenRouterProviderTests(unittest.TestCase):
             )
 
     def test_registry_requires_model(self):
-        with self.assertRaisesRegex(ProviderError, "requires a model"):
-            default_registry().create(
+        with patch.dict(
+            "os.environ",
+            {"OPENROUTER_UPSTREAM_PROVIDER": "anthropic"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ProviderError, "requires a model"):
+                default_registry().create(
+                    ProviderSettings(
+                        name="openrouter",
+                        api_key="secret",
+                        openrouter_policy=_POLICY,
+                    )
+                )
+
+    def test_registry_uses_default_base_url_constant(self):
+        with patch.dict(
+            "os.environ",
+            {"OPENROUTER_UPSTREAM_PROVIDER": "anthropic"},
+            clear=True,
+        ):
+            provider = default_registry().create(
                 ProviderSettings(
                     name="openrouter",
                     api_key="secret",
+                    model="anthropic/claude-3.5-sonnet",
                     openrouter_policy=_POLICY,
                 )
             )
-
-    def test_registry_uses_default_base_url_constant(self):
-        provider = default_registry().create(
-            ProviderSettings(
-                name="openrouter",
-                api_key="secret",
-                model="anthropic/claude-3.5-sonnet",
-                openrouter_policy=_POLICY,
-            )
-        )
-        self.assertEqual(provider.base_url, DEFAULT_OPENROUTER_BASE_URL)
+            self.assertEqual(provider.base_url, DEFAULT_OPENROUTER_BASE_URL)
 
     def test_allowlisted_endpoint_helper(self):
         accepted = [

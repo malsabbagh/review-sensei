@@ -463,8 +463,10 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -824,8 +826,10 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -1199,8 +1203,10 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then

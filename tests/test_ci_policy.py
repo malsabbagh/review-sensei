@@ -564,7 +564,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             repo_root / ".github" / "workflows" / "review-sensei-run.yml"
         ).read_text(encoding="utf-8")
         caller_template = (
-            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+            repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
         setup_plan = SetupPlanBuilder().build("owner/repo")
         generated_caller = next(
