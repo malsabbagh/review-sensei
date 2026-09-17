@@ -172,12 +172,14 @@ class _VerifiedHTTPSHandler(HTTPSHandler):
             normalized_host = host.casefold()
             if normalized_host != expected_hostname:
                 raise ProviderError("OpenRouter TLS host mismatch")
+            connection_timeout: float | None = None
+            if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+                connection_timeout = float(timeout)
             return http.client.HTTPSConnection(
                 host,
                 port=port or 443,
-                timeout=timeout,
+                timeout=connection_timeout,
                 context=verified_context,
-                server_hostname=host,
             )
 
         return self.do_open(connection_factory, req)
