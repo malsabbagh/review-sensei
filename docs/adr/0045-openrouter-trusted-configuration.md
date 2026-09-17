@@ -78,14 +78,20 @@ the public `v4` tag includes the reusable-workflow contract.
 `provider_mode=cloud` whenever a profile is set.
 
 The `openrouter` job body intentionally mirrors the `cloud` job for #98,
-including job-level permissions (`contents: read`, `pull-requests: read`,
-`issues: read`, `id-token: write`) and broker publication (`github review`
-with `id-token: write`). Mention-reply approval finalization is not a
+including `runs-on: ubuntu-latest` (the public reusable workflow is exempt
+from the repository `ENABLE_UBICLOUD_HOSTED` switch; `local` remains the
+self-hosted lane), job-level permissions (`contents: read`, `pull-requests:
+read`, `issues: read`, `id-token: write`), and broker publication (`github
+review` with `id-token: write`). Mention-reply approval finalization is not a
 workflow step: all three jobs pass `--enable-auto-approve` into
 `review-sensei github reply`, which calls the shared finalizer in
 `conversation.py`. The OIDC capability broker remains in scope for OpenRouter
 publication the same way it is for cloud; OpenRouter only changes inference
 credentials (`OPENROUTER_API_KEY`) and `--profile`.
+Setup PR bodies call out that `REVIEWSENSEI_PROVIDER_PROFILE` alone does not
+enable hosted OpenRouter on setup-v4 callers until follow-up #112 forwards
+`provider_profile` and `OPENROUTER_API_KEY` after the public `v4` tag includes
+this contract.
 ADR 0025's parameterized-job ideal remains the follow-up; until then
 `tests/test_ci_policy.py` asserts provider-job parity (reply parsing,
 permissions, auto-approve forwarding, concurrency groups, publish/reply

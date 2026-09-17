@@ -718,6 +718,9 @@ jobs:
       # review for the same PR cancels any in-flight provider-mode review.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
+    # Public reusable workflow: GitHub-hosted compute for cloud/OpenRouter matches
+    # the `cloud` job and is exempt from the repository ENABLE_UBICLOUD_HOSTED
+    # switch (see tests/test_ci_policy.py).
     runs-on: ubuntu-latest
     # Same permission set as cloud/local. GitHub writes go through the OIDC
     # broker inside `review-sensei github review` / `github reply`; this job

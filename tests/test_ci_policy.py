@@ -564,12 +564,15 @@ class ActionPinPolicyTests(unittest.TestCase):
         caller_template = (
             repo_root / ".github" / "workflows" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
+        setup_plan = SetupPlanBuilder().build("owner/repo")
         generated_caller = next(
             file.content
-            for file in SetupPlanBuilder().build("owner/repo").files
+            for file in setup_plan.files
             if file.path == ".github/workflows/review-sensei-review.yml"
         )
         self.assertEqual(generated_caller, caller_template)
+        self.assertIn("does not enable hosted OpenRouter on setup-v4 callers yet", setup_plan.body)
+        self.assertIn("follow-up #112", setup_plan.body)
 
         # Caller wiring for provider_profile is deferred until the v4 tag moves;
         # until then the reusable workflow default keeps OpenRouter off the path.
@@ -610,6 +613,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             "provider_profile is unsupported; use openrouter-sonnet or openrouter-gpt.",
             reusable,
         )
+        self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
 
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
