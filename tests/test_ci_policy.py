@@ -630,6 +630,48 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("allow_unqualified_profile:", generated_caller)
         self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
 
+        deferral = (
+            "does not enable hosted OpenRouter on setup-v4 callers yet: the generated "
+            "caller forwards provider_profile, allow_unqualified_profile, and "
+            "OPENROUTER_API_KEY only after follow-up #112"
+        )
+        self.assertIn(deferral, setup_plan.body)
+
+        self.assertIn("repository id must be a positive decimal integer", reusable)
+        openrouter_job = _job_section(reusable, "openrouter")
+        self.assertRegex(
+            openrouter_job,
+            r"- name: Prepare bounded trusted-base diff\n        if: inputs\.operation == 'review'",
+        )
+        self.assertIn(
+            "ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}",
+            openrouter_job,
+        )
+        review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
+        self.assertIn(
+            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)',
+            review_step,
+        )
+        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', review_step)
+        self.assertNotIn("--allow-unqualified-profile \\\n", review_step)
+        reply_step = _step_block(
+            openrouter_job, "Generate and publish OpenRouter mention reply"
+        )
+        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', reply_step)
+        self.assertNotIn(
+            '--allow-unqualified-profile \\\n            --repository "$REPOSITORY"',
+            reply_step,
+        )
+        publish_step = _step_block(
+            openrouter_job, "Publish or promote validated review through the broker"
+        )
+        self.assertIn(
+            "BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}",
+            publish_step,
+        )
+        self.assertIn('--repository-id "$REPOSITORY_ID"', publish_step)
+        self.assertIn('--base-branch "$BASE_REF"', publish_step)
+
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
     ):
