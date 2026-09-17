@@ -517,8 +517,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("inputs.provider_mode == 'local'", text)
         self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
         self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
-        self.assertIn("OPENROUTER_API_KEY is required for OpenRouter provider profile", text)
-        self.assertIn("--profile \"$PROVIDER_PROFILE\" --provider openrouter", text)
+        self.assertIn(
+            "OPENROUTER_API_KEY is required for OpenRouter provider profile", text
+        )
+        self.assertIn('--profile "$PROVIDER_PROFILE" --provider openrouter', text)
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
