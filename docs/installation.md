@@ -168,9 +168,20 @@ model:
 | `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
 
 Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
-selected. Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL`
-remain fallbacks for Ollama when `REVIEWSENSEI_MODEL` is empty. Hosted
-OpenRouter accepts only the published allowlist in
+selected. When `REVIEWSENSEI_MODEL` is empty, the hosted workflow resolves
+the model per backend:
+
+- **Local Ollama jobs** use `REVIEWSENSEI_LOCAL_MODEL`, then `qwen3.5:4b`.
+- **Cloud Ollama jobs** use `REVIEWSENSEI_CLOUD_MODEL`, then
+  `deepseek-v4.1-flash:cloud`.
+- **OpenRouter jobs** use the hosted allowlist default
+  (`deepseek/deepseek-v4.1-flash`); they do not consult
+  `REVIEWSENSEI_LOCAL_MODEL`, `REVIEWSENSEI_CLOUD_MODEL`, or
+  `OPENROUTER_MODEL`.
+
+Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL` apply only
+to their respective Ollama jobs. Hosted OpenRouter accepts only the published
+allowlist in
 `provider_config.HOSTED_OPENROUTER_DEFAULTS` (default
 `deepseek/deepseek-v4.1-flash`, plus `anthropic/claude-3.5-sonnet` and
 `openai/gpt-4o-mini`).

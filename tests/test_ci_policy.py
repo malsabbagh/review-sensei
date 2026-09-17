@@ -936,6 +936,28 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("inputs.provider_mode == 'cloud'", cloud_if)
 
+    def test_provider_jobs_use_backend_specific_model_fallbacks(self):
+        workflow_text = _reusable_workflow_text()
+        shared_prefix = (
+            "needs.validate-provider-mode.outputs.normalized_model || "
+            "vars.REVIEWSENSEI_MODEL || "
+        )
+        cloud_model = (
+            shared_prefix
+            + "vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud'"
+        )
+        local_model = shared_prefix + "vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b'"
+        openrouter_model = shared_prefix + "''"
+        self.assertGreaterEqual(
+            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {cloud_model} }}}}"), 2
+        )
+        self.assertGreaterEqual(
+            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {local_model} }}}}"), 2
+        )
+        self.assertGreaterEqual(
+            workflow_text.count(f"REVIEW_MODEL: ${{{{ {openrouter_model} }}}}"), 2
+        )
+
     def test_validate_provider_mode_job_validates_model_input(self):
         workflow_text = _reusable_workflow_text()
         job = _job_section(workflow_text, "validate-provider-mode")
