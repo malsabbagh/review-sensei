@@ -90,6 +90,20 @@ class SiteManifestValidationTests(unittest.TestCase):
         with self.assertRaises(validate_module.SiteManifestError):
             validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
+    def test_missing_npm_launcher_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(
+                (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            with self.assertRaises(validate_module.SiteManifestError):
+                validate_module.validate_site_manifest(
+                    document, root=root, schema=schema
+                )
+
     def test_mismatched_npm_version_is_rejected(self) -> None:
         document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -156,6 +170,18 @@ class SiteManifestValidationTests(unittest.TestCase):
 
     def test_committed_site_pages_match_manifest(self) -> None:
         build_module.check_site_pages(manifest_path=MANIFEST_PATH)
+
+    def test_missing_committed_site_page_reports_stale_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            providers = directory / "providers" / "index.html"
+            releases = directory / "releases" / "index.html"
+            with self.assertRaisesRegex(ValueError, "missing: .*providers"):
+                build_module.check_site_pages(
+                    manifest_path=MANIFEST_PATH,
+                    providers_output=providers,
+                    releases_output=releases,
+                )
 
 
 if __name__ == "__main__":

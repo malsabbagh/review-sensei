@@ -184,7 +184,7 @@ h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:
     <li><strong>npx launcher</strong><span>yes</span></li>
   </ul>
   <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/openai_compatible.py</code><code class="path-chip">docs/public-contracts.md</code><code class="path-chip">docs/adr/0041-production-provider-adapters-and-per-stage-profiles.md</code></div></div>
-  <ul style="margin-top:12px;padding-left:18px"><li>Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.</li><li>Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings.</li></ul>
+  <ul style="margin-top:12px;padding-left:18px"><li>Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.</li><li>Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings.</li><li>The npx launcher forwards argv to the Python CLI; reaching openai-compatible still requires explicit --profile fast-triage (or unprofiled flags) plus OPENAI_API_KEY.</li></ul>
 </article>
 <article class="card">
   <h3>OpenRouter</h3>

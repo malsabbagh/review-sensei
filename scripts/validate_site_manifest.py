@@ -62,6 +62,12 @@ def npm_launcher_version(root: Path) -> str:
 
 
 def registered_provider_names(root: Path) -> frozenset[str]:
+    """Return registry keys from direct ``registry.register("name", ...)`` calls.
+
+    AST inspection is intentionally limited to literal registrations in
+    ``registry.py``. Indirect registration helpers are out of scope and must
+    not be used for production provider keys without updating this check.
+    """
     registry_path = root / REGISTRY_RELATIVE_PATH
     try:
         tree = ast.parse(registry_path.read_text(encoding="utf-8"))

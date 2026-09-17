@@ -378,6 +378,8 @@ def check_site_pages(
             (providers_output, generated_providers),
             (releases_output, generated_releases),
         ):
+            if not committed.is_file():
+                raise ValueError(f"committed site page is missing: {committed}")
             if committed.read_text(encoding="utf-8") != generated.read_text(
                 encoding="utf-8"
             ):
