@@ -160,16 +160,19 @@ the reusable workflow.
 
 OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
 
-**Hosted selection is not live on generated setup-v4 callers in this change.**
-Those callers still omit `provider_profile` and `OPENROUTER_API_KEY` until
-the public `v4` tag includes this reusable-workflow contract (follow-up #112).
-Until then, setting `REVIEWSENSEI_PROVIDER_PROFILE` on a generated caller has
-no effect.
+**Generated setup-v4 callers do not forward OpenRouter inputs until #112.**
+Those callers still omit `provider_profile`, `allow_unqualified_profile`, and
+`OPENROUTER_API_KEY` until follow-up #112 lands after the public `v4` tag
+includes this reusable-workflow contract. Until then, setting
+`REVIEWSENSEI_PROVIDER_PROFILE` on a generated caller has no effect.
 
-Once callers forward the inputs, the reusable workflow requires **both**
+After the `v4` tag moves, **manual or custom callers** that forward the new
+inputs can run OpenRouter immediately; there is no extra gate beyond what the
+reusable workflow validates. The reusable workflow requires **both**
 `provider_mode=cloud` and `provider_profile=openrouter-sonnet` or
-`openrouter-gpt`, plus `OPENROUTER_API_KEY`. Setting only the profile with
-`local` mode fails during `validate-provider-mode`.
+`openrouter-gpt`, plus `allow_unqualified_profile=true` and
+`OPENROUTER_API_KEY`. Setting only the profile with `local` mode or without
+`allow_unqualified_profile=true` fails during `validate-provider-mode`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -186,9 +189,10 @@ OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile
 for live review, live evaluation, and provider-backed GitHub reply generation
 until separate qualification evidence exists. Hosted OpenRouter runs use
 `ubuntu-latest`, require `REVIEWSENSEI_PROVIDER_MODE=cloud`, read
-`OPENROUTER_API_KEY` by name only, and forward `--allow-unqualified-profile`
-until qualification evidence exists. Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty
-to keep the default Ollama local/cloud paths.
+`OPENROUTER_API_KEY` by name only, and pass `--allow-unqualified-profile` only
+when the caller forwards `allow_unqualified_profile=true` (default `false`).
+Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty to keep the default Ollama
+local/cloud paths.
 
 To roll back from OpenRouter, clear `REVIEWSENSEI_PROVIDER_PROFILE`, restore
 `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`, and remove the

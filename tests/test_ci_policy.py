@@ -522,8 +522,15 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(
             "OPENROUTER_API_KEY is required for OpenRouter provider profile", text
         )
-        self.assertIn('--profile "$PROVIDER_PROFILE" --provider openrouter', text)
-        self.assertIn("--allow-unqualified-profile", text)
+        self.assertIn(
+            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)', text
+        )
+        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', text)
+        self.assertIn("profile_args+=(--allow-unqualified-profile)", text)
+        self.assertIn(
+            "allow_unqualified_profile:\n        required: false\n        default: 'false'",
+            text,
+        )
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
@@ -591,6 +598,7 @@ class ActionPinPolicyTests(unittest.TestCase):
 
         openrouter_gate = (
             "inputs.provider_mode == 'cloud' && "
+            "inputs.allow_unqualified_profile == 'true' && "
             "(inputs.provider_profile == 'openrouter-sonnet' || "
             "inputs.provider_profile == 'openrouter-gpt')"
         )
@@ -612,9 +620,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             reusable,
         )
         self.assertIn(
+            "provider_profile requires allow_unqualified_profile=true",
+            reusable,
+        )
+        self.assertIn(
             "provider_profile is unsupported; use openrouter-sonnet or openrouter-gpt.",
             reusable,
         )
+        self.assertNotIn("allow_unqualified_profile:", generated_caller)
         self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
 
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(

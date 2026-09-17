@@ -69,11 +69,14 @@ alone cannot move reviews onto GitHub-hosted compute. The job shares the
 newer review for the same pull request cancels any in-flight provider-mode
 review.
 
-Hosted OpenRouter review and mention-reply commands forward
-`--allow-unqualified-profile` because the workflow is operator-controlled and
-profiles remain `unqualified` until separate qualification evidence exists.
-Caller workflows forward `provider_profile` and `OPENROUTER_API_KEY` only after
-the public `v4` tag includes the reusable-workflow contract.
+Hosted OpenRouter review and mention-reply commands append
+`--allow-unqualified-profile` only when the caller forwards
+`allow_unqualified_profile=true` (workflow input default `false`).
+`validate-provider-mode` rejects OpenRouter profiles without that explicit
+opt-in. Generated setup-v4 callers forward `provider_profile`,
+`allow_unqualified_profile`, and `OPENROUTER_API_KEY` only after follow-up #112
+lands once the public `v4` tag includes the reusable-workflow contract; manual
+callers may forward them immediately after the tag move.
 `validate-provider-mode` rejects unsupported profile values and requires
 `provider_mode=cloud` whenever a profile is set.
 

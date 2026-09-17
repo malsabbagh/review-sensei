@@ -103,6 +103,10 @@ on:
         required: false
         default: 'false'
         type: string
+      allow_unqualified_profile:
+        required: false
+        default: 'false'
+        type: string
     secrets:
       OLLAMA_API_KEY:
         required: false
@@ -135,6 +139,7 @@ jobs:
         env:
           PROVIDER_MODE: ${{ inputs.provider_mode }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
+          ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
           OPERATION: ${{ inputs.operation }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -169,6 +174,10 @@ jobs:
           esac
           if [[ -n "$PROVIDER_PROFILE" && "$PROVIDER_MODE" != "cloud" ]]; then
             echo '::error::provider_profile requires provider_mode=cloud; set REVIEWSENSEI_PROVIDER_MODE=cloud for OpenRouter hosted runs.' >&2
+            exit 1
+          fi
+          if [[ -n "$PROVIDER_PROFILE" && "$ALLOW_UNQUALIFIED_PROFILE" != "true" ]]; then
+            echo '::error::provider_profile requires allow_unqualified_profile=true for unqualified OpenRouter profiles.' >&2
             exit 1
           fi
           case "$OPERATION" in
@@ -712,7 +721,7 @@ jobs:
 
   openrouter:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && inputs.provider_mode == 'cloud' && (inputs.provider_profile == 'openrouter-sonnet' || inputs.provider_profile == 'openrouter-gpt')
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && inputs.provider_mode == 'cloud' && inputs.allow_unqualified_profile == 'true' && (inputs.provider_profile == 'openrouter-sonnet' || inputs.provider_profile == 'openrouter-gpt')
     concurrency:
       # OpenRouter shares the provider review group with cloud/local so a newer
       # review for the same PR cancels any in-flight provider-mode review.
@@ -867,6 +876,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
+          ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -900,10 +910,13 @@ jobs:
           if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
+          profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)
+          if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then
+            profile_args+=(--allow-unqualified-profile)
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --profile "$PROVIDER_PROFILE" --provider openrouter \
-            --allow-unqualified-profile \
+            "${profile_args[@]}" \
             --output review.json --outcome outcome.json
 
       - name: Confirm live pull-request head is still current
@@ -1007,6 +1020,7 @@ jobs:
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
+          ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
         run: |
           if [[ -z "$OPENROUTER_API_KEY" ]]; then
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter provider profile' >&2
@@ -1019,10 +1033,13 @@ jobs:
           elif [[ "$AUTO_APPROVE" == "false" ]]; then
             auto_approve_args+=(--no-auto-approve)
           fi
+          profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)
+          if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then
+            profile_args+=(--allow-unqualified-profile)
+          fi
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
-            --generate --profile "$PROVIDER_PROFILE" --provider openrouter \
-            --allow-unqualified-profile \
+            --generate "${profile_args[@]}" \
             --repository "$REPOSITORY" --pull-request "$PULL_REQUEST" \
             --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
