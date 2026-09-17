@@ -269,8 +269,10 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
-        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
-        self.assertIn(
+        self.assertNotIn(
+            "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow
+        )
+        self.assertNotIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
             workflow,
         )

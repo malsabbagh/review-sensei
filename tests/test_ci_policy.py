@@ -309,8 +309,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
-        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
-        self.assertIn(
+        self.assertNotIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertNotIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
         )
         self.assertIn("id-token: write", text)
