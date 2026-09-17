@@ -171,7 +171,7 @@ def resolve_effective_provider_configuration(
         resolved_model = selected_profile.model
         resolved_base_url = selected_profile.base_url
         credential_env = selected_profile.api_key_env
-        qualification_status = selected_profile.qualification_status
+        qualification_status: str = selected_profile.qualification_status
         openrouter_policy = selected_profile.openrouter_policy
     else:
         provider_name = (
@@ -187,24 +187,25 @@ def resolve_effective_provider_configuration(
             raise ReviewInputError("provider must be non-empty")
         if provider_name == "openai-compatible":
             resolved_base_url = (
-                base_url or os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+                base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
             ).strip()
             resolved_model = (
-                model or os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+                model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
             ).strip()
             credential_env = api_key_env or "OPENAI_API_KEY"
             openrouter_policy = None
         elif provider_name == "openrouter":
             resolved_base_url = (
                 base_url
-                or os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+                or os.getenv("OPENROUTER_BASE_URL")
+                or DEFAULT_OPENROUTER_BASE_URL
             ).strip()
             resolved_model = (
-                model or os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
+                model or os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
             ).strip()
             credential_env = api_key_env or "OPENROUTER_API_KEY"
-            upstream = os.getenv(
-                "OPENROUTER_UPSTREAM_PROVIDER", DEFAULT_OPENROUTER_UPSTREAM
+            upstream = (
+                os.getenv("OPENROUTER_UPSTREAM_PROVIDER") or DEFAULT_OPENROUTER_UPSTREAM
             )
             try:
                 openrouter_policy = OpenRouterRoutingPolicy(
