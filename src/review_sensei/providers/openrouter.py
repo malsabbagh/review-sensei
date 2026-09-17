@@ -236,6 +236,8 @@ class OpenRouterProvider:
         if not is_allowlisted_openrouter_endpoint(base_url):
             raise ValueError("OpenRouter endpoint is not allowlisted")
         parsed = urlsplit(base_url)
+        if parsed.hostname is None:
+            raise ValueError("OpenRouter endpoint host is invalid")
         try:
             hostname = parsed.hostname.encode("idna").decode("ascii").casefold()
         except UnicodeError as exc:
