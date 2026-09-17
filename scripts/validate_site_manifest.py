@@ -183,10 +183,19 @@ def validate_provider_consistency(root: Path, document: dict[str, Any]) -> None:
             raise SiteManifestError(
                 f"shipped provider {provider_id!r} must include implemented-on-main"
             )
-        if entry["engine_support"]["cli"] and "supported" not in labels:
-            raise SiteManifestError(
-                f"CLI-enabled provider {provider_id!r} must include supported"
-            )
+        workflow = entry["workflow_support"]
+        if entry["engine_support"]["cli"]:
+            if workflow.get("reusable_workflow"):
+                if "supported" not in labels:
+                    raise SiteManifestError(
+                        f"workflow-enabled provider {provider_id!r} must include "
+                        "supported"
+                    )
+            elif "available-in-distribution" not in labels:
+                raise SiteManifestError(
+                    f"CLI-only provider {provider_id!r} must include "
+                    "available-in-distribution"
+                )
 
 
 def validate_site_manifest(

@@ -130,8 +130,7 @@
       },
       "status_labels": [
         "implemented-on-main",
-        "available-in-distribution",
-        "supported"
+        "available-in-distribution"
       ],
       "evidence": [
         "src/review_sensei/providers/registry.py",

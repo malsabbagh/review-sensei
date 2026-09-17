@@ -338,7 +338,10 @@ def render_releases_page(manifest: dict[str, Any]) -> str:
 </section>"""
     return _page_shell(
         title="ReviewSensei releases",
-        description="Release-aware facts for ReviewSensei 0.1.1 packages, workflows, and compatibility manifest references.",
+        description=(
+            f"Release-aware facts for ReviewSensei {release['version']} packages, "
+            "workflows, and compatibility manifest references."
+        ),
         canonical_path="/releases/",
         current_nav="releases",
         body=body,

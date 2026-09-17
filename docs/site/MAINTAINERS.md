@@ -23,8 +23,10 @@ manifest whenever provider or release boundaries change.
 3. Use conservative status labels. A provider is **shipped** only when its
    registry key is registered and at least one engine surface (`cli`,
    `evaluate`, or `npx_launcher`) is enabled. Shipped providers must include
-   `implemented-on-main`; CLI-enabled shipped providers must also include
-   `supported`. Unshipped providers (including source-only adapters such as
+   `implemented-on-main`. Workflow-enabled shipped providers must also include
+   `supported`; CLI-only shipped providers must include
+   `available-in-distribution` instead. Unshipped providers (including
+   source-only adapters such as
    OpenRouter today) must stay `not-implemented` and must not be labeled
    `supported`.
 4. Point `evidence` entries at repository paths that exist on main.

@@ -80,13 +80,24 @@ class SiteManifestValidationTests(unittest.TestCase):
         with self.assertRaises(validate_module.SiteManifestError):
             validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
-    def test_cli_enabled_provider_without_supported_label_is_rejected(self) -> None:
+    def test_workflow_enabled_provider_without_supported_label_is_rejected(
+        self,
+    ) -> None:
         document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         document["providers"][0]["status_labels"] = [
             "implemented-on-main",
             "available-in-distribution",
         ]
+        with self.assertRaises(validate_module.SiteManifestError):
+            validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
+
+    def test_cli_only_provider_without_distribution_label_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        for entry in document["providers"]:
+            if entry["id"] == "openai-compatible":
+                entry["status_labels"] = ["implemented-on-main", "supported"]
         with self.assertRaises(validate_module.SiteManifestError):
             validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
