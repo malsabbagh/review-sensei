@@ -552,6 +552,57 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
+    def test_generated_caller_and_reusable_workflow_openrouter_routing_contract(
+        self,
+    ):
+        from review_sensei.hosting.github.setup import SETUP_VARIABLES, SetupPlanBuilder
+
+        repo_root = Path(__file__).resolve().parents[1]
+        reusable = (
+            repo_root / ".github" / "workflows" / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        caller_template = (
+            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        generated_caller = next(
+            file.content
+            for file in SetupPlanBuilder().build("owner/repo").files
+            if file.path == ".github/workflows/review-sensei-review.yml"
+        )
+        self.assertEqual(generated_caller, caller_template)
+
+        # Caller wiring for provider_profile is deferred until the v4 tag moves;
+        # until then the reusable workflow default keeps OpenRouter off the path.
+        self.assertIn(
+            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
+            generated_caller,
+        )
+        self.assertNotIn("provider_profile:", generated_caller)
+        self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
+        self.assertIn(
+            "provider_profile:\n        required: false\n        default: ''",
+            reusable,
+        )
+
+        openrouter_gate = (
+            "inputs.provider_mode == 'cloud' && "
+            "(inputs.provider_profile == 'openrouter-sonnet' || "
+            "inputs.provider_profile == 'openrouter-gpt')"
+        )
+        cloud_fallback_gate = (
+            "inputs.provider_profile == '' && "
+            "(inputs.provider_mode == 'cloud' || "
+            "(inputs.provider_mode == '' && inputs.mode == 'automatic'))"
+        )
+        local_fallback_gate = (
+            "inputs.provider_profile == '' && "
+            "(inputs.provider_mode == 'local' || "
+            "(inputs.provider_mode == '' && inputs.mode == 'manual'))"
+        )
+        self.assertIn(openrouter_gate, reusable)
+        self.assertIn(cloud_fallback_gate, reusable)
+        self.assertIn(local_fallback_gate, reusable)
+
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
         workflow = (
             Path(__file__).resolve().parents[1]
