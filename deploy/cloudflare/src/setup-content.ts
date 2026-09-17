@@ -3,8 +3,9 @@
  *
  * The Worker receives the public reusable-workflow git tag as the update
  * channel and validates that it resolves before generating these files. The
- * customer-owned OLLAMA_API_KEY is referenced by name in the caller and passed
- * to the workflow; this module never handles its value.
+ * customer-owned OLLAMA_API_KEY and OPENROUTER_API_KEY secrets are referenced
+ * by name in the caller and passed to the workflow; this module never handles
+ * their values.
  */
 
 const GITHUB_EXPRESSION = "@@";
