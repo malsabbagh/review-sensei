@@ -1004,6 +1004,10 @@ jobs:
               raise SystemExit(1) from exc
           PY
           )"
+          if [[ -z "$OPENROUTER_UPSTREAM_PROVIDER" ]]; then
+            echo '::error::OPENROUTER_UPSTREAM_PROVIDER could not be resolved' >&2
+            exit 1
+          fi
           export OPENROUTER_UPSTREAM_PROVIDER
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
@@ -1155,6 +1159,10 @@ jobs:
               raise SystemExit(1) from exc
           PY
           )"
+          if [[ -z "$OPENROUTER_UPSTREAM_PROVIDER" ]]; then
+            echo '::error::OPENROUTER_UPSTREAM_PROVIDER could not be resolved' >&2
+            exit 1
+          fi
           export OPENROUTER_UPSTREAM_PROVIDER
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
