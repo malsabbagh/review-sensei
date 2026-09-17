@@ -253,11 +253,14 @@ jobs:
               ;;
           esac
 
-      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
+      - name: Install ReviewSensei and validate hosted model
         env:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
           REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          MODE: ${{ inputs.mode }}
+          MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
@@ -292,14 +295,7 @@ jobs:
           fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
-
-      - name: Validate model input for selected backend
-        env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
-          MODE: ${{ inputs.mode }}
-          MODEL: ${{ inputs.model }}
-        run: |
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          "$python_bin" - <<'PY'
           import os
           import sys
 
@@ -981,9 +977,17 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import hosted_openrouter_upstream
+          from review_sensei.provider_config import (
+              hosted_openrouter_upstream,
+              validate_hosted_workflow_model,
+          )
 
           try:
+              validate_hosted_workflow_model(
+                  provider_mode="openrouter",
+                  workflow_mode="",
+                  model=os.environ["MODEL"],
+              )
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],
@@ -1136,9 +1140,17 @@ jobs:
           import sys
 
           from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import hosted_openrouter_upstream
+          from review_sensei.provider_config import (
+              hosted_openrouter_upstream,
+              validate_hosted_workflow_model,
+          )
 
           try:
+              validate_hosted_workflow_model(
+                  provider_mode="openrouter",
+                  workflow_mode="",
+                  model=os.environ["MODEL"],
+              )
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],

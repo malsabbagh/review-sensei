@@ -79,6 +79,17 @@ Callers forward `REVIEWSENSEI_PROVIDER_MODE`, `REVIEWSENSEI_MODEL`, and
 `openrouter` job body mirrors the `cloud` job; `tests/test_ci_policy.py`
 asserts provider-job parity so drift is caught in CI.
 
+## Amendment (2026-09-17, PR #112)
+
+Hosted OpenRouter validation resolves an empty `model` input to
+`DEFAULT_OPENROUTER_MODEL` before allowlist checks in
+`validate_hosted_workflow_model`. The reusable workflow validates the resolved
+model in `validate-provider-mode` and again in the `openrouter` provider job
+after applying the job default. Non-allowlisted models fail with an explicit
+message that hosted runs do not forward `--allow-unqualified-profile`; operator
+opt-in is `REVIEWSENSEI_PROVIDER_MODE=openrouter` plus a published allowlist
+slug.
+
 ## Alternatives considered
 
 ### Reusing `openai-compatible` with an OpenRouter base URL

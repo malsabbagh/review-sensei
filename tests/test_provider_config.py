@@ -7,6 +7,7 @@ from review_sensei.provider_config import (
     HOSTED_OPENROUTER_DEFAULTS,
     hosted_openrouter_upstream,
     published_hosted_openrouter_models,
+    resolve_hosted_workflow_model,
     validate_hosted_workflow_model,
 )
 
@@ -17,6 +18,21 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             provider_mode="cloud-ollama",
             workflow_mode="automatic",
             model="",
+        )
+
+    def test_empty_openrouter_model_validates_default(self) -> None:
+        validate_hosted_workflow_model(
+            provider_mode="openrouter",
+            workflow_mode="automatic",
+            model="",
+        )
+        self.assertEqual(
+            resolve_hosted_workflow_model(
+                provider_mode="openrouter",
+                workflow_mode="automatic",
+                model="",
+            ),
+            DEFAULT_OPENROUTER_MODEL,
         )
 
     def test_empty_workflow_mode_is_allowed(self) -> None:

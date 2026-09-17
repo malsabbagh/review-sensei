@@ -72,6 +72,22 @@ def hosted_openrouter_upstream(
     return upstream
 
 
+def resolve_hosted_workflow_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    model: str,
+) -> str:
+    """Return the hosted workflow model slug used for validation."""
+
+    value = model.strip()
+    if value:
+        return value
+    if _effective_hosted_backend(provider_mode, workflow_mode) == "openrouter":
+        return DEFAULT_OPENROUTER_MODEL
+    return ""
+
+
 def validate_hosted_workflow_model(
     *,
     provider_mode: str,
@@ -80,7 +96,11 @@ def validate_hosted_workflow_model(
 ) -> None:
     """Validate a hosted workflow model string for the selected backend."""
 
-    value = model.strip()
+    value = resolve_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model=model,
+    )
     if not value:
         return
     validate_bounded_text(
@@ -99,7 +119,8 @@ def validate_hosted_workflow_model(
             raise ReviewInputError("openrouter model must be vendor/model slug")
         if value not in published_hosted_openrouter_models():
             raise ReviewInputError(
-                "openrouter model is not allowlisted for hosted workflows"
+                "openrouter model is not allowlisted for hosted workflows; "
+                "hosted runs do not forward --allow-unqualified-profile"
             )
         return
     if "/" in value:
@@ -338,6 +359,7 @@ __all__ = [
     "provider_mode_default",
     "published_hosted_openrouter_models",
     "resolve_effective_provider_configuration",
+    "resolve_hosted_workflow_model",
     "validate_hosted_workflow_model",
     "validate_profile_provider_match",
 ]

@@ -5,7 +5,9 @@
 - Hosted GitHub setup selects the backend with `REVIEWSENSEI_PROVIDER_MODE`
   (`local-ollama`, `cloud-ollama`, or `openrouter`; `local` and `cloud` are
   aliases) and the model with `REVIEWSENSEI_MODEL`. `REVIEWSENSEI_PROVIDER_PROFILE`
-  is no longer an operator setting.
+  is no longer an operator setting. Hosted OpenRouter derives
+  `OPENROUTER_UPSTREAM_PROVIDER` from `HOSTED_OPENROUTER_DEFAULTS` and validates
+  the resolved default model (`DEFAULT_OPENROUTER_MODEL`) when `model` is empty.
 
 - Documented ownership, licensing inventory, trademark usage, DCO-without-CLA
   contribution licensing, and the Community / Managed / Enterprise boundary

@@ -912,19 +912,15 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("actions/checkout@", job)
         self.assertIn("permissions: {}", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
-        self.assertIn("Install ReviewSensei package (PyPI first, GitHub fallback)", job)
+        self.assertIn("Install ReviewSensei and validate hosted model", job)
         self.assertNotIn(
             "deepseek/deepseek-v4.1-flash|anthropic/claude-3.5-sonnet", job
         )
-        install_pos = job.index(
-            "Install ReviewSensei package (PyPI first, GitHub fallback)"
-        )
+        install_pos = job.index("Install ReviewSensei and validate hosted model")
         reject_pos = job.index("Reject unsupported provider mode")
         self.assertLess(reject_pos, install_pos)
-        model_block = _run_block_containing(
-            workflow_text, "validate_hosted_workflow_model"
-        )
-        self.assertIn('"$RUNNER_TEMP/review-sensei-venv/bin/python"', model_block)
+        self.assertIn("validate_hosted_workflow_model", job)
+        self.assertIn('"$RUNNER_TEMP/review-sensei-venv/bin/python"', job)
         self.assertNotIn("PYTHONPATH=src", job)
 
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
@@ -1050,8 +1046,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
-            4,
+            3,
         )
+        self.assertIn("Install ReviewSensei and validate hosted model", text)
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
             4,
