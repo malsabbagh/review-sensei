@@ -6,14 +6,13 @@ evidence. They do not contact live providers or fabricate operator evidence.
 
 from __future__ import annotations
 
-import json
 import unittest
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
     engine_digest,
-    prompt_digest,
     promotion_record_from_reports,
+    prompt_digest,
     require_supported_promotion,
 )
 from review_sensei.openrouter_qualification import (
@@ -191,7 +190,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
 
     def test_two_live_reports_are_insufficient(self) -> None:
         reports = [
-            _make_openrouter_report(elapsed_total_ms=index, invocation_id=f"live-{index}")
+            _make_openrouter_report(
+                elapsed_total_ms=index, invocation_id=f"live-{index}"
+            )
             for index in (1, 2)
         ]
         record = qualification_record_from_reports(
@@ -230,7 +231,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
 
     def test_failing_live_reports_are_unsupported(self) -> None:
         reports = [
-            _make_openrouter_report(passed=False, elapsed_total_ms=index, invocation_id=f"f-{index}")
+            _make_openrouter_report(
+                passed=False, elapsed_total_ms=index, invocation_id=f"f-{index}"
+            )
             for index in (1, 2, 3)
         ]
         record = qualification_record_from_reports(
@@ -268,7 +271,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 evaluated_at=EVALUATED_AT,
             )
 
-    def test_supported_status_requires_three_evidence_references_in_record(self) -> None:
+    def test_supported_status_requires_three_evidence_references_in_record(
+        self,
+    ) -> None:
         reports = [
             _make_openrouter_report(elapsed_total_ms=index, invocation_id=f"ok-{index}")
             for index in (1, 2, 3)
@@ -290,7 +295,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
 
     def test_three_independent_live_reports_can_build_supported_record(self) -> None:
         reports = [
-            _make_openrouter_report(elapsed_total_ms=index, invocation_id=f"live-{index}")
+            _make_openrouter_report(
+                elapsed_total_ms=index, invocation_id=f"live-{index}"
+            )
             for index in (1, 2, 3)
         ]
         record = qualification_record_from_reports(
@@ -308,7 +315,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             "supported",
         )
 
-    def test_generic_promotion_gate_also_rejects_fixture_openrouter_reports(self) -> None:
+    def test_generic_promotion_gate_also_rejects_fixture_openrouter_reports(
+        self,
+    ) -> None:
         reports = [
             _make_openrouter_report(
                 mode="fixture",
@@ -340,7 +349,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         self,
     ) -> None:
         live = _make_openrouter_report(endpoint_scope="remote")
-        loopback = _make_openrouter_report(endpoint_scope="loopback", invocation_id="loop-1")
+        loopback = _make_openrouter_report(
+            endpoint_scope="loopback", invocation_id="loop-1"
+        )
         record = qualification_record_from_reports(
             [live],
             target=TARGET,

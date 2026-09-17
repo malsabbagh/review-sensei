@@ -56,9 +56,13 @@ class OpenRouterQualificationTarget:
             isinstance(value, str) and value.strip()
             for value in (self.model, self.upstream_provider, self.base_url)
         ):
-            raise ReviewInputError("OpenRouter qualification target fields are required")
+            raise ReviewInputError(
+                "OpenRouter qualification target fields are required"
+            )
         if not is_allowlisted_openrouter_endpoint(self.base_url):
-            raise ReviewInputError("OpenRouter qualification base_url is not allowlisted")
+            raise ReviewInputError(
+                "OpenRouter qualification base_url is not allowlisted"
+            )
 
     @property
     def provider(self) -> str:
@@ -93,9 +97,9 @@ def routing_policy_digest(policy: OpenRouterRoutingPolicy) -> str:
         raise ReviewInputError("OpenRouter routing policy is required")
     payload = dict(policy.identity_fields())
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
     ).hexdigest()
 
 
@@ -132,9 +136,15 @@ class OpenRouterQualificationRecord:
             _digest_list(self.evidence_references, label="evidence_references"),
         )
         if not self.limitations:
-            raise ReviewInputError("OpenRouter qualification record requires limitations")
-        if any(not isinstance(item, str) or not item.strip() for item in self.limitations):
-            raise ReviewInputError("OpenRouter qualification limitations must be non-empty")
+            raise ReviewInputError(
+                "OpenRouter qualification record requires limitations"
+            )
+        if any(
+            not isinstance(item, str) or not item.strip() for item in self.limitations
+        ):
+            raise ReviewInputError(
+                "OpenRouter qualification limitations must be non-empty"
+            )
         if self.promotion.status == "supported":
             if len(self.evidence_references) < 3:
                 raise ReviewInputError(
@@ -224,7 +234,9 @@ def _validate_openrouter_live_report(
     if fields["mode"] != "live":
         return
     if fields["model"] != target.model:
-        raise ReviewInputError("OpenRouter qualification report model does not match target")
+        raise ReviewInputError(
+            "OpenRouter qualification report model does not match target"
+        )
     run = report.get("run")
     if not isinstance(run, Mapping):
         raise ReviewInputError("evaluation report is incomplete")
@@ -252,7 +264,9 @@ def qualification_record_from_reports(
     try:
         documents = tuple(reports)
     except TypeError as exc:
-        raise ReviewInputError("OpenRouter qualification reports must be iterable") from exc
+        raise ReviewInputError(
+            "OpenRouter qualification reports must be iterable"
+        ) from exc
     for report in documents:
         _validate_openrouter_live_report(report, target)
     promotion = promotion_record_from_reports(
@@ -271,9 +285,9 @@ def qualification_record_from_reports(
     if not references and documents:
         references = tuple(
             hashlib.sha256(
-                json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-                    "utf-8"
-                )
+                json.dumps(
+                    report, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode("utf-8")
             ).hexdigest()
             for report in documents
         )
