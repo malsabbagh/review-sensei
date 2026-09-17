@@ -639,11 +639,13 @@ v4 workflow following another valid public tag is stale and is migrated; absent
 and legacy/v2 clients are also reconciled through at most one reviewable
 setup-v4 PR per selected repository.
 
-One generated caller passes `provider_mode` explicitly. Cloud and local runtime
-jobs expose the same operation matrix—automatic/manual review, review and
-learning publication, optional artifacts, and bounded `@sensei` replies—while
-retaining different compute and egress boundaries. Cloud uses GitHub-hosted
-compute and Ollama Cloud; local uses the labelled self-hosted Ollama runner.
+One generated caller passes `provider_mode` and `model` explicitly. Local,
+cloud, and OpenRouter runtime jobs expose the same operation matrix—automatic/manual
+review, review and learning publication, optional artifacts, and bounded
+`@sensei` replies—while retaining different compute and egress boundaries.
+`local-ollama` uses the labelled self-hosted Ollama runner; `cloud-ollama`
+uses GitHub-hosted Ollama Cloud; `openrouter` uses GitHub-hosted OpenRouter with
+`REVIEWSENSEI_MODEL`.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 

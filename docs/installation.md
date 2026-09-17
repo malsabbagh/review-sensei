@@ -158,46 +158,39 @@ use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
 an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
 the reusable workflow.
 
-OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
+Installed GitHub workflows select the backend with one variable and one shared
+model:
 
-**Generated setup-v4 callers do not forward OpenRouter inputs until #112.**
-Those callers still omit `provider_profile`, `allow_unqualified_profile`, and
-`OPENROUTER_API_KEY` until follow-up #112 lands after the public `v4` tag
-includes this reusable-workflow contract. Until then, setting
-`REVIEWSENSEI_PROVIDER_PROFILE` on a generated caller has no effect.
+| `REVIEWSENSEI_PROVIDER_MODE` | Where it runs | Secret | Default model when `REVIEWSENSEI_MODEL` is empty |
+| --- | --- | --- | --- |
+| `local` or `local-ollama` (default) | Self-hosted runner labelled `ollama` | none | `qwen3.5:4b` |
+| `cloud` or `cloud-ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4-flash:cloud` |
+| `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `anthropic/claude-3.5-sonnet` |
 
-After the `v4` tag moves, **manual or custom callers** that forward the new
-inputs can run OpenRouter immediately; there is no extra gate beyond what the
-reusable workflow validates. The reusable workflow requires **both**
-`provider_mode=cloud` and `provider_profile=openrouter-sonnet` or
-`openrouter-gpt`, plus `allow_unqualified_profile=true` and
-`OPENROUTER_API_KEY`. Setting only the profile with `local` mode or without
-`allow_unqualified_profile=true` fails during `validate-provider-mode`.
+Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
+selected. Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL`
+remain fallbacks for Ollama when `REVIEWSENSEI_MODEL` is empty.
+
+OpenRouter CLI flags and environment (used with `--provider openrouter` or
+`--profile openrouter-sonnet` / `openrouter-gpt` for local CLI runs):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt` together with `REVIEWSENSEI_PROVIDER_MODE=cloud`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies. Leave empty to keep Ollama local/cloud defaults. |
-| `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter profiles in CLI or workflow runs |
+| `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
-| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |
+| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter CLI runs |
 | `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
 
 `doctor` and `plan` report credential presence only; they never print the key.
-OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile`
-for live review, live evaluation, and provider-backed GitHub reply generation
-until separate qualification evidence exists. Hosted OpenRouter runs use
-`ubuntu-latest`, require `REVIEWSENSEI_PROVIDER_MODE=cloud`, read
-`OPENROUTER_API_KEY` by name only, and pass `--allow-unqualified-profile` only
-when the caller forwards `allow_unqualified_profile=true` (default `false`).
-Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty to keep the default Ollama
-local/cloud paths.
+OpenRouter CLI profiles start `unqualified` and require
+`--allow-unqualified-profile` for live review until separate qualification
+evidence exists. Hosted OpenRouter uses `--provider openrouter --model` and
+derives `OPENROUTER_UPSTREAM_PROVIDER` from the model slug when possible.
 
-To roll back from OpenRouter, clear `REVIEWSENSEI_PROVIDER_PROFILE`, restore
-`REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`, and remove the
-`OPENROUTER_API_KEY` secret when it is no longer needed. Ollama defaults are
-unchanged.
+To roll back from OpenRouter, set `REVIEWSENSEI_PROVIDER_MODE` back to `local`
+or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.
 
 ## GitHub workflow example
 
@@ -251,10 +244,12 @@ provider-only while writes are disabled. Set
 `REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated
 learning proposals are desired, and `REVIEWSENSEI_LEARNING_PRS=true` to publish
 those proposals as draft PRs.
-`REVIEWSENSEI_PROVIDER_MODE=cloud` runs on `ubuntu-latest` and requires the
-customer-owned `OLLAMA_API_KEY` under Repository Settings → Secrets and
-variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` runs the same review
-path on the labelled self-hosted runner. Both reject fork heads before provider
+`REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` runs on `ubuntu-latest`
+and requires the customer-owned `OLLAMA_API_KEY` under Repository Settings →
+Secrets and variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` or
+`local-ollama` runs the same review path on the labelled self-hosted runner.
+`REVIEWSENSEI_PROVIDER_MODE=openrouter` runs on `ubuntu-latest` with
+`OPENROUTER_API_KEY` and `REVIEWSENSEI_MODEL`. All modes reject fork heads before provider
 or broker access and can publish one exact-head App review with valid inline
 comments and a validated summary. Enable `REVIEWSENSEI_LEARNING_PRS` separately for deterministic draft
 learning PRs.

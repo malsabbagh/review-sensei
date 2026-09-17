@@ -431,12 +431,11 @@ exist on the public reusable runner they reference. Compatibility tests fail
 before release if a caller `with:` key is absent from
 `review-sensei-run.yml` `workflow_call.inputs`.
 
-`REVIEWSENSEI_PROVIDER_MODE` defaults to `local`. The default local model is
-`qwen3.5:4b`; setting the mode to `cloud` selects
-`deepseek-v4-flash:cloud` and requires `OLLAMA_API_KEY`. OpenRouter is explicit
-opt-in through `REVIEWSENSEI_PROVIDER_PROFILE` (`openrouter-sonnet` or
-`openrouter-gpt`) and the customer-owned `OPENROUTER_API_KEY` secret; empty
-profile values preserve the Ollama local/cloud contract.
+`REVIEWSENSEI_PROVIDER_MODE` defaults to `local` (alias for `local-ollama`).
+Hosted backends are `local-ollama`, `cloud-ollama`, or `openrouter`; `local`
+and `cloud` remain aliases. `REVIEWSENSEI_MODEL` overrides the model for the
+selected backend. OpenRouter requires the customer-owned `OPENROUTER_API_KEY`
+secret; Ollama Cloud requires `OLLAMA_API_KEY`.
 
 `review-sensei --version` reads package metadata and prints an exact `X.Y.Z`
 version. This is the version recorded by the portable manual GitHub Actions

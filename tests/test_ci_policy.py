@@ -309,7 +309,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
-        self.assertNotIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", text)
         self.assertNotIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
         )
@@ -514,23 +515,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("--enable-auto-approve", text)
         self.assertIn("--no-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
+        self.assertIn("inputs.provider_mode == 'cloud-ollama'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
-        self.assertIn("inputs.provider_mode == 'cloud'", text)
-        self.assertIn("inputs.provider_profile == ''", text)
-        self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
-        self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
-        self.assertIn(
-            "OPENROUTER_API_KEY is required for OpenRouter provider profile", text
-        )
-        self.assertIn(
-            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)', text
-        )
-        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', text)
-        self.assertIn("profile_args+=(--allow-unqualified-profile)", text)
-        self.assertIn(
-            "allow_unqualified_profile:\n        required: false\n        default: 'false'",
-            text,
-        )
+        self.assertIn("inputs.provider_mode == 'local-ollama'", text)
+        self.assertIn("inputs.provider_mode == 'openrouter'", text)
+        self.assertIn("OPENROUTER_API_KEY is required for OpenRouter mode", text)
+        self.assertIn("--provider openrouter --model", text)
+        self.assertIn("provider_profile is unused", text)
+        self.assertIn("allow_unqualified_profile is unused", text)
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
@@ -538,7 +530,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(text.count("needs: validate-provider-mode"), 2)
         self.assertIn('case "$PROVIDER_MODE" in', text)
-        self.assertIn('case "$PROVIDER_PROFILE" in', text)
+        self.assertIn(
+            '""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;',
+            text,
+        )
         self.assertEqual(text.count("github reply \\\n"), 3)
         self.assertEqual(text.count("github review \\\n"), 3)
         self.assertEqual(text.count("--outcome outcome.json"), 3)
@@ -579,63 +574,29 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(generated_caller, caller_template)
         self.assertIn(
-            "does not enable hosted OpenRouter on setup-v4 callers yet", setup_plan.body
-        )
-        self.assertIn("follow-up #112", setup_plan.body)
-
-        # Caller wiring for provider_profile is deferred until the v4 tag moves;
-        # until then the reusable workflow default keeps OpenRouter off the path.
-        self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
             generated_caller,
         )
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", generated_caller)
         self.assertNotIn("provider_profile:", generated_caller)
-        self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
-        self.assertIn(
-            "provider_profile:\n        required: false\n        default: ''",
-            reusable,
-        )
+        self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
+        self.assertNotIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
+        self.assertIn("provider_profile:", reusable)
+        self.assertIn("provider_profile is unused", reusable)
 
-        openrouter_gate = (
-            "inputs.provider_mode == 'cloud' && "
-            "inputs.allow_unqualified_profile == 'true' && "
-            "(inputs.provider_profile == 'openrouter-sonnet' || "
-            "inputs.provider_profile == 'openrouter-gpt')"
-        )
+        openrouter_gate = "inputs.provider_mode == 'openrouter'"
         cloud_fallback_gate = (
-            "inputs.provider_profile == '' && "
-            "(inputs.provider_mode == 'cloud' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'automatic'))"
+            "inputs.provider_mode == 'cloud' || inputs.provider_mode == 'cloud-ollama' || "
+            "(inputs.provider_mode == '' && inputs.mode == 'automatic')"
         )
         local_fallback_gate = (
-            "inputs.provider_profile == '' && "
-            "(inputs.provider_mode == 'local' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'manual'))"
+            "inputs.provider_mode == 'local' || inputs.provider_mode == 'local-ollama' || "
+            "(inputs.provider_mode == '' && inputs.mode == 'manual')"
         )
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
         self.assertIn(local_fallback_gate, reusable)
-        self.assertIn(
-            "provider_profile requires provider_mode=cloud",
-            reusable,
-        )
-        self.assertIn(
-            "provider_profile requires allow_unqualified_profile=true",
-            reusable,
-        )
-        self.assertIn(
-            "provider_profile is unsupported; use openrouter-sonnet or openrouter-gpt.",
-            reusable,
-        )
-        self.assertNotIn("allow_unqualified_profile:", generated_caller)
         self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
-
-        deferral = (
-            "does not enable hosted OpenRouter on setup-v4 callers yet: the generated "
-            "caller forwards provider_profile, allow_unqualified_profile, and "
-            "OPENROUTER_API_KEY only after follow-up #112"
-        )
-        self.assertIn(deferral, setup_plan.body)
 
         self.assertIn("repository id must be a positive decimal integer", reusable)
         openrouter_job = _job_section(reusable, "openrouter")
@@ -648,24 +609,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             openrouter_job,
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
-        self.assertIn(
-            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)',
-            review_step,
-        )
-        self.assertIn(
-            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', review_step
-        )
-        self.assertNotIn("--allow-unqualified-profile \\\n", review_step)
+        self.assertIn("--provider openrouter --model", review_step)
+        self.assertIn("OPENROUTER_UPSTREAM_PROVIDER", review_step)
         reply_step = _step_block(
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
-        self.assertIn(
-            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', reply_step
-        )
-        self.assertNotIn(
-            '--allow-unqualified-profile \\\n            --repository "$REPOSITORY"',
-            reply_step,
-        )
+        self.assertIn("--provider openrouter --model", reply_step)
         publish_step = _step_block(
             openrouter_job, "Publish or promote validated review through the broker"
         )

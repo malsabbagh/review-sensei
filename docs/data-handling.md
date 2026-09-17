@@ -71,11 +71,10 @@ and emergency revocation.
   `OPENROUTER_UPSTREAM_PROVIDER` (default `anthropic`) for the routing policy.
 - `doctor` and `plan` report execution location (local CLI process) versus
   inference location (remote for OpenRouter) and credential presence only.
-- `REVIEWSENSEI_PROVIDER_MODE=cloud` continues to mean Ollama Cloud only; it
-  does not select OpenRouter. Hosted workflows select OpenRouter only when
-  `REVIEWSENSEI_PROVIDER_PROFILE` is set to a supported OpenRouter profile; the
-  generated caller forwards `OPENROUTER_API_KEY` by name and never reads its
-  value during setup.
+- `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` means Ollama Cloud only.
+  Hosted OpenRouter is selected with `REVIEWSENSEI_PROVIDER_MODE=openrouter` and
+  `REVIEWSENSEI_MODEL`; the generated caller forwards `OPENROUTER_API_KEY` by
+  name and never reads its value during setup.
 
 ReviewSensei does not make claims about provider retention, model training,
 subprocessors, residency, or deletion. Review the provider's current terms and

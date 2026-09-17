@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Hosted GitHub setup selects the backend with `REVIEWSENSEI_PROVIDER_MODE`
+  (`local-ollama`, `cloud-ollama`, or `openrouter`; `local` and `cloud` are
+  aliases) and the model with `REVIEWSENSEI_MODEL`. `REVIEWSENSEI_PROVIDER_PROFILE`
+  is no longer an operator setting.
+
 - Documented ownership, licensing inventory, trademark usage, DCO-without-CLA
   contribution licensing, and the Community / Managed / Enterprise boundary
   (issue #89): `docs/ownership-and-licensing.md`, `TRADEMARKS.md`, and
