@@ -234,6 +234,33 @@ jobs:
               *) echo "::error::${flag} must be true or false" >&2; exit 1 ;;
             esac
           done
+          if [[ -n "$MODEL" && "$MODEL" == -* ]]; then
+            echo '::error::model must not start with -' >&2
+            exit 1
+          fi
+          case "$PROVIDER_MODE" in
+            openrouter)
+              if [[ -n "$MODEL" ]]; then
+                if [[ "$MODEL" == *:cloud* ]]; then
+                  echo '::error::openrouter model must not use ollama cloud suffix' >&2
+                  exit 1
+                fi
+                case "$MODEL" in
+                  deepseek/deepseek-v4.1-flash|anthropic/claude-3.5-sonnet|openai/gpt-4o-mini) ;;
+                  *)
+                    echo '::error::openrouter model is not allowlisted for hosted workflows' >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              ;;
+            ""|local|local-ollama|cloud|cloud-ollama)
+              if [[ -n "$MODEL" && "$MODEL" == */* ]]; then
+                echo '::error::ollama model must not use vendor/model openrouter slug' >&2
+                exit 1
+              fi
+              ;;
+          esac
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:

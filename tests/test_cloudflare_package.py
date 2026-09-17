@@ -121,6 +121,37 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("review-sensei-uninstall.yml", source)
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)
+        self.assertIn(
+            'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
+        )
+
+    def test_setup_builders_share_constants_and_variables(self):
+        from review_sensei.hosting.github.setup import (
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            DEFAULT_OPENROUTER_MODEL,
+            DEFAULT_PROVIDER_MODE,
+            SETUP_VARIABLES,
+            SetupPlanBuilder,
+        )
+
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        for const_name, value in (
+            ("DEFAULT_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
+            ("DEFAULT_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
+            ("DEFAULT_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
+            ("DEFAULT_OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
+        ):
+            self.assertIn(f'{const_name} = "{value}"', ts_source)
+        for name, _value in SETUP_VARIABLES:
+            self.assertIn(f'name: "{name}"', ts_source)
+        py_workflow = SetupPlanBuilder().build("owner/repo").files[0].content
+        example = (
+            ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(py_workflow, example)
 
     def test_user_guidance_describes_setup_v4_publication_contract(self):
         readme = (ROOT / "README.md").read_text()

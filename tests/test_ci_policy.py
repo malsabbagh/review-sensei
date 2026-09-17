@@ -913,6 +913,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("permissions: {}", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
         self.assertIn("Install ReviewSensei package (PyPI first, GitHub fallback)", job)
+        self.assertIn("openrouter model is not allowlisted for hosted workflows", job)
+        install_pos = job.index(
+            "Install ReviewSensei package (PyPI first, GitHub fallback)"
+        )
+        reject_pos = job.index("Reject unsupported provider mode")
+        self.assertLess(reject_pos, install_pos)
         model_block = _run_block_containing(
             workflow_text, "validate_hosted_workflow_model"
         )
