@@ -107,6 +107,18 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             HOSTED_OPENROUTER_DEFAULTS,
         )
 
+    def test_hosted_defaults_match_published_set(self) -> None:
+        self.assertEqual(
+            HOSTED_OPENROUTER_DEFAULTS,
+            frozenset(
+                {
+                    (DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM),
+                    ("anthropic/claude-3.5-sonnet", "anthropic"),
+                    ("openai/gpt-4o-mini", "openai"),
+                }
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

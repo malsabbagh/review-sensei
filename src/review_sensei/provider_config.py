@@ -13,7 +13,7 @@ from .providers.openrouter import (
     OpenRouterRoutingPolicy,
     is_allowlisted_openrouter_endpoint,
 )
-from .providers.profiles import PROVIDER_PROFILES, ProviderProfile, get_provider_profile
+from .providers.profiles import ProviderProfile, get_provider_profile
 from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
@@ -27,18 +27,13 @@ DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
-def _hosted_openrouter_defaults() -> frozenset[tuple[str, str]]:
-    defaults: set[tuple[str, str]] = {
-        (DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM)
+HOSTED_OPENROUTER_DEFAULTS = frozenset(
+    {
+        (DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM),
+        ("anthropic/claude-3.5-sonnet", "anthropic"),
+        ("openai/gpt-4o-mini", "openai"),
     }
-    for profile in PROVIDER_PROFILES.values():
-        if profile.provider != "openrouter" or profile.openrouter_policy is None:
-            continue
-        defaults.add((profile.model, profile.openrouter_policy.upstream_provider))
-    return frozenset(defaults)
-
-
-HOSTED_OPENROUTER_DEFAULTS = _hosted_openrouter_defaults()
+)
 _OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 _OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
 
