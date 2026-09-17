@@ -169,7 +169,11 @@ model:
 
 Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
 selected. Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL`
-remain fallbacks for Ollama when `REVIEWSENSEI_MODEL` is empty.
+remain fallbacks for Ollama when `REVIEWSENSEI_MODEL` is empty. Hosted
+OpenRouter accepts only the published allowlist in
+`provider_config.HOSTED_OPENROUTER_DEFAULTS` (default
+`deepseek/deepseek-v4.1-flash`, plus `anthropic/claude-3.5-sonnet` and
+`openai/gpt-4o-mini`).
 
 OpenRouter CLI flags and environment (used with `--provider openrouter` or
 `--profile openrouter-sonnet` / `openrouter-gpt` for local CLI runs):

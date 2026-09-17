@@ -36,7 +36,7 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             validate_hosted_workflow_model(
                 provider_mode="openrouter",
                 workflow_mode="automatic",
-                model="anthropic/claude-3.5-sonnet",
+                model="meta-llama/llama-3.1-70b-instruct",
             )
 
     def test_openrouter_accepts_published_model(self) -> None:
@@ -46,6 +46,18 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             model=DEFAULT_OPENROUTER_MODEL,
         )
 
+    def test_openrouter_accepts_profile_models(self) -> None:
+        for model in (
+            "anthropic/claude-3.5-sonnet",
+            "openai/gpt-4o-mini",
+        ):
+            with self.subTest(model=model):
+                validate_hosted_workflow_model(
+                    provider_mode="openrouter",
+                    workflow_mode="automatic",
+                    model=model,
+                )
+
     def test_hosted_openrouter_upstream_resolves_default(self) -> None:
         self.assertEqual(
             hosted_openrouter_upstream(DEFAULT_OPENROUTER_MODEL),
@@ -54,7 +66,7 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
 
     def test_hosted_openrouter_upstream_rejects_unknown(self) -> None:
         with self.assertRaisesRegex(ReviewInputError, "not allowlisted"):
-            hosted_openrouter_upstream("anthropic/claude-3.5-sonnet")
+            hosted_openrouter_upstream("meta-llama/llama-3.1-70b-instruct")
 
     def test_hosted_openrouter_upstream_rejects_mismatch(self) -> None:
         with self.assertRaisesRegex(ReviewInputError, "does not match hosted model"):

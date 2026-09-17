@@ -26,7 +26,11 @@ DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 HOSTED_OPENROUTER_DEFAULTS = frozenset(
-    {(DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM)}
+    {
+        (DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM),
+        ("anthropic/claude-3.5-sonnet", "anthropic"),
+        ("openai/gpt-4o-mini", "openai"),
+    }
 )
 _OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 _OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
