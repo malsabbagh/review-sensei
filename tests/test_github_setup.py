@@ -307,7 +307,7 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
             (
                 Path(__file__).parent.parent
-                / ".github/workflows/review-sensei-review.yml"
+                / "examples/github-actions/review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
         config = dict((f.path, f.content) for f in plan.files)[
