@@ -155,10 +155,21 @@ def _provider_is_shipped(entry: dict[str, Any], registered: frozenset[str]) -> b
 
 def validate_provider_consistency(root: Path, document: dict[str, Any]) -> None:
     registered = registered_provider_names(root)
+    seen_ids: set[str] = set()
     for entry in document["providers"]:
         provider_id = entry["id"]
         provider = entry["provider"]
         labels = set(entry["status_labels"])
+
+        if provider_id in seen_ids:
+            raise SiteManifestError(f"duplicate provider id {provider_id!r}")
+        seen_ids.add(provider_id)
+
+        if provider not in registered:
+            raise SiteManifestError(
+                f"provider {provider_id!r} references unknown registry key "
+                f"{provider!r}; registered keys: {', '.join(sorted(registered))}"
+            )
 
         if not _provider_is_shipped(entry, registered):
             if labels & UNSUPPORTED_USER_FACING_LABELS:
@@ -174,11 +185,6 @@ def validate_provider_consistency(root: Path, document: dict[str, Any]) -> None:
                 )
             continue
 
-        if provider not in registered:
-            raise SiteManifestError(
-                f"provider {provider_id!r} references unknown registry key "
-                f"{provider!r}; registered keys: {', '.join(sorted(registered))}"
-            )
         if "implemented-on-main" not in labels:
             raise SiteManifestError(
                 f"shipped provider {provider_id!r} must include implemented-on-main"

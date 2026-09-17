@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import sys
 import tempfile
@@ -362,12 +363,25 @@ def build_site_pages(
     return providers_output, releases_output
 
 
+def _validate_manifest(manifest: dict[str, Any], *, root: Path) -> None:
+    script = Path(__file__).resolve().parent / "validate_site_manifest.py"
+    spec = importlib.util.spec_from_file_location("validate_site_manifest", script)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load manifest validator from {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.validate_site_manifest(manifest, root=root)
+
+
 def check_site_pages(
     *,
     manifest_path: Path = DEFAULT_MANIFEST,
     providers_output: Path = PROVIDERS_PAGE,
     releases_output: Path = RELEASES_PAGE,
+    root: Path = ROOT,
 ) -> None:
+    manifest = _load_manifest(manifest_path)
+    _validate_manifest(manifest, root=root)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         generated_providers = directory / "providers" / "index.html"

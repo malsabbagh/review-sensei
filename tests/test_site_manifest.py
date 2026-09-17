@@ -66,10 +66,18 @@ class SiteManifestValidationTests(unittest.TestCase):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         document["providers"][0]["provider"] = "missing-provider"
         document["providers"][0]["engine_support"] = {
-            "cli": True,
-            "evaluate": True,
-            "npx_launcher": True,
+            "cli": False,
+            "evaluate": False,
+            "npx_launcher": False,
         }
+        document["providers"][0]["status_labels"] = ["planned", "not-implemented"]
+        with self.assertRaises(validate_module.SiteManifestError):
+            validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
+
+    def test_duplicate_provider_id_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        document["providers"].append(dict(document["providers"][0]))
         with self.assertRaises(validate_module.SiteManifestError):
             validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
