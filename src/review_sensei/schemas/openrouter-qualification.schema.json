@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/openrouter-qualification.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "engine_digest",
+    "prompt_digest",
+    "configuration_digest",
+    "corpus_digest",
+    "provider",
+    "model",
+    "observed_revision",
+    "run_count",
+    "evaluated_at",
+    "reproducibility",
+    "status",
+    "rollback_decision",
+    "qualification_target",
+    "evidence_references",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "engine_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "prompt_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "configuration_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "corpus_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "provider": {"const": "openrouter"},
+    "model": {"type": "string", "minLength": 1, "maxLength": 256},
+    "observed_revision": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_count": {"type": "integer", "minimum": 1},
+    "evaluated_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "reproducibility": {"type": "object", "minProperties": 1, "maxProperties": 32},
+    "status": {"enum": ["supported", "insufficient", "unsupported"]},
+    "rollback_decision": {"enum": ["revert-to-baseline", "hold", "none"]},
+    "qualification_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "upstream_provider",
+        "base_url",
+        "routing_policy_digest"
+      ],
+      "properties": {
+        "provider": {"const": "openrouter"},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "upstream_provider": {"type": "string", "minLength": 1, "maxLength": 128},
+        "base_url": {"type": "string", "minLength": 1, "maxLength": 256},
+        "routing_policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "evidence_references": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+      "maxItems": 32
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 512},
+      "maxItems": 32
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "engine_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "prompt_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "corpus_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "provider": "openrouter",
+      "model": "anthropic/claude-3.5-haiku",
+      "observed_revision": "pending-operator-live-evidence",
+      "run_count": 1,
+      "evaluated_at": "2026-09-16T00:00:00Z",
+      "reproducibility": {"temperature": 0},
+      "status": "insufficient",
+      "rollback_decision": "hold",
+      "qualification_target": {
+        "provider": "openrouter",
+        "model": "anthropic/claude-3.5-haiku",
+        "upstream_provider": "anthropic",
+        "base_url": "https://openrouter.ai/api/v1",
+        "routing_policy_digest": "97ee4e2219c11ea18a569068db74dbcce5eb8df5366eb8ffeb56ec98b81f11dd"
+      },
+      "evidence_references": [],
+      "limitations": [
+        "Harness-only record; live operator evidence is required before supported status."
+      ]
+    }
+  ]
+}
