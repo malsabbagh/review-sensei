@@ -4,7 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..errors import ProviderError
+from ..errors import ProviderError, ReviewInputError
+from ..provider_config import openrouter_policy_from_env
 from .base import ReviewProvider, validate_provider_contract
 from .fixture import FixtureProvider
 from .ollama import OllamaProvider
@@ -43,6 +44,16 @@ class ProviderSettings:
             raise ProviderError(
                 f"provider profile '{selected.name}' requires an explicit API key"
             )
+        if selected.provider == "openrouter":
+            if selected.openrouter_policy is None:
+                raise ProviderError(
+                    f"provider profile '{selected.name}' requires an OpenRouter "
+                    "routing policy"
+                )
+        elif selected.openrouter_policy is not None:
+            raise ProviderError(
+                f"provider profile '{selected.name}' must not declare openrouter_policy"
+            )
         if not selected.requires_api_key and api_key is not None:
             raise ProviderError(
                 f"provider profile '{selected.name}' does not accept an API key"
@@ -55,6 +66,7 @@ class ProviderSettings:
             timeout_seconds=selected.timeout_seconds,
             max_output_tokens=selected.max_output_tokens,
             profile=selected.name,
+            openrouter_policy=selected.openrouter_policy,
         )
 
 
@@ -137,6 +149,13 @@ class ProviderRegistry:
                 raise ProviderError(
                     "provider profile output budget cannot be overridden"
                 )
+            if (
+                settings.openrouter_policy is not None
+                and settings.openrouter_policy != profile.openrouter_policy
+            ):
+                raise ProviderError(
+                    "provider profile routing policy cannot be overridden"
+                )
             settings = replace(
                 settings,
                 name=profile.provider,
@@ -146,8 +165,21 @@ class ProviderRegistry:
                 max_output_tokens=profile.max_output_tokens,
                 profile=profile.name,
                 allow_custom_endpoint=False,
+                openrouter_policy=profile.openrouter_policy,
             )
         name = settings.name.strip().lower()
+        if name == "openrouter" and settings.profile is None:
+            if settings.openrouter_policy is None:
+                raise ProviderError("openrouter provider requires a routing policy")
+            try:
+                env_policy = openrouter_policy_from_env()
+            except ReviewInputError as exc:
+                raise ProviderError(str(exc)) from exc
+            if settings.openrouter_policy != env_policy:
+                raise ProviderError(
+                    "openrouter routing policy does not match "
+                    "OPENROUTER_UPSTREAM_PROVIDER"
+                )
         try:
             factory = self._factories[name]
         except KeyError as exc:

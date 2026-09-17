@@ -337,16 +337,24 @@ reach the review service. Timeout and network failures should raise
 
 The built-in `openai-compatible` adapter targets an explicit HTTPS
 `/v1/chat/completions` endpoint and requires a non-empty API key; it has no
-provider fallback. Named registry profiles are deterministic presets:
-`local-private`, `fast-triage`, and `deep-verification` (with `local`, `private`,
-and `local/private` aliases for the first). Profiles carry bounded timeout/output-token
-budgets, `json_object` structured output, endpoint/credential policy, and
-`permitted_fallback: none`. A stage JSON file may set `provider_profile` to a
-canonical profile name. Unprofiled and `local-private` runs cannot select a
-remote stage profile; a remote run may narrow a stage to `local-private`.
-Routing never forwards one profile's credential to another endpoint and never
-escalates models after a failure. `ProviderSettings.for_profile()` never
-reads the environment or forwards a credential to a profile that disallows it.
+provider fallback. The built-in `openrouter` adapter targets the allowlisted
+`https://openrouter.ai/api/v1` Chat Completions endpoint, requires
+`OPENROUTER_API_KEY` (resolved only at the CLI boundary), and applies a typed
+`OpenRouterRoutingPolicy` (upstream provider slug, no fallbacks, deny data
+collection, ZDR). Named registry profiles are deterministic presets:
+`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, and
+`openrouter-gpt` (with `local`, `private`, and `local/private` aliases for the
+first). Profiles carry bounded timeout/output-token budgets, `json_object`
+structured output, endpoint/credential policy, optional OpenRouter routing
+policy, `qualification_status`, and `permitted_fallback: none`. New OpenRouter
+profiles start `unqualified` and cannot pass `validate_profile_promotion` until
+separate qualification evidence exists. A stage JSON file may set
+`provider_profile` to a canonical profile name. Unprofiled and `local-private`
+runs cannot select a remote stage profile; a remote run may narrow a stage to
+`local-private`. Routing never forwards one profile's credential to another
+endpoint and never escalates models after a failure.
+`ProviderSettings.for_profile()` never reads the environment or forwards a
+credential to a profile that disallows it.
 
 Ollama, fixture, and `openai-compatible` share a conformance suite covering
 request/result shape, malformed envelopes, resource limits, timeout/cancellation,
@@ -379,8 +387,8 @@ The command is `review-sensei`. Supported flags are:
 | --- | --- | --- |
 | `--version` | none | Print the installed ReviewSensei version and exit |
 | `--diff` | none | Required unified diff file path |
-| `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`) |
-| `--provider` | `REVIEWSENSEI_PROVIDER` | Provider registry key |
+| `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`) |
+| `--provider` | `REVIEWSENSEI_PROVIDER` | Provider registry key (`ollama`, `openai-compatible`, `openrouter`, `fixture`) |
 | `--base-url` | `OLLAMA_BASE_URL` | Optional Ollama API root override; mode defaults to loopback or Ollama Cloud |
 | `--model` | `OLLAMA_MODEL` | Optional model override; mode defaults to the configured local/cloud model |
 | `--api-key-env` | none | Name of environment variable holding the API key |

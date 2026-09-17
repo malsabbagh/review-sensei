@@ -686,6 +686,8 @@ def validate_profile_promotion(
     """
 
     profile = get_provider_profile(profile_name)
+    if profile.qualification_status == "unqualified":
+        raise ReviewInputError("unqualified provider profile cannot support promotion")
     if _is_fixture_alias(record.provider):
         raise ReviewInputError("fixture-only evidence cannot support promotion")
     if record.status != "supported":
@@ -933,20 +935,26 @@ def _packaged_category_digest() -> str:
 
 
 def configuration_digest(
-    corpus: Corpus, mode: str, provider: str, model: str | None
+    corpus: Corpus,
+    mode: str,
+    provider: str,
+    model: str | None,
+    *,
+    openrouter_policy: Mapping[str, object] | None = None,
 ) -> str:
-    return _json_digest(
-        {
-            "corpus_id": corpus.corpus_id,
-            "corpus_version": corpus.version,
-            "mode": mode,
-            "provider": provider,
-            "model": model,
-            "review_configuration_id": corpus.document["review_configuration"]["id"],
-            "category_digest": _packaged_category_digest(),
-            "stage_digest": package_stage_digest(),
-        }
-    )
+    payload: dict[str, object] = {
+        "corpus_id": corpus.corpus_id,
+        "corpus_version": corpus.version,
+        "mode": mode,
+        "provider": provider,
+        "model": model,
+        "review_configuration_id": corpus.document["review_configuration"]["id"],
+        "category_digest": _packaged_category_digest(),
+        "stage_digest": package_stage_digest(),
+    }
+    if openrouter_policy is not None:
+        payload["openrouter_policy"] = dict(openrouter_policy)
+    return _json_digest(payload)
 
 
 class MeasuredProvider:
@@ -1420,6 +1428,10 @@ def evaluate_live(
             continue
         service = ReviewService(measured)
         cases.append(run_case(corpus, case, service, measured))
+    openrouter_policy = None
+    routing_policy = getattr(provider, "routing_policy", None)
+    if routing_policy is not None and hasattr(routing_policy, "identity_fields"):
+        openrouter_policy = routing_policy.identity_fields()
     return build_report(
         corpus,
         cases,
@@ -1429,6 +1441,7 @@ def evaluate_live(
         provider_version=provider_version,
         model=model,
         endpoint_scope=endpoint_scope,
+        openrouter_policy=openrouter_policy,
     )
 
 
@@ -1442,6 +1455,7 @@ def build_report(
     provider_version: str | None,
     model: str | None,
     endpoint_scope: str,
+    openrouter_policy: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     quality_cases = [case for case in cases if case["kind"] == "quality"]
     expected = sum(case["expected_matches"] for case in quality_cases)
@@ -1499,7 +1513,13 @@ def build_report(
             "engine_digest": engine_digest(),
             "prompt_digest": prompt_digest(),
             "package_stage_digest": package_stage_digest(),
-            "configuration_digest": configuration_digest(corpus, mode, provider, model),
+            "configuration_digest": configuration_digest(
+                corpus,
+                mode,
+                provider,
+                model,
+                openrouter_policy=openrouter_policy,
+            ),
         },
         "configuration": {
             "review_configuration_id": corpus.document["review_configuration"]["id"],

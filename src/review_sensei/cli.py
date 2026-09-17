@@ -38,8 +38,18 @@ from .outcomes import (
     run_outcome_exit_code,
 )
 from .planning import DEFAULT_TOTAL_WORK_BUDGET
+from .provider_config import (
+    openrouter_policy_from_env,
+    openrouter_timeout_default,
+    openrouter_upstream_default,
+    resolve_effective_provider_configuration,
+    validate_profile_provider_match,
+)
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
+from .providers.openrouter import (
+    OpenRouterRoutingPolicy,
+)
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewService
@@ -57,6 +67,9 @@ DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/api"
 DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_UPSTREAM = "anthropic"
 
 
 def _provider_mode() -> str:
@@ -244,6 +257,14 @@ def _openai_timeout_default() -> float:
         raise ReviewInputError(f"{source} must be a positive number") from exc
 
 
+def _openrouter_timeout_default() -> float:
+    return openrouter_timeout_default()
+
+
+def _openrouter_upstream_default() -> str:
+    return openrouter_upstream_default()
+
+
 def _assign_if_present(args: argparse.Namespace, name: str, value: object) -> None:
     if hasattr(args, name):
         setattr(args, name, value)
@@ -271,6 +292,23 @@ def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> 
             _assign_if_present(args, "api_key_env", "OPENAI_API_KEY")
         if not _cli_option_set(arguments, "--timeout-seconds", explicit=explicit):
             _assign_if_present(args, "timeout_seconds", _openai_timeout_default())
+    elif provider == "openrouter":
+        if not _cli_option_set(arguments, "--base-url", explicit=explicit):
+            _assign_if_present(
+                args,
+                "base_url",
+                os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+            )
+        if not _cli_option_set(arguments, "--model", explicit=explicit):
+            _assign_if_present(
+                args,
+                "model",
+                os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
+            )
+        if not _cli_option_set(arguments, "--api-key-env", explicit=explicit):
+            _assign_if_present(args, "api_key_env", "OPENROUTER_API_KEY")
+        if not _cli_option_set(arguments, "--timeout-seconds", explicit=explicit):
+            _assign_if_present(args, "timeout_seconds", _openrouter_timeout_default())
     elif provider == "fixture":
         if not _cli_option_set(arguments, "--model", explicit=explicit):
             _assign_if_present(args, "model", "fixture-v1")
@@ -289,6 +327,26 @@ def _add_allow_custom_endpoint_argument(parser: argparse.ArgumentParser) -> None
     )
 
 
+def _validate_live_profile_gates(args: argparse.Namespace, argv: list[str]) -> None:
+    _validate_profile_cli_args(args, argv)
+    _validate_unqualified_profile_gate(args)
+
+
+def _require_allowlisted_openrouter_configuration(args: argparse.Namespace) -> None:
+    """Reject non-allowlisted OpenRouter endpoints using effective defaults."""
+
+    provider = str(getattr(args, "provider", "")).strip().lower()
+    if provider != "openrouter":
+        return
+    resolve_effective_provider_configuration(
+        profile=getattr(args, "profile", None),
+        provider=provider,
+        base_url=getattr(args, "base_url", None),
+        model=getattr(args, "model", None),
+        api_key_env=getattr(args, "api_key_env", None),
+    )
+
+
 def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
     """Reject non-allowlisted OpenAI endpoints at the CLI boundary."""
 
@@ -303,6 +361,22 @@ def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
             "openai-compatible endpoint is not allowlisted; pass "
             "--allow-custom-endpoint only for an explicitly trusted service"
         )
+
+
+def _openrouter_policy_from_args(args: argparse.Namespace) -> OpenRouterRoutingPolicy:
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        validate_profile_provider_match(
+            profile_name=profile_name,
+            provider_name=str(getattr(args, "provider", "")),
+        )
+        profile = get_provider_profile(profile_name)
+        if profile.openrouter_policy is None:
+            raise ReviewInputError(
+                f"profile '{profile.name}' does not declare an OpenRouter routing policy"
+            )
+        return profile.openrouter_policy
+    return openrouter_policy_from_env()
 
 
 def _resolve_api_key(
@@ -324,7 +398,26 @@ def _resolve_api_key(
     provider_name = str(args.provider).strip().lower()
     if provider_name == "fixture":
         return None
-    return os.getenv(args.api_key_env)
+    api_key_env = args.api_key_env
+    api_key = os.getenv(api_key_env)
+    if provider_name == "openrouter" and not api_key:
+        raise ReviewInputError(f"environment variable {api_key_env} is unavailable")
+    return api_key
+
+
+def _validate_unqualified_profile_gate(args: argparse.Namespace) -> None:
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return
+    profile = get_provider_profile(profile_name)
+    if profile.qualification_status != "unqualified":
+        return
+    if getattr(args, "allow_unqualified_profile", False):
+        return
+    raise ReviewInputError(
+        f"profile '{profile.name}' is unqualified; pass --allow-unqualified-profile "
+        "to authorize remote egress before qualification evidence exists"
+    )
 
 
 def _provider_settings_from_args(
@@ -336,9 +429,15 @@ def _provider_settings_from_args(
 ) -> ProviderSettings:
     profile_name = getattr(args, "profile", None)
     explicit = getattr(args, "_explicit_cli_options", None)
+    provider_name = str(args.provider).strip().lower()
+    openrouter_policy = (
+        _openrouter_policy_from_args(args) if provider_name == "openrouter" else None
+    )
+    if provider_name == "openrouter":
+        _require_allowlisted_openrouter_configuration(args)
     if profile_name:
         return ProviderSettings(
-            name=str(args.provider).strip().lower(),
+            name=provider_name,
             profile=profile_name,
             model=args.model
             if argv is None or _cli_option_set(argv, "--model", explicit=explicit)
@@ -358,16 +457,19 @@ def _provider_settings_from_args(
                 else None
             ),
             allow_custom_endpoint=False,
+            openrouter_policy=openrouter_policy,
         )
-    _require_allowlisted_openai_endpoint(args)
+    if provider_name == "openai-compatible":
+        _require_allowlisted_openai_endpoint(args)
     return ProviderSettings(
-        name=str(args.provider).strip().lower(),
+        name=provider_name,
         model=args.model,
         base_url=args.base_url,
         api_key=api_key,
         fixture_response=fixture_response,
         timeout_seconds=args.timeout_seconds,
         allow_custom_endpoint=bool(getattr(args, "allow_custom_endpoint", False)),
+        openrouter_policy=openrouter_policy,
     )
 
 
@@ -422,7 +524,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         default=None,
-        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+        help=(
+            "Named provider profile (local-private, fast-triage, deep-verification, "
+            "openrouter-sonnet, openrouter-gpt)"
+        ),
     )
     parser.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
@@ -444,6 +549,14 @@ def _parser() -> argparse.ArgumentParser:
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
     _add_allow_custom_endpoint_argument(parser)
+    parser.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live review with an unqualified provider profile before "
+            "qualification evidence exists"
+        ),
+    )
     parser.add_argument("--repository")
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--title")
@@ -603,7 +716,10 @@ def _evaluate_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         default=None,
-        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+        help=(
+            "Named provider profile (local-private, fast-triage, deep-verification, "
+            "openrouter-sonnet, openrouter-gpt)"
+        ),
     )
     parser.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
@@ -617,6 +733,14 @@ def _evaluate_parser() -> argparse.ArgumentParser:
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
     )
     _add_allow_custom_endpoint_argument(parser)
+    parser.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live provider use with an unqualified profile before "
+            "qualification evidence exists"
+        ),
+    )
     parser.add_argument("--provider-version")
     parser.add_argument(
         "--allow-live-model",
@@ -671,8 +795,11 @@ def _doctor_parser() -> argparse.ArgumentParser:
         help="Run optional read-only probes (never generate, never mint tokens).",
     )
     parser.add_argument("--repository")
+    parser.add_argument("--profile")
+    parser.add_argument("--provider")
     parser.add_argument("--base-url")
     parser.add_argument("--model")
+    parser.add_argument("--api-key-env")
     parser.add_argument("--compatibility-manifest", type=Path)
     parser.add_argument(
         "--allow-data-egress",
@@ -693,6 +820,11 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--title")
     parser.add_argument("--stage", action="append", default=[])
+    parser.add_argument("--profile")
+    parser.add_argument("--provider")
+    parser.add_argument("--base-url")
+    parser.add_argument("--model")
+    parser.add_argument("--api-key-env")
     parser.add_argument("--provider-mode")
     parser.add_argument("--base-sha")
     parser.add_argument("--head-sha")
@@ -790,7 +922,7 @@ def _run_evaluate(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError("--mode live requires --allow-live-model")
         if not args.provider_version:
             raise ReviewInputError("--mode live requires --provider-version")
-        _validate_profile_cli_args(args, argv)
+        _validate_live_profile_gates(args, argv)
         if args.profile:
             profile = get_provider_profile(args.profile)
             scope = "loopback" if profile.endpoint_scope == "local" else "remote"
@@ -1015,7 +1147,10 @@ def _github_parser() -> argparse.ArgumentParser:
     reply.add_argument(
         "--profile",
         default=None,
-        help=("Named provider profile (local-private, fast-triage, deep-verification)"),
+        help=(
+            "Named provider profile (local-private, fast-triage, deep-verification, "
+            "openrouter-sonnet, openrouter-gpt)"
+        ),
     )
     reply.add_argument(
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
@@ -1027,6 +1162,14 @@ def _github_parser() -> argparse.ArgumentParser:
         "--timeout-seconds",
         type=_positive_float,
         default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
+    )
+    reply.add_argument(
+        "--allow-unqualified-profile",
+        action="store_true",
+        help=(
+            "Authorize live provider use with an unqualified profile before "
+            "qualification evidence exists"
+        ),
     )
     reply.add_argument(
         "--allow-write",
@@ -1257,7 +1400,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError(
                 f"GitHub read token environment variable {args.github_token_env} is unavailable"
             )
-        _validate_profile_cli_args(args, argv)
+        _validate_live_profile_gates(args, argv)
         provider = default_registry().create(
             _provider_settings_from_args(
                 args,
@@ -1335,8 +1478,11 @@ def _run_doctor_command(arguments: list[str]) -> int:
             include_network=args.network,
             provider_mode=os.getenv("REVIEWSENSEI_PROVIDER_MODE"),
             repository=args.repository,
+            profile=args.profile,
+            provider=args.provider,
             base_url=args.base_url,
             model=args.model,
+            api_key_env=args.api_key_env,
             compatibility_manifest=args.compatibility_manifest,
             allow_data_egress=args.allow_data_egress,
         )
@@ -1378,6 +1524,11 @@ def _run_plan_command(arguments: list[str]) -> int:
             pull_request=args.pull_request,
             title=args.title,
             stages=args.stage,
+            profile=args.profile,
+            provider=args.provider,
+            base_url=args.base_url,
+            model=args.model,
+            api_key_env=args.api_key_env,
             provider_mode=args.provider_mode,
             base_sha=args.base_sha,
             head_sha=args.head_sha,
@@ -1549,7 +1700,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.diff:
             raise ReviewInputError("--diff is required")
-        _validate_profile_cli_args(args, args_list)
+        _validate_live_profile_gates(args, args_list)
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
             if not args.fixture_response:

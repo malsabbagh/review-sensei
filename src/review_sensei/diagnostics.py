@@ -22,6 +22,11 @@ from urllib.request import Request, urlopen
 
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
+from .provider_config import (
+    LOCAL_LOOPBACK_HOSTS,
+    provider_mode_default,
+    resolve_effective_provider_configuration,
+)
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
 from .stages import (
@@ -42,7 +47,6 @@ _SAFE_REPOSITORY_RE = re.compile(
 )
 MAX_PROBE_BYTES = 8192
 PROBE_TIMEOUT_SECONDS = 2.0
-LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,49 @@ def _is_loopback_url(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").strip().casefold()
     return host in LOCAL_LOOPBACK_HOSTS
+
+
+def _provider_network_probe_checks(
+    *,
+    base_url: str,
+    model: str,
+    provider: str,
+    allow_data_egress: bool,
+    opener: Callable[..., Any],
+) -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    remote = not _is_loopback_url(base_url)
+    if remote and not allow_data_egress:
+        return (
+            DiagnosticCheck(
+                "endpoint",
+                "unknown",
+                "remote endpoint not probed without explicit data-egress authorization",
+            ),
+            DiagnosticCheck(
+                "model",
+                "unknown",
+                "model inventory not probed for a remote endpoint",
+            ),
+        )
+    if provider in {"openrouter", "openai-compatible", "fixture"}:
+        return (
+            DiagnosticCheck(
+                "endpoint",
+                "unknown",
+                f"{provider} endpoint not probed without a dedicated read-only probe",
+            ),
+            DiagnosticCheck(
+                "model",
+                "unknown",
+                f"{provider} model inventory not probed offline",
+            ),
+        )
+    return probe_provider_endpoint(
+        base_url=base_url,
+        model=model,
+        opener=opener,
+        allow_remote=allow_data_egress,
+    )
 
 
 def _bounded_probe_get(
@@ -281,8 +328,11 @@ def run_doctor(
     include_network: bool = False,
     provider_mode: str | None = None,
     repository: str | None = None,
+    profile: str | None = None,
+    provider: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    api_key_env: str | None = None,
     compatibility_manifest: Path | None = None,
     allow_data_egress: bool = False,
     opener: Callable[..., Any] = urlopen,
@@ -346,25 +396,33 @@ def run_doctor(
             ),
         )
     )
-    mode = (
-        (
-            provider_mode
-            if provider_mode is not None
-            else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
+    try:
+        mode = provider_mode_default(provider_mode)
+        provider_configuration = resolve_effective_provider_configuration(
+            profile=profile,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key_env=api_key_env,
+            provider_mode=mode,
         )
-        .strip()
-        .lower()
-    )
-    if mode not in {"local", "cloud"}:
-        checks.append(
-            DiagnosticCheck(
-                "provider-mode", "action", "provider mode must be local or cloud"
-            )
-        )
-    else:
         checks.append(
             DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)")
         )
+        if provider_configuration.get(
+            "credential_required"
+        ) and not provider_configuration.get("credential_present"):
+            credential_env = provider_configuration.get("credential_env")
+            checks.append(
+                DiagnosticCheck(
+                    "credential",
+                    "action",
+                    f"environment variable {credential_env} is unavailable",
+                )
+            )
+    except ReviewInputError as exc:
+        provider_configuration = None
+        checks.append(DiagnosticCheck("provider-mode", "action", str(exc)))
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -483,21 +541,13 @@ def run_doctor(
             manifest_path = Path(configured_manifest)
     if include_network or manifest_path is not None:
         checks.append(check_compatibility_manifest(manifest_path))
-    if include_network:
-        probe_base = (
-            base_url or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/api"
-        ).strip()
-        probe_model = (
-            model
-            or os.getenv("OLLAMA_MODEL")
-            or os.getenv("REVIEWSENSEI_LOCAL_MODEL")
-            or "qwen3.5:4b"
-        ).strip()
-        endpoint_check, model_check = probe_provider_endpoint(
-            base_url=probe_base,
-            model=probe_model,
+    if include_network and provider_configuration is not None:
+        endpoint_check, model_check = _provider_network_probe_checks(
+            base_url=str(provider_configuration["base_url"]),
+            model=str(provider_configuration["model"]),
+            provider=str(provider_configuration["provider"]),
+            allow_data_egress=allow_data_egress,
             opener=opener,
-            allow_remote=allow_data_egress,
         )
         checks.append(endpoint_check)
         checks.append(model_check)
@@ -522,12 +572,15 @@ def run_doctor(
         status = "unknown"
     else:
         status = "pass"
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "version": version,
         "checks": [check.to_dict() for check in checks],
     }
+    if provider_configuration is not None:
+        report["provider_configuration"] = provider_configuration
+    return report
 
 
 def build_plan(
@@ -537,6 +590,11 @@ def build_plan(
     pull_request: int | None = None,
     title: str | None = None,
     stages: Iterable[str] = (),
+    profile: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    api_key_env: str | None = None,
     provider_mode: str | None = None,
     base_sha: str | None = None,
     head_sha: str | None = None,
@@ -589,14 +647,15 @@ def build_plan(
         raise ReviewInputError("stages must contain non-empty strings")
     if len(selected_stages) != len(set(selected_stages)):
         raise ReviewInputError("stages must be unique")
-    raw_mode = (
-        provider_mode
-        if provider_mode is not None
-        else os.getenv("REVIEWSENSEI_PROVIDER_MODE", "local")
+    mode = provider_mode_default(provider_mode)
+    provider_configuration = resolve_effective_provider_configuration(
+        profile=profile,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        provider_mode=mode,
     )
-    mode = raw_mode.strip().lower()
-    if mode not in {"local", "cloud"}:
-        raise ReviewInputError("provider mode must be local or cloud")
     if categories_dir is None:
         categories = [category.id for category in DEFAULT_CATEGORY_CATALOG.categories]
     else:
@@ -620,6 +679,7 @@ def build_plan(
         "stages": list(selected_stages),
         "categories": categories,
         "provider_mode": mode,
+        "provider_configuration": provider_configuration,
         "budgets": {
             "max_diff_bytes": DEFAULT_REVIEW_LIMITS.max_diff_bytes,
             "max_prompt_bytes": DEFAULT_REVIEW_LIMITS.max_prompt_bytes,
@@ -653,6 +713,35 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         )
     if "provider_mode" in document:
         lines.append(f"provider_mode: {document['provider_mode']}")
+    provider_configuration = document.get("provider_configuration")
+    if isinstance(provider_configuration, dict):
+        lines.append(
+            "provider: "
+            f"{provider_configuration.get('provider')} "
+            f"model={provider_configuration.get('model')}"
+        )
+        lines.append(
+            "inference: "
+            f"execution={provider_configuration.get('execution_location')} "
+            f"inference={provider_configuration.get('inference_location')}"
+        )
+        credential_env = provider_configuration.get("credential_env")
+        if credential_env:
+            present = provider_configuration.get("credential_present")
+            lines.append(
+                f"credential: {credential_env} ({'present' if present else 'missing'})"
+            )
+        policy = provider_configuration.get("openrouter_policy")
+        if isinstance(policy, dict) and policy.get("upstream_provider"):
+            lines.append(
+                f"openrouter_policy: upstream={policy.get('upstream_provider')}"
+            )
+        qualification = provider_configuration.get("qualification_status")
+        if qualification:
+            lines.append(f"qualification: {qualification}")
+        timeout_seconds = provider_configuration.get("timeout_seconds")
+        if timeout_seconds is not None:
+            lines.append(f"timeout_seconds: {timeout_seconds}")
     identity = document.get("identity")
     if isinstance(identity, dict):
         if identity.get("base_sha") or identity.get("head_sha"):
@@ -681,5 +770,6 @@ __all__ = [
     "probe_provider_endpoint",
     "probe_repository_metadata",
     "render_diagnostic",
+    "resolve_effective_provider_configuration",
     "run_doctor",
 ]
