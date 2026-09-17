@@ -60,6 +60,20 @@ and emergency revocation.
 - Any other private service URL sends source data to that configured service
   instead.
 
+## OpenRouter configurations
+
+- `https://openrouter.ai/api/v1` is the only allowlisted OpenRouter endpoint.
+  Review data and the `OPENROUTER_API_KEY` bearer credential leave the machine
+  for remote inference even when the CLI runs locally.
+- Named profiles (`openrouter-sonnet`, `openrouter-gpt`) embed an immutable
+  `OpenRouterRoutingPolicy` (upstream provider slug, no fallbacks, deny data
+  collection, ZDR). Unprofiled `--provider openrouter` uses
+  `OPENROUTER_UPSTREAM_PROVIDER` (default `anthropic`) for the routing policy.
+- `doctor` and `plan` report execution location (local CLI process) versus
+  inference location (remote for OpenRouter) and credential presence only.
+- `REVIEWSENSEI_PROVIDER_MODE=cloud` continues to mean Ollama Cloud only; it
+  does not select OpenRouter.
+
 ReviewSensei does not make claims about provider retention, model training,
 subprocessors, residency, or deletion. Review the provider's current terms and
 configure the endpoint deliberately before using private or regulated code.

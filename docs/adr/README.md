@@ -53,6 +53,7 @@ Process: `docs/process/adr-process.md`
 | [0042](0042-incremental-reviews-and-finding-lifecycle.md) | Proposed | Incremental reviews and stable finding lifecycle identities | #38 | Coverage modes, fingerprint lifecycle, optional in-memory cache, no omission-as-fixed |
 | [0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36 | Machine-readable outcomes, hard admission budgets, publication-only recovery |
 | [0044](0044-bounded-large-change-coverage-and-deletion-aware-findings.md) | Proposed | Bounded large-change coverage, deletion-aware locations, and opt-in chunk orchestration | #39 | Per-request limits stay; total-work budgets and explicit coverage outcomes are added. |
+| [0045](0045-openrouter-trusted-configuration.md) | Proposed | OpenRouter trusted configuration, CLI profiles, and zero-write diagnostics | #97 | `--provider openrouter`, named profiles, doctor/plan policy summary; workflows unchanged |
 
 ## Policy
 

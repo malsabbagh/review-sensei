@@ -8,6 +8,7 @@ from review_sensei.providers.profiles import (
     get_provider_profile,
     profile_names,
 )
+from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import (
     ProviderRegistry,
     ProviderSettings,
@@ -123,7 +124,14 @@ class ProviderRegistryTests(unittest.TestCase):
 
     def test_profiles_are_deterministic_and_local_profile_has_no_credential(self):
         self.assertEqual(
-            profile_names(), ("deep-verification", "fast-triage", "local-private")
+            profile_names(),
+            (
+                "deep-verification",
+                "fast-triage",
+                "local-private",
+                "openrouter-gpt",
+                "openrouter-sonnet",
+            ),
         )
         self.assertEqual(get_provider_profile("local").name, "local-private")
         self.assertEqual(get_provider_profile("local/private").name, "local-private")
@@ -285,3 +293,38 @@ class ProviderRegistryTests(unittest.TestCase):
                     allow_custom_endpoint=True,
                 )
             )
+
+    def test_openrouter_profile_requires_explicit_key_and_policy(self):
+        with self.assertRaisesRegex(ProviderError, "requires an explicit API key"):
+            ProviderSettings.for_profile("openrouter-sonnet")
+        settings = ProviderSettings.for_profile(
+            "openrouter-sonnet", api_key="router-secret"
+        )
+        self.assertEqual(settings.name, "openrouter")
+        self.assertEqual(settings.model, "anthropic/claude-3.5-sonnet")
+        self.assertEqual(
+            settings.openrouter_policy,
+            OpenRouterRoutingPolicy(upstream_provider="anthropic"),
+        )
+        provider = default_registry().create(settings)
+        self.assertEqual(provider.name, "openrouter")
+        self.assertEqual(provider.routing_policy.upstream_provider, "anthropic")
+
+    def test_openrouter_profile_rejects_routing_policy_override(self):
+        with self.assertRaisesRegex(
+            ProviderError, "routing policy cannot be overridden"
+        ):
+            default_registry().create(
+                ProviderSettings(
+                    name="openrouter",
+                    profile="openrouter-sonnet",
+                    api_key="secret",
+                    openrouter_policy=OpenRouterRoutingPolicy(
+                        upstream_provider="openai"
+                    ),
+                )
+            )
+
+    def test_openrouter_profile_is_unqualified(self):
+        profile = get_provider_profile("openrouter-sonnet")
+        self.assertEqual(profile.qualification_status, "unqualified")

@@ -55,6 +55,7 @@ class ProviderSettings:
             timeout_seconds=selected.timeout_seconds,
             max_output_tokens=selected.max_output_tokens,
             profile=selected.name,
+            openrouter_policy=selected.openrouter_policy,
         )
 
 
@@ -137,6 +138,13 @@ class ProviderRegistry:
                 raise ProviderError(
                     "provider profile output budget cannot be overridden"
                 )
+            if (
+                settings.openrouter_policy is not None
+                and settings.openrouter_policy != profile.openrouter_policy
+            ):
+                raise ProviderError(
+                    "provider profile routing policy cannot be overridden"
+                )
             settings = replace(
                 settings,
                 name=profile.provider,
@@ -146,6 +154,7 @@ class ProviderRegistry:
                 max_output_tokens=profile.max_output_tokens,
                 profile=profile.name,
                 allow_custom_endpoint=False,
+                openrouter_policy=profile.openrouter_policy,
             )
         name = settings.name.strip().lower()
         try:

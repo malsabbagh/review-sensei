@@ -15,6 +15,7 @@ from review_sensei.diagnostics import (
     probe_provider_endpoint,
     probe_repository_metadata,
     render_diagnostic,
+    resolve_effective_provider_configuration,
     run_doctor,
 )
 from review_sensei.errors import ReviewInputError
@@ -185,6 +186,45 @@ class DiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "diff must be a string"):
             build_plan(diff=b"not-a-string")  # type: ignore[arg-type]
 
+    def test_resolve_openrouter_profile_reports_remote_inference_without_secret(self):
+        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "router-secret"}):
+            config = resolve_effective_provider_configuration(
+                profile="openrouter-sonnet"
+            )
+        self.assertEqual(config["provider"], "openrouter")
+        self.assertEqual(config["inference_location"], "remote")
+        self.assertEqual(config["execution_location"], "local")
+        self.assertTrue(config["credential_present"])
+        self.assertEqual(config["qualification_status"], "unqualified")
+        self.assertEqual(
+            config["openrouter_policy"]["upstream_provider"],
+            "anthropic",
+        )
+        rendered = render_diagnostic({"provider_configuration": config})
+        self.assertNotIn("router-secret", rendered)
+
+    def test_doctor_and_plan_include_provider_configuration(self):
+        doctor = run_doctor(profile="local-private", provider="ollama")
+        self.assertIn("provider_configuration", doctor)
+        self.assertEqual(doctor["provider_configuration"]["provider"], "ollama")
+        self.assertEqual(
+            doctor["provider_configuration"]["inference_location"],
+            "local",
+        )
+        plan = build_plan(
+            diff=DIFF,
+            profile="openrouter-sonnet",
+            provider="openrouter",
+        )
+        self.assertEqual(plan["provider_configuration"]["provider"], "openrouter")
+        self.assertEqual(
+            plan["provider_configuration"]["qualification_status"],
+            "unqualified",
+        )
+        rendered = render_diagnostic(plan)
+        self.assertIn("provider: openrouter", rendered)
+        self.assertIn("qualification: unqualified", rendered)
+
     def test_render_diagnostic_supports_json_and_all_human_fields(self):
         check = DiagnosticCheck("sample", "pass", "ok")
         document = {
@@ -328,7 +368,13 @@ class DiagnosticProbeTests(unittest.TestCase):
                 ),
             }
         )
-        report = run_doctor(include_network=True, opener=opener, model="qwen3.5:4b")
+        report = run_doctor(
+            include_network=True,
+            opener=opener,
+            model="qwen3.5:4b",
+            provider_mode="local",
+            base_url="http://127.0.0.1:11434/api",
+        )
         self.assertEqual(report["status"], "pass")
         names = {check["name"] for check in report["checks"]}
         self.assertIn("endpoint", names)

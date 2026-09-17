@@ -12,10 +12,15 @@ from dataclasses import dataclass, field
 from typing import Literal, Mapping
 
 from ..errors import ProviderError, UnknownProviderProfileError
+from .openrouter import (
+    DEFAULT_OPENROUTER_BASE_URL,
+    OpenRouterRoutingPolicy,
+)
 
 EndpointScope = Literal["local", "remote"]
 StructuredOutput = Literal["json_object"]
 FallbackPolicy = Literal["none"]
+QualificationStatus = Literal["qualified", "unqualified"]
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,8 @@ class ProviderProfile:
     structured_output: StructuredOutput = "json_object"
     permitted_fallback: FallbackPolicy = "none"
     stage_models: tuple[tuple[str, str], ...] = ()
+    openrouter_policy: OpenRouterRoutingPolicy | None = None
+    qualification_status: QualificationStatus = "qualified"
     _stage_models_map: dict[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -59,6 +66,18 @@ class ProviderProfile:
             raise ValueError("provider profile structured_output must be 'json_object'")
         if self.permitted_fallback != "none":
             raise ValueError("provider profiles do not permit fallback")
+        if self.qualification_status not in ("qualified", "unqualified"):
+            raise ValueError(
+                "provider profile qualification_status must be "
+                "'qualified' or 'unqualified'"
+            )
+        if self.provider == "openrouter":
+            if self.openrouter_policy is None:
+                raise ValueError("openrouter provider profiles require openrouter_policy")
+        elif self.openrouter_policy is not None:
+            raise ValueError(
+                "openrouter_policy is only valid for openrouter provider profiles"
+            )
         self._validate_stage_models()
 
     def _validate_stage_models(self) -> None:
@@ -101,6 +120,13 @@ class ProviderProfile:
 
         return frozenset((self.model, *(model for _, model in self.stage_models)))
 
+    def policy_identity_fields(self) -> Mapping[str, object] | None:
+        """Return non-secret routing policy fields for configuration digests."""
+
+        if self.openrouter_policy is None:
+            return None
+        return dict(self.openrouter_policy.identity_fields())
+
 
 PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "local-private": ProviderProfile(
@@ -136,6 +162,32 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         max_output_tokens=8192,
         api_key_env="OLLAMA_API_KEY",
         requires_api_key=True,
+    ),
+    "openrouter-sonnet": ProviderProfile(
+        name="openrouter-sonnet",
+        provider="openrouter",
+        model="anthropic/claude-3.5-sonnet",
+        base_url=DEFAULT_OPENROUTER_BASE_URL,
+        endpoint_scope="remote",
+        timeout_seconds=120,
+        max_output_tokens=4096,
+        api_key_env="OPENROUTER_API_KEY",
+        requires_api_key=True,
+        openrouter_policy=OpenRouterRoutingPolicy(upstream_provider="anthropic"),
+        qualification_status="unqualified",
+    ),
+    "openrouter-gpt": ProviderProfile(
+        name="openrouter-gpt",
+        provider="openrouter",
+        model="openai/gpt-4o-mini",
+        base_url=DEFAULT_OPENROUTER_BASE_URL,
+        endpoint_scope="remote",
+        timeout_seconds=120,
+        max_output_tokens=2048,
+        api_key_env="OPENROUTER_API_KEY",
+        requires_api_key=True,
+        openrouter_policy=OpenRouterRoutingPolicy(upstream_provider="openai"),
+        qualification_status="unqualified",
     ),
 }
 

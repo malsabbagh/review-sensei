@@ -41,7 +41,7 @@ Repair actions:
 | `package` action | Reinstall the exact `review-sensei` version; do not mix checkout `src/` with a wheel. |
 | `packaged-assets` action | Reinstall the package so default stages/categories are present. |
 | `stages`/`categories` action | Point `--stages-dir`/`--categories-dir` at trusted-base directories that contain valid JSON, not a PR-head copy. |
-| `provider-mode` action | Set `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`. |
+| `provider-mode` action | Set `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud` (Ollama only; not OpenRouter). |
 | `endpoint` action | Start a local Ollama runner on loopback, or correct `OLLAMA_BASE_URL`. |
 | `model` action | `ollama pull` the configured model. |
 | `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
@@ -152,10 +152,25 @@ is `deepseek-v4-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
 available as explicit overrides.
 
 Optional CLI `--profile` selects a named preset (`local-private`,
-`fast-triage`, `deep-verification`) without changing these workflow defaults.
-Installed GitHub workflows continue to use `REVIEWSENSEI_PROVIDER_MODE` and do
-not pass `--profile`. `fast-triage` is an explicit CLI/OpenAI path and requires
-`OPENAI_API_KEY`; it is not enabled by the reusable workflow.
+`fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`)
+without changing these workflow defaults. Installed GitHub workflows continue to
+use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
+an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
+the reusable workflow.
+
+OpenRouter is an explicit CLI-only remote path in this release:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | empty | Required bearer credential for `--provider openrouter` or OpenRouter profiles |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
+| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |
+| `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
+| `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
+
+`doctor` and `plan` report credential presence only; they never print the key.
+OpenRouter profiles start `unqualified` and are not approval-eligible until
+separate qualification evidence exists.
 
 ## GitHub workflow example
 
