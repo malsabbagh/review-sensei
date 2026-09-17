@@ -128,7 +128,7 @@ class ProviderConformanceTests(unittest.TestCase):
         )
         openrouter_result = openrouter.complete(ProviderRequest(prompt="review"))
         self.assertEqual(openrouter_result.provider, "openrouter")
-        self.assertEqual(openrouter_result.revision, "fp_or")
+        self.assertEqual(openrouter_result.revision, "anthropic/claude-3.5-sonnet")
 
     def test_malformed_output_is_sanitized(self) -> None:
         prompt = "private prompt with secret"

@@ -9,7 +9,11 @@ from .base import ReviewProvider, validate_provider_contract
 from .fixture import FixtureProvider
 from .ollama import OllamaProvider
 from .openai_compatible import OpenAICompatibleProvider
-from .openrouter import OpenRouterProvider, OpenRouterRoutingPolicy
+from .openrouter import (
+    DEFAULT_OPENROUTER_BASE_URL,
+    OpenRouterProvider,
+    OpenRouterRoutingPolicy,
+)
 from .profiles import ProviderProfile, get_provider_profile
 
 
@@ -201,9 +205,14 @@ def default_registry() -> ProviderRegistry:
             raise ProviderError("openrouter provider requires an API key")
         if settings.openrouter_policy is None:
             raise ProviderError("openrouter provider requires a routing policy")
+        if not isinstance(settings.model, str) or not settings.model.strip():
+            raise ProviderError("openrouter provider requires a model")
+        # Named profiles select per-stage models through ``bind_stage_providers``;
+        # disable runtime ``request.model`` overrides whenever a profile is active,
+        # matching the openai-compatible and ollama factories.
         return OpenRouterProvider(
-            base_url=settings.base_url or "https://openrouter.ai/api/v1",
-            model=settings.model or "anthropic/claude-3.5-sonnet",
+            base_url=settings.base_url or DEFAULT_OPENROUTER_BASE_URL,
+            model=settings.model,
             api_key=settings.api_key,
             routing_policy=settings.openrouter_policy,
             timeout_seconds=(

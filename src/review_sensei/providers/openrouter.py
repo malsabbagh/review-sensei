@@ -56,6 +56,18 @@ def _endpoint_has_userinfo(parsed: Any) -> bool:
     return "@" in parsed.netloc or bool(parsed.username) or bool(parsed.password)
 
 
+def _path_is_allowlisted_openrouter_prefix(path: str) -> bool:
+    normalized = path.rstrip("/") or "/"
+    if normalized != "/api/v1" and not normalized.startswith("/api/v1/"):
+        return False
+    for segment in normalized.split("/"):
+        if segment in {"", "."}:
+            continue
+        if segment == "..":
+            return False
+    return True
+
+
 def is_allowlisted_openrouter_endpoint(base_url: str) -> bool:
     """Return whether ``base_url`` is the built-in OpenRouter Chat Completions host."""
 
@@ -73,12 +85,11 @@ def is_allowlisted_openrouter_endpoint(base_url: str) -> bool:
         port = parsed.port
     except (UnicodeError, ValueError):
         return False
-    path = parsed.path.rstrip("/") or "/"
-    return (
-        hostname == ALLOWLISTED_OPENROUTER_HOSTNAME
-        and (port is None or port == 443)
-        and (path == "/api/v1" or path.startswith("/api/v1/"))
-    )
+    if hostname != ALLOWLISTED_OPENROUTER_HOSTNAME:
+        return False
+    if port is not None and port != 443:
+        return False
+    return _path_is_allowlisted_openrouter_prefix(parsed.path)
 
 
 @dataclass(frozen=True)
@@ -118,11 +129,9 @@ class OpenRouterRoutingPolicy:
         """Return non-secret fields for configuration identity digests."""
 
         return {
+            "schema_version": 1,
+            **self.to_request_provider(),
             "upstream_provider": self.upstream_provider,
-            "allow_fallbacks": False,
-            "require_parameters": True,
-            "data_collection": "deny",
-            "zdr": True,
         }
 
 
@@ -132,6 +141,8 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class _VerifiedHTTPSHandler(HTTPSHandler):
+    """Verify TLS against the request host when it matches the allowlisted hostname."""
+
     def __init__(self, context: ssl.SSLContext, *, expected_hostname: str) -> None:
         super().__init__(context=context)
         self._expected_hostname = expected_hostname
@@ -147,19 +158,36 @@ class _VerifiedHTTPSHandler(HTTPSHandler):
             timeout: float | object = object(),
             **kwargs: object,
         ) -> http.client.HTTPSConnection:
+            normalized_host = host.casefold()
+            if normalized_host != expected_hostname:
+                raise ProviderError("OpenRouter TLS host mismatch")
             return http.client.HTTPSConnection(
                 host,
                 port=port or 443,
                 timeout=timeout,
                 context=verified_context,
-                server_hostname=expected_hostname,  # type: ignore[call-overload]
+                server_hostname=host,
             )
 
         return self.do_open(connection_factory, req)
 
 
 def _http_failure_is_transient(code: int) -> bool:
-    return code in {408, 429} or 500 <= code < 600
+    return code in {408, 409, 425, 429} or 500 <= code < 600
+
+
+def _validate_openrouter_header_value(value: str, *, label: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"OpenRouter {label} must be non-empty")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        for character in value
+    ):
+        raise ValueError(f"OpenRouter {label} contains a forbidden control character")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"OpenRouter {label} must contain only ASCII characters") from exc
 
 
 class OpenRouterProvider:
@@ -233,6 +261,8 @@ class OpenRouterProvider:
             raise ValueError(
                 "OpenRouter max_output_tokens exceeds the configured limit"
             )
+        _validate_openrouter_header_value(app_referer, label="app_referer")
+        _validate_openrouter_header_value(app_title, label="app_title")
         if not is_allowlisted_openrouter_endpoint(base_url):
             raise ValueError("OpenRouter endpoint is not allowlisted")
         parsed = urlsplit(base_url)
@@ -267,6 +297,20 @@ class OpenRouterProvider:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
+            path_stat_before = os.stat(str(cert_path), follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise ProviderError("configured SSL_CERT_FILE is missing") from exc
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                raise ProviderError("configured SSL_CERT_FILE is unreadable") from exc
+            if exc.errno == errno.ELOOP:
+                raise ProviderError(
+                    "configured SSL_CERT_FILE is not a regular file"
+                ) from exc
+            raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
+        if not stat.S_ISREG(path_stat_before.st_mode):
+            raise ProviderError("configured SSL_CERT_FILE is not a regular file")
+        try:
             fd = os.open(str(cert_path), flags)
         except OSError as exc:
             if exc.errno == errno.ENOENT:
@@ -280,24 +324,30 @@ class OpenRouterProvider:
             raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
         try:
             try:
-                file_stat_before = os.fstat(fd)
-                if not stat.S_ISREG(file_stat_before.st_mode):
-                    raise ProviderError(
-                        "configured SSL_CERT_FILE is not a regular file"
-                    )
                 with os.fdopen(fd, "rb") as handle:
                     fd = -1
-                    contents = handle.read(MAX_CA_BUNDLE_BYTES + 1)
-                    file_stat_after = os.fstat(handle.fileno())
+                    chunks: list[bytes] = []
+                    total = 0
+                    while True:
+                        piece = handle.read(
+                            min(65_536, MAX_CA_BUNDLE_BYTES + 1 - total)
+                        )
+                        if not piece:
+                            break
+                        total += len(piece)
+                        if total > MAX_CA_BUNDLE_BYTES:
+                            raise ProviderError(
+                                "configured SSL_CERT_FILE exceeds the configured "
+                                "size limit"
+                            )
+                        chunks.append(piece)
+                    contents = b"".join(chunks)
+                path_stat_after = os.stat(str(cert_path), follow_symlinks=False)
                 if (
-                    file_stat_before.st_dev != file_stat_after.st_dev
-                    or file_stat_before.st_ino != file_stat_after.st_ino
+                    path_stat_before.st_dev != path_stat_after.st_dev
+                    or path_stat_before.st_ino != path_stat_after.st_ino
                 ):
                     raise ProviderError("configured SSL_CERT_FILE changed during read")
-                if len(contents) > MAX_CA_BUNDLE_BYTES:
-                    raise ProviderError(
-                        "configured SSL_CERT_FILE exceeds the configured size limit"
-                    )
             finally:
                 if fd >= 0:
                     os.close(fd)
@@ -306,8 +356,9 @@ class OpenRouterProvider:
         except OSError as exc:
             raise ProviderError("configured SSL_CERT_FILE is unavailable") from exc
         try:
+            # Augment the default trust store with the operator-provided bundle.
             context = ssl.create_default_context()
-            context.load_verify_locations(cadata=contents.decode("ascii"))
+            context.load_verify_locations(cadata=contents.decode("utf-8-sig"))
             return context
         except (OSError, ssl.SSLError, UnicodeDecodeError) as exc:
             raise ProviderError("configured SSL_CERT_FILE could not be loaded") from exc
@@ -335,6 +386,10 @@ class OpenRouterProvider:
         return f"{self.base_url}/chat/completions"
 
     def _call_custom_opener(self, http_request: Request) -> Any:
+        # Custom openers are a test seam only.  Production traffic must use the
+        # built-in ``urlopen`` path so redirect rejection and verified TLS apply.
+        if not is_allowlisted_openrouter_endpoint(http_request.full_url):
+            raise ProviderError("OpenRouter endpoint is not allowlisted")
         opener = getattr(self._opener, "open", self._opener)
         try:
             return opener(
@@ -343,6 +398,9 @@ class OpenRouterProvider:
                 context=self._ssl_context,
             )
         except TypeError as exc:
+            message = str(exc).casefold()
+            if "unexpected keyword argument" not in message and "required positional" not in message:
+                raise
             raise ProviderError(
                 "OpenRouter opener must accept timeout and context kwargs"
             ) from exc
@@ -388,6 +446,7 @@ class OpenRouterProvider:
                     http_request, timeout=self.timeout_seconds
                 )
             else:
+                # Test seam only: see ``_call_custom_opener`` for allowlist checks.
                 response_ctx = self._call_custom_opener(http_request)
             with response_ctx as response:
                 body = read_bounded_body(
@@ -404,11 +463,6 @@ class OpenRouterProvider:
                 retry_after_seconds=parse_retry_after_seconds(exc),
             ) from exc
         except (TimeoutError, URLError) as exc:
-            if isinstance(exc, HTTPError):
-                raise ProviderError(
-                    f"OpenRouter request failed with HTTP {exc.code}",
-                    transient=_http_failure_is_transient(exc.code),
-                ) from exc
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
                 raise ProviderError(
                     "OpenRouter request timed out", transient=True
@@ -456,6 +510,8 @@ class OpenRouterProvider:
                     text = message.get("content")
         if finish_reason == "length":
             raise ProviderError("OpenRouter response was truncated")
+        if finish_reason == "content_filter":
+            raise ProviderError("OpenRouter response was filtered")
         if not isinstance(text, str) or not text.strip():
             raise ProviderError("OpenRouter response did not contain review text")
         try:
@@ -472,12 +528,12 @@ class OpenRouterProvider:
 
         revision = None
         if isinstance(data, dict):
-            fingerprint = data.get("system_fingerprint")
             observed_model = data.get("model")
+            fingerprint = data.get("system_fingerprint")
             candidate = (
-                fingerprint
-                if isinstance(fingerprint, str) and fingerprint.strip()
-                else observed_model
+                observed_model
+                if isinstance(observed_model, str) and observed_model.strip()
+                else fingerprint
             )
             if isinstance(candidate, str) and candidate.strip():
                 try:
