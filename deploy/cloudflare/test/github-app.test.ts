@@ -589,7 +589,7 @@ describe("setup repository reconciliation", () => {
       createHash("sha256")
         .update(fake.files[SETUP_FILE_PATHS[0]]!, "utf8")
         .digest("hex"),
-    ).toBe("a693256f243dbeafc2910297375064b6133b7ace8f71b75712c72db43a6fafee");
+    ).toBe("f6fefdd359c037630004382c5cdee3335669e6c586112c0039ecd262448e61d2");
     expect(
       createHash("sha256")
         .update(fake.files[SETUP_FILE_PATHS[1]]!, "utf8")

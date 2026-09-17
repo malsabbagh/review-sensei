@@ -626,8 +626,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-run.yml"
         ).read_text(encoding="utf-8")
         reply_blocks = [
-            block.strip()
-            for block in workflow.split("reply_status=\"$(grep -E")[1:]
+            block.strip() for block in workflow.split('reply_status="$(grep -E')[1:]
         ]
         self.assertEqual(len(reply_blocks), 3)
         first = reply_blocks[0].split('" | tail -n 1 || true)"')[0]
