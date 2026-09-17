@@ -523,9 +523,7 @@ def merge_chunk_coverage(
             hunk_map[key] = replace(hunk_map[key], outcome=outcome, reason=reason)
         else:
             hunk_map[key] = chunk_hunk
-    hunks = tuple(
-        sorted(hunk_map.values(), key=lambda hunk: (hunk.index, hunk.path))
-    )
+    hunks = tuple(sorted(hunk_map.values(), key=lambda hunk: (hunk.index, hunk.path)))
     return CoverageManifest(
         files=files,
         hunks=hunks,
@@ -550,7 +548,14 @@ def apply_chunk_outcomes(
         raise ReviewInputError("coverage outcome is invalid")
     _validate_reason(reason)
     enumerated = set(coverage.enumerated_paths)
-    updated_paths = {path for path in paths if path in enumerated}
+    unknown_paths = set(paths) - enumerated
+    if unknown_paths:
+        raise ReviewInputError("coverage paths are outside the enumerated set")
+    known_hunk_indexes = {entry.index for entry in coverage.hunks}
+    unknown_hunks = set(hunk_indexes) - known_hunk_indexes
+    if unknown_hunks:
+        raise ReviewInputError("coverage hunk indexes are outside the manifest")
+    updated_paths = set(paths)
     files: list[FileCoverage] = []
     for file_entry in coverage.files:
         if file_entry.path in updated_paths:

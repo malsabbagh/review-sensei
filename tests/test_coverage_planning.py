@@ -362,21 +362,19 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(outcomes["src/a.py"], "partially-reviewed")
         self.assertEqual(outcomes["src/b.py"], "reviewed")
 
-    def test_apply_chunk_outcomes_ignores_paths_outside_enumerated_set(self):
+    def test_apply_chunk_outcomes_rejects_paths_outside_enumerated_set(self):
         coverage = CoverageManifest(
             files=(FileCoverage(path="src/a.py", outcome="reviewed"),),
             enumerated_paths=("src/a.py",),
         )
-        updated = apply_chunk_outcomes(
-            coverage,
-            paths=("src/a.py", "src/other.py"),
-            hunk_indexes=(),
-            outcome="partially-reviewed",
-            reason="chunk-failed",
-        )
-        paths = {entry.path for entry in updated.files}
-        self.assertEqual(paths, {"src/a.py"})
-        self.assertEqual(updated.files[0].outcome, "partially-reviewed")
+        with self.assertRaises(ReviewInputError):
+            apply_chunk_outcomes(
+                coverage,
+                paths=("src/a.py", "src/other.py"),
+                hunk_indexes=(),
+                outcome="partially-reviewed",
+                reason="chunk-failed",
+            )
 
     def test_merge_chunk_coverage_keeps_worse_outcome(self):
         aggregate = CoverageManifest(
