@@ -52,10 +52,28 @@ never hashed.
 ## Scope
 
 In scope: CLI `--provider openrouter`, OpenRouter profiles, registry wiring,
-doctor/plan extensions, configuration digests, docs, and offline tests.
+doctor/plan extensions, configuration digests, reusable-workflow OpenRouter job
+wiring (#98), setup `REVIEWSENSEI_PROVIDER_PROFILE` variable/config parity, docs,
+and offline tests.
 
-Out of scope: workflow/broker wiring (#98 is tracked separately), live qualification/promotion (O4),
-arbitrary endpoint overrides, and catalog scraping.
+Out of scope: live qualification/promotion (O4), arbitrary endpoint overrides,
+and catalog scraping.
+
+### Hosted workflow contract (#98)
+
+The reusable workflow adds an `openrouter` job that runs only when
+`provider_mode == 'cloud'` and `provider_profile` is `openrouter-sonnet` or
+`openrouter-gpt`. This preserves ADR 0011/0025 egress opt-in: a profile value
+alone cannot move reviews onto GitHub-hosted compute. The job shares the
+`reviewsensei-provider-*` concurrency group with cloud/local provider jobs so a
+newer review for the same pull request cancels any in-flight provider-mode
+review.
+
+Hosted OpenRouter review and mention-reply commands forward
+`--allow-unqualified-profile` because the workflow is operator-controlled and
+profiles remain `unqualified` until separate qualification evidence exists.
+Caller workflows forward `provider_profile` and `OPENROUTER_API_KEY` only after
+the public `v4` tag includes the reusable-workflow contract.
 
 ## Alternatives considered
 

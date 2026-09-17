@@ -95,6 +95,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("default: main");
     expect(buildTaggedV4SetupFiles(tag)[2].content).not.toContain("auto_approve");
     expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("learning_proposals: false");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("provider_profile: ''");
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
       "learning_proposals",
     );

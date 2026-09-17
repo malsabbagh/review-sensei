@@ -856,7 +856,7 @@ function configFile(
     `setup_version: ${version}\n` +
     "provider: ollama\n" +
     "provider_mode: local\n" +
-    (includeLearningProposals ? "provider_profile: ''\n" : "") +
+    "provider_profile: ''\n" +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +

@@ -223,6 +223,17 @@ class GeneratedCallerContractTests(unittest.TestCase):
         self.assertIn("enable_mention_replies:", workflow)
         self.assertIn("upload_artifacts:", workflow)
 
+    def test_reusable_workflow_routes_openrouter_only_with_cloud_mode(self) -> None:
+        reusable = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("inputs.provider_mode == 'cloud'", reusable)
+        self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", reusable)
+        self.assertIn("inputs.provider_profile == ''", reusable)
+
     def test_uninstall_is_upgrade_safe_and_does_not_wipe_operator_state(self) -> None:
         uninstall = _generated_files()[UNINSTALL_WORKFLOW_PATH]
         self.assertIn('"git", "rm", "--force", "--ignore-unmatch"', uninstall)

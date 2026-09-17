@@ -708,8 +708,10 @@ jobs:
 
   openrouter:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (inputs.provider_profile == 'openrouter-sonnet' || inputs.provider_profile == 'openrouter-gpt')
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && inputs.provider_mode == 'cloud' && (inputs.provider_profile == 'openrouter-sonnet' || inputs.provider_profile == 'openrouter-gpt')
     concurrency:
+      # OpenRouter shares the provider review group with cloud/local so a newer
+      # review for the same PR cancels any in-flight provider-mode review.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
     runs-on: ubuntu-latest
@@ -738,6 +740,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
@@ -768,6 +771,8 @@ jobs:
               raise SystemExit("workflow mode is invalid")
           if os.environ.get("OPERATION") not in {"review", "reply"}:
               raise SystemExit("workflow operation is invalid")
+          if os.environ.get("PROVIDER_MODE") != "cloud":
+              raise SystemExit("openrouter job requires provider_mode cloud")
           if os.environ.get("PROVIDER_PROFILE") not in {"openrouter-sonnet", "openrouter-gpt"}:
               raise SystemExit("openrouter job received an invalid provider profile")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
@@ -888,6 +893,7 @@ jobs:
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --profile "$PROVIDER_PROFILE" --provider openrouter \
+            --allow-unqualified-profile \
             --output review.json --outcome outcome.json
 
       - name: Confirm live pull-request head is still current
@@ -1004,6 +1010,7 @@ jobs:
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --profile "$PROVIDER_PROFILE" --provider openrouter \
+            --allow-unqualified-profile \
             --repository "$REPOSITORY" --pull-request "$PULL_REQUEST" \
             --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \

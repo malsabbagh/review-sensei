@@ -515,12 +515,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("--no-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
+        self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
         self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
         self.assertIn(
             "OPENROUTER_API_KEY is required for OpenRouter provider profile", text
         )
         self.assertIn('--profile "$PROVIDER_PROFILE" --provider openrouter', text)
+        self.assertIn("--allow-unqualified-profile", text)
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
@@ -628,12 +630,17 @@ class ActionPinPolicyTests(unittest.TestCase):
             "'review' && (needs.authoritative-preflight.outputs.pull_request_number || "
             "github.event.pull_request.number || github.run_id) || github.run_id }}"
         )
+        # OpenRouter intentionally shares the provider review slot with cloud/local.
         self.assertEqual(cloud, expected_provider_group)
         self.assertEqual(openrouter, expected_provider_group)
         self.assertEqual(local, expected_provider_group)
         self.assertNotIn("-cloud-", cloud)
         self.assertNotIn("-openrouter-", openrouter)
         self.assertNotIn("-local-", local)
+        self.assertIn(
+            "OpenRouter shares the provider review group with cloud/local",
+            text,
+        )
 
         cancel_lines = [
             line.strip()

@@ -162,7 +162,7 @@ OpenRouter is an explicit opt-in remote path for CLI and hosted workflows:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies |
+| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt` with `REVIEWSENSEI_PROVIDER_MODE=cloud`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies. Leave empty to keep Ollama local/cloud defaults. |
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter profiles in CLI or workflow runs |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |
@@ -174,9 +174,10 @@ OpenRouter is an explicit opt-in remote path for CLI and hosted workflows:
 OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile`
 for live review, live evaluation, and provider-backed GitHub reply generation
 until separate qualification evidence exists. Hosted OpenRouter runs use
-`ubuntu-latest`, read `OPENROUTER_API_KEY` by name only, and ignore
-`REVIEWSENSEI_PROVIDER_MODE`. Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty to
-keep the default Ollama local/cloud paths.
+`ubuntu-latest`, require `REVIEWSENSEI_PROVIDER_MODE=cloud`, read
+`OPENROUTER_API_KEY` by name only, and forward `--allow-unqualified-profile`
+until qualification evidence exists. Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty
+to keep the default Ollama local/cloud paths.
 
 To roll back from OpenRouter, clear `REVIEWSENSEI_PROVIDER_PROFILE`, restore
 `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`, and remove the
