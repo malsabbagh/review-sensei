@@ -30,13 +30,40 @@ HOSTED_OPENROUTER_DEFAULTS = frozenset(
 )
 _OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
 _OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
-_OPENROUTER_VENDORS = frozenset({"openai", "anthropic", "deepseek"})
 
 
 def published_hosted_openrouter_models() -> frozenset[str]:
     """Return OpenRouter model slugs approved for hosted workflow defaults."""
 
     return frozenset(model for model, _ in HOSTED_OPENROUTER_DEFAULTS)
+
+
+def hosted_openrouter_upstream(
+    model: str,
+    *,
+    configured_upstream: str | None = None,
+) -> str:
+    """Return upstream provider for a hosted OpenRouter model slug."""
+
+    value = model.strip() or DEFAULT_OPENROUTER_MODEL
+    upstream: str | None = None
+    for hosted_model, hosted_upstream in HOSTED_OPENROUTER_DEFAULTS:
+        if hosted_model == value:
+            upstream = hosted_upstream
+            break
+    if upstream is None:
+        raise ReviewInputError(
+            "openrouter model is not allowlisted for hosted workflows"
+        )
+    if configured_upstream is not None:
+        configured = configured_upstream.strip()
+        if configured and configured != upstream:
+            raise ReviewInputError(
+                "OPENROUTER_UPSTREAM_PROVIDER does not match hosted model"
+            )
+        if configured:
+            return configured
+    return upstream
 
 
 def validate_hosted_workflow_model(
@@ -64,9 +91,10 @@ def validate_hosted_workflow_model(
             raise ReviewInputError("openrouter model must not use ollama cloud suffix")
         if not _OPENROUTER_MODEL_PATTERN.fullmatch(value):
             raise ReviewInputError("openrouter model must be vendor/model slug")
-        vendor = value.split("/", 1)[0]
-        if vendor not in _OPENROUTER_VENDORS:
-            raise ReviewInputError("openrouter model vendor is not allowlisted")
+        if value not in published_hosted_openrouter_models():
+            raise ReviewInputError(
+                "openrouter model is not allowlisted for hosted workflows"
+            )
         return
     if "/" in value:
         raise ReviewInputError("ollama model must not use vendor/model openrouter slug")
@@ -295,6 +323,7 @@ __all__ = [
     "DEFAULT_OPENROUTER_MODEL",
     "DEFAULT_OPENROUTER_UPSTREAM",
     "HOSTED_OPENROUTER_DEFAULTS",
+    "hosted_openrouter_upstream",
     "openrouter_policy_from_env",
     "openrouter_timeout_default",
     "openrouter_upstream_default",

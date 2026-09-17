@@ -612,11 +612,13 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
         self.assertIn("--provider openrouter --model", review_step)
-        self.assertIn("OPENROUTER_UPSTREAM_PROVIDER", review_step)
+        self.assertIn("hosted_openrouter_upstream", review_step)
+        self.assertNotIn("openrouter model vendor is not allowlisted", review_step)
         reply_step = _step_block(
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
         self.assertIn("--provider openrouter --model", reply_step)
+        self.assertIn("hosted_openrouter_upstream", reply_step)
         publish_step = _step_block(
             openrouter_job, "Publish or promote validated review through the broker"
         )

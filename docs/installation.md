@@ -189,7 +189,8 @@ OpenRouter CLI profiles start `unqualified` and require
 evidence exists. Hosted workflows reject `allow_unqualified_profile=true` and
 do not forward `--allow-unqualified-profile`; use the CLI for unqualified
 profile runs. Hosted OpenRouter uses `--provider openrouter --model` and
-derives `OPENROUTER_UPSTREAM_PROVIDER` from an allowlisted model vendor prefix.
+derives `OPENROUTER_UPSTREAM_PROVIDER` from the hosted OpenRouter model
+allowlist in `provider_config.py`.
 Every OpenRouter request includes `provider.data_collection=deny` (plus
 no fallbacks and zero-data-retention) through the typed routing policy.
 

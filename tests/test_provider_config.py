@@ -5,6 +5,7 @@ from review_sensei.provider_config import (
     DEFAULT_OPENROUTER_MODEL,
     DEFAULT_OPENROUTER_UPSTREAM,
     HOSTED_OPENROUTER_DEFAULTS,
+    hosted_openrouter_upstream,
     published_hosted_openrouter_models,
     validate_hosted_workflow_model,
 )
@@ -29,11 +30,37 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             )
 
     def test_openrouter_rejects_unallowlisted_vendor(self) -> None:
-        with self.assertRaisesRegex(ReviewInputError, "vendor is not allowlisted"):
+        with self.assertRaisesRegex(
+            ReviewInputError, "not allowlisted for hosted workflows"
+        ):
             validate_hosted_workflow_model(
                 provider_mode="openrouter",
                 workflow_mode="automatic",
-                model="qwen3.5/local-model",
+                model="anthropic/claude-3.5-sonnet",
+            )
+
+    def test_openrouter_accepts_published_model(self) -> None:
+        validate_hosted_workflow_model(
+            provider_mode="openrouter",
+            workflow_mode="automatic",
+            model=DEFAULT_OPENROUTER_MODEL,
+        )
+
+    def test_hosted_openrouter_upstream_resolves_default(self) -> None:
+        self.assertEqual(
+            hosted_openrouter_upstream(DEFAULT_OPENROUTER_MODEL),
+            DEFAULT_OPENROUTER_UPSTREAM,
+        )
+
+    def test_hosted_openrouter_upstream_rejects_unknown(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "not allowlisted"):
+            hosted_openrouter_upstream("anthropic/claude-3.5-sonnet")
+
+    def test_hosted_openrouter_upstream_rejects_mismatch(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "does not match hosted model"):
+            hosted_openrouter_upstream(
+                DEFAULT_OPENROUTER_MODEL,
+                configured_upstream="anthropic",
             )
 
     def test_ollama_rejects_openrouter_slug(self) -> None:
