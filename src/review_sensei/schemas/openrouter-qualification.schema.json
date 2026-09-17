@@ -58,6 +58,10 @@
       "items": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
       "maxItems": 32
     },
+    "evidence_reference_kind": {
+      "description": "What evidence_references are digests of. Digests are taken over the retained report bytes; a digest of a re-serialized document is not interchangeable.",
+      "const": "retained-bytes-v1"
+    },
     "limitations": {
       "type": "array",
       "items": {"type": "string", "minLength": 1, "maxLength": 512},
@@ -67,7 +71,10 @@
   "allOf": [
     {
       "if": {"properties": {"status": {"const": "supported"}}, "required": ["status"]},
-      "then": {"properties": {"evidence_references": {"minItems": 3}}}
+      "then": {
+        "properties": {"evidence_references": {"minItems": 3}},
+        "required": ["evidence_reference_kind"]
+      }
     }
   ],
   "examples": [

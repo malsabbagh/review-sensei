@@ -44,6 +44,11 @@ _ACCEPTED_REPORT_MODES = frozenset({"fixture", "live"})
 # carries the evaluation contract's own JSON ceiling rather than a second,
 # independently drifting bound (ADR 0007).
 MAX_EVIDENCE_ARTIFACT_BYTES = MAX_JSON_FILE_BYTES
+# Published marker telling a consumer what `evidence_references` are digests
+# of, so it does not have to infer it from the runbook. Digests are taken over
+# the retained report bytes, not over a re-serialized document, and those are
+# not interchangeable.
+EVIDENCE_REFERENCE_KIND = "retained-bytes-v1"
 _DEFAULT_LIMITATIONS = (
     "Qualified only for the declared model, upstream provider, and routing "
     "policy; not the full OpenRouter catalog.",
@@ -316,6 +321,8 @@ class OpenRouterQualificationRecord:
             "evidence_references": list(self.evidence_references),
             "limitations": list(self.limitations),
         }
+        if self.evidence_references:
+            value["evidence_reference_kind"] = EVIDENCE_REFERENCE_KIND
         validate_public_document(value, "openrouter-qualification")
         return value
 
@@ -554,6 +561,16 @@ def require_supported_openrouter_qualification(
             "OpenRouter support gate requires a minted or published record; "
             "a hand-built record carries no evidence provenance"
         )
+    # Stated here as well as inside the re-mint. The re-mint already fails
+    # closed without bytes, but a support claim is the one thing this module
+    # must never grant on a document's own say-so, so the requirement is local
+    # to the gate rather than a consequence of a helper three calls away.
+    if report_artifacts is None:
+        raise ReviewInputError(
+            "OpenRouter support gate requires the retained live report "
+            "artifacts; a published document's evidence_references are not "
+            "evidence until the harness hashes the bytes behind them"
+        )
     if parsed.qualification_target.model != parsed.promotion.model:
         raise ReviewInputError(
             "OpenRouter qualification target model does not match promotion record"
@@ -669,6 +686,7 @@ __all__ = [
     "PUBLISHED_QUALIFICATION_SLICES",
     "OpenRouterQualificationRecord",
     "OpenRouterQualificationTarget",
+    "EVIDENCE_REFERENCE_KIND",
     "evidence_reference_digest",
     "load_supported_openrouter_qualification",
     "qualification_record_from_reports",

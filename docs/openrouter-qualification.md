@@ -122,7 +122,13 @@ or accept `supported` status without them, and rejects `evidence_references`
 that the operator supplies but the bytes do not produce. This applies at every
 status, not only `supported`: a record may omit `evidence_references`
 entirely, but it may not carry digests without the artifacts behind them, so a
-historical record cannot be regenerated from a published document alone. Digests of
+historical record cannot be regenerated from a published document alone.
+
+A published record that carries digests also carries
+`evidence_reference_kind: retained-bytes-v1`, and the schema requires that
+marker on any `supported` document. A consumer can therefore tell from the
+record itself what the digests are digests of, rather than inferring it from
+this runbook. Digests of
 re-serialized in-memory documents are not interchangeable with these values.
 
 `OpenRouterQualificationRecord` tracks where its `evidence_references` came

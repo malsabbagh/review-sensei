@@ -18,6 +18,7 @@ from review_sensei.evaluation import (
     require_supported_promotion,
 )
 from review_sensei.openrouter_qualification import (
+    EVIDENCE_REFERENCE_KIND,
     INITIAL_OPENROUTER_QUALIFICATION_TARGET,
     OpenRouterQualificationRecord,
     OpenRouterQualificationTarget,
@@ -543,6 +544,37 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             require_supported_openrouter_qualification(
                 record, reports, report_artifacts=artifacts, **ATTESTED
             )
+
+    def test_support_gate_refuses_to_run_without_artifacts(self) -> None:
+        """A support claim is never granted on a document's own say-so."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        published = _supported_record(reports, artifacts).to_dict()
+        for label, kwargs in (
+            ("omitted", {}),
+            ("explicit None", {"report_artifacts": None}),
+        ):
+            with self.subTest(artifacts=label):
+                with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+                    require_supported_openrouter_qualification(
+                        published, reports, **kwargs, **ATTESTED
+                    )
+                with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+                    load_supported_openrouter_qualification(
+                        published, reports, **{"report_artifacts": None}, **ATTESTED
+                    )
+
+    def test_published_supported_record_declares_its_evidence_kind(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        published = _supported_record(reports, artifacts).to_dict()
+        self.assertEqual(published["evidence_reference_kind"], EVIDENCE_REFERENCE_KIND)
+        # The schema, not just the harness, requires the marker on a support
+        # claim, so a consumer cannot be handed digests of unknown provenance.
+        del published["evidence_reference_kind"]
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(published, "openrouter-qualification")
 
     def test_support_gate_rejects_a_record_naming_another_target(self) -> None:
         """Target identity is attested by the caller, not by the record."""
