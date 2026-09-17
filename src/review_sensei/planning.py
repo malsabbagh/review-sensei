@@ -285,6 +285,35 @@ def _coverage_for(
     )
 
 
+def _reconcile_file_outcomes_from_hunks(
+    analysis: DiffAnalysis,
+    *,
+    file_outcomes: dict[str, tuple[str, str | None]],
+    hunk_outcomes: dict[int, tuple[str, str | None]],
+) -> None:
+    """Align file outcomes with mixed per-hunk coverage within one path."""
+
+    for path in analysis.changed_paths:
+        hunk_indexes = [
+            hunk.index
+            for hunk in analysis.hunk_records
+            if (hunk.new_path or hunk.old_path) == path
+        ]
+        if not hunk_indexes:
+            continue
+        states = [
+            hunk_outcomes.get(index, ("unsupported", "incomplete-enumeration"))[0]
+            for index in hunk_indexes
+        ]
+        if any(state == "reviewed" for state in states) and any(
+            state != "reviewed" for state in states
+        ):
+            reason = file_outcomes.get(path, (None, None))[1]
+            file_outcomes[path] = ("partially-reviewed", reason)
+        elif states and all(state == "reviewed" for state in states):
+            file_outcomes[path] = ("reviewed", None)
+
+
 def plan_change(
     diff: str,
     *,
@@ -377,6 +406,11 @@ def plan_change(
             for hunk in record.hunks:
                 if hunk.index in packed_hunks:
                     hunk_outcomes[hunk.index] = ("reviewed", None)
+        _reconcile_file_outcomes_from_hunks(
+            analysis,
+            file_outcomes=file_outcomes,
+            hunk_outcomes=hunk_outcomes,
+        )
     else:
         if not analysis.enumeration_complete:
             raise ReviewInputError(
@@ -461,39 +495,40 @@ def merge_chunk_coverage(
 
     path_set = set(paths)
     hunk_set = set(hunk_indexes)
-    chunk_files = {
-        entry.path: (entry.outcome, entry.reason)
-        for entry in chunk.files
-        if entry.path in path_set
-    }
-    chunk_hunks = {
-        entry.index: (entry.outcome, entry.reason)
-        for entry in chunk.hunks
-        if entry.index in hunk_set
-    }
-    files: list[FileCoverage] = []
-    for entry in aggregate.files:
-        if entry.path in chunk_files:
+    file_map = {entry.path: entry for entry in aggregate.files}
+    for entry in chunk.files:
+        if entry.path not in path_set:
+            continue
+        if entry.path in file_map:
             outcome, reason = _worse_coverage_outcome(
+                (file_map[entry.path].outcome, file_map[entry.path].reason),
                 (entry.outcome, entry.reason),
-                chunk_files[entry.path],
             )
-            files.append(replace(entry, outcome=outcome, reason=reason))
+            file_map[entry.path] = replace(
+                file_map[entry.path], outcome=outcome, reason=reason
+            )
         else:
-            files.append(entry)
-    hunks: list[HunkCoverage] = []
-    for hunk_entry in aggregate.hunks:
-        if hunk_entry.index in chunk_hunks:
+            file_map[entry.path] = entry
+    files = tuple(sorted(file_map.values(), key=lambda entry: entry.path))
+    hunk_map = {(entry.index, entry.path): entry for entry in aggregate.hunks}
+    for chunk_hunk in chunk.hunks:
+        if chunk_hunk.index not in hunk_set:
+            continue
+        key = (chunk_hunk.index, chunk_hunk.path)
+        if key in hunk_map:
             outcome, reason = _worse_coverage_outcome(
-                (hunk_entry.outcome, hunk_entry.reason),
-                chunk_hunks[hunk_entry.index],
+                (hunk_map[key].outcome, hunk_map[key].reason),
+                (chunk_hunk.outcome, chunk_hunk.reason),
             )
-            hunks.append(replace(hunk_entry, outcome=outcome, reason=reason))
+            hunk_map[key] = replace(hunk_map[key], outcome=outcome, reason=reason)
         else:
-            hunks.append(hunk_entry)
+            hunk_map[key] = chunk_hunk
+    hunks = tuple(
+        sorted(hunk_map.values(), key=lambda hunk: (hunk.index, hunk.path))
+    )
     return CoverageManifest(
-        files=tuple(files),
-        hunks=tuple(hunks),
+        files=files,
+        hunks=hunks,
         enumeration_complete=aggregate.enumeration_complete,
         enumerated_paths=aggregate.enumerated_paths,
         limits=limits,
@@ -514,8 +549,9 @@ def apply_chunk_outcomes(
     if outcome not in COVERAGE_OUTCOMES:
         raise ReviewInputError("coverage outcome is invalid")
     _validate_reason(reason)
+    enumerated = set(coverage.enumerated_paths)
+    updated_paths = {path for path in paths if path in enumerated}
     files: list[FileCoverage] = []
-    updated_paths = set(paths)
     for file_entry in coverage.files:
         if file_entry.path in updated_paths:
             files.append(replace(file_entry, outcome=outcome, reason=reason))

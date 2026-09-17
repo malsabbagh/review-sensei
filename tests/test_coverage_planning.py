@@ -9,7 +9,7 @@ from review_sensei.coverage import (
     coverage_approval_state,
 )
 from review_sensei.diff import DiffFileRecord, analyze_diff
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewFormatError, ReviewInputError
 from review_sensei.evaluation import compare_chunked_against_baseline
 from review_sensei.models import (
     ProviderResponse,
@@ -21,6 +21,7 @@ from review_sensei.planning import (
     TotalWorkBudget,
     _classify_file,
     _coverage_for,
+    apply_chunk_outcomes,
     is_generated_path,
     merge_chunk_coverage,
     plan_change,
@@ -166,6 +167,13 @@ class CoveragePlanningTests(unittest.TestCase):
                     "fully_reviewed": True,
                     "enumerated_paths": ["src/a.py"],
                 }
+            )
+
+    def test_rejects_file_outcomes_without_enumerated_paths(self):
+        with self.assertRaises(ReviewInputError):
+            CoverageManifest(
+                files=(FileCoverage(path="src/a.py", outcome="reviewed"),),
+                enumerated_paths=(),
             )
 
     def test_rejects_coverage_paths_outside_enumerated_set(self):
@@ -328,6 +336,48 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(outcomes[1], "reviewed")
         self.assertEqual(outcomes[2], "unsupported")
 
+    def test_merge_chunk_coverage_appends_missing_chunk_entries(self):
+        aggregate = CoverageManifest(
+            files=(FileCoverage(path="src/b.py", outcome="reviewed"),),
+            enumeration_complete=False,
+            enumerated_paths=("src/a.py", "src/b.py"),
+        )
+        chunk = CoverageManifest(
+            files=(
+                FileCoverage(
+                    path="src/a.py",
+                    outcome="partially-reviewed",
+                    reason="cross-file-relationship",
+                ),
+            ),
+            enumerated_paths=("src/a.py",),
+        )
+        merged = merge_chunk_coverage(
+            aggregate,
+            chunk,
+            paths=("src/a.py",),
+            hunk_indexes=(),
+        )
+        outcomes = {entry.path: entry.outcome for entry in merged.files}
+        self.assertEqual(outcomes["src/a.py"], "partially-reviewed")
+        self.assertEqual(outcomes["src/b.py"], "reviewed")
+
+    def test_apply_chunk_outcomes_ignores_paths_outside_enumerated_set(self):
+        coverage = CoverageManifest(
+            files=(FileCoverage(path="src/a.py", outcome="reviewed"),),
+            enumerated_paths=("src/a.py",),
+        )
+        updated = apply_chunk_outcomes(
+            coverage,
+            paths=("src/a.py", "src/other.py"),
+            hunk_indexes=(),
+            outcome="partially-reviewed",
+            reason="chunk-failed",
+        )
+        paths = {entry.path for entry in updated.files}
+        self.assertEqual(paths, {"src/a.py"})
+        self.assertEqual(updated.files[0].outcome, "partially-reviewed")
+
     def test_merge_chunk_coverage_keeps_worse_outcome(self):
         aggregate = CoverageManifest(
             files=(
@@ -423,6 +473,31 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(run.outcome.status, "partial")
         self.assertEqual(run.outcome.diagnostic, "no_validated_result")
         self.assertEqual(run.result.review_status, "incomplete")
+
+    def test_provider_budget_does_not_count_failed_attempts(self):
+        from review_sensei.service import _BudgetedProvider, _CallBudget
+
+        class FlakyProvider(FakeProvider):
+            def complete(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    raise ReviewInputError("transport failed")
+                return ProviderResponse(
+                    text='{"summary":"ok","comments":[]}',
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        provider = FlakyProvider([])
+        budget = _CallBudget(max_calls=1)
+        budgeted = _BudgetedProvider(provider, budget=budget)
+        with self.assertRaises(ReviewInputError):
+            budgeted.complete(None)
+        self.assertEqual(budget.calls, 0)
+        budgeted.complete(None)
+        self.assertEqual(budget.calls, 1)
+        with self.assertRaises(ReviewFormatError):
+            budgeted.complete(None)
 
     def test_provider_budget_stops_unbounded_calls(self):
         limits = ReviewLimits(max_diff_files=1)

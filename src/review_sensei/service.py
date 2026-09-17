@@ -161,8 +161,9 @@ class _BudgetedProvider:
         if self._budget.calls >= self._budget.max_calls:
             self._budget.exhausted = True
             raise ReviewFormatError("provider call budget exhausted")
+        response = self._provider.complete(request)
         self._budget.calls += 1
-        return self._provider.complete(request)
+        return response
 
 
 def _location_valid(comment: ReviewComment, analysis: DiffAnalysis) -> bool:

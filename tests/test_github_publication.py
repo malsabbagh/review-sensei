@@ -1864,6 +1864,8 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_out_of_diff_comment_is_retained_in_the_summary(self):
+        """Unanchored findings are summary-only by design: no inline thread is created."""
+
         from review_sensei.hosting.github.approval import has_blocking_findings
 
         bad = ReviewResult(
@@ -1903,7 +1905,8 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
-        self.assertIn("Findings without a publishable inline location", body["body"])
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("`missing.py`", body["body"])
         self.assertIn("unchanged", body["body"])
 
         blocking_responses = [

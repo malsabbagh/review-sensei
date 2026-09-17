@@ -57,6 +57,8 @@ PUBLIC_DIAGNOSTICS = frozenset(
     {
         "already_published",
         "cancelled",
+        "coverage-incomplete",
+        "coverage-partial",
         "deadline_exceeded",
         "draft_pr",
         "fork_not_allowed",

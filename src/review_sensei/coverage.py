@@ -197,12 +197,12 @@ class CoverageManifest:
             raise ReviewInputError(
                 "coverage enumeration_complete requires file outcomes"
             )
+        file_paths = {entry.path for entry in self.files}
+        hunk_paths = {entry.path for entry in self.hunks}
         if self.enumerated_paths:
             if len(self.enumerated_paths) != len(set(self.enumerated_paths)):
                 raise ReviewInputError("coverage enumerated_paths must be unique")
             enumerated = set(self.enumerated_paths)
-            file_paths = {entry.path for entry in self.files}
-            hunk_paths = {entry.path for entry in self.hunks}
             if not file_paths.issubset(enumerated):
                 raise ReviewInputError(
                     "coverage files contain paths outside the enumerated set"
@@ -215,6 +215,10 @@ class CoverageManifest:
                 raise ReviewInputError(
                     "coverage enumeration_complete requires every enumerated path"
                 )
+        elif file_paths or hunk_paths:
+            raise ReviewInputError(
+                "coverage enumerated_paths is required when outcomes are present"
+            )
         validate_public_document(self.to_dict(), "coverage-manifest")
 
     @property
