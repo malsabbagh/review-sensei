@@ -1233,6 +1233,20 @@ class ReviewPublisher:
                 prepared_comments.append(
                     (comment, lifecycle.fingerprint, comment_body, anchor)
                 )
+            # GitHub rejects batch review comments with subject_type=file on
+            # REQUEST_CHANGES reviews (HTTP 422). Retain them in the summary
+            # instead; COMMENT reviews may still publish file-level threads.
+            if auto_approve and has_blocking_findings(result):
+                file_level: list[ReviewComment] = []
+                inline_prepared: list[tuple[ReviewComment, str, str, str]] = []
+                for entry in prepared_comments:
+                    if entry[3] == "file":
+                        file_level.append(entry[0])
+                    else:
+                        inline_prepared.append(entry)
+                if file_level:
+                    unanchored.extend(file_level)
+                prepared_comments = inline_prepared
             if unanchored:
                 summary = (
                     f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
