@@ -182,10 +182,18 @@ jobs:
             echo '::error::provider_profile is unused; set provider_mode to openrouter and model via REVIEWSENSEI_MODEL.' >&2
             exit 1
           fi
-          if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then
-            echo '::error::allow_unqualified_profile is unused for hosted OpenRouter runs.' >&2
-            exit 1
-          fi
+          case "$ALLOW_UNQUALIFIED_PROFILE" in
+            ""|false)
+              ;;
+            true)
+              echo '::error::allow_unqualified_profile is unused for hosted OpenRouter runs.' >&2
+              exit 1
+              ;;
+            *)
+              echo '::error::allow_unqualified_profile must be empty or false' >&2
+              exit 1
+              ;;
+          esac
           case "$OPERATION" in
             review|reply) ;;
             *) echo '::error::operation must be review or reply' >&2; exit 1 ;;
@@ -594,6 +602,7 @@ jobs:
       - name: Run cloud-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           OLLAMA_BASE_URL: https://ollama.com/api
           OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -620,7 +629,7 @@ jobs:
 
           try:
               validate_hosted_workflow_model(
-                  provider_mode="cloud-ollama",
+                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
                   model=os.environ["OLLAMA_MODEL"],
               )
@@ -743,6 +752,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -769,7 +779,7 @@ jobs:
 
           try:
               validate_hosted_workflow_model(
-                  provider_mode="cloud-ollama",
+                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
                   model=os.environ["OLLAMA_MODEL"],
               )
@@ -1433,6 +1443,7 @@ jobs:
       - name: Prepare and run trusted local review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
@@ -1458,7 +1469,7 @@ jobs:
 
           try:
               validate_hosted_workflow_model(
-                  provider_mode="local-ollama",
+                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
                   model=os.environ["OLLAMA_MODEL"],
               )
@@ -1587,6 +1598,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1607,7 +1619,7 @@ jobs:
 
           try:
               validate_hosted_workflow_model(
-                  provider_mode="local-ollama",
+                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
                   workflow_mode="",
                   model=os.environ["OLLAMA_MODEL"],
               )

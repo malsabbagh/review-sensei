@@ -125,6 +125,55 @@ class CloudflarePackageTests(unittest.TestCase):
             'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
         )
 
+    def test_v4_config_core_fields_match_ts_builder(self):
+        from review_sensei.hosting.github.setup import (
+            CURRENT_PACKAGE_VERSION,
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            _v4_config_file,
+        )
+
+        def parse_fields(content: str) -> dict[str, str]:
+            fields: dict[str, str] = {}
+            for line in content.splitlines():
+                if not line or line.startswith("#"):
+                    continue
+                key, _, value = line.partition(":")
+                fields[key.strip()] = value.strip()
+            return fields
+
+        py_fields = parse_fields(_v4_config_file())
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            py_fields,
+            {
+                "setup_version": "4",
+                "provider": "ollama",
+                "provider_mode": "local",
+                "model": "''",
+                "base_url": "http://127.0.0.1:11434/api",
+                "cloud_base_url": "https://ollama.com/api",
+                "local_model": DEFAULT_LOCAL_MODEL,
+                "cloud_model": DEFAULT_CLOUD_MODEL,
+                "version": CURRENT_PACKAGE_VERSION,
+                "auto_review": "false",
+                "learning_proposals": "false",
+                "github_writes": "false",
+                "learning_prs": "false",
+                "mention_replies": "false",
+                "upload_artifacts": "false",
+                "stages_dir": "''",
+                "categories_dir": "''",
+            },
+        )
+        self.assertIn("provider_mode: local", ts_source)
+        self.assertIn("model: ''", ts_source)
+        self.assertIn("local_model: ${DEFAULT_LOCAL_MODEL}", ts_source)
+        self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
+        self.assertIn("learning_proposals: false", ts_source)
+
     def test_setup_builders_share_constants_and_variables(self):
         import re
 
