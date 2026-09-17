@@ -132,11 +132,22 @@ live reports can authorize support labels or approval eligibility.
 `evaluated_at` and `reproducibility` describe the observation window, and
 evaluation reports do not carry either value. The gate always rejects an
 `evaluated_at` that is not an RFC 3339 UTC instant or that is dated in the
-future, but it cannot derive the window from the reports themselves. A caller
-that still holds the original mint inputs should pass `expected_evaluated_at`
-and `expected_reproducibility` so the comparison record is minted from those
-values instead of from the record under test; otherwise a republished record
-validates its own attestations against itself.
+future, but it cannot derive the window from the reports themselves.
+
+The gate therefore requires `expected_evaluated_at` and
+`expected_reproducibility` by default, so the comparison record is minted from
+the caller's own mint inputs instead of from the record under test. A consumer
+that holds only the published record and the reports must opt into the weaker
+guarantee with `allow_self_attested_inputs=True`, which makes at the call site
+the fact that the record is attesting to its own observation window. Pass `now`
+to inject the clock used for the future-dating check when a caller needs
+deterministic gate decisions.
+
+Downstream consumers should prefer `load_supported_openrouter_qualification`,
+which parses a published document and runs the gate in one step, over calling
+`validate_openrouter_qualification_record` directly: the latter is a structural
+parse, so a record it returns can report `status=supported` without any
+artifact check having run.
 
 ### Qualification slice
 

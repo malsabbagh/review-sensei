@@ -9,6 +9,7 @@ from pathlib import Path
 SITE_ROOT = Path(__file__).resolve().parents[1] / "docs" / "site"
 INDEX = SITE_ROOT / "index.html"
 SECURITY = SITE_ROOT / "security" / "index.html"
+EXAMPLES = SITE_ROOT / "examples" / "index.html"
 SITEMAP = SITE_ROOT / "sitemap.xml"
 
 # Every page is read in full, so bound the size a single page may contribute.
@@ -22,10 +23,15 @@ BANNED_PATTERNS = [
     re.compile(r"\b(?:fully|100%)\s+(?:secure|private|accurate)\b", re.I),
 ]
 
-# Honesty qualifiers the public pages must keep somewhere in their copy.
+# Honesty qualifiers each claim-bearing page must keep somewhere in its copy.
+# The original "illustrative"/"schema"/"alpha" set is preserved for every page
+# that makes capability claims; the security page carries one more because it
+# is the page that states what the project does not promise. Getting-started is
+# absent because it is instructional and makes no capability claim.
 REQUIRED_QUALIFIERS = {
-    INDEX: ("illustrative", "alpha"),
-    SECURITY: ("alpha", "does not guarantee"),
+    INDEX: ("illustrative", "schema", "alpha"),
+    SECURITY: ("illustrative", "schema", "alpha", "does not guarantee"),
+    EXAMPLES: ("illustrative", "schema", "alpha"),
 }
 
 INTERNAL_LINK = re.compile(r'href="(/[^"#?]*)"')

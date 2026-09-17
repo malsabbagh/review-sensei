@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timezone
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.evaluation import (
@@ -21,6 +22,7 @@ from review_sensei.openrouter_qualification import (
     OpenRouterQualificationRecord,
     OpenRouterQualificationTarget,
     evidence_reference_digest,
+    load_supported_openrouter_qualification,
     qualification_record_from_reports,
     require_supported_openrouter_qualification,
     routing_policy_digest,
@@ -35,6 +37,12 @@ TARGET = INITIAL_OPENROUTER_QUALIFICATION_TARGET
 POLICY_DIGEST = routing_policy_digest(TARGET.routing_policy())
 REPRO = {"temperature": 0}
 EVALUATED_AT = "2026-09-16T00:00:00Z"
+# The gate requires the caller's own mint inputs unless it opts into the
+# weaker self-attested path, so every gate call states them explicitly.
+ATTESTED = {
+    "expected_evaluated_at": EVALUATED_AT,
+    "expected_reproducibility": REPRO,
+}
 
 
 def _make_openrouter_report(
@@ -132,6 +140,19 @@ def _supported_live_reports() -> list[dict]:
     ]
 
 
+def _supported_record(
+    reports: list[dict], artifacts: list[bytes]
+) -> OpenRouterQualificationRecord:
+    return qualification_record_from_reports(
+        reports,
+        target=TARGET,
+        observed_revision="openrouter-rev-1",
+        reproducibility=REPRO,
+        evaluated_at=EVALUATED_AT,
+        report_artifacts=artifacts,
+    )
+
+
 def _insufficient_harness_record() -> dict:
     return {
         "schema_version": "1.0",
@@ -201,7 +222,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 status="supported",
             )
         with self.assertRaises(ReviewInputError):
-            require_supported_openrouter_qualification(record, reports)
+            require_supported_openrouter_qualification(record, reports, **ATTESTED)
 
     def test_two_live_reports_are_insufficient(self) -> None:
         reports = [
@@ -220,7 +241,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         self.assertEqual(record.status, "insufficient")
         self.assertEqual(record.promotion.run_count, 2)
         with self.assertRaises(ReviewInputError):
-            require_supported_openrouter_qualification(record, reports)
+            require_supported_openrouter_qualification(record, reports, **ATTESTED)
 
     def test_loopback_endpoint_scope_is_rejected(self) -> None:
         report = _make_openrouter_report(endpoint_scope="loopback")
@@ -345,7 +366,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         validate_public_document(record.to_dict(), "openrouter-qualification")
         self.assertEqual(
             require_supported_openrouter_qualification(
-                record, reports, report_artifacts=artifacts
+                record, reports, report_artifacts=artifacts, **ATTESTED
             ).status,
             "supported",
         )
@@ -417,12 +438,11 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             report_artifacts=artifacts,
         ).to_dict()
         record["reproducibility"] = {"temperature": 1}
-        with self.assertRaisesRegex(ReviewInputError, "reproducibility"):
+        with self.assertRaisesRegex(
+            ReviewInputError, "reproducibility does not match live evaluation evidence"
+        ):
             require_supported_openrouter_qualification(
-                record,
-                reports,
-                report_artifacts=artifacts,
-                expected_reproducibility=REPRO,
+                record, reports, report_artifacts=artifacts, **ATTESTED
             )
 
     def test_stale_evaluated_at_fails_the_support_gate(self) -> None:
@@ -437,12 +457,11 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             report_artifacts=artifacts,
         ).to_dict()
         record["evaluated_at"] = "2020-01-01T00:00:00Z"
-        with self.assertRaisesRegex(ReviewInputError, "evaluated_at"):
+        with self.assertRaisesRegex(
+            ReviewInputError, "evaluated_at does not match live evaluation evidence"
+        ):
             require_supported_openrouter_qualification(
-                record,
-                reports,
-                report_artifacts=artifacts,
-                expected_evaluated_at=EVALUATED_AT,
+                record, reports, report_artifacts=artifacts, **ATTESTED
             )
 
     def test_future_dated_evaluated_at_fails_the_support_gate(self) -> None:
@@ -459,7 +478,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         record["evaluated_at"] = "3026-01-01T00:00:00Z"
         with self.assertRaisesRegex(ReviewInputError, "dated in the future"):
             require_supported_openrouter_qualification(
-                record, reports, report_artifacts=artifacts
+                record, reports, report_artifacts=artifacts, **ATTESTED
             )
 
     def test_malformed_evaluated_at_fails_the_support_gate(self) -> None:
@@ -476,8 +495,80 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
         record["evaluated_at"] = "2026-09-16 00:00:00"
         with self.assertRaisesRegex(ReviewInputError, "RFC 3339 UTC"):
             require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts, **ATTESTED
+            )
+
+    def test_published_supported_record_with_three_references_parses(self) -> None:
+        """The <3 rule must not reject a well-formed three-reference record."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        published = _supported_record(reports, artifacts).to_dict()
+        self.assertEqual(len(published["evidence_references"]), 3)
+        parsed = validate_openrouter_qualification_record(published)
+        self.assertEqual(parsed.status, "supported")
+        self.assertEqual(
+            list(parsed.evidence_references), published["evidence_references"]
+        )
+
+    def test_support_gate_requires_attested_mint_inputs_by_default(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = _supported_record(reports, artifacts)
+        with self.assertRaisesRegex(ReviewInputError, "allow_self_attested_inputs"):
+            require_supported_openrouter_qualification(
                 record, reports, report_artifacts=artifacts
             )
+        self.assertEqual(
+            require_supported_openrouter_qualification(
+                record,
+                reports,
+                report_artifacts=artifacts,
+                allow_self_attested_inputs=True,
+            ).status,
+            "supported",
+        )
+
+    def test_load_supported_qualification_parses_and_gates(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        published = _supported_record(reports, artifacts).to_dict()
+        self.assertEqual(
+            load_supported_openrouter_qualification(
+                published,
+                reports,
+                report_artifacts=artifacts,
+                expected_evaluated_at=EVALUATED_AT,
+                expected_reproducibility=REPRO,
+            ).status,
+            "supported",
+        )
+        published["evaluated_at"] = "2020-01-01T00:00:00Z"
+        with self.assertRaises(ReviewInputError):
+            load_supported_openrouter_qualification(
+                published,
+                reports,
+                report_artifacts=artifacts,
+                expected_evaluated_at=EVALUATED_AT,
+                expected_reproducibility=REPRO,
+            )
+
+    def test_future_dating_uses_the_injected_clock(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = _supported_record(reports, artifacts)
+        before = datetime(2026, 9, 15, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ReviewInputError, "dated in the future"):
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts, now=before, **ATTESTED
+            )
+        after = datetime(2026, 9, 17, tzinfo=timezone.utc)
+        self.assertEqual(
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts, now=after, **ATTESTED
+            ).status,
+            "supported",
+        )
 
     def test_unpublished_slice_cannot_be_qualified(self) -> None:
         with self.assertRaisesRegex(ReviewInputError, "published qualification slice"):

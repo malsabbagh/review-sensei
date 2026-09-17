@@ -187,7 +187,9 @@ def _evidence_references_from_artifacts(
         if parsed != dict(document):
             raise ReviewInputError(
                 f"report_artifacts[{index}] does not match the supplied "
-                "evaluation report"
+                "evaluation report; pass the bytes the report was parsed from "
+                "rather than a re-serialized copy, because the digest is taken "
+                "over the retained bytes"
             )
         digests.append(digest)
     return _digest_list(digests, label="evidence_references")
@@ -462,7 +464,7 @@ def validate_openrouter_qualification_against_report(
     _validate_openrouter_live_report(report, record.qualification_target)
 
 
-def _require_attested_evaluated_at(value: str) -> None:
+def _require_attested_evaluated_at(value: str, *, now: datetime | None = None) -> None:
     """Reject support-claim timestamps that are malformed or not yet observed."""
 
     if not isinstance(value, str) or not _RFC3339_UTC.fullmatch(value):
@@ -477,7 +479,7 @@ def _require_attested_evaluated_at(value: str) -> None:
         raise ReviewInputError(
             "OpenRouter qualification evaluated_at must be an RFC 3339 UTC instant"
         ) from exc
-    if observed > datetime.now(timezone.utc):
+    if observed > (now or datetime.now(timezone.utc)):
         raise ReviewInputError(
             "OpenRouter qualification evaluated_at is dated in the future"
         )
@@ -490,6 +492,8 @@ def require_supported_openrouter_qualification(
     report_artifacts: Sequence[bytes] | None = None,
     expected_evaluated_at: str | None = None,
     expected_reproducibility: Mapping[str, Any] | None = None,
+    allow_self_attested_inputs: bool = False,
+    now: datetime | None = None,
 ) -> OpenRouterQualificationRecord:
     """Fail-closed gate for OpenRouter support claims and approval eligibility.
 
@@ -501,11 +505,18 @@ def require_supported_openrouter_qualification(
     ``evaluated_at`` and ``reproducibility`` are operator attestations that
     evaluation reports do not carry, so the gate cannot derive them from
     ``reports``. It always rejects an ``evaluated_at`` that is not an RFC 3339
-    UTC instant or that is dated in the future. A caller holding the original
-    mint inputs should also pass ``expected_evaluated_at`` and
+    UTC instant or that is dated in the future.
+
+    Beyond that, the caller must supply ``expected_evaluated_at`` and
     ``expected_reproducibility``: the comparison record is then minted from
     those values rather than from the record under test, so a stale or edited
-    record fails instead of validating against itself.
+    record fails instead of validating against itself. The weaker path, where
+    the record attests to its own observation window, is available only by
+    passing ``allow_self_attested_inputs=True``, which makes the reduced
+    guarantee explicit at the call site rather than silently the default.
+
+    ``now`` injects the clock used for the future-dating check so callers can
+    reproduce gate decisions deterministically.
     """
 
     parsed = (
@@ -518,9 +529,17 @@ def require_supported_openrouter_qualification(
         raise ReviewInputError(
             "OpenRouter qualification target model does not match promotion record"
         )
-    _require_attested_evaluated_at(parsed.promotion.evaluated_at)
+    if not allow_self_attested_inputs and (
+        expected_evaluated_at is None or expected_reproducibility is None
+    ):
+        raise ReviewInputError(
+            "OpenRouter support gate requires expected_evaluated_at and "
+            "expected_reproducibility; pass allow_self_attested_inputs=True to "
+            "accept the record's own attestations and the weaker guarantee"
+        )
+    _require_attested_evaluated_at(parsed.promotion.evaluated_at, now=now)
     if expected_evaluated_at is not None:
-        _require_attested_evaluated_at(expected_evaluated_at)
+        _require_attested_evaluated_at(expected_evaluated_at, now=now)
     minted = qualification_record_from_reports(
         reports,
         target=parsed.qualification_target,
@@ -563,6 +582,35 @@ def require_supported_openrouter_qualification(
     return parsed
 
 
+def load_supported_openrouter_qualification(
+    document: Mapping[str, Any],
+    reports: Sequence[Mapping[str, Any]],
+    *,
+    report_artifacts: Sequence[bytes],
+    expected_evaluated_at: str,
+    expected_reproducibility: Mapping[str, Any],
+    now: datetime | None = None,
+) -> OpenRouterQualificationRecord:
+    """Parse a published qualification document and gate it in one step.
+
+    Prefer this over calling :func:`validate_openrouter_qualification_record`
+    directly: that function is a structural parse, and a record it returns
+    reports ``status == "supported"`` without any artifact check having run.
+    This helper never returns a record that has not cleared the evidence-bound
+    gate, so a downstream consumer cannot read a support claim it did not
+    verify.
+    """
+
+    return require_supported_openrouter_qualification(
+        validate_openrouter_qualification_record(document),
+        reports,
+        report_artifacts=report_artifacts,
+        expected_evaluated_at=expected_evaluated_at,
+        expected_reproducibility=expected_reproducibility,
+        now=now,
+    )
+
+
 __all__ = [
     "INITIAL_OPENROUTER_QUALIFICATION_TARGET",
     "MAX_EVIDENCE_ARTIFACT_BYTES",
@@ -570,6 +618,7 @@ __all__ = [
     "OpenRouterQualificationRecord",
     "OpenRouterQualificationTarget",
     "evidence_reference_digest",
+    "load_supported_openrouter_qualification",
     "qualification_record_from_reports",
     "require_supported_openrouter_qualification",
     "routing_policy_digest",
