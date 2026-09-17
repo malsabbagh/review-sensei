@@ -13,19 +13,19 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 <meta name="theme-color" content="#070913" />
 <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
 <link rel="canonical" href="https://reviewsensei.dev/" />
-<title>ReviewSensei — Open-source, provider-neutral AI code review</title>
-<meta name="description" content="ReviewSensei is an open-source, provider-neutral code review engine with repository context, specialist reviewers, and actionable findings. Bring your own model, self-host, and keep review memory in your Git workflow." />
+<title>ReviewSensei — AI code review. Your models. Your standards. Your control.</title>
+<meta name="description" content="Review pull requests with repository-owned knowledge, configurable review stages, and explicit coverage. Run in your own GitHub Actions environment or locally, and decide what it can publish and learn." />
 
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://reviewsensei.dev/" />
-<meta property="og:title" content="ReviewSensei — Open-source, provider-neutral AI code review" />
-<meta property="og:description" content="ReviewSensei combines specialist review passes, repository context, and durable learnings to produce fewer noisy comments and more findings your team can defend, discuss, and act on." />
+<meta property="og:title" content="ReviewSensei — AI code review. Your models. Your standards. Your control." />
+<meta property="og:description" content="Review pull requests with repository-owned knowledge, configurable review stages, and explicit coverage. Run in your own GitHub Actions environment or locally." />
 <meta property="og:image" content="https://reviewsensei.dev/assets/favicon.svg" />
 <meta property="og:site_name" content="ReviewSensei" />
 
 <meta name="twitter:card" content="summary" />
-<meta name="twitter:title" content="ReviewSensei — Open-source, provider-neutral AI code review" />
-<meta name="twitter:description" content="Specialist review passes, repository context, and durable learnings. Bring your own model and keep review memory in your Git workflow." />
+<meta name="twitter:title" content="ReviewSensei — AI code review. Your models. Your standards. Your control." />
+<meta name="twitter:description" content="Repository-owned knowledge, configurable review stages, explicit coverage, and separate controls for analysis, publication, and learning." />
 <meta name="twitter:image" content="https://reviewsensei.dev/assets/favicon.svg" />
 
 <script type="application/ld+json">
@@ -38,7 +38,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   "url": "https://reviewsensei.dev/",
   "downloadUrl": "https://github.com/malsabbagh/review-sensei",
   "license": "https://github.com/malsabbagh/review-sensei/blob/main/LICENSE",
-  "description": "Open-source, provider-neutral AI code review engine with repository context, specialist reviewers, and actionable findings.",
+  "description": "Open-source AI code review with repository-owned knowledge, configurable stages, explicit coverage, and customer-controlled execution.",
   "author": { "@type": "Person", "name": "Mohamad Alsabbagh", "url": "https://github.com/malsabbagh" },
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
 }
@@ -485,9 +485,11 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
     <nav class="nav-links" aria-label="Primary">
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
+      <a href="/examples/">Examples</a>
+      <a href="/getting-started/">Getting started</a>
+      <a href="/security/">Security</a>
       <a href="#install">Install</a>
-      <a href="#opensource">Open source</a>
-      <a class="nav-cta" href="#install">Get ReviewSensei</a>
+      <a class="nav-cta" href="/getting-started/">Set up GitHub reviews</a>
     </nav>
   </div>
 </header>
@@ -496,24 +498,24 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
 <section class="hero">
   <div class="container hero-grid">
     <div>
-      <div class="eyebrow"><span class="dot"></span> Open source · Repository-aware · GitHub-native</div>
-      <h1><span class="grad">Code review with judgment.</span><br/>Context your team actually owns.</h1>
+      <div class="eyebrow"><span class="dot"></span> Open source · Alpha · Repository-aware</div>
+      <h1><span class="grad">AI code review.</span><br/>Your models. Your standards. Your control.</h1>
       <p class="lede">
-        ReviewSensei combines specialist review passes, repository context, and durable learnings to produce fewer noisy comments and more findings your team can defend, discuss, and act on.
+        Review pull requests with repository-owned knowledge, configurable review stages, and explicit coverage. Run in your own GitHub Actions environment or locally, and decide what it can publish and learn.
       </p>
       <div class="actions">
-        <a class="btn btn-primary" href="#install">Install ReviewSensei <span aria-hidden="true">→</span></a>
-        <a class="btn btn-ghost" href="#how">See how it reviews</a>
+        <a class="btn btn-primary" href="/getting-started/">Set up GitHub reviews <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="/getting-started/#cli">Try the CLI</a>
       </div>
       <div class="meta">
         <span><i></i>Bring your own model</span>
-        <span><i></i>Self-host friendly</span>
-        <span><i></i>Repository-owned memory</span>
+        <span><i></i>Your execution environment</span>
+        <span><i></i>Separate write controls</span>
       </div>
       <div class="review-seal" aria-hidden="true">Reviewed<br>with context</div>
     </div>
 
-    <div class="hero-card" aria-label="ReviewSensei product preview">
+    <div class="hero-card" aria-label="Illustrative review preview (fixture example, not a live review)">
       <div class="review-shell">
         <div class="window-bar">
           <div class="win-left">
@@ -562,7 +564,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
               <div class="cbody">No security regressions found in the changed authorization path.</div>
               <div class="cpath">review summary</div>
             </div>
-            <span class="badge">Verified</span>
+            <span class="badge">Illustrative</span>
           </div>
         </div>
       </div>
@@ -579,28 +581,28 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
 
 <section class="trust">
   <div class="container trust-strip reveal">
-    <div class="trust-item"><strong>Repository-aware</strong><span>Understands local architecture and rules.</span></div>
-    <div class="trust-item"><strong>Model-independent</strong><span>Use Ollama or your preferred provider.</span></div>
-    <div class="trust-item"><strong>Evidence-first</strong><span>Findings point back to code and context.</span></div>
-    <div class="trust-item"><strong>Learnings you own</strong><span>Keep review memory in your Git workflow.</span></div>
+    <div class="trust-item"><strong>Explicit coverage</strong><span>Per-file outcomes including incomplete and budget-exhausted.</span></div>
+    <div class="trust-item"><strong>Stable finding IDs</strong><span>Track disposition across runs without assuming omission means fixed.</span></div>
+    <div class="trust-item"><strong>Trusted context</strong><span>Path-scoped lenses, stages, and repository learnings you approve.</span></div>
+    <div class="trust-item"><strong>Bounded diagnostics</strong><span>Zero-write <code>doctor</code> and <code>plan</code> previews before you publish.</span></div>
   </div>
 </section>
 
 <section class="section" id="features">
   <div class="container">
     <div class="section-head reveal">
-      <div class="kicker">A review system, not a chatbot</div>
-      <h2>Fewer opinions. Better review evidence.</h2>
-      <p>ReviewSensei is designed around the things that make review trustworthy: focused passes, repository knowledge, traceable evidence, and a final synthesis that removes duplication.</p>
+      <div class="kicker">Demonstrable controls</div>
+      <h2>Review behavior you can inspect and reproduce.</h2>
+      <p>Capabilities below ship in the open-source engine today. Defaults and opt-in gates are noted where release posture matters — see <a href="/examples/" style="color:var(--red-soft);font-weight:700">fixture walkthroughs</a> for reproducible examples.</p>
     </div>
 
     <div class="feature-grid">
-      <article class="feature reveal"><span class="tag">Core</span><div class="ficon">⌘</div><h3>Multi-stage review</h3><p>Run correctness, architecture, security, performance, tests, and maintainability as separate review stages instead of one overloaded prompt.</p></article>
-      <article class="feature reveal"><span class="tag">Context</span><div class="ficon">◎</div><h3>Repository memory</h3><p>Carry forward conventions, architectural decisions, prior findings, and accepted review guidance without locking that knowledge inside a vendor.</p></article>
-      <article class="feature reveal"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Evidence-backed findings</h3><p>Every important comment should explain why it matters and connect to the changed code, repository rule, or prior learning that supports it.</p></article>
-      <article class="feature reveal"><span class="tag">Choice</span><div class="ficon">↔</div><h3>Bring your own model</h3><p>Keep the review engine provider-neutral. Switch models as they improve without replacing your workflow, repository memory, or review policy.</p></article>
-      <article class="feature reveal"><span class="tag">Conversation</span><div class="ficon">👀</div><h3>Discuss every finding</h3><p>Mention <code>@sensei</code> on a review comment or PR conversation to ask a follow-up. The processing reaction clears when the bounded, thread-aware reply arrives.</p></article>
-      <article class="feature reveal"><span class="tag">Open</span><div class="ficon">{"</>"}</div><h3>Open-source by design</h3><p>Inspect how the reviewer works, self-host it, extend stages, add providers, and keep sensitive code review execution under your control.</p></article>
+      <article class="feature reveal"><span class="tag">Coverage</span><div class="ficon">◎</div><h3>Per-file coverage outcomes</h3><p>Large-change orchestration (opt-in) emits explicit per-path outcomes: reviewed, partially-reviewed, excluded-by-policy, unsupported, and budget-exhausted. Incomplete enumeration never reports a fully reviewed plan.</p></article>
+      <article class="feature reveal"><span class="tag">Identity</span><div class="ficon">◇</div><h3>Stable finding identities</h3><p>Incremental reviews derive lifecycle states (<code>new</code>, <code>still-present</code>, <code>fixed</code>, <code>outdated</code>, <code>uncertain</code>) from stable fingerprints. A later response omitting a concern is not treated as proof the defect is fixed.</p></article>
+      <article class="feature reveal"><span class="tag">Learning</span><div class="ficon">↗</div><h3>Learning lifecycle</h3><p>Proposed learnings appear in the review result → draft learning PR → maintainer approval on the trusted base → future selection for matching paths. Thread resolution and learning approval are separate from code correctness.</p></article>
+      <article class="feature reveal"><span class="tag">Context</span><div class="ficon">⌘</div><h3>Trusted lenses &amp; stages</h3><p>Configure path-scoped stages, categories, and trusted-base context. Symbol-aware source context is opt-in trusted-base policy, disabled by default.</p></article>
+      <article class="feature reveal"><span class="tag">Controls</span><div class="ficon">↔</div><h3>Separate write switches</h3><p>Independent controls for analysis, comment publication, automatic approval/request-changes, learning proposals, learning PRs, <code>@sensei</code> conversations, and artifact retention.</p></article>
+      <article class="feature reveal"><span class="tag">Diagnostics</span><div class="ficon">{"</>"}</div><h3>Bounded diagnostics &amp; plans</h3><p><code>review-sensei doctor</code> and <code>review-sensei plan</code> perform zero-provider-call, zero-write previews of configuration, stages, budgets, and skip reasons before you publish.</p></article>
     </div>
   </div>
 </section>
@@ -615,7 +617,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
         <ul>
           <li><span class="num">1</span><span><b>Build context.</b> Load the diff, relevant files, repository policy, architecture notes, and approved learnings.</span></li>
           <li><span class="num">2</span><span><b>Run specialists.</b> Each reviewer looks for a narrower class of failure with its own criteria.</span></li>
-          <li><span class="num">3</span><span><b>Validate findings.</b> Remove duplicates, weak guesses, and findings unsupported by the codebase.</span></li>
+          <li><span class="num">3</span><span><b>Validate structure.</b> Enforce JSON/schema contracts, diff-location bounds, and configured evidence checks. This is not independent verification that every finding is correct.</span></li>
           <li><span class="num">4</span><span><b>Export a clean review.</b> High-signal findings and a final verdict are written to a validated artifact ready for your chosen integration.</span></li>
         </ul>
       </div>
@@ -624,8 +626,24 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
         <div class="pipe"><div class="pipe-icon">⌘</div><div><h4>Architecture reviewer</h4><p>Boundaries, coupling, maintainability, design drift</p></div><span class="status">complete</span></div>
         <div class="pipe"><div class="pipe-icon">◈</div><div><h4>Security reviewer</h4><p>Trust boundaries, authz, data exposure, risky patterns</p></div><span class="status">complete</span></div>
         <div class="pipe"><div class="pipe-icon">↗</div><div><h4>Performance reviewer</h4><p>Scaling risks, hot paths, unnecessary work</p></div><span class="status">complete</span></div>
-        <div class="final"><div><strong>Final synthesis: Looks good</strong><span>3 useful findings · 0 duplicate comments · 92% confidence</span></div><div class="score">92</div></div>
+        <div class="final"><div><strong>Illustrative synthesis</strong><span>3 findings · explicit coverage fields · no fabricated quality score</span></div><div class="score" aria-hidden="true">—</div></div>
       </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="examples">
+  <div class="container">
+    <div class="section-head reveal">
+      <div class="kicker">See it concretely</div>
+      <h2>Fixture walkthroughs you can reproduce.</h2>
+      <p>The synthetic <code>evaluation/v1</code> corpus demonstrates review output, thread follow-ups, finding disposition, learning proposals, and partial coverage — each labeled as fixture or illustration with copyable commands.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature reveal"><span class="tag">Fixture</span><div class="ficon">✦</div><h3>Off-by-one finding</h3><p>A sanitized pagination change produces a specific correctness finding with deterministic fixture replay.</p><p style="margin-top:12px"><a href="/examples/#finding-from-change" style="color:var(--red-soft);font-weight:700">Reproduce with fixture mode →</a></p></article>
+      <article class="feature reveal"><span class="tag">Illustration</span><div class="ficon">👀</div><h3><code>@sensei</code> follow-up</h3><p>Bounded, thread-aware replies when conversation controls are enabled — shown as an illustrative thread, not a live PR.</p><p style="margin-top:12px"><a href="/examples/#sensei-follow-up" style="color:var(--red-soft);font-weight:700">See the example →</a></p></article>
+      <article class="feature reveal"><span class="tag">Illustration</span><div class="ficon">↗</div><h3>Disposition &amp; learning</h3><p>Stable finding fingerprints and maintainer-approved learnings are separate artifacts with separate lifecycles.</p><p style="margin-top:12px"><a href="/examples/#disposition-and-learning" style="color:var(--red-soft);font-weight:700">See the example →</a></p></article>
+      <article class="feature reveal"><span class="tag">Illustration</span><div class="ficon">◎</div><h3>Partial coverage</h3><p>Budget-limited reviews retain valid findings, surface explicit coverage fields, and withhold approval — no fabricated confidence score.</p><p style="margin-top:12px"><a href="/examples/#partial-coverage" style="color:var(--red-soft);font-weight:700">See the example →</a></p></article>
     </div>
   </div>
 </section>
@@ -658,7 +676,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
     </div>
     <div class="feature-grid">
       <article class="feature"><span class="tag">Setup</span><div class="ficon">⌁</div><h3>Installation guide</h3><p>Install from source, configure your provider, and run your first review. Covers local Ollama and Ollama Cloud.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md" style="color:var(--red-soft);font-weight:700">Read the install guide →</a></p></article>
-      <article class="feature"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Security & data handling</h3><p>ReviewSensei sends diffs to your configured provider and stores nothing. Understand the trust boundary before you connect a model.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md" style="color:var(--red-soft);font-weight:700">Security policy →</a> · <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/data-handling.md" style="color:var(--red-soft);font-weight:700">Data handling →</a></p></article>
+      <article class="feature"><span class="tag">Trust</span><div class="ficon">◇</div><h3>Security & data handling</h3><p>The core does not persist raw prompts or provider responses. Published comments, artifacts, approved learnings, and your model provider have separate retention boundaries.</p><p style="margin-top:12px"><a href="/security/" style="color:var(--red-soft);font-weight:700">Security &amp; data flow →</a> · <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/data-handling.md" style="color:var(--red-soft);font-weight:700">Data handling →</a></p></article>
       <article class="feature"><span class="tag">Architecture</span><div class="ficon">⌘</div><h3>Architecture & contracts</h3><p>Provider-neutral review engine, structured stages, versioned JSON schemas, and public compatibility guarantees.</p><p style="margin-top:12px"><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/architecture.md" style="color:var(--red-soft);font-weight:700">Architecture docs →</a> · <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/public-contracts.md" style="color:var(--red-soft);font-weight:700">Public contracts →</a></p></article>
     </div>
   </div>
@@ -671,8 +689,8 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
       <h2>Keep the reviewer inspectable. Keep the judgment yours.</h2>
       <p>Inspect the reviewer, choose the models, own the memory, and evolve the workflow with your repository instead of handing institutional knowledge to another closed review service.</p>
       <div class="actions" style="justify-content:center;margin-bottom:0">
-        <a class="btn btn-primary" href="https://github.com/malsabbagh/review-sensei">View on GitHub</a>
-        <a class="btn btn-ghost" href="https://github.com/malsabbagh/review-sensei/blob/main/CONTRIBUTING.md">Contributing</a>
+        <a class="btn btn-primary" href="/getting-started/">Set up GitHub reviews</a>
+        <a class="btn btn-ghost" href="https://github.com/malsabbagh/review-sensei">View on GitHub</a>
       </div>
     </div>
   </div>
@@ -683,12 +701,14 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
   <div class="container footer-inner">
     <div class="brand" style="font-size:13px"><span>ReviewSensei<span class="dev">.dev</span></span><span style="font-weight:500;color:#65718f">Open-source code review intelligence</span></div>
     <div class="footer-links">
+      <a href="/examples/">Examples</a>
       <a href="https://github.com/malsabbagh/review-sensei">GitHub</a>
       <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">Docs</a>
       <a href="https://github.com/malsabbagh/review-sensei/blob/main/LICENSE">License</a>
       <a href="https://github.com/malsabbagh/review-sensei/blob/main/TRADEMARKS.md">Trademarks</a>
       <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/ownership-and-licensing.md">Ownership</a>
-      <a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md">Security</a>
+      <a href="/security/">Security</a>
+      <a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md">Report a vulnerability</a>
       <a href="https://github.com/malsabbagh/review-sensei/blob/main/CONTRIBUTING.md">Contributing</a>
       <a href="https://github.com/malsabbagh/review-sensei/issues">Issues</a>
     </div>
