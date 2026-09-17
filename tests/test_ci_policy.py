@@ -628,6 +628,34 @@ class ActionPinPolicyTests(unittest.TestCase):
         for block in reply_blocks[1:]:
             other = block.split('" | tail -n 1 || true)"')[0]
             self.assertEqual(other, first)
+        expected_permissions = (
+            "    permissions:\n"
+            "      contents: read\n"
+            "      pull-requests: read\n"
+            "      issues: read\n"
+            "      id-token: write\n"
+        )
+        for job_id in ("cloud", "openrouter", "local"):
+            job = _job_section(workflow, job_id)
+            self.assertIn(expected_permissions, job)
+            reply_name = next(
+                name
+                for name in _named_steps(job)
+                if name.startswith("Generate and publish") and "mention reply" in name
+            )
+            reply = _step_block(job, reply_name)
+            self.assertIn("auto_approve_args=()", reply)
+            self.assertIn("auto_approve_args+=(--enable-auto-approve)", reply)
+            self.assertIn('"${auto_approve_args[@]}"', reply)
+            self.assertIn("github reply \\", reply)
+            self.assertNotIn("- name: Finalize", reply)
+            self.assertNotIn("review-sensei github review", reply)
+        self.assertNotIn("- name: Finalize", workflow)
+        self.assertNotIn("- name: Promote", workflow)
+        self.assertEqual(
+            workflow.count("Publish or promote validated review through the broker"),
+            2,
+        )
 
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
         workflow = (
@@ -712,6 +740,34 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(cloud, expected_provider_group)
         self.assertEqual(openrouter, expected_provider_group)
         self.assertEqual(local, expected_provider_group)
+        cloud_job = _job_section(text, "cloud")
+        openrouter_job = _job_section(text, "openrouter")
+        local_job = _job_section(text, "local")
+        cancel_expr = "cancel-in-progress: ${{ inputs.operation == 'review' }}"
+        self.assertEqual(
+            [
+                line.strip()
+                for line in cloud_job.splitlines()
+                if "cancel-in-progress:" in line
+            ],
+            [cancel_expr],
+        )
+        self.assertEqual(
+            [
+                line.strip()
+                for line in openrouter_job.splitlines()
+                if "cancel-in-progress:" in line
+            ],
+            [cancel_expr],
+        )
+        self.assertEqual(
+            [
+                line.strip()
+                for line in local_job.splitlines()
+                if "cancel-in-progress:" in line
+            ],
+            [cancel_expr],
+        )
         self.assertNotIn("-cloud-", cloud)
         self.assertNotIn("-openrouter-", openrouter)
         self.assertNotIn("-local-", local)

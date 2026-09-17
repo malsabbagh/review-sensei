@@ -719,6 +719,9 @@ jobs:
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
     runs-on: ubuntu-latest
+    # Same permission set as cloud/local. GitHub writes go through the OIDC
+    # broker inside `review-sensei github review` / `github reply`; this job
+    # does not grant pull-requests:write or issues:write to GITHUB_TOKEN.
     permissions:
       contents: read
       pull-requests: read
@@ -986,6 +989,8 @@ jobs:
 
       - name: Generate and publish OpenRouter mention reply
         id: reply
+        # Approval finalization is inside `github reply --enable-auto-approve`,
+        # matching cloud/local. There is no separate YAML finalizer step.
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}

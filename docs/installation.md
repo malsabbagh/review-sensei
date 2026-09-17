@@ -159,12 +159,17 @@ an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
 the reusable workflow.
 
 OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
-The reusable workflow requires **both** `provider_mode=cloud` and
-`provider_profile=openrouter-sonnet` or `openrouter-gpt`, plus
-`OPENROUTER_API_KEY`. Setting only the profile with `local` mode fails during
-`validate-provider-mode`. Generated setup-v4 callers do not yet forward
-`provider_profile` or `OPENROUTER_API_KEY`; that caller wiring lands after the
-public `v4` tag includes this reusable-workflow contract.
+
+**Hosted selection is not live on generated setup-v4 callers in this change.**
+Those callers still omit `provider_profile` and `OPENROUTER_API_KEY` until
+the public `v4` tag includes this reusable-workflow contract (follow-up #112).
+Until then, setting `REVIEWSENSEI_PROVIDER_PROFILE` on a generated caller has
+no effect.
+
+Once callers forward the inputs, the reusable workflow requires **both**
+`provider_mode=cloud` and `provider_profile=openrouter-sonnet` or
+`openrouter-gpt`, plus `OPENROUTER_API_KEY`. Setting only the profile with
+`local` mode fails during `validate-provider-mode`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
