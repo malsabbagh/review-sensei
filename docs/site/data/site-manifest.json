@@ -1,0 +1,185 @@
+{
+  "schema_version": "1.0",
+  "last_updated": "2026-09-16",
+  "release_facts": {
+    "version": "0.1.1",
+    "tag": "v0.1.1",
+    "python_package": "review-sensei",
+    "npm_launcher": "@reviewsensei/cli",
+    "npm_platform_packages": [
+      "@reviewsensei/cli-darwin-arm64",
+      "@reviewsensei/cli-darwin-x64",
+      "@reviewsensei/cli-linux-arm64-gnu",
+      "@reviewsensei/cli-linux-x64-gnu",
+      "@reviewsensei/cli-win32-x64"
+    ],
+    "workflow_references": [
+      {
+        "name": "Reusable runner",
+        "path": ".github/workflows/review-sensei-run.yml",
+        "ref": "v4",
+        "notes": "Public setup-v4 callers pin this reusable workflow through the operator-managed v4 tag."
+      },
+      {
+        "name": "Example caller",
+        "path": "examples/github-actions/review-sensei-review.yml",
+        "ref": "v4",
+        "notes": "Documents PyPI-first install with executing-commit fallback and compatibility manifest proof."
+      }
+    ],
+    "documentation": [
+      "docs/releasing.md",
+      "docs/installation.md",
+      "README.md"
+    ]
+  },
+  "providers": [
+    {
+      "id": "ollama-local",
+      "title": "Ollama (local)",
+      "provider": "ollama",
+      "profile": "local-private",
+      "inference_destination": {
+        "endpoint_scope": "local",
+        "base_url": "http://127.0.0.1:11434/api",
+        "default_model": "qwen3.5:4b"
+      },
+      "credential_ref": null,
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": true,
+        "provider_mode": "local",
+        "notes": "Default installed workflow path via REVIEWSENSEI_PROVIDER_MODE=local and local model variables."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/profiles.py",
+        "docs/installation.md"
+      ],
+      "limitations": [
+        "Requires a reachable local Ollama runner on loopback.",
+        "No bearer credential is used for the default local-private profile."
+      ]
+    },
+    {
+      "id": "ollama-cloud",
+      "title": "Ollama Cloud",
+      "provider": "ollama",
+      "profile": "deep-verification",
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://ollama.com/api",
+        "default_model": "deepseek-v4-flash:cloud"
+      },
+      "credential_ref": "OLLAMA_API_KEY",
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": true,
+        "provider_mode": "cloud",
+        "notes": "Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=cloud and repository OLLAMA_API_KEY secret."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/profiles.py",
+        "docs/installation.md",
+        "docs/data-handling.md"
+      ],
+      "limitations": [
+        "Requires a provisioned Ollama Cloud account and OLLAMA_API_KEY.",
+        "Cloud egress is explicit opt-in; local runs cannot silently fail over to Ollama Cloud."
+      ]
+    },
+    {
+      "id": "openai-compatible",
+      "title": "OpenAI-compatible (Python boundary)",
+      "provider": "openai-compatible",
+      "profile": "fast-triage",
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini"
+      },
+      "credential_ref": "OPENAI_API_KEY",
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": false,
+        "provider_mode": null,
+        "notes": "Installed GitHub workflows do not pass --profile; fast-triage is an explicit CLI/evaluate path only."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/openai_compatible.py",
+        "docs/public-contracts.md",
+        "docs/adr/0041-production-provider-adapters-and-per-stage-profiles.md"
+      ],
+      "limitations": [
+        "Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.",
+        "Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings."
+      ]
+    },
+    {
+      "id": "openrouter",
+      "title": "OpenRouter",
+      "provider": "openrouter",
+      "profile": null,
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": null
+      },
+      "credential_ref": "OPENROUTER_API_KEY",
+      "engine_support": {
+        "cli": false,
+        "evaluate": false,
+        "npx_launcher": false
+      },
+      "workflow_support": {
+        "reusable_workflow": false,
+        "provider_mode": null,
+        "notes": "Adapter source exists on main, but no named profile, CLI flags, or reusable-workflow path expose OpenRouter yet."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "planned",
+        "source-only",
+        "not-implemented",
+        "experimental"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/openrouter.py"
+      ],
+      "limitations": [
+        "Registry registers openrouter, but engine surfaces remain disabled until routing policy and operator docs ship.",
+        "No named profile or workflow provider mode selects OpenRouter in installed callers."
+      ]
+    }
+  ]
+}
