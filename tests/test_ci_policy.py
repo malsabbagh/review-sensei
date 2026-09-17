@@ -8,6 +8,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from review_sensei.errors import ReviewInputError
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -890,6 +892,27 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('"--" not in value', workflow_text)
         self.assertIn('not value.endswith("-")', workflow_text)
 
+    def test_validate_provider_mode_rejects_cross_backend_model_slugs(self):
+        from review_sensei.provider_config import validate_hosted_workflow_model
+
+        with self.assertRaisesRegex(
+            ReviewInputError, "must not use vendor/model openrouter slug"
+        ):
+            validate_hosted_workflow_model(
+                provider_mode="cloud-ollama",
+                workflow_mode="automatic",
+                model="deepseek/deepseek-v4.1-flash",
+            )
+
+    def test_validate_provider_mode_job_validates_model_input(self):
+        workflow_text = _reusable_workflow_text()
+        job = _job_section(workflow_text, "validate-provider-mode")
+        self.assertIn("MODEL: ${{ inputs.model }}", job)
+        block = _run_block_containing(
+            workflow_text, "ReviewSensei provider mode is unsupported"
+        )
+        self.assertIn("validate_hosted_workflow_model", block)
+
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
         root = Path(__file__).resolve().parents[1]
         workflow_text = (
@@ -1037,6 +1060,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("refusing the GitHub fallback", text)
         self.assertIn("must run from a public git tag", text)
         self.assertIn("@refs/tags/[A-Za-z0-9]", text)
+        self.assertNotIn("dogfood_ref", text)
+        self.assertNotIn("refs/pull/", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
         self.assertNotIn(
             "git ls-remote https://github.com/malsabbagh/review-sensei.git", text

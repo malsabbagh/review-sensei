@@ -179,15 +179,17 @@ OpenRouter CLI flags and environment (used with `--provider openrouter` or
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Default model for unprofiled OpenRouter CLI runs |
-| `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
+| `OPENROUTER_UPSTREAM_PROVIDER` | `deepseek` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
 
 `doctor` and `plan` report credential presence only; they never print the key.
 OpenRouter CLI profiles start `unqualified` and require
 `--allow-unqualified-profile` for live review until separate qualification
-evidence exists. Hosted OpenRouter uses `--provider openrouter --model` and
-derives `OPENROUTER_UPSTREAM_PROVIDER` from the model slug when possible.
+evidence exists. Hosted workflows reject `allow_unqualified_profile=true` and
+do not forward `--allow-unqualified-profile`; use the CLI for unqualified
+profile runs. Hosted OpenRouter uses `--provider openrouter --model` and
+derives `OPENROUTER_UPSTREAM_PROVIDER` from an allowlisted model vendor prefix.
 Every OpenRouter request includes `provider.data_collection=deny` (plus
 no fallbacks and zero-data-retention) through the typed routing policy.
 

@@ -141,11 +141,20 @@ jobs:
     # non-pull_request operations continue.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Reject unsupported provider mode
         env:
           PROVIDER_MODE: ${{ inputs.provider_mode }}
+          MODE: ${{ inputs.mode }}
+          MODEL: ${{ inputs.model }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
           ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
           OPERATION: ${{ inputs.operation }}
@@ -229,6 +238,23 @@ jobs:
               *) echo "::error::${flag} must be true or false" >&2; exit 1 ;;
             esac
           done
+          PYTHONPATH=src python - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_hosted_workflow_model
+
+          try:
+              validate_hosted_workflow_model(
+                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
+                  workflow_mode=os.environ.get("MODE", ""),
+                  model=os.environ.get("MODEL", ""),
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
 
   authoritative-preflight:
     needs: validate-provider-mode
@@ -463,10 +489,8 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
-          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -826,10 +850,8 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
-          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -898,8 +920,10 @@ jobs:
               openai/*) OPENROUTER_UPSTREAM_PROVIDER=openai ;;
               anthropic/*) OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
               deepseek/*) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
-              */*) OPENROUTER_UPSTREAM_PROVIDER="${MODEL%%/*}" ;;
-              *) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+              *)
+                echo '::error::openrouter model vendor is not allowlisted' >&2
+                exit 1
+                ;;
             esac
             export OPENROUTER_UPSTREAM_PROVIDER
           fi
@@ -1039,8 +1063,10 @@ jobs:
               openai/*) OPENROUTER_UPSTREAM_PROVIDER=openai ;;
               anthropic/*) OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
               deepseek/*) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
-              */*) OPENROUTER_UPSTREAM_PROVIDER="${MODEL%%/*}" ;;
-              *) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+              *)
+                echo '::error::openrouter model vendor is not allowlisted' >&2
+                exit 1
+                ;;
             esac
             export OPENROUTER_UPSTREAM_PROVIDER
           fi
@@ -1203,10 +1229,8 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          tag_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
-          dogfood_ref='^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@(refs/heads/[A-Za-z0-9._/-]+|refs/pull/[0-9]+/merge)$'
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $tag_ref && ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ $dogfood_ref ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag or the same-repository pull-request ref." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
             exit 1
           fi
           if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then

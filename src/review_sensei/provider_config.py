@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 from urllib.parse import urlparse
 
 from .errors import ReviewInputError
+from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 from .providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterRoutingPolicy,
@@ -23,6 +25,67 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+HOSTED_OPENROUTER_DEFAULTS = frozenset(
+    {(DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM)}
+)
+_OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
+_OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+_OPENROUTER_VENDORS = frozenset({"openai", "anthropic", "deepseek"})
+
+
+def published_hosted_openrouter_models() -> frozenset[str]:
+    """Return OpenRouter model slugs approved for hosted workflow defaults."""
+
+    return frozenset(model for model, _ in HOSTED_OPENROUTER_DEFAULTS)
+
+
+def validate_hosted_workflow_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    model: str,
+) -> None:
+    """Validate a hosted workflow model string for the selected backend."""
+
+    value = model.strip()
+    if not value:
+        return
+    validate_bounded_text(
+        value,
+        DEFAULT_REVIEW_LIMITS.max_model_bytes,
+        label="model",
+        allow_empty=False,
+    )
+    if value.startswith("-"):
+        raise ReviewInputError("model must not start with '-'")
+    backend = _effective_hosted_backend(provider_mode, workflow_mode)
+    if backend == "openrouter":
+        if not _OPENROUTER_MODEL_PATTERN.fullmatch(value):
+            raise ReviewInputError("openrouter model must be vendor/model slug")
+        vendor = value.split("/", 1)[0]
+        if vendor not in _OPENROUTER_VENDORS:
+            raise ReviewInputError("openrouter model vendor is not allowlisted")
+        if ":cloud" in value:
+            raise ReviewInputError("openrouter model must not use ollama cloud suffix")
+        return
+    if "/" in value:
+        raise ReviewInputError("ollama model must not use vendor/model openrouter slug")
+    if not _OLLAMA_MODEL_PATTERN.fullmatch(value):
+        raise ReviewInputError("ollama model slug is invalid")
+
+
+def _effective_hosted_backend(provider_mode: str, workflow_mode: str) -> str:
+    mode = provider_mode.strip().lower()
+    if mode == "openrouter":
+        return "openrouter"
+    if mode in {"local", "local-ollama", "cloud", "cloud-ollama"}:
+        return "ollama"
+    if mode != "":
+        raise ReviewInputError("provider mode is unsupported")
+    wf = workflow_mode.strip().lower()
+    if wf not in {"automatic", "manual"}:
+        raise ReviewInputError("workflow mode is invalid")
+    return "ollama"
 
 
 def _positive_env_float(value: str, *, source: str) -> float:
@@ -231,10 +294,13 @@ def resolve_effective_provider_configuration(
 __all__ = [
     "DEFAULT_OPENROUTER_MODEL",
     "DEFAULT_OPENROUTER_UPSTREAM",
+    "HOSTED_OPENROUTER_DEFAULTS",
     "openrouter_policy_from_env",
     "openrouter_timeout_default",
     "openrouter_upstream_default",
     "provider_mode_default",
+    "published_hosted_openrouter_models",
     "resolve_effective_provider_configuration",
+    "validate_hosted_workflow_model",
     "validate_profile_provider_match",
 ]

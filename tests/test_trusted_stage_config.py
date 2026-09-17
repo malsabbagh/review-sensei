@@ -209,6 +209,12 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         )
         self.assertNotIn("model:", callers["repo"])
         self.assertIn("model:", callers["example"])
+        repo_passed = caller_reusable_with_keys(callers["repo"])
+        example_passed = caller_reusable_with_keys(callers["example"])
+        self.assertNotIn("model", repo_passed)
+        self.assertIn("model", example_passed)
+        self.assertLessEqual(repo_passed, runner_inputs)
+        self.assertLessEqual(example_passed, runner_inputs)
         self.assertNotEqual(callers["generated"], callers["historical-parity"])
         for name, text in callers.items():
             with self.subTest(caller=name):
