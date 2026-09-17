@@ -142,13 +142,17 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     permissions: {}
+    outputs:
+      normalized_provider_mode: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_provider_mode }}
+      normalized_model: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_model }}
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Reject unsupported provider mode
+        id: reject-unsupported-provider-mode
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           MODE: ${{ inputs.mode }}
           MODEL: ${{ inputs.model }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
@@ -171,6 +175,8 @@ jobs:
           UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
         run: |
           set -euo pipefail
+          PROVIDER_MODE="$(printf '%s' "$PROVIDER_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          MODEL="$(printf '%s' "$MODEL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           case "$PROVIDER_MODE" in
             ""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;
             *)
@@ -178,6 +184,10 @@ jobs:
               exit 1
               ;;
           esac
+          {
+            echo "normalized_provider_mode=$PROVIDER_MODE"
+            echo "normalized_model=$MODEL"
+          } >> "$GITHUB_OUTPUT"
           if [[ -n "$PROVIDER_PROFILE" ]]; then
             echo '::error::provider_profile is unused; set provider_mode to openrouter and model via REVIEWSENSEI_MODEL.' >&2
             exit 1
@@ -266,9 +276,9 @@ jobs:
           REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
           REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_provider_mode }}
           MODE: ${{ inputs.mode }}
-          MODEL: ${{ inputs.model }}
+          MODEL: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_model }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
@@ -453,7 +463,7 @@ jobs:
     needs: [validate-provider-mode, authoritative-preflight]
     # Compatibility marker for consumers that inspect the historical single
     # dependency spelling: needs: validate-provider-mode
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (inputs.provider_mode == 'cloud' || inputs.provider_mode == 'cloud-ollama' || (inputs.provider_mode == '' && inputs.mode == 'automatic'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud' || needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama' || (needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'automatic'))
     concurrency:
       # All provider modes share this review group, so a newer cloud review
       # cancels an older local review (and vice versa) for the same PR. Reply
@@ -488,7 +498,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ inputs.provider_mode || 'cloud' }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud' }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -602,9 +612,9 @@ jobs:
       - name: Run cloud-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
+          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -752,7 +762,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -763,7 +773,7 @@ jobs:
           SOURCE_KIND: ${{ inputs.source_kind }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
+          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         run: |
           if [[ -z "$OLLAMA_API_KEY" ]]; then
@@ -849,7 +859,7 @@ jobs:
 
   openrouter:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && inputs.provider_mode == 'openrouter'
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'
     concurrency:
       # OpenRouter shares the provider review group with cloud/local so a newer
       # review for the same PR cancels any in-flight provider-mode review.
@@ -887,7 +897,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -1000,7 +1010,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          REVIEW_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || '' }}
+          REVIEW_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || '' }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -1193,7 +1203,7 @@ jobs:
           SOURCE_KIND: ${{ inputs.source_kind }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          REVIEW_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || '' }}
+          REVIEW_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || '' }}
         run: |
           if [[ -z "$OPENROUTER_API_KEY" ]]; then
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
@@ -1315,7 +1325,7 @@ jobs:
 
   local:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (inputs.provider_mode == 'local' || inputs.provider_mode == 'local-ollama' || (inputs.provider_mode == '' && inputs.mode == 'manual'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (needs.validate-provider-mode.outputs.normalized_provider_mode == 'local' || needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama' || (needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'manual'))
     concurrency:
       # Keep this key byte-for-byte equivalent to the cloud job. A newer
       # review therefore cancels any older provider-mode review for the same
@@ -1348,7 +1358,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ inputs.provider_mode || 'local' }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'local' }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -1443,11 +1453,11 @@ jobs:
       - name: Prepare and run trusted local review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
+          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -1598,7 +1608,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1607,7 +1617,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
+          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'

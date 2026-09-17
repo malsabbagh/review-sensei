@@ -516,11 +516,26 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("AUTO_APPROVE", text)
         self.assertIn("--enable-auto-approve", text)
         self.assertIn("--no-auto-approve", text)
-        self.assertIn("inputs.provider_mode == 'cloud'", text)
-        self.assertIn("inputs.provider_mode == 'cloud-ollama'", text)
-        self.assertIn("inputs.provider_mode == 'local'", text)
-        self.assertIn("inputs.provider_mode == 'local-ollama'", text)
-        self.assertIn("inputs.provider_mode == 'openrouter'", text)
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud'",
+            text,
+        )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama'",
+            text,
+        )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local'",
+            text,
+        )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama'",
+            text,
+        )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'",
+            text,
+        )
         self.assertIn("OPENROUTER_API_KEY is required for OpenRouter mode", text)
         self.assertIn("--provider openrouter --model", text)
         self.assertIn("provider_profile is unused", text)
@@ -586,14 +601,16 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("provider_profile:", reusable)
         self.assertIn("provider_profile is unused", reusable)
 
-        openrouter_gate = "inputs.provider_mode == 'openrouter'"
+        openrouter_gate = "needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'"
         cloud_fallback_gate = (
-            "inputs.provider_mode == 'cloud' || inputs.provider_mode == 'cloud-ollama' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'automatic')"
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud' || "
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama' || "
+            "(needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'automatic')"
         )
         local_fallback_gate = (
-            "inputs.provider_mode == 'local' || inputs.provider_mode == 'local-ollama' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'manual')"
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local' || "
+            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama' || "
+            "(needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'manual')"
         )
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
@@ -906,11 +923,26 @@ class ActionPinPolicyTests(unittest.TestCase):
                 model="deepseek/deepseek-v4.1-flash",
             )
 
+    def test_provider_jobs_gate_on_normalized_provider_mode(self):
+        workflow_text = _reusable_workflow_text()
+        for job_name in ("cloud", "local", "openrouter"):
+            job = _job_section(workflow_text, job_name)
+            self.assertIn(
+                "needs.validate-provider-mode.outputs.normalized_provider_mode",
+                job,
+            )
+        cloud_if = (
+            _job_section(workflow_text, "cloud").split("if:", 1)[1].split("\n", 1)[0]
+        )
+        self.assertNotIn("inputs.provider_mode == 'cloud'", cloud_if)
+
     def test_validate_provider_mode_job_validates_model_input(self):
         workflow_text = _reusable_workflow_text()
         job = _job_section(workflow_text, "validate-provider-mode")
         self.assertNotIn("actions/checkout@", job)
         self.assertIn("permissions: {}", job)
+        self.assertIn("normalized_provider_mode:", job)
+        self.assertIn("normalized_model:", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
         self.assertIn("Install ReviewSensei and validate hosted model", job)
         self.assertNotIn(
