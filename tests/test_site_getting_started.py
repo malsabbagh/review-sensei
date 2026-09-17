@@ -68,7 +68,9 @@ class GettingStartedSiteTests(unittest.TestCase):
             )
 
     def test_snippets_reference_released_version(self) -> None:
-        matched = [pattern.pattern for pattern in VERSION_PATTERNS if pattern.search(self.html)]
+        matched = [
+            pattern.pattern for pattern in VERSION_PATTERNS if pattern.search(self.html)
+        ]
         self.assertTrue(
             matched,
             "page must reference review-sensei 0.1.1 or @reviewsensei/cli@0.1.1",
@@ -82,7 +84,9 @@ class GettingStartedSiteTests(unittest.TestCase):
             )
 
     def test_sitemap_includes_getting_started(self) -> None:
-        sitemap = (REPO_ROOT / "docs" / "site" / "sitemap.xml").read_text(encoding="utf-8")
+        sitemap = (REPO_ROOT / "docs" / "site" / "sitemap.xml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("https://reviewsensei.dev/getting-started/", sitemap)
 
 
