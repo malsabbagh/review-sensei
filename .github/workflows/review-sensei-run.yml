@@ -167,6 +167,10 @@ jobs:
               exit 1
               ;;
           esac
+          if [[ -n "$PROVIDER_PROFILE" && "$PROVIDER_MODE" != "cloud" ]]; then
+            echo '::error::provider_profile requires provider_mode=cloud; set REVIEWSENSEI_PROVIDER_MODE=cloud for OpenRouter hosted runs.' >&2
+            exit 1
+          fi
           case "$OPERATION" in
             review|reply) ;;
             *) echo '::error::operation must be review or reply' >&2; exit 1 ;;

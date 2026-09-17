@@ -158,11 +158,15 @@ use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
 an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
 the reusable workflow.
 
-OpenRouter is an explicit opt-in remote path for CLI and hosted workflows:
+OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
+Hosted OpenRouter requires **both** `REVIEWSENSEI_PROVIDER_MODE=cloud` and
+`REVIEWSENSEI_PROVIDER_PROFILE=openrouter-sonnet` or `openrouter-gpt`, plus
+`OPENROUTER_API_KEY`. Setting only the profile with `local` mode fails the
+workflow during `validate-provider-mode`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt` with `REVIEWSENSEI_PROVIDER_MODE=cloud`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies. Leave empty to keep Ollama local/cloud defaults. |
+| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt` together with `REVIEWSENSEI_PROVIDER_MODE=cloud`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies. Leave empty to keep Ollama local/cloud defaults. |
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter profiles in CLI or workflow runs |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |

@@ -72,8 +72,15 @@ review.
 Hosted OpenRouter review and mention-reply commands forward
 `--allow-unqualified-profile` because the workflow is operator-controlled and
 profiles remain `unqualified` until separate qualification evidence exists.
-Caller workflows forward `provider_profile` and `OPENROUTER_API_KEY` only after
-the public `v4` tag includes the reusable-workflow contract.
+Setup-v4 callers forward `provider_profile` from
+`REVIEWSENSEI_PROVIDER_PROFILE` and `OPENROUTER_API_KEY` from repository
+secrets. `validate-provider-mode` rejects unsupported profile values and
+requires `provider_mode=cloud` whenever a profile is set.
+
+The `openrouter` job body intentionally mirrors the `cloud` job for #98.
+ADR 0025's parameterized-job ideal remains the follow-up; until then
+`tests/test_ci_policy.py` asserts provider-job parity (reply parsing,
+concurrency groups, publish/reply counts) so drift is caught in CI.
 
 ## Alternatives considered
 

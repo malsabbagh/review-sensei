@@ -309,8 +309,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
-        self.assertNotIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
-        self.assertNotIn(
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
         )
         self.assertIn("id-token: write", text)
@@ -571,13 +571,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(generated_caller, caller_template)
 
-        # Caller wiring for provider_profile is deferred until the v4 tag moves;
-        # until then the reusable workflow default keeps OpenRouter off the path.
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
             generated_caller,
         )
-        self.assertNotIn("provider_profile:", generated_caller)
+        self.assertIn(
+            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
+            generated_caller,
+        )
+        self.assertIn(
+            "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}",
+            generated_caller,
+        )
         self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
         self.assertIn(
             "provider_profile:\n        required: false\n        default: ''",
@@ -602,6 +607,33 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
         self.assertIn(local_fallback_gate, reusable)
+        self.assertIn(
+            "provider_profile requires provider_mode=cloud",
+            reusable,
+        )
+        self.assertIn(
+            "provider_profile is unsupported; use openrouter-sonnet or openrouter-gpt.",
+            reusable,
+        )
+
+    def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
+        self,
+    ):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        reply_blocks = [
+            block.strip()
+            for block in workflow.split("reply_status=\"$(grep -E")[1:]
+        ]
+        self.assertEqual(len(reply_blocks), 3)
+        first = reply_blocks[0].split('" | tail -n 1 || true)"')[0]
+        for block in reply_blocks[1:]:
+            other = block.split('" | tail -n 1 || true)"')[0]
+            self.assertEqual(other, first)
 
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
         workflow = (
