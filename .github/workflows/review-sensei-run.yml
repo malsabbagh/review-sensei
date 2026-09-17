@@ -138,7 +138,7 @@ jobs:
           OPERATION: ${{ inputs.operation }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -242,7 +242,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
@@ -505,7 +505,7 @@ jobs:
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
@@ -551,7 +551,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           set -euo pipefail
@@ -603,7 +603,7 @@ jobs:
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
@@ -635,7 +635,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
           HEAD_SHA: ${{ inputs.head_sha }}
@@ -868,7 +868,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
@@ -912,7 +912,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           set -euo pipefail
@@ -964,7 +964,7 @@ jobs:
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
@@ -998,7 +998,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
           HEAD_SHA: ${{ inputs.head_sha }}
@@ -1208,7 +1208,7 @@ jobs:
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
           OLLAMA_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           STAGES_DIR: ${{ inputs.stages_dir }}
           CATEGORIES_DIR: ${{ inputs.categories_dir }}
@@ -1258,7 +1258,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           set -euo pipefail
@@ -1310,7 +1310,7 @@ jobs:
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
@@ -1342,7 +1342,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
           HEAD_SHA: ${{ inputs.head_sha }}

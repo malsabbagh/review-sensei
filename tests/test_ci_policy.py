@@ -571,7 +571,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             if file.path == ".github/workflows/review-sensei-review.yml"
         )
         self.assertEqual(generated_caller, caller_template)
-        self.assertIn("does not enable hosted OpenRouter on setup-v4 callers yet", setup_plan.body)
+        self.assertIn(
+            "does not enable hosted OpenRouter on setup-v4 callers yet", setup_plan.body
+        )
         self.assertIn("follow-up #112", setup_plan.body)
 
         # Caller wiring for provider_profile is deferred until the v4 tag moves;
@@ -632,6 +634,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         for block in reply_blocks[1:]:
             other = block.split('" | tail -n 1 || true)"')[0]
             self.assertEqual(other, first)
+        pull_request_env = (
+            "PULL_REQUEST: ${{ inputs.pull_request_number || "
+            "github.event.pull_request.number || github.event.issue.number }}"
+        )
         expected_permissions = (
             "    permissions:\n"
             "      contents: read\n"
@@ -639,6 +645,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             "      issues: read\n"
             "      id-token: write\n"
         )
+        for job_id in ("cloud", "openrouter", "local"):
+            job = _job_section(workflow, job_id)
+            self.assertEqual(job.count(pull_request_env), 4)
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
