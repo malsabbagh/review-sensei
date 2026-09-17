@@ -611,6 +611,23 @@ jobs:
             echo '::error::OLLAMA_API_KEY is required for cloud-ollama mode' >&2
             exit 1
           fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_hosted_workflow_model
+
+          try:
+              validate_hosted_workflow_model(
+                  provider_mode="cloud-ollama",
+                  workflow_mode="",
+                  model=os.environ["OLLAMA_MODEL"],
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
             exit 1
@@ -743,6 +760,23 @@ jobs:
             echo '::error::OLLAMA_API_KEY is required for cloud-ollama mode' >&2
             exit 1
           fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_hosted_workflow_model
+
+          try:
+              validate_hosted_workflow_model(
+                  provider_mode="cloud-ollama",
+                  workflow_mode="",
+                  model=os.environ["OLLAMA_MODEL"],
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
           if [[ "$AUTO_APPROVE" == "true" ]]; then
@@ -1413,6 +1447,23 @@ jobs:
         run: |
           args=()
           if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_hosted_workflow_model
+
+          try:
+              validate_hosted_workflow_model(
+                  provider_mode="local-ollama",
+                  workflow_mode="",
+                  model=os.environ["OLLAMA_MODEL"],
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
@@ -1545,6 +1596,23 @@ jobs:
           OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_hosted_workflow_model
+
+          try:
+              validate_hosted_workflow_model(
+                  provider_mode="local-ollama",
+                  workflow_mode="",
+                  model=os.environ["OLLAMA_MODEL"],
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
