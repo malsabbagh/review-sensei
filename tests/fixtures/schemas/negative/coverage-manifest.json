@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "enumeration_complete": true,
+  "fully_reviewed": true,
+  "enumerated_paths": ["src/app.py"],
+  "files": [
+    {
+      "path": "src/app.py",
+      "outcome": "clean"
+    }
+  ],
+  "hunks": []
+}

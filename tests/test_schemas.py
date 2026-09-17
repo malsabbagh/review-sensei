@@ -33,6 +33,7 @@ SCHEMA_NAMES = (
     "recovery-artifact",
     "candidate-finding",
     "verification-result",
+    "coverage-manifest",
 )
 
 
@@ -82,6 +83,20 @@ class PublicSchemaTests(unittest.TestCase):
                         json.loads(path.read_text(encoding="utf-8")),
                         schema_name,
                     )
+
+    def test_review_comment_schema_requires_line_or_file_side(self) -> None:
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                {"path": "src/app.py", "body": "Missing both line and side."},
+                "review-comment",
+            )
+
+    def test_review_comment_schema_requires_line_for_right_side(self) -> None:
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                {"path": "src/app.py", "body": "Missing line.", "side": "RIGHT"},
+                "review-comment",
+            )
 
     def test_review_result_to_dict_validates_against_review_result_schema(self) -> None:
         result = ReviewResult(

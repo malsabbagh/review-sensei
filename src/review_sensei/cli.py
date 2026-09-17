@@ -37,6 +37,7 @@ from .outcomes import (
     recovery_expires_at,
     run_outcome_exit_code,
 )
+from .planning import DEFAULT_TOTAL_WORK_BUDGET
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.profiles import get_provider_profile
@@ -515,6 +516,14 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Maximum relationship depth for symbol-aware context (default: 1)",
+    )
+    parser.add_argument(
+        "--orchestrate-large-changes",
+        action="store_true",
+        help=(
+            "Opt in to bounded chunk orchestration for changes that exceed a "
+            "single per-request diff while remaining within the total-work budget"
+        ),
     )
     parser.add_argument(
         "--no-learning-proposals",
@@ -1555,15 +1564,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
+        orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
         # Read and preflight before loading any provider adapter.  The helper
-        # performs a bounded ``max_diff_bytes + 1`` read and strict UTF-8
+        # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
-        diff = read_bounded_utf8(
-            args.diff,
-            maximum=limits.max_diff_bytes,
-            label="diff",
-        )
-        analysis = analyze_diff(diff, limits=limits)
+        work_budget = DEFAULT_TOTAL_WORK_BUDGET
+        if orchestrate:
+            from .planning import plan_change
+
+            diff = read_bounded_utf8(
+                args.diff,
+                maximum=work_budget.max_total_diff_bytes,
+                label="diff",
+            )
+            analysis = plan_change(
+                diff, limits=limits, orchestrate=True, work_budget=work_budget
+            ).analysis
+        else:
+            diff = read_bounded_utf8(
+                args.diff,
+                maximum=limits.max_diff_bytes,
+                label="diff",
+            )
+            analysis = analyze_diff(diff, limits=limits)
         changed_paths = analysis.changed_paths
         learnings: tuple[LearningEntry, ...] = ()
         if args.learning_root:
@@ -1653,6 +1676,8 @@ def main(argv: list[str] | None = None) -> int:
                 limits=limits,
                 source_context=context_selection.source_context,
                 untrusted_head_sha=untrusted_head_sha,
+                orchestrate_large_changes=orchestrate,
+                work_budget=work_budget,
             ),
             budget=ResourceBudget.for_limits(limits),
         )

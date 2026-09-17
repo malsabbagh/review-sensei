@@ -1,0 +1,619 @@
+"""Deterministic large-change planning with separate total-work budgets.
+
+Per-request ``ReviewLimits`` stay fail-closed.  This module adds aggregate
+ceilings so a change can be partitioned into bounded chunks without raising
+those per-request limits or silently truncating work.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+
+from .coverage import (
+    COVERAGE_OUTCOMES,
+    CoverageManifest,
+    FileCoverage,
+    HunkCoverage,
+    _validate_reason,
+)
+from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
+from .errors import ReviewInputError
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    DEFAULT_TOTAL_WORK_BUDGET,
+    ReviewLimits,
+    TotalWorkBudget,
+    utf8_size,
+)
+
+MAX_RELATED_PATHS = 32
+
+GENERATED_FILE_NAMES = frozenset(
+    {
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "cargo.lock",
+        "poetry.lock",
+        "composer.lock",
+        "go.sum",
+        "gemfile.lock",
+    }
+)
+GENERATED_SUFFIXES = (".min.js", ".min.css", ".min.map", ".map")
+GENERATED_PATH_PREFIXES = ("dist/", "vendor/", "node_modules/", "generated/")
+
+
+def is_generated_path(path: str) -> bool:
+    """Return whether ``path`` matches the explicit generated-file policy."""
+
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if name in GENERATED_FILE_NAMES:
+        return True
+    if any(lowered.endswith(suffix) for suffix in GENERATED_SUFFIXES):
+        return True
+    return any(
+        lowered == prefix[:-1] or lowered.startswith(prefix)
+        for prefix in GENERATED_PATH_PREFIXES
+    )
+
+
+@dataclass(frozen=True)
+class ReviewChunk:
+    """One per-request slice of a larger change."""
+
+    index: int
+    diff: str
+    paths: tuple[str, ...]
+    related_paths: tuple[str, ...] = ()
+    hunk_indexes: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class LargeChangePlan:
+    """Deterministic coverage plan for one change, with optional review chunks."""
+
+    analysis: DiffAnalysis
+    coverage: CoverageManifest
+    chunks: tuple[ReviewChunk, ...]
+    work_budget: TotalWorkBudget = field(default_factory=TotalWorkBudget)
+    orchestrated: bool = False
+
+    @property
+    def reviewable_chunks(self) -> tuple[ReviewChunk, ...]:
+        return self.chunks
+
+
+def _file_bytes(record: DiffFileRecord) -> int:
+    return utf8_size(record.text, label="diff file")
+
+
+def _fits(
+    records: tuple[DiffFileRecord, ...],
+    candidate: DiffFileRecord,
+    *,
+    limits: ReviewLimits,
+) -> bool:
+    combined = records + (candidate,)
+    text = "".join(record.text for record in combined)
+    try:
+        utf8_size(text, label="chunk diff")
+    except ReviewInputError:
+        return False
+    if len(text.encode("utf-8")) > limits.max_diff_bytes:
+        return False
+    if sum(record.text.count("\n") for record in combined) > limits.max_diff_lines:
+        return False
+    paths: set[str] = set()
+    hunks = 0
+    for record in combined:
+        paths.update(record.coverage_paths)
+        hunks += len(record.hunks)
+    return len(paths) <= limits.max_diff_files and hunks <= limits.max_diff_hunks
+
+
+def _hunk_record(
+    file_record: DiffFileRecord,
+    hunk: DiffHunk,
+) -> DiffFileRecord:
+    text = f"{file_record.header}{hunk.text}"
+    return DiffFileRecord(
+        old_path=file_record.old_path,
+        new_path=file_record.new_path,
+        text=text,
+        header=file_record.header,
+        added_lines=hunk.added_lines,
+        deleted_lines=hunk.deleted_lines,
+        hunks=(hunk,),
+        binary=False,
+    )
+
+
+def _classify_file(
+    record: DiffFileRecord,
+    *,
+    analysis: DiffAnalysis,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> tuple[str, str | None]:
+    paths = record.coverage_paths
+    if record.binary or any(path in analysis.binary_paths for path in paths):
+        return "unsupported", "binary"
+    if any(is_generated_path(path) for path in paths):
+        return "excluded-by-policy", "generated"
+    # Hunkless records cannot be split further; oversized payloads fail closed here.
+    # Multi-hunk files are classified as reviewable and handled by chunk packing.
+    if not record.hunks and _file_bytes(record) > limits.max_diff_bytes:
+        return "unsupported", "too-large-file"
+    return "reviewable", None
+
+
+def _related_paths(path: str, changed: tuple[str, ...]) -> tuple[str, ...]:
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    related: list[str] = []
+    for candidate in changed:
+        if candidate == path:
+            continue
+        candidate_parent = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
+        if candidate_parent == parent:
+            related.append(candidate)
+        if len(related) >= MAX_RELATED_PATHS:
+            break
+    return tuple(related)
+
+
+def _chunk_from_records(
+    index: int,
+    records: tuple[DiffFileRecord, ...],
+    *,
+    changed_paths: tuple[str, ...],
+) -> ReviewChunk:
+    diff = "".join(record.text for record in records)
+    paths: list[str] = []
+    hunk_indexes: list[int] = []
+    for record in records:
+        for path in record.coverage_paths:
+            if path not in paths:
+                paths.append(path)
+        hunk_indexes.extend(hunk.index for hunk in record.hunks)
+    related: list[str] = []
+    for path in paths:
+        for candidate in _related_paths(path, changed_paths):
+            if candidate not in paths and candidate not in related:
+                related.append(candidate)
+            if len(related) >= MAX_RELATED_PATHS:
+                break
+    return ReviewChunk(
+        index=index,
+        diff=diff,
+        paths=tuple(paths),
+        related_paths=tuple(related[:MAX_RELATED_PATHS]),
+        hunk_indexes=tuple(hunk_indexes),
+    )
+
+
+def _pack_records(
+    records: tuple[DiffFileRecord, ...],
+    *,
+    limits: ReviewLimits,
+    work_budget: TotalWorkBudget,
+    changed_paths: tuple[str, ...],
+) -> tuple[tuple[ReviewChunk, ...], tuple[DiffFileRecord, ...], str | None]:
+    """Pack reviewable records into bounded chunks.
+
+    Returns packed chunks, records that could not be packed, and a static
+    overflow reason when the total-work chunk budget is exhausted.
+    """
+
+    chunks: list[ReviewChunk] = []
+    current: tuple[DiffFileRecord, ...] = ()
+    overflow: list[DiffFileRecord] = []
+    overflow_reason: str | None = None
+    chunk_budget_exhausted = False
+
+    def flush() -> None:
+        nonlocal current, chunk_budget_exhausted, overflow_reason
+        if not current:
+            return
+        if len(chunks) >= work_budget.max_chunks:
+            overflow_reason = overflow_reason or "provider-call-budget"
+            overflow.extend(current)
+            current = ()
+            chunk_budget_exhausted = True
+            return
+        chunks.append(
+            _chunk_from_records(len(chunks) + 1, current, changed_paths=changed_paths)
+        )
+        current = ()
+
+    for record in records:
+        if chunk_budget_exhausted:
+            overflow.append(record)
+            continue
+        pieces: tuple[DiffFileRecord, ...]
+        if _fits((), record, limits=limits):
+            pieces = (record,)
+        elif record.hunks and not record.binary:
+            pieces = tuple(_hunk_record(record, hunk) for hunk in record.hunks)
+            if any(not _fits((), piece, limits=limits) for piece in pieces):
+                overflow.append(record)
+                continue
+        else:
+            overflow.append(record)
+            continue
+        for piece in pieces:
+            if current and not _fits(current, piece, limits=limits):
+                flush()
+            if len(chunks) >= work_budget.max_chunks:
+                overflow_reason = "provider-call-budget"
+                overflow.append(piece)
+                chunk_budget_exhausted = True
+                break
+            current = current + (piece,)
+    flush()
+    return tuple(chunks), tuple(overflow), overflow_reason
+
+
+def _coverage_for(
+    analysis: DiffAnalysis,
+    *,
+    file_outcomes: dict[str, tuple[str, str | None]],
+    hunk_outcomes: dict[int, tuple[str, str | None]],
+    limits: ReviewLimits,
+) -> CoverageManifest:
+    files = tuple(
+        FileCoverage(path=path, outcome=outcome, reason=reason)
+        for path, (outcome, reason) in sorted(file_outcomes.items())
+    )
+    enumerated = set(analysis.changed_paths)
+    hunks: list[HunkCoverage] = []
+    for hunk in analysis.hunk_records:
+        path = None
+        for candidate in (hunk.new_path, hunk.old_path):
+            if candidate is not None and candidate in enumerated:
+                path = candidate
+                break
+        if path is None:
+            continue
+        if hunk.index in hunk_outcomes:
+            outcome, reason = hunk_outcomes[hunk.index]
+        else:
+            file_outcome = file_outcomes.get(path)
+            if file_outcome is not None and file_outcome[0] != "reviewed":
+                outcome, reason = file_outcome
+            else:
+                outcome, reason = ("unsupported", "incomplete-enumeration")
+        hunks.append(
+            HunkCoverage(index=hunk.index, path=path, outcome=outcome, reason=reason)
+        )
+    complete = analysis.enumeration_complete and enumerated == set(file_outcomes)
+    if not complete:
+        # Incomplete enumeration can never be reported as fully reviewed.
+        pass
+    return CoverageManifest(
+        files=files,
+        hunks=tuple(hunks),
+        enumeration_complete=complete,
+        enumerated_paths=analysis.changed_paths,
+        limits=limits,
+    )
+
+
+def _reconcile_file_outcomes_from_hunks(
+    analysis: DiffAnalysis,
+    *,
+    file_outcomes: dict[str, tuple[str, str | None]],
+    hunk_outcomes: dict[int, tuple[str, str | None]],
+) -> None:
+    """Align file outcomes with mixed per-hunk coverage within one path."""
+
+    for path in analysis.changed_paths:
+        hunk_indexes = [
+            hunk.index
+            for hunk in analysis.hunk_records
+            if (hunk.new_path or hunk.old_path) == path
+        ]
+        if not hunk_indexes:
+            continue
+        states = [
+            hunk_outcomes.get(index, ("unsupported", "incomplete-enumeration"))[0]
+            for index in hunk_indexes
+        ]
+        if any(state == "reviewed" for state in states) and any(
+            state != "reviewed" for state in states
+        ):
+            reason = file_outcomes.get(path, (None, None))[1]
+            file_outcomes[path] = ("partially-reviewed", reason)
+        elif states and all(state == "reviewed" for state in states):
+            file_outcomes[path] = ("reviewed", None)
+
+
+def plan_change(
+    diff: str,
+    *,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+    work_budget: TotalWorkBudget = DEFAULT_TOTAL_WORK_BUDGET,
+    orchestrate: bool = False,
+) -> LargeChangePlan:
+    """Build a coverage plan, optionally partitioning into bounded chunks."""
+
+    if not isinstance(work_budget, TotalWorkBudget):
+        raise ReviewInputError("work budget must be a TotalWorkBudget value")
+    if not isinstance(orchestrate, bool):
+        raise ReviewInputError("orchestrate must be a boolean")
+    if orchestrate:
+        analysis = analyze_diff(
+            diff,
+            limits=limits,
+            allow_incomplete=True,
+            max_bytes=work_budget.max_total_diff_bytes,
+            max_lines=work_budget.max_total_diff_lines,
+            max_files=work_budget.max_total_files,
+            max_hunks=work_budget.max_total_hunks,
+        )
+    else:
+        analysis = analyze_diff(diff, limits=limits)
+
+    file_outcomes: dict[str, tuple[str, str | None]] = {}
+    hunk_outcomes: dict[int, tuple[str, str | None]] = {}
+    reviewable: list[DiffFileRecord] = []
+    records = analysis.file_records
+    if not records and analysis.changed_paths:
+        raise ReviewInputError("diff file records are incomplete")
+    records = records or ()
+
+    for record in records:
+        outcome, reason = _classify_file(record, analysis=analysis, limits=limits)
+        for path in record.coverage_paths or (
+            (record.canonical_path,) if record.canonical_path else ()
+        ):
+            file_outcomes[path] = (
+                (outcome, reason)
+                if outcome != "reviewable"
+                else (
+                    "reviewed",
+                    None,
+                )
+            )
+        if outcome != "reviewable":
+            for hunk in record.hunks:
+                hunk_outcomes[hunk.index] = (outcome, reason)
+            continue
+        reviewable.append(record)
+
+    chunks: tuple[ReviewChunk, ...] = ()
+    if orchestrate:
+        packed, overflow, overflow_reason = _pack_records(
+            tuple(reviewable),
+            limits=limits,
+            work_budget=work_budget,
+            changed_paths=analysis.changed_paths,
+        )
+        chunks = packed
+        packed_paths = {path for chunk in packed for path in chunk.paths}
+        packed_hunks = {index for chunk in packed for index in chunk.hunk_indexes}
+        overflow_paths = {path for record in overflow for path in record.coverage_paths}
+        for record in overflow:
+            reason = overflow_reason or (
+                "too-large-hunk" if record.hunks else "too-large-file"
+            )
+            outcome = (
+                "budget-exhausted"
+                if overflow_reason == "provider-call-budget"
+                else "unsupported"
+            )
+            for path in record.coverage_paths:
+                if path in packed_paths:
+                    file_outcomes[path] = ("partially-reviewed", reason)
+                else:
+                    file_outcomes[path] = (outcome, reason)
+            for hunk in record.hunks:
+                if hunk.index not in packed_hunks:
+                    hunk_outcomes[hunk.index] = (outcome, reason)
+        for record in reviewable:
+            for path in record.coverage_paths:
+                # A path can appear in both a packed chunk and an overflow
+                # record when only some of its hunks fit the per-request budget.
+                # Treat that as partial coverage rather than fully reviewed.
+                if path in packed_paths and path not in overflow_paths:
+                    file_outcomes[path] = ("reviewed", None)
+            for hunk in record.hunks:
+                if hunk.index in packed_hunks:
+                    hunk_outcomes[hunk.index] = ("reviewed", None)
+        _reconcile_file_outcomes_from_hunks(
+            analysis,
+            file_outcomes=file_outcomes,
+            hunk_outcomes=hunk_outcomes,
+        )
+    else:
+        if not analysis.enumeration_complete:
+            if analysis.diff_bytes > limits.max_diff_bytes:
+                raise ReviewInputError("diff exceeds the configured byte limit")
+            if analysis.diff_lines > limits.max_diff_lines:
+                raise ReviewInputError("diff exceeds the configured line limit")
+            if analysis.diff_files > limits.max_diff_files:
+                raise ReviewInputError("diff contains too many files")
+            if analysis.diff_hunks > limits.max_diff_hunks:
+                raise ReviewInputError("diff contains too many hunks")
+            raise ReviewInputError("diff exceeds the configured byte limit")
+        # Single-request reviews still emit coverage.  Files that fit the
+        # per-request inventory are reviewed; the parser has already failed
+        # closed when they would not fit.
+        chunks = (
+            ReviewChunk(
+                index=1,
+                diff=diff if diff.endswith("\n") else f"{diff}\n",
+                paths=analysis.changed_paths,
+                related_paths=(),
+                hunk_indexes=tuple(hunk.index for hunk in analysis.hunk_records),
+            ),
+        )
+        for hunk in analysis.hunk_records:
+            hunk_path = hunk.new_path or hunk.old_path
+            if hunk_path is None:
+                continue
+            if hunk_path not in file_outcomes:
+                continue
+            if file_outcomes[hunk_path][0] == "reviewed":
+                hunk_outcomes[hunk.index] = ("reviewed", None)
+
+    for path in analysis.changed_paths:
+        file_outcomes.setdefault(
+            path,
+            (
+                "budget-exhausted"
+                if not analysis.enumeration_complete
+                else "unsupported",
+                "incomplete-enumeration",
+            ),
+        )
+
+    coverage = _coverage_for(
+        analysis,
+        file_outcomes=file_outcomes,
+        hunk_outcomes=hunk_outcomes,
+        limits=limits,
+    )
+    return LargeChangePlan(
+        analysis=analysis,
+        coverage=coverage,
+        chunks=chunks,
+        work_budget=work_budget,
+        orchestrated=orchestrate,
+    )
+
+
+_COVERAGE_OUTCOME_RANK = {
+    "reviewed": 0,
+    "excluded-by-policy": 1,
+    "partially-reviewed": 2,
+    "unsupported": 3,
+    "budget-exhausted": 4,
+}
+
+
+def _worse_coverage_outcome(
+    left: tuple[str, str | None],
+    right: tuple[str, str | None],
+) -> tuple[str, str | None]:
+    left_rank = _COVERAGE_OUTCOME_RANK.get(left[0], len(_COVERAGE_OUTCOME_RANK))
+    right_rank = _COVERAGE_OUTCOME_RANK.get(right[0], len(_COVERAGE_OUTCOME_RANK))
+    if left_rank >= right_rank:
+        return left
+    return right
+
+
+def merge_chunk_coverage(
+    aggregate: CoverageManifest,
+    chunk: CoverageManifest,
+    *,
+    paths: tuple[str, ...],
+    hunk_indexes: tuple[int, ...],
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> CoverageManifest:
+    """Merge chunk-scoped coverage into an aggregate manifest conservatively."""
+
+    path_set = set(paths)
+    hunk_set = set(hunk_indexes)
+    file_map = {entry.path: entry for entry in aggregate.files}
+    for entry in chunk.files:
+        if entry.path not in path_set:
+            continue
+        if entry.path in file_map:
+            outcome, reason = _worse_coverage_outcome(
+                (file_map[entry.path].outcome, file_map[entry.path].reason),
+                (entry.outcome, entry.reason),
+            )
+            file_map[entry.path] = replace(
+                file_map[entry.path], outcome=outcome, reason=reason
+            )
+        else:
+            file_map[entry.path] = entry
+    for path in aggregate.enumerated_paths:
+        if path not in file_map:
+            file_map[path] = FileCoverage(
+                path=path,
+                outcome="unsupported",
+                reason="incomplete-enumeration",
+            )
+    files = tuple(sorted(file_map.values(), key=lambda entry: entry.path))
+    hunk_map = {(entry.index, entry.path): entry for entry in aggregate.hunks}
+    for chunk_hunk in chunk.hunks:
+        if chunk_hunk.index not in hunk_set:
+            continue
+        key = (chunk_hunk.index, chunk_hunk.path)
+        if key in hunk_map:
+            outcome, reason = _worse_coverage_outcome(
+                (hunk_map[key].outcome, hunk_map[key].reason),
+                (chunk_hunk.outcome, chunk_hunk.reason),
+            )
+            hunk_map[key] = replace(hunk_map[key], outcome=outcome, reason=reason)
+        else:
+            hunk_map[key] = chunk_hunk
+    hunks = tuple(sorted(hunk_map.values(), key=lambda hunk: (hunk.index, hunk.path)))
+    return CoverageManifest(
+        files=files,
+        hunks=hunks,
+        enumeration_complete=aggregate.enumeration_complete,
+        enumerated_paths=aggregate.enumerated_paths,
+        limits=limits,
+    )
+
+
+def apply_chunk_outcomes(
+    coverage: CoverageManifest,
+    *,
+    paths: tuple[str, ...],
+    hunk_indexes: tuple[int, ...],
+    outcome: str,
+    reason: str | None = None,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> CoverageManifest:
+    """Return a copy of ``coverage`` with the selected files/hunks updated."""
+
+    if outcome not in COVERAGE_OUTCOMES:
+        raise ReviewInputError("coverage outcome is invalid")
+    _validate_reason(reason)
+    enumerated = set(coverage.enumerated_paths)
+    unknown_paths = set(paths) - enumerated
+    if unknown_paths:
+        raise ReviewInputError("coverage paths are outside the enumerated set")
+    known_hunk_indexes = {entry.index for entry in coverage.hunks}
+    unknown_hunks = set(hunk_indexes) - known_hunk_indexes
+    if unknown_hunks:
+        raise ReviewInputError("coverage hunk indexes are outside the manifest")
+    updated_paths = set(paths)
+    files: list[FileCoverage] = []
+    for file_entry in coverage.files:
+        if file_entry.path in updated_paths:
+            files.append(replace(file_entry, outcome=outcome, reason=reason))
+            updated_paths.discard(file_entry.path)
+        else:
+            files.append(file_entry)
+    for path in sorted(updated_paths):
+        files.append(FileCoverage(path=path, outcome=outcome, reason=reason))
+    hunks: list[HunkCoverage] = []
+    for hunk_entry in coverage.hunks:
+        if hunk_entry.index in hunk_indexes:
+            hunks.append(replace(hunk_entry, outcome=outcome, reason=reason))
+        else:
+            hunks.append(hunk_entry)
+    return CoverageManifest(
+        files=tuple(files),
+        hunks=tuple(hunks),
+        enumeration_complete=coverage.enumeration_complete,
+        enumerated_paths=coverage.enumerated_paths,
+        limits=limits,
+    )
+
+
+__all__ = [
+    "DEFAULT_TOTAL_WORK_BUDGET",
+    "LargeChangePlan",
+    "ReviewChunk",
+    "TotalWorkBudget",
+    "apply_chunk_outcomes",
+    "is_generated_path",
+    "merge_chunk_coverage",
+    "plan_change",
+]

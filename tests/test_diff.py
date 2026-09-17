@@ -255,3 +255,117 @@ rename to new b/with b/new.txt
     def test_unstructured_text_is_not_accepted_as_a_diff(self):
         with self.assertRaises(ReviewInputError):
             analyze_diff("not a unified diff")
+
+    def test_incomplete_hunk_close_does_not_pollute_the_next_hunk(self):
+        diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1,1 +1,2 @@
+ a
++b
+@@ -5,1 +5,2 @@
+ e
++f
+"""
+        analysis = analyze_diff(diff, allow_incomplete=True, max_hunks=1)
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertEqual(len(analysis.hunk_records), 1)
+        self.assertEqual(analysis.hunk_records[0].added_lines, frozenset({2}))
+
+    def test_truncated_line_inventory_only_enumerates_bounded_paths(self):
+        first_file = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ x
++y
+"""
+        second_file = """diff --git a/src/b.py b/src/b.py
+--- a/src/b.py
++++ b/src/b.py
+@@ -1 +1,2 @@
+ p
++q
+"""
+        diff = first_file + second_file
+        line_limit = len(first_file.splitlines())
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertIn("src/a.py", analysis.changed_paths)
+        self.assertNotIn("src/b.py", analysis.changed_paths)
+
+    def test_truncated_line_inventory_mid_hunk_does_not_raise(self):
+        diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1,3 +1,4 @@
+ line1
++added
+ context
++more
+"""
+        line_limit = len(diff.splitlines()) - 1
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertIn("src/a.py", analysis.changed_paths)
+        self.assertEqual(analysis.file_records, ())
+        self.assertEqual(analysis.hunk_records, ())
+
+    def test_truncated_line_inventory_keeps_complete_hunks_only(self):
+        diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ first
++one
+@@ -5 +6,2 @@
+ second
++two
+"""
+        line_limit = len(diff.splitlines()) - 1
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertEqual(len(analysis.file_records), 1)
+        self.assertEqual(len(analysis.file_records[0].hunks), 1)
+        self.assertIn("diff --git", analysis.file_records[0].text)
+
+    def test_truncated_line_inventory_at_unmatched_marker_does_not_raise(self):
+        first_file = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ x
++y
+"""
+        second_start = """diff --git a/src/b.py b/src/b.py
+--- a/src/b.py
++++ b/src/b.py
+"""
+        diff = first_file + second_start
+        line_limit = len(first_file.splitlines()) + 2
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertIn("src/a.py", analysis.changed_paths)
+        self.assertEqual(len(analysis.hunk_records), 1)
+        self.assertFalse(
+            any(
+                record.new_path == "src/b.py" or record.old_path == "src/b.py"
+                for record in analysis.file_records
+            )
+        )

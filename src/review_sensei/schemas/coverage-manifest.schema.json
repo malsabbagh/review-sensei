@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/coverage-manifest.schema.json",
+  "title": "ReviewSensei coverage manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "enumeration_complete",
+    "fully_reviewed",
+    "enumerated_paths",
+    "files",
+    "hunks"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "enumeration_complete": {"type": "boolean"},
+    "fully_reviewed": {"type": "boolean"},
+    "enumerated_paths": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "outcome"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "reviewed",
+              "partially-reviewed",
+              "excluded-by-policy",
+              "unsupported",
+              "budget-exhausted"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "generated",
+              "too-large-hunk",
+              "too-large-file",
+              "chunk-failed",
+              "chunk-preflight-failed",
+              "provider-call-budget",
+              "incomplete-enumeration",
+              "cross-file-relationship",
+              "deleted",
+              "renamed"
+            ]
+          }
+        }
+      }
+    },
+    "hunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "path", "outcome"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 1},
+          "path": {"type": "string", "minLength": 1},
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "reviewed",
+              "partially-reviewed",
+              "excluded-by-policy",
+              "unsupported",
+              "budget-exhausted"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "generated",
+              "too-large-hunk",
+              "too-large-file",
+              "chunk-failed",
+              "chunk-preflight-failed",
+              "provider-call-budget",
+              "incomplete-enumeration",
+              "cross-file-relationship",
+              "deleted",
+              "renamed"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -291,12 +291,21 @@ same validated result.
   reads existing markers through one bounded GraphQL review-thread sweep
   before the write, on every coverage mode including `full`. Human comments
   and resolutions are left intact.
-- `ReviewComment` must use a repository-relative path and a positive line.
+- `ReviewResult.coverage` is an optional additive v1 object. `ReviewService`
+  always emits it. Legacy documents without the field have unknown coverage and
+  cannot be auto-approved. Every enumerated changed path has one outcome:
+  `reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
+  `budget-exhausted`.
+- `ReviewComment` must use a repository-relative path. Right-side comments
+  require a positive new-file line; left-side comments require a deleted
+  old-file line; file-level comments omit `line`.
 - `ReviewComment` and `ReviewResult` reject bodies, lines, counts, proposals,
   and serialized output above the selected `ReviewLimits` profile. Exact
-  `(path, line, body)` duplicates are deduplicated first-wins in stable stage
+  `(path, line, side, body)` duplicates are deduplicated first-wins in stable stage
   order, while distinct bodies remain separate.
-- By default, every comment must target an added or modified line in the diff.
+- By default, every comment must target a validated left-side, right-side, or
+  file-level location in the exact reviewed snapshot. Unrepresentable locations
+  are retained rather than dropped.
 - When a stage declares categories, any category supplied on its comments must
   match one of that stage's ids. A category remains optional so providers that
   omit classification do not invalidate an otherwise actionable finding.

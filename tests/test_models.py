@@ -170,6 +170,22 @@ class ModelTests(unittest.TestCase):
                 }
             )
 
+    def test_review_result_rejects_left_comment_without_line(self):
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(
+                {
+                    "summary": "Review complete.",
+                    "comments": [
+                        {
+                            "path": "src/app.py",
+                            "side": "LEFT",
+                            "body": "finding",
+                        }
+                    ],
+                    "provider": "fake",
+                }
+            )
+
     def test_learning_entry_requires_repository_relative_scope(self):
         with self.assertRaises(ReviewInputError):
             LearningEntry(

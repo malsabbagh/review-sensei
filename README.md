@@ -22,7 +22,9 @@ providers later.
 - Sends a structured prompt to a replaceable provider adapter.
 - Requires provider output to be valid JSON.
 - Filters inline comments that target files or lines outside the supplied diff
-  while preserving independently valid findings.
+  while preserving independently valid findings, including deletions and
+  file-level concerns, and reports an explicit coverage outcome for every
+  changed file.
 - Supports local Ollama servers and Ollama Cloud through the same adapter.
 - Loads approved repository-local learnings and returns validated learning proposals.
 - Supports ordered review stages with structured categories and explicit focus
@@ -230,6 +232,15 @@ bytes for the compact UTF-8 serialization of the complete proposal array
 (including brackets and separators); 2,097,152 bytes per publisher-facing
 result; and line numbers up to 2,147,483,647. These are byte limits unless a
 unit is stated otherwise.
+
+Every changed file in a review result receives an explicit coverage outcome
+(`reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
+`budget-exhausted`). Incomplete enumeration is never reported as fully
+reviewed. Finding locations may bind to a right-side added line (the legacy
+default), a left-side deleted line, or a file-level concern. Per-request
+limits stay in place; opt-in `--orchestrate-large-changes` adds a separate
+total-work budget so larger diffs can be chunked without silent truncation or
+unbounded provider calls.
 
 Repository paths are strict canonical NFC UTF-8, `/`-separated, relative paths:
 no empty, dot, parent, absolute, drive/UNC, backslash, surrounding whitespace,

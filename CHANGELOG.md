@@ -135,6 +135,11 @@
   Recovery republishes a retained validated result and cannot rewrite trusted
   learnings or configuration.
 
+- Added explicit per-file/per-hunk coverage, deletion-aware left/file finding
+  locations, and opt-in bounded chunk orchestration for issue #39. Per-request
+  limits are unchanged; total-work budgets prevent silent truncation and
+  unbounded provider calls. Partial or unknown coverage cannot be approved.
+
 - Added the issue #103 `@reviewsensei/cli` npx launcher and five exact-target
   native package lanes. The launcher forwards the existing Python CLI without
   downloads or lifecycle hooks; native builds, tarball validation, npm SRI/

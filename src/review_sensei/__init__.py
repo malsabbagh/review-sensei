@@ -31,6 +31,7 @@ from .context import (
     stable_finding_fingerprint,
 )
 from .conversation import ConversationService
+from .coverage import CoverageManifest, coverage_approval_state
 from .diagnostics import build_plan, run_doctor
 from .errors import AdmissionCancelled, AdmissionRejected
 from .evaluation import (
@@ -70,6 +71,7 @@ from .models import (
 )
 from .outcomes import RecoveryArtifact, ResourceBudget, RunOutcome
 from .patches import PatchSuggestion, create_patch_suggestion
+from .planning import LargeChangePlan, ReviewChunk, plan_change
 from .release_manifest import (
     Artifact,
     CanaryBinding,
@@ -102,7 +104,7 @@ from .stages import (
     load_review_categories_from_dir,
     load_stages_from_dir,
 )
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
+from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, TotalWorkBudget
 from .verifier import (
     CandidateFinding,
     EvidenceReference,
@@ -152,6 +154,12 @@ __all__ = [
     "FindingLifecycleRecord",
     "IncrementalReviewPlan",
     "ReviewContextSelection",
+    "CoverageManifest",
+    "coverage_approval_state",
+    "LargeChangePlan",
+    "ReviewChunk",
+    "TotalWorkBudget",
+    "plan_change",
     "ReviewComment",
     "ReviewDocument",
     "ReviewLensContext",
