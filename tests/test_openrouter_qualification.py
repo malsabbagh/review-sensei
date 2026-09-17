@@ -40,6 +40,7 @@ EVALUATED_AT = "2026-09-16T00:00:00Z"
 # The gate requires the caller's own mint inputs unless it opts into the
 # weaker self-attested path, so every gate call states them explicitly.
 ATTESTED = {
+    "expected_target": TARGET,
     "expected_evaluated_at": EVALUATED_AT,
     "expected_reproducibility": REPRO,
 }
@@ -543,6 +544,21 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 record, reports, report_artifacts=artifacts, **ATTESTED
             )
 
+    def test_support_gate_rejects_a_record_naming_another_target(self) -> None:
+        """Target identity is attested by the caller, not by the record."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = _supported_record(reports, artifacts).to_dict()
+        record["qualification_target"] = {
+            **record["qualification_target"],
+            "base_url": "https://openrouter.example/api/v1",
+        }
+        with self.assertRaises(ReviewInputError):
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts, **ATTESTED
+            )
+
     def test_support_gate_requires_attested_mint_inputs_by_default(self) -> None:
         reports = _supported_live_reports()
         artifacts = _retained_artifacts(reports)
@@ -640,6 +656,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 published,
                 reports,
                 report_artifacts=artifacts,
+                expected_target=TARGET,
                 expected_evaluated_at=EVALUATED_AT,
                 expected_reproducibility=REPRO,
             ).status,
@@ -651,6 +668,7 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 published,
                 reports,
                 report_artifacts=artifacts,
+                expected_target=TARGET,
                 expected_evaluated_at=EVALUATED_AT,
                 expected_reproducibility=REPRO,
             )

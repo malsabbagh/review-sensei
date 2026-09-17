@@ -110,6 +110,7 @@ require_supported_openrouter_qualification(
     record,
     reports,
     report_artifacts=artifacts,
+    expected_target=target,
     expected_evaluated_at=evaluated_at,
     expected_reproducibility={"temperature": 0},
 )
@@ -118,7 +119,10 @@ require_supported_openrouter_qualification(
 `report_artifacts` holds the exact retained bytes of each report, in the same
 order as `reports`. The harness hashes those bytes itself, so it refuses to mint
 or accept `supported` status without them, and rejects `evidence_references`
-that the operator supplies but the bytes do not produce. Digests of
+that the operator supplies but the bytes do not produce. This applies at every
+status, not only `supported`: a record may omit `evidence_references`
+entirely, but it may not carry digests without the artifacts behind them, so a
+historical record cannot be regenerated from a published document alone. Digests of
 re-serialized in-memory documents are not interchangeable with these values.
 
 `OpenRouterQualificationRecord` tracks where its `evidence_references` came
@@ -139,7 +143,7 @@ evaluation reports do not carry either value. The gate always rejects an
 `evaluated_at` that is not an RFC 3339 UTC instant or that is dated in the
 future, but it cannot derive the window from the reports themselves.
 
-The gate therefore requires `expected_evaluated_at` and
+The gate therefore requires `expected_target`, `expected_evaluated_at`, and
 `expected_reproducibility` by default, so the comparison record is minted from
 the caller's own mint inputs instead of from the record under test. A consumer
 that holds only the published record and the reports must opt into the weaker

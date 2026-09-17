@@ -503,6 +503,7 @@ def require_supported_openrouter_qualification(
     reports: Sequence[Mapping[str, Any]],
     *,
     report_artifacts: Sequence[bytes] | None = None,
+    expected_target: OpenRouterQualificationTarget | None = None,
     expected_evaluated_at: str | None = None,
     expected_reproducibility: Mapping[str, Any] | None = None,
     allow_self_attested_inputs: bool = False,
@@ -520,12 +521,15 @@ def require_supported_openrouter_qualification(
     ``reports``. It always rejects an ``evaluated_at`` that is not an RFC 3339
     UTC instant or that is dated in the future.
 
-    Beyond that, the caller must supply ``expected_evaluated_at`` and
-    ``expected_reproducibility``: the comparison record is then minted from
-    those values rather than from the record under test, so a stale or edited
-    record fails instead of validating against itself. The weaker path, where
-    the record attests to its own observation window, is available only by
-    passing ``allow_self_attested_inputs=True``, which makes the reduced
+    Beyond that, the caller must supply ``expected_target``,
+    ``expected_evaluated_at``, and ``expected_reproducibility``: the comparison
+    record is then minted from those values rather than from the record under
+    test, so a stale or edited record fails instead of validating against
+    itself. ``expected_target`` matters for the same reason as the other two:
+    once a second slice is published, a record naming slice A must not be
+    gated against reports produced for slice B. The weaker path, where the
+    record attests to its own target and observation window, is available only
+    by passing ``allow_self_attested_inputs=True``, which makes the reduced
     guarantee explicit at the call site rather than silently the default.
 
     ``now`` injects the clock used for the future-dating check so callers can
@@ -555,19 +559,24 @@ def require_supported_openrouter_qualification(
             "OpenRouter qualification target model does not match promotion record"
         )
     if not allow_self_attested_inputs and (
-        expected_evaluated_at is None or expected_reproducibility is None
+        expected_target is None
+        or expected_evaluated_at is None
+        or expected_reproducibility is None
     ):
         raise ReviewInputError(
-            "OpenRouter support gate requires expected_evaluated_at and "
-            "expected_reproducibility; pass allow_self_attested_inputs=True to "
-            "accept the record's own attestations and the weaker guarantee"
+            "OpenRouter support gate requires expected_target, "
+            "expected_evaluated_at, and expected_reproducibility; pass "
+            "allow_self_attested_inputs=True to accept the record's own "
+            "attestations and the weaker guarantee"
         )
     _require_attested_evaluated_at(parsed.promotion.evaluated_at, now=now)
     if expected_evaluated_at is not None:
         _require_attested_evaluated_at(expected_evaluated_at, now=now)
     minted = qualification_record_from_reports(
         reports,
-        target=parsed.qualification_target,
+        target=(
+            parsed.qualification_target if expected_target is None else expected_target
+        ),
         observed_revision=parsed.promotion.observed_revision,
         reproducibility=(
             parsed.promotion.reproducibility
@@ -620,8 +629,10 @@ def load_supported_openrouter_qualification(
     reports: Sequence[Mapping[str, Any]],
     *,
     report_artifacts: Sequence[bytes],
-    expected_evaluated_at: str,
-    expected_reproducibility: Mapping[str, Any],
+    expected_target: OpenRouterQualificationTarget | None = None,
+    expected_evaluated_at: str | None = None,
+    expected_reproducibility: Mapping[str, Any] | None = None,
+    allow_self_attested_inputs: bool = False,
     now: datetime | None = None,
 ) -> OpenRouterQualificationRecord:
     """Parse a published qualification document and gate it in one step.
@@ -632,14 +643,22 @@ def load_supported_openrouter_qualification(
     This helper never returns a record that has not cleared the evidence-bound
     gate, so a downstream consumer cannot read a support claim it did not
     verify.
+
+    The attestation arguments carry the same meaning and the same default as on
+    the gate itself, so a consumer that holds only the published document and
+    the reports can still use this entry point by passing
+    ``allow_self_attested_inputs=True`` rather than having to drop down to
+    :func:`require_supported_openrouter_qualification`.
     """
 
     return require_supported_openrouter_qualification(
         validate_openrouter_qualification_record(document),
         reports,
         report_artifacts=report_artifacts,
+        expected_target=expected_target,
         expected_evaluated_at=expected_evaluated_at,
         expected_reproducibility=expected_reproducibility,
+        allow_self_attested_inputs=allow_self_attested_inputs,
         now=now,
     )
 
