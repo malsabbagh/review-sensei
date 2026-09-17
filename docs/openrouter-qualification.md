@@ -72,7 +72,8 @@ Publish a machine-readable `openrouter-qualification` document (schema id
 fields plus:
 
 - `qualification_target` (model, upstream provider, base URL, routing policy digest)
-- `evidence_references` (SHA-256 digests of retained live reports)
+- `evidence_references` (SHA-256 digests of the exact retained live report
+  bytes, reproducible with `sha256sum openrouter-live-1.json`)
 - `limitations` (honest scope bounds; the small corpus is not broad superiority)
 - `status` (`supported`, `insufficient`, or `unsupported`)
 - `rollback_decision` (`revert-to-baseline`, `hold`, or `none`)
@@ -80,6 +81,8 @@ fields plus:
 Emit from Python:
 
 ```python
+import json
+
 from review_sensei.openrouter_qualification import (
     INITIAL_OPENROUTER_QUALIFICATION_TARGET,
     qualification_record_from_reports,
@@ -87,18 +90,53 @@ from review_sensei.openrouter_qualification import (
 )
 
 target = INITIAL_OPENROUTER_QUALIFICATION_TARGET
+artifacts = [path.read_bytes() for path in retained_report_paths]
+reports = [json.loads(artifact) for artifact in artifacts]
+
 record = qualification_record_from_reports(
     reports,
     target=target,
     observed_revision="<observed-openrouter-revision>",
     reproducibility={"temperature": 0},
     evaluated_at="2026-09-16T00:00:00Z",
+    report_artifacts=artifacts,
 )
-require_supported_openrouter_qualification(record, reports)
+require_supported_openrouter_qualification(
+    record,
+    reports,
+    report_artifacts=artifacts,
+    expected_evaluated_at="2026-09-16T00:00:00Z",
+    expected_reproducibility={"temperature": 0},
+)
 ```
+
+`report_artifacts` holds the exact retained bytes of each report, in the same
+order as `reports`. The harness hashes those bytes itself, so it refuses to mint
+or accept `supported` status without them, and rejects `evidence_references`
+that the operator supplies but the bytes do not produce. Digests of
+re-serialized in-memory documents are not interchangeable with these values.
 
 Only `status=supported` with at least three evidence references and matching
 live reports can authorize support labels or approval eligibility.
+
+### Operator attestations
+
+`evaluated_at` and `reproducibility` describe the observation window, and
+evaluation reports do not carry either value. The gate always rejects an
+`evaluated_at` that is not an RFC 3339 UTC instant or that is dated in the
+future, but it cannot derive the window from the reports themselves. A caller
+that still holds the original mint inputs should pass `expected_evaluated_at`
+and `expected_reproducibility` so the comparison record is minted from those
+values instead of from the record under test; otherwise a republished record
+validates its own attestations against itself.
+
+### Qualification slice
+
+`OpenRouterQualificationTarget` accepts only the published
+`(model, upstream_provider)` pairs in `PUBLISHED_QUALIFICATION_SLICES`. A new
+model or upstream provider requires publishing a new target alongside its
+evidence set; the harness will not mint a record for an unlisted combination
+even when the base URL is allowlisted.
 
 ## Negative gates (harness coverage)
 
@@ -112,6 +150,13 @@ The qualification harness proves these cases fail closed:
 - duplicate `invocation_id` values
 - explicit `status=supported` when evidence is insufficient
 - supported records with fewer than three `evidence_references`
+- `supported` status minted without the retained report artifacts
+- `evidence_references` that the retained bytes do not produce, or that repeat
+  the same digest
+- an artifact whose bytes do not parse to the report it accompanies
+- `evaluated_at` that is malformed, future-dated, or stale against the
+  attested mint inputs
+- targets outside the published model and upstream-provider slice
 
 Ordinary CI runs `tests/test_openrouter_qualification.py` and
 `tests/test_promotion_release.py` without live credentials.

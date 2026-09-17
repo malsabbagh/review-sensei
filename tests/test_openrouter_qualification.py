@@ -6,6 +6,7 @@ evidence. They do not contact live providers or fabricate operator evidence.
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from review_sensei.errors import ReviewInputError
@@ -19,6 +20,7 @@ from review_sensei.openrouter_qualification import (
     INITIAL_OPENROUTER_QUALIFICATION_TARGET,
     OpenRouterQualificationRecord,
     OpenRouterQualificationTarget,
+    evidence_reference_digest,
     qualification_record_from_reports,
     require_supported_openrouter_qualification,
     routing_policy_digest,
@@ -115,6 +117,19 @@ def _make_openrouter_report(
         "threshold_failures": failures,
         "passed": passed,
     }
+
+
+def _retained_artifacts(reports: list[dict]) -> list[bytes]:
+    """Serialize reports the way an operator retains them on disk."""
+
+    return [json.dumps(report, indent=2).encode("utf-8") for report in reports]
+
+
+def _supported_live_reports() -> list[dict]:
+    return [
+        _make_openrouter_report(elapsed_total_ms=index, invocation_id=f"live-{index}")
+        for index in (1, 2, 3)
+    ]
 
 
 def _insufficient_harness_record() -> dict:
@@ -294,26 +309,180 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             )
 
     def test_three_independent_live_reports_can_build_supported_record(self) -> None:
-        reports = [
-            _make_openrouter_report(
-                elapsed_total_ms=index, invocation_id=f"live-{index}"
-            )
-            for index in (1, 2, 3)
-        ]
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
         record = qualification_record_from_reports(
             reports,
             target=TARGET,
             observed_revision="openrouter-rev-1",
             reproducibility=REPRO,
             evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
         )
         self.assertEqual(record.status, "supported")
-        self.assertEqual(len(record.evidence_references), 3)
+        self.assertEqual(
+            list(record.evidence_references),
+            [evidence_reference_digest(artifact) for artifact in artifacts],
+        )
         validate_public_document(record.to_dict(), "openrouter-qualification")
         self.assertEqual(
-            require_supported_openrouter_qualification(record, reports).status,
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts
+            ).status,
             "supported",
         )
+
+    def test_supported_status_requires_retained_report_artifacts(self) -> None:
+        reports = _supported_live_reports()
+        with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+            qualification_record_from_reports(
+                reports,
+                target=TARGET,
+                observed_revision="openrouter-rev-1",
+                reproducibility=REPRO,
+                evaluated_at=EVALUATED_AT,
+            )
+
+    def test_fabricated_evidence_references_are_rejected(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        with self.assertRaisesRegex(ReviewInputError, "do not match the retained"):
+            qualification_record_from_reports(
+                reports,
+                target=TARGET,
+                observed_revision="openrouter-rev-1",
+                reproducibility=REPRO,
+                evaluated_at=EVALUATED_AT,
+                report_artifacts=artifacts,
+                evidence_references=("a" * 64, "b" * 64, "c" * 64),
+            )
+
+    def test_duplicate_evidence_references_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "distinct artifacts"):
+            OpenRouterQualificationRecord(
+                promotion=promotion_record_from_reports(
+                    _supported_live_reports(),
+                    observed_revision="openrouter-rev-1",
+                    reproducibility=REPRO,
+                    evaluated_at=EVALUATED_AT,
+                ),
+                qualification_target=TARGET,
+                evidence_references=("a" * 64, "a" * 64, "a" * 64),
+                limitations=("test limitation",),
+            )
+
+    def test_artifact_not_matching_its_report_is_rejected(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        tampered = dict(reports[0])
+        tampered["passed"] = False
+        artifacts[0] = json.dumps(tampered, indent=2).encode("utf-8")
+        with self.assertRaisesRegex(ReviewInputError, "does not match the supplied"):
+            qualification_record_from_reports(
+                reports,
+                target=TARGET,
+                observed_revision="openrouter-rev-1",
+                reproducibility=REPRO,
+                evaluated_at=EVALUATED_AT,
+                report_artifacts=artifacts,
+            )
+
+    def test_stale_reproducibility_fails_the_support_gate(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = qualification_record_from_reports(
+            reports,
+            target=TARGET,
+            observed_revision="openrouter-rev-1",
+            reproducibility=REPRO,
+            evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
+        ).to_dict()
+        record["reproducibility"] = {"temperature": 1}
+        with self.assertRaisesRegex(ReviewInputError, "reproducibility"):
+            require_supported_openrouter_qualification(
+                record,
+                reports,
+                report_artifacts=artifacts,
+                expected_reproducibility=REPRO,
+            )
+
+    def test_stale_evaluated_at_fails_the_support_gate(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = qualification_record_from_reports(
+            reports,
+            target=TARGET,
+            observed_revision="openrouter-rev-1",
+            reproducibility=REPRO,
+            evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
+        ).to_dict()
+        record["evaluated_at"] = "2020-01-01T00:00:00Z"
+        with self.assertRaisesRegex(ReviewInputError, "evaluated_at"):
+            require_supported_openrouter_qualification(
+                record,
+                reports,
+                report_artifacts=artifacts,
+                expected_evaluated_at=EVALUATED_AT,
+            )
+
+    def test_future_dated_evaluated_at_fails_the_support_gate(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = qualification_record_from_reports(
+            reports,
+            target=TARGET,
+            observed_revision="openrouter-rev-1",
+            reproducibility=REPRO,
+            evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
+        ).to_dict()
+        record["evaluated_at"] = "3026-01-01T00:00:00Z"
+        with self.assertRaisesRegex(ReviewInputError, "dated in the future"):
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts
+            )
+
+    def test_malformed_evaluated_at_fails_the_support_gate(self) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = qualification_record_from_reports(
+            reports,
+            target=TARGET,
+            observed_revision="openrouter-rev-1",
+            reproducibility=REPRO,
+            evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
+        ).to_dict()
+        record["evaluated_at"] = "2026-09-16 00:00:00"
+        with self.assertRaisesRegex(ReviewInputError, "RFC 3339 UTC"):
+            require_supported_openrouter_qualification(
+                record, reports, report_artifacts=artifacts
+            )
+
+    def test_unpublished_slice_cannot_be_qualified(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "published qualification slice"):
+            OpenRouterQualificationTarget(
+                model="openai/gpt-4o-mini",
+                upstream_provider="openai",
+            )
+
+    def test_fixture_mode_report_with_mismatched_model_is_rejected(self) -> None:
+        report = _make_openrouter_report(
+            mode="fixture",
+            model="openai/gpt-4o-mini",
+            provider_version=None,
+            endpoint_scope="none",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "model does not match target"):
+            qualification_record_from_reports(
+                [report],
+                target=TARGET,
+                observed_revision="fixture-v1",
+                reproducibility=REPRO,
+                evaluated_at=EVALUATED_AT,
+            )
 
     def test_generic_promotion_gate_also_rejects_fixture_openrouter_reports(
         self,

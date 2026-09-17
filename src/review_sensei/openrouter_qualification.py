@@ -12,6 +12,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from .errors import ReviewInputError
@@ -31,9 +32,13 @@ from .providers.openrouter import (
 from .schemas import validate_public_document
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 _OPENROUTER_PROVIDER = "openrouter"
+_SCHEMA_VERSION = "1.0"
 _INITIAL_MODEL = "anthropic/claude-3.5-haiku"
 _INITIAL_UPSTREAM = "anthropic"
+_ACCEPTED_REPORT_MODES = frozenset({"fixture", "live"})
+MAX_EVIDENCE_ARTIFACT_BYTES = 4 * 1024 * 1024
 _DEFAULT_LIMITATIONS = (
     "Qualified only for the declared model, upstream provider, and routing "
     "policy; not the full OpenRouter catalog.",
@@ -41,6 +46,11 @@ _DEFAULT_LIMITATIONS = (
     "Mutable model aliases and unavailable revision metadata must be recorded "
     "honestly in observed_revision.",
 )
+
+# Published qualification slices. A new model or upstream provider stays
+# outside the qualified slice until its target and evidence set are published,
+# so the harness refuses to mint records for unlisted combinations.
+PUBLISHED_QUALIFICATION_SLICES = frozenset({(_INITIAL_MODEL, _INITIAL_UPSTREAM)})
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,11 @@ class OpenRouterQualificationTarget:
         if not is_allowlisted_openrouter_endpoint(self.base_url):
             raise ReviewInputError(
                 "OpenRouter qualification base_url is not allowlisted"
+            )
+        if (self.model, self.upstream_provider) not in PUBLISHED_QUALIFICATION_SLICES:
+            raise ReviewInputError(
+                "OpenRouter qualification target model and upstream provider "
+                "are outside the published qualification slice"
             )
 
     @property
@@ -109,7 +124,93 @@ def _digest_list(values: Sequence[str], *, label: str) -> tuple[str, ...]:
         if not isinstance(value, str) or not _SHA256.fullmatch(value):
             raise ReviewInputError(f"{label}[{index}] must be a SHA-256 digest")
         digests.append(value)
+    if len(set(digests)) != len(digests):
+        raise ReviewInputError(f"{label} must reference distinct artifacts")
     return tuple(digests)
+
+
+def evidence_reference_digest(artifact: bytes) -> str:
+    """Return the SHA-256 digest of one retained evaluation-report artifact.
+
+    ``evidence_references`` are digests of the exact retained report bytes, so
+    an auditor can reproduce them with ``sha256sum openrouter-live-1.json``.
+    Digests of re-serialized in-memory documents are not interchangeable with
+    these values and are never minted by this module.
+    """
+
+    if not isinstance(artifact, (bytes, bytearray)):
+        raise ReviewInputError("evaluation report artifact must be bytes")
+    raw = bytes(artifact)
+    if len(raw) > MAX_EVIDENCE_ARTIFACT_BYTES:
+        raise ReviewInputError(
+            "evaluation report artifact exceeds the configured size limit"
+        )
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _evidence_references_from_artifacts(
+    artifacts: Sequence[bytes],
+    documents: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Hash retained report bytes and bind each one to its parsed report."""
+
+    try:
+        payloads = tuple(artifacts)
+    except TypeError as exc:
+        raise ReviewInputError(
+            "OpenRouter qualification report artifacts must be iterable"
+        ) from exc
+    if len(payloads) != len(documents):
+        raise ReviewInputError(
+            "OpenRouter qualification requires one retained report artifact "
+            "per evaluation report"
+        )
+    digests: list[str] = []
+    for index, (payload, document) in enumerate(zip(payloads, documents)):
+        if not isinstance(payload, (bytes, bytearray)):
+            raise ReviewInputError(
+                f"report_artifacts[{index}] must be the retained report bytes"
+            )
+        raw = bytes(payload)
+        digest = evidence_reference_digest(raw)
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ReviewInputError(
+                f"report_artifacts[{index}] is not a UTF-8 JSON document"
+            ) from exc
+        if parsed != dict(document):
+            raise ReviewInputError(
+                f"report_artifacts[{index}] does not match the supplied "
+                "evaluation report"
+            )
+        digests.append(digest)
+    return _digest_list(digests, label="evidence_references")
+
+
+def _resolve_evidence_references(
+    documents: Sequence[Mapping[str, Any]],
+    *,
+    report_artifacts: Sequence[bytes] | None,
+    evidence_references: Sequence[str],
+    status: str,
+) -> tuple[str, ...]:
+    declared = _digest_list(tuple(evidence_references), label="evidence_references")
+    if report_artifacts is None:
+        if status == "supported":
+            raise ReviewInputError(
+                "supported OpenRouter qualification requires the retained live "
+                "report artifacts; evidence_references cannot be accepted "
+                "without bytes the harness can hash itself"
+            )
+        return declared
+    derived = _evidence_references_from_artifacts(report_artifacts, documents)
+    if declared and declared != derived:
+        raise ReviewInputError(
+            "OpenRouter qualification evidence_references do not match the "
+            "retained live report artifacts"
+        )
+    return derived
 
 
 @dataclass(frozen=True)
@@ -161,9 +262,14 @@ class OpenRouterQualificationRecord:
         return self.promotion.status
 
     def to_dict(self) -> dict[str, Any]:
+        promotion_fields = self.promotion.to_dict()
+        if promotion_fields.get("schema_version") != _SCHEMA_VERSION:
+            raise ReviewInputError(
+                "OpenRouter qualification record requires promotion-record "
+                f"schema_version {_SCHEMA_VERSION}"
+            )
         value = {
-            "schema_version": "1.0",
-            **self.promotion.to_dict(),
+            **promotion_fields,
             "qualification_target": self.qualification_target.to_dict(),
             "evidence_references": list(self.evidence_references),
             "limitations": list(self.limitations),
@@ -231,12 +337,14 @@ def _validate_openrouter_live_report(
     fields = _report_promotion_fields(report)
     if fields["provider"] != _OPENROUTER_PROVIDER:
         raise ReviewInputError("OpenRouter qualification requires openrouter reports")
-    if fields["mode"] != "live":
-        return
     if fields["model"] != target.model:
         raise ReviewInputError(
             "OpenRouter qualification report model does not match target"
         )
+    if fields["mode"] not in _ACCEPTED_REPORT_MODES:
+        raise ReviewInputError("OpenRouter qualification report mode is not recognized")
+    if fields["mode"] != "live":
+        return
     run = report.get("run")
     if not isinstance(run, Mapping):
         raise ReviewInputError("evaluation report is incomplete")
@@ -254,12 +362,20 @@ def qualification_record_from_reports(
     observed_revision: str,
     reproducibility: Mapping[str, Any],
     evaluated_at: str,
+    report_artifacts: Sequence[bytes] | None = None,
     evidence_references: Sequence[str] = (),
     limitations: Sequence[str] = _DEFAULT_LIMITATIONS,
     rollback_decision: str = "revert-to-baseline",
     status: str | None = None,
 ) -> OpenRouterQualificationRecord:
-    """Build an OpenRouter qualification record from evaluation reports."""
+    """Build an OpenRouter qualification record from evaluation reports.
+
+    ``report_artifacts`` holds the exact retained bytes of each report in
+    ``reports``, in the same order. ``supported`` status requires them because
+    ``evidence_references`` must be digests the harness computed itself from
+    those bytes; caller-supplied digests are cross-checked against them and are
+    otherwise only accepted for non-supported records.
+    """
 
     try:
         documents = tuple(reports)
@@ -281,16 +397,12 @@ def qualification_record_from_reports(
         raise ReviewInputError("OpenRouter qualification requires openrouter provider")
     if promotion.model != target.model:
         raise ReviewInputError("OpenRouter qualification model does not match target")
-    references = tuple(evidence_references)
-    if not references and documents:
-        references = tuple(
-            hashlib.sha256(
-                json.dumps(
-                    report, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-                ).encode("utf-8")
-            ).hexdigest()
-            for report in documents
-        )
+    references = _resolve_evidence_references(
+        documents,
+        report_artifacts=report_artifacts,
+        evidence_references=evidence_references,
+        status=promotion.status,
+    )
     return OpenRouterQualificationRecord(
         promotion=promotion,
         qualification_target=target,
@@ -309,11 +421,51 @@ def validate_openrouter_qualification_against_report(
     _validate_openrouter_live_report(report, record.qualification_target)
 
 
+def _require_attested_evaluated_at(value: str) -> None:
+    """Reject support-claim timestamps that are malformed or not yet observed."""
+
+    if not isinstance(value, str) or not _RFC3339_UTC.fullmatch(value):
+        raise ReviewInputError(
+            "OpenRouter qualification evaluated_at must be an RFC 3339 UTC instant"
+        )
+    stamp = value[:-1]
+    layout = "%Y-%m-%dT%H:%M:%S.%f" if "." in stamp else "%Y-%m-%dT%H:%M:%S"
+    try:
+        observed = datetime.strptime(stamp, layout).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ReviewInputError(
+            "OpenRouter qualification evaluated_at must be an RFC 3339 UTC instant"
+        ) from exc
+    if observed > datetime.now(timezone.utc):
+        raise ReviewInputError(
+            "OpenRouter qualification evaluated_at is dated in the future"
+        )
+
+
 def require_supported_openrouter_qualification(
     record: OpenRouterQualificationRecord | Mapping[str, Any],
     reports: Sequence[Mapping[str, Any]],
+    *,
+    report_artifacts: Sequence[bytes] | None = None,
+    expected_evaluated_at: str | None = None,
+    expected_reproducibility: Mapping[str, Any] | None = None,
 ) -> OpenRouterQualificationRecord:
-    """Fail-closed gate for OpenRouter support claims and approval eligibility."""
+    """Fail-closed gate for OpenRouter support claims and approval eligibility.
+
+    The record is re-minted from ``reports`` and ``report_artifacts`` and then
+    compared field by field, so every published value, including
+    ``qualification_target``, ``evidence_references``, and ``limitations``,
+    must agree with the evidence the gate can verify itself.
+
+    ``evaluated_at`` and ``reproducibility`` are operator attestations that
+    evaluation reports do not carry, so the gate cannot derive them from
+    ``reports``. It always rejects an ``evaluated_at`` that is not an RFC 3339
+    UTC instant or that is dated in the future. A caller holding the original
+    mint inputs should also pass ``expected_evaluated_at`` and
+    ``expected_reproducibility``: the comparison record is then minted from
+    those values rather than from the record under test, so a stale or edited
+    record fails instead of validating against itself.
+    """
 
     parsed = (
         record
@@ -325,36 +477,45 @@ def require_supported_openrouter_qualification(
         raise ReviewInputError(
             "OpenRouter qualification target model does not match promotion record"
         )
+    _require_attested_evaluated_at(parsed.promotion.evaluated_at)
+    if expected_evaluated_at is not None:
+        _require_attested_evaluated_at(expected_evaluated_at)
     minted = qualification_record_from_reports(
         reports,
         target=parsed.qualification_target,
         observed_revision=parsed.promotion.observed_revision,
-        reproducibility=parsed.promotion.reproducibility,
-        evaluated_at=parsed.promotion.evaluated_at,
+        reproducibility=(
+            parsed.promotion.reproducibility
+            if expected_reproducibility is None
+            else expected_reproducibility
+        ),
+        evaluated_at=(
+            parsed.promotion.evaluated_at
+            if expected_evaluated_at is None
+            else expected_evaluated_at
+        ),
+        report_artifacts=report_artifacts,
         evidence_references=parsed.evidence_references,
         limitations=parsed.limitations,
         rollback_decision=parsed.promotion.rollback_decision,
         status="supported",
     )
-    for name in (
-        "engine_digest",
-        "prompt_digest",
-        "configuration_digest",
-        "corpus_digest",
-        "provider",
-        "model",
-        "observed_revision",
-        "run_count",
-        "status",
-        "rollback_decision",
-    ):
-        if getattr(minted.promotion, name) != getattr(parsed.promotion, name):
+    minted_promotion = minted.promotion.to_dict()
+    parsed_promotion = parsed.promotion.to_dict()
+    for name in _PROMOTION_RECORD_KEYS:
+        if minted_promotion[name] != parsed_promotion[name]:
             raise ReviewInputError(
                 f"OpenRouter qualification {name} does not match live evaluation evidence"
             )
     if minted.evidence_references != parsed.evidence_references:
         raise ReviewInputError(
-            "OpenRouter qualification evidence_references do not match live reports"
+            "OpenRouter qualification evidence_references do not match the "
+            "retained live report artifacts"
+        )
+    if minted.to_dict() != parsed.to_dict():
+        raise ReviewInputError(
+            "OpenRouter qualification record does not match the record minted "
+            "from live evaluation evidence"
         )
     for report in reports:
         validate_openrouter_qualification_against_report(parsed, report)
@@ -363,8 +524,11 @@ def require_supported_openrouter_qualification(
 
 __all__ = [
     "INITIAL_OPENROUTER_QUALIFICATION_TARGET",
+    "MAX_EVIDENCE_ARTIFACT_BYTES",
+    "PUBLISHED_QUALIFICATION_SLICES",
     "OpenRouterQualificationRecord",
     "OpenRouterQualificationTarget",
+    "evidence_reference_digest",
     "qualification_record_from_reports",
     "require_supported_openrouter_qualification",
     "routing_policy_digest",
