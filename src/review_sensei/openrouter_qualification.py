@@ -52,10 +52,16 @@ _DEFAULT_LIMITATIONS = (
     "honestly in observed_revision.",
 )
 
-# Published qualification slices. A new model or upstream provider stays
-# outside the qualified slice until its target and evidence set are published,
-# so the harness refuses to mint records for unlisted combinations.
-PUBLISHED_QUALIFICATION_SLICES = frozenset({(_INITIAL_MODEL, _INITIAL_UPSTREAM)})
+# Published qualification slices, keyed by the full qualified combination of
+# model, upstream provider, and base URL. A new model, upstream provider, or
+# endpoint stays outside the qualified slice until its target and evidence set
+# are published, so the harness refuses to mint records for unlisted
+# combinations. Pinning the base URL here rather than leaning on
+# ``is_allowlisted_openrouter_endpoint`` alone keeps the slice from widening if
+# that allowlist is ever extended for an unrelated deployment.
+PUBLISHED_QUALIFICATION_SLICES = frozenset(
+    {(_INITIAL_MODEL, _INITIAL_UPSTREAM, DEFAULT_OPENROUTER_BASE_URL)}
+)
 
 
 @dataclass(frozen=True)
@@ -78,10 +84,11 @@ class OpenRouterQualificationTarget:
             raise ReviewInputError(
                 "OpenRouter qualification base_url is not allowlisted"
             )
-        if (self.model, self.upstream_provider) not in PUBLISHED_QUALIFICATION_SLICES:
+        slice_key = (self.model, self.upstream_provider, self.base_url)
+        if slice_key not in PUBLISHED_QUALIFICATION_SLICES:
             raise ReviewInputError(
-                "OpenRouter qualification target model and upstream provider "
-                "are outside the published qualification slice"
+                "OpenRouter qualification target model, upstream provider, and "
+                "base URL are outside the published qualification slice"
             )
 
     @property
@@ -602,7 +609,10 @@ def require_supported_openrouter_qualification(
         )
     for report in reports:
         validate_openrouter_qualification_against_report(parsed, report)
-    return parsed
+    # Return the re-minted record, not the caller's. It is proven identical by
+    # the comparison above, but it carries ARTIFACT_DIGEST provenance, so a
+    # caller cannot hold on to the weaker parsed object after passing the gate.
+    return minted
 
 
 def load_supported_openrouter_qualification(

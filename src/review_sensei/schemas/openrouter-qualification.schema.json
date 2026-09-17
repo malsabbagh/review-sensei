@@ -64,6 +64,12 @@
       "maxItems": 32
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "supported"}}, "required": ["status"]},
+      "then": {"properties": {"evidence_references": {"minItems": 3}}}
+    }
+  ],
   "examples": [
     {
       "schema_version": "1.0",

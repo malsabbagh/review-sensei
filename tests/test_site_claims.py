@@ -91,8 +91,12 @@ def _route_target(page: Path, href: str) -> Path:
 
     base = SITE_ROOT if href.startswith("/") else page.parent
     resolved = (base / href.lstrip("/")).resolve()
-    if href.endswith("/") or resolved.suffix == "":
+    if href.endswith("/"):
         return resolved / "index.html"
+    # An extensionless link without a trailing slash is deliberately not
+    # treated as a directory route: GitHub Pages answers it with a 301 to the
+    # slashed form rather than serving the page, so requiring the slash keeps
+    # what this test verifies identical to what production serves.
     return resolved
 
 

@@ -347,7 +347,11 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             report_artifacts=artifacts,
         ).to_dict()
         published["evidence_references"] = published["evidence_references"][:2]
-        with self.assertRaisesRegex(ReviewInputError, "evidence references"):
+        # The schema now encodes the rule, so a consumer validating structurally
+        # rejects it too rather than relying on the harness alone.
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(published, "openrouter-qualification")
+        with self.assertRaises(ReviewInputError):
             validate_openrouter_qualification_record(published)
 
     def test_three_independent_live_reports_can_build_supported_record(self) -> None:
@@ -556,6 +560,47 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             ).status,
             "supported",
         )
+
+    def test_published_document_with_fabricated_references_is_rejected(self) -> None:
+        """A hand-written published document cannot buy a support claim."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        forged = _supported_record(reports, artifacts).to_dict()
+        forged["evidence_references"] = [SHA, "b" * 64, "c" * 64]
+        # Without artifacts there is nothing to hash, so the gate fails closed
+        # rather than trusting the document's own provenance marker.
+        with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+            require_supported_openrouter_qualification(forged, reports, **ATTESTED)
+        with self.assertRaisesRegex(ReviewInputError, "retained live report"):
+            require_supported_openrouter_qualification(
+                forged, reports, allow_self_attested_inputs=True
+            )
+        # With artifacts the references are re-derived from the bytes, so the
+        # forged digests cannot survive the comparison.
+        with self.assertRaisesRegex(ReviewInputError, "do not match the retained"):
+            require_supported_openrouter_qualification(
+                forged, reports, report_artifacts=artifacts, **ATTESTED
+            )
+
+    def test_published_digests_must_match_the_supplied_reports(self) -> None:
+        """Promotion digests are re-derived from the reports, not the record."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        for field in (
+            "engine_digest",
+            "prompt_digest",
+            "configuration_digest",
+            "corpus_digest",
+        ):
+            tampered = _supported_record(reports, artifacts).to_dict()
+            tampered[field] = "9" * 64
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ReviewInputError, field):
+                    require_supported_openrouter_qualification(
+                        tampered, reports, report_artifacts=artifacts, **ATTESTED
+                    )
 
     def test_self_attested_path_accepts_a_tampered_observation_window(self) -> None:
         """Document the residual risk the weaker path deliberately carries."""
