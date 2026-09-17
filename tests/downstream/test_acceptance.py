@@ -209,6 +209,14 @@ class GeneratedCallerContractTests(unittest.TestCase):
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", workflow)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", workflow)
         self.assertIn("provider_mode: local", config)
+        self.assertIn("provider_profile: ''", config)
+        self.assertNotIn(
+            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
+            workflow,
+        )
+        self.assertNotIn(
+            "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow
+        )
         self.assertIn("cloud_base_url: https://ollama.com/api", config)
         self.assertIn("base_url: http://127.0.0.1:11434/api", config)
         self.assertIn("enable_learning_proposals:", workflow)

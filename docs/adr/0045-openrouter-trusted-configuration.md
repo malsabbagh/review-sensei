@@ -52,10 +52,53 @@ never hashed.
 ## Scope
 
 In scope: CLI `--provider openrouter`, OpenRouter profiles, registry wiring,
-doctor/plan extensions, configuration digests, docs, and offline tests.
+doctor/plan extensions, configuration digests, reusable-workflow OpenRouter job
+wiring (#98), setup `REVIEWSENSEI_PROVIDER_PROFILE` variable/config parity, docs,
+and offline tests.
 
-Out of scope: workflow/broker changes (#98), live qualification/promotion (O4),
-arbitrary endpoint overrides, and catalog scraping.
+Out of scope: live qualification/promotion (O4), arbitrary endpoint overrides,
+and catalog scraping.
+
+### Hosted workflow contract (#98)
+
+The reusable workflow adds an `openrouter` job that runs only when
+`provider_mode == 'cloud'` and `provider_profile` is `openrouter-sonnet` or
+`openrouter-gpt`. This preserves ADR 0011/0025 egress opt-in: a profile value
+alone cannot move reviews onto GitHub-hosted compute. The job shares the
+`reviewsensei-provider-*` concurrency group with cloud/local provider jobs so a
+newer review for the same pull request cancels any in-flight provider-mode
+review.
+
+Hosted OpenRouter review and mention-reply commands append
+`--allow-unqualified-profile` only when the caller forwards
+`allow_unqualified_profile=true` (workflow input default `false`).
+`validate-provider-mode` rejects OpenRouter profiles without that explicit
+opt-in. Generated setup-v4 callers forward `provider_profile`,
+`allow_unqualified_profile`, and `OPENROUTER_API_KEY` only after follow-up #112
+lands once the public `v4` tag includes the reusable-workflow contract; manual
+callers may forward them immediately after the tag move.
+`validate-provider-mode` rejects unsupported profile values and requires
+`provider_mode=cloud` whenever a profile is set.
+
+The `openrouter` job body intentionally mirrors the `cloud` job for #98,
+including `runs-on: ubuntu-latest` (the public reusable workflow is exempt
+from the repository `ENABLE_UBICLOUD_HOSTED` switch; `local` remains the
+self-hosted lane), job-level permissions (`contents: read`, `pull-requests:
+read`, `issues: read`, `id-token: write`), and broker publication (`github
+review` with `id-token: write`). Mention-reply approval finalization is not a
+workflow step: all three jobs pass `--enable-auto-approve` into
+`review-sensei github reply`, which calls the shared finalizer in
+`conversation.py`. The OIDC capability broker remains in scope for OpenRouter
+publication the same way it is for cloud; OpenRouter only changes inference
+credentials (`OPENROUTER_API_KEY`) and `--profile`.
+Setup PR bodies call out that `REVIEWSENSEI_PROVIDER_PROFILE` alone does not
+enable hosted OpenRouter on setup-v4 callers until follow-up #112 forwards
+`provider_profile` and `OPENROUTER_API_KEY` after the public `v4` tag includes
+this contract.
+ADR 0025's parameterized-job ideal remains the follow-up; until then
+`tests/test_ci_policy.py` asserts provider-job parity (reply parsing,
+permissions, auto-approve forwarding, concurrency groups, publish/reply
+counts) so drift is caught in CI.
 
 ## Alternatives considered
 

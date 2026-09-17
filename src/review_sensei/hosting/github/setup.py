@@ -49,6 +49,7 @@ DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
 DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
 SETUP_VARIABLES = (
     ("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
+    ("REVIEWSENSEI_PROVIDER_PROFILE", ""),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.1.1"),
@@ -1144,6 +1145,11 @@ def _v4_config_file() -> str:
             "upload_artifacts: false\nstages_dir: ''\ncategories_dir: ''\n",
             1,
         )
+        .replace(
+            "provider_mode: local\n",
+            "provider_mode: local\nprovider_profile: ''\n",
+            1,
+        )
     )
 
 
@@ -1237,15 +1243,21 @@ def _setup_pull_request_body() -> str:
         "tag, with opt-in provider defaults and a "
         "manual uninstall-cleanup workflow. The installation bootstrap also "
         "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
-        "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
-        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
+        "REVIEWSENSEI_PROVIDER_PROFILE (empty), REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), "
+        "and REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
         "values. Change the opt-in variables explicitly to enable publication. "
         "The selected provider mode applies to automatic/manual reviews and "
         "authorized mention conversations; cloud uses GitHub-hosted compute and "
         "local uses the labelled self-hosted runner. "
         "Cloud mode reads the existing customer-owned OLLAMA_API_KEY secret by "
-        "name only; the App never creates or reads its value. The uninstall "
+        "name only; OpenRouter profiles read OPENROUTER_API_KEY the same way once "
+        "hosted OpenRouter is live. Setting REVIEWSENSEI_PROVIDER_PROFILE alone "
+        "does not enable hosted OpenRouter on setup-v4 callers yet: the generated "
+        "caller forwards provider_profile, allow_unqualified_profile, and "
+        "OPENROUTER_API_KEY only after follow-up #112 lands once the public v4 tag "
+        "includes this reusable-workflow contract. "
+        "The App never creates or reads secret values. The uninstall "
         "workflow creates a reviewable PR to remove these generated scripts; it does "
         "not delete learnings or secrets. No private keys, installation tokens, or "
         "webhook bodies are included in these files."

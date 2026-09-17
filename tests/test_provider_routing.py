@@ -300,9 +300,17 @@ class ProviderRoutingTests(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
         example = example_path.read_text(encoding="utf-8")
         for text in (workflow, example):
-            self.assertNotIn("--profile", text)
             self.assertNotIn("OPENAI_API_KEY", text)
             self.assertNotIn("api.openai.com", text)
+        cloud_start = workflow.index("  cloud:")
+        openrouter_start = workflow.index("  openrouter:")
+        local_start = workflow.index("  local:")
+        self.assertNotIn("--profile", workflow[cloud_start:openrouter_start])
+        self.assertNotIn("--profile", workflow[local_start:])
+        openrouter = workflow[openrouter_start:local_start]
+        self.assertIn("--profile", openrouter)
+        self.assertIn("--provider openrouter", openrouter)
+        self.assertNotIn("--profile", example)
 
 
 class StageProviderProfileTests(unittest.TestCase):

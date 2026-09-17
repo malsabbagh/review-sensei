@@ -158,11 +158,26 @@ use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
 an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
 the reusable workflow.
 
-OpenRouter is an explicit CLI-only remote path in this release:
+OpenRouter is an explicit opt-in remote path for CLI and hosted workflows.
+
+**Generated setup-v4 callers do not forward OpenRouter inputs until #112.**
+Those callers still omit `provider_profile`, `allow_unqualified_profile`, and
+`OPENROUTER_API_KEY` until follow-up #112 lands after the public `v4` tag
+includes this reusable-workflow contract. Until then, setting
+`REVIEWSENSEI_PROVIDER_PROFILE` on a generated caller has no effect.
+
+After the `v4` tag moves, **manual or custom callers** that forward the new
+inputs can run OpenRouter immediately; there is no extra gate beyond what the
+reusable workflow validates. The reusable workflow requires **both**
+`provider_mode=cloud` and `provider_profile=openrouter-sonnet` or
+`openrouter-gpt`, plus `allow_unqualified_profile=true` and
+`OPENROUTER_API_KEY`. Setting only the profile with `local` mode or without
+`allow_unqualified_profile=true` fails during `validate-provider-mode`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | empty | Required bearer credential for `--provider openrouter` or OpenRouter profiles |
+| `REVIEWSENSEI_PROVIDER_PROFILE` | empty | When set to `openrouter-sonnet` or `openrouter-gpt` together with `REVIEWSENSEI_PROVIDER_MODE=cloud`, selects the OpenRouter profile for reviews, learning proposals, and authorized replies. Leave empty to keep Ollama local/cloud defaults. |
+| `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter profiles in CLI or workflow runs |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter runs |
 | `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
@@ -172,7 +187,17 @@ OpenRouter is an explicit CLI-only remote path in this release:
 `doctor` and `plan` report credential presence only; they never print the key.
 OpenRouter profiles start `unqualified` and require `--allow-unqualified-profile`
 for live review, live evaluation, and provider-backed GitHub reply generation
-until separate qualification evidence exists.
+until separate qualification evidence exists. Hosted OpenRouter runs use
+`ubuntu-latest`, require `REVIEWSENSEI_PROVIDER_MODE=cloud`, read
+`OPENROUTER_API_KEY` by name only, and pass `--allow-unqualified-profile` only
+when the caller forwards `allow_unqualified_profile=true` (default `false`).
+Leave `REVIEWSENSEI_PROVIDER_PROFILE` empty to keep the default Ollama
+local/cloud paths.
+
+To roll back from OpenRouter, clear `REVIEWSENSEI_PROVIDER_PROFILE`, restore
+`REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud`, and remove the
+`OPENROUTER_API_KEY` secret when it is no longer needed. Ollama defaults are
+unchanged.
 
 ## GitHub workflow example
 
@@ -302,10 +327,12 @@ successful AI resolution automatically causes one fresh same-head review pass;
 approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
 The generated caller may contain the literal name-only mapping
-`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read the value
-during setup and the App never creates, retrieves, logs, persists, or
-interpolates a secret value into generated output. Add the customer-owned
-secret yourself only when explicitly enabling cloud mode.
+`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read
+secret values during setup and the App never creates, retrieves, logs,
+persists, or interpolates a secret value into generated output. Add the
+customer-owned `OLLAMA_API_KEY` yourself only when explicitly enabling cloud
+mode. `OPENROUTER_API_KEY` is forwarded by generated callers only after the
+public `v4` tag includes the reusable-workflow contract.
 
 Setup reconciliation is PR-only and changes only the three generated paths.
 `installation.created` (including reinstall),

@@ -53,6 +53,7 @@ export const SETUP_FILE_PATHS: readonly string[] = [
 
 export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_PROVIDER_MODE", value: DEFAULT_PROVIDER_MODE },
+  { name: "REVIEWSENSEI_PROVIDER_PROFILE", value: "" },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
   { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
@@ -855,6 +856,7 @@ function configFile(
     `setup_version: ${version}\n` +
     "provider: ollama\n" +
     "provider_mode: local\n" +
+    "provider_profile: ''\n" +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
