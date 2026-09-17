@@ -212,6 +212,9 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             evaluated_at=EVALUATED_AT,
         )
         self.assertEqual(record.status, "insufficient")
+        # Pin the reason: three reports were accepted and classified as
+        # insufficient, not rejected for some unrelated defect.
+        self.assertEqual(record.promotion.run_count, 3)
         with self.assertRaises(ReviewInputError):
             qualification_record_from_reports(
                 reports,
@@ -553,6 +556,35 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             ).status,
             "supported",
         )
+
+    def test_self_attested_path_accepts_a_tampered_observation_window(self) -> None:
+        """Document the residual risk the weaker path deliberately carries."""
+
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        record = _supported_record(reports, artifacts).to_dict()
+        record["evaluated_at"] = "2025-01-01T00:00:00Z"
+        # No attested mint inputs to compare against, so the record's own
+        # observation window is taken at face value. This is why the opt-out
+        # has to be explicit.
+        self.assertEqual(
+            require_supported_openrouter_qualification(
+                record,
+                reports,
+                report_artifacts=artifacts,
+                allow_self_attested_inputs=True,
+            ).promotion.evaluated_at,
+            "2025-01-01T00:00:00Z",
+        )
+        # The evidence binding still holds on the weaker path.
+        record["evidence_references"] = [SHA, "b" * 64, "c" * 64]
+        with self.assertRaises(ReviewInputError):
+            require_supported_openrouter_qualification(
+                record,
+                reports,
+                report_artifacts=artifacts,
+                allow_self_attested_inputs=True,
+            )
 
     def test_load_supported_qualification_parses_and_gates(self) -> None:
         reports = _supported_live_reports()

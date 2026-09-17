@@ -210,6 +210,12 @@ def _resolve_evidence_references(
                 "report artifacts; evidence_references cannot be accepted "
                 "without bytes the harness can hash itself"
             )
+        if declared:
+            raise ReviewInputError(
+                "OpenRouter qualification evidence_references require the "
+                "retained report artifacts at any status, because a published "
+                "digest must be reproducible from the bytes behind it"
+            )
         return declared, _EvidenceProvenance.UNVERIFIED
     derived = _evidence_references_from_artifacts(report_artifacts, documents)
     if declared and declared != derived:
@@ -531,6 +537,11 @@ def require_supported_openrouter_qualification(
     if parsed.promotion.status != "supported":
         raise ReviewInputError(
             "OpenRouter support gate requires a supported promotion record"
+        )
+    if parsed.evidence_provenance is _EvidenceProvenance.UNVERIFIED:
+        raise ReviewInputError(
+            "OpenRouter support gate requires a minted or published record; "
+            "a hand-built record carries no evidence provenance"
         )
     if parsed.qualification_target.model != parsed.promotion.model:
         raise ReviewInputError(

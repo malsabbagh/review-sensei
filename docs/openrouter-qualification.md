@@ -93,19 +93,24 @@ target = INITIAL_OPENROUTER_QUALIFICATION_TARGET
 artifacts = [path.read_bytes() for path in retained_report_paths]
 reports = [json.loads(artifact) for artifact in artifacts]
 
+# The UTC instant the live runs were observed. The gate rejects a value dated
+# in the future, so this must be a real observation time, not a literal copied
+# from this runbook.
+evaluated_at = "<observed-utc-instant>"  # e.g. "2026-09-16T00:00:00Z"
+
 record = qualification_record_from_reports(
     reports,
     target=target,
     observed_revision="<observed-openrouter-revision>",
     reproducibility={"temperature": 0},
-    evaluated_at="2026-09-16T00:00:00Z",
+    evaluated_at=evaluated_at,
     report_artifacts=artifacts,
 )
 require_supported_openrouter_qualification(
     record,
     reports,
     report_artifacts=artifacts,
-    expected_evaluated_at="2026-09-16T00:00:00Z",
+    expected_evaluated_at=evaluated_at,
     expected_reproducibility={"temperature": 0},
 )
 ```
