@@ -67,8 +67,12 @@ The reusable workflow selects one backend from `provider_mode`:
 aliases). Model selection is `REVIEWSENSEI_MODEL` forwarded as the `model`
 input; each backend applies its own default when the variable is empty.
 `provider_profile` and `allow_unqualified_profile` are unused and fail closed
-when set. Hosted OpenRouter uses `--provider openrouter --model` and derives
-`OPENROUTER_UPSTREAM_PROVIDER` from the model slug when possible.
+when set. The previous hosted `allow_unqualified_profile=true` acknowledgement
+is removed: selecting `REVIEWSENSEI_PROVIDER_MODE=openrouter` is the operator
+opt-in to GitHub-hosted OpenRouter egress. Hosted OpenRouter uses
+`--provider openrouter --model` against the published allowlist in
+`provider_config.HOSTED_OPENROUTER_DEFAULTS` and derives
+`OPENROUTER_UPSTREAM_PROVIDER` from that allowlist.
 
 Callers forward `REVIEWSENSEI_PROVIDER_MODE`, `REVIEWSENSEI_MODEL`, and
 `OPENROUTER_API_KEY` after the public `v4` tag includes this contract. The
