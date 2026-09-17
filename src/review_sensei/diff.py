@@ -756,15 +756,19 @@ def analyze_diff(
     if lines_truncated and allow_incomplete:
         enumeration_complete = False
         stopped_for_budget = True
-        if pending_old_marker and not matched_file_marker:
-            abandon_file()
+        close_hunk(require_complete=False)
+        if in_file:
+            if current_file_hunks:
+                close_file()
+            else:
+                abandon_file()
         pending_old_marker = False
         pending_git_header = None
         pending_rename_from = None
         rename_from_for_header = None
-
-    close_hunk(require_complete=not allow_incomplete)
-    close_file()
+    else:
+        close_hunk(require_complete=not allow_incomplete)
+        close_file()
     if not stopped_for_budget and pending_old_marker:
         raise _invalid("diff contains an unmatched file marker")
     if not stopped_for_budget and (

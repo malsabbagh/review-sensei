@@ -316,6 +316,30 @@ rename to new b/with b/new.txt
         )
         self.assertFalse(analysis.enumeration_complete)
         self.assertIn("src/a.py", analysis.changed_paths)
+        self.assertEqual(analysis.file_records, ())
+        self.assertEqual(analysis.hunk_records, ())
+
+    def test_truncated_line_inventory_keeps_complete_hunks_only(self):
+        diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1,2 @@
+ first
++one
+@@ -5 +6,2 @@
+ second
++two
+"""
+        line_limit = len(diff.splitlines()) - 1
+        analysis = analyze_diff(
+            diff,
+            allow_incomplete=True,
+            max_lines=line_limit,
+        )
+        self.assertFalse(analysis.enumeration_complete)
+        self.assertEqual(len(analysis.file_records), 1)
+        self.assertEqual(len(analysis.file_records[0].hunks), 1)
+        self.assertIn("diff --git", analysis.file_records[0].text)
 
     def test_truncated_line_inventory_at_unmatched_marker_does_not_raise(self):
         first_file = """diff --git a/src/a.py b/src/a.py

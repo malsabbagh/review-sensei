@@ -14,6 +14,10 @@ class ReviewInputError(ReviewSenseiError, ValueError):
         self.diagnostic = diagnostic
 
 
+class ChunkPreflightError(ReviewInputError):
+    """Raised when a chunked sub-run diff fails bounded planning preflight."""
+
+
 class ReviewFormatError(ReviewSenseiError, ValueError):
     """Raised when a provider response cannot be safely used as a review."""
 

@@ -427,9 +427,15 @@ def plan_change(
         )
     else:
         if not analysis.enumeration_complete:
-            raise ReviewInputError(
-                "non-orchestrated reviews require complete diff enumeration"
-            )
+            if analysis.diff_bytes > limits.max_diff_bytes:
+                raise ReviewInputError("diff exceeds the configured byte limit")
+            if analysis.diff_lines > limits.max_diff_lines:
+                raise ReviewInputError("diff exceeds the configured line limit")
+            if analysis.diff_files > limits.max_diff_files:
+                raise ReviewInputError("diff contains too many files")
+            if analysis.diff_hunks > limits.max_diff_hunks:
+                raise ReviewInputError("diff contains too many hunks")
+            raise ReviewInputError("diff exceeds the configured byte limit")
         # Single-request reviews still emit coverage.  Files that fit the
         # per-request inventory are reviewed; the parser has already failed
         # closed when they would not fit.

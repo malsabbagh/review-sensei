@@ -130,6 +130,13 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertTrue(plan.coverage.fully_reviewed)
         self.assertEqual(coverage_approval_state(plan.coverage), "reviewed")
 
+    def test_non_orchestrated_overflow_preserves_legacy_limit_errors(self):
+        with self.assertRaises(ReviewInputError) as raised:
+            plan_change(TWO_FILES, limits=ReviewLimits(max_diff_bytes=4))
+        self.assertEqual(
+            str(raised.exception), "diff exceeds the configured byte limit"
+        )
+
     def test_incomplete_enumeration_is_never_fully_reviewed(self):
         plan = plan_change(
             TWO_FILES,

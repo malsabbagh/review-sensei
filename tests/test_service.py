@@ -381,8 +381,11 @@ class ReviewServiceTests(unittest.TestCase):
     def test_diff_preflight_happens_before_provider_calls(self):
         provider = FakeProvider('{"summary":"ok","comments":[]}')
         limits = ReviewLimits(max_diff_bytes=4)
-        with self.assertRaises(ReviewInputError):
+        with self.assertRaises(ReviewInputError) as raised:
             ReviewService(provider).review(ReviewRequest(diff=DIFF, limits=limits))
+        self.assertEqual(
+            str(raised.exception), "diff exceeds the configured byte limit"
+        )
         self.assertEqual(provider.requests, [])
 
     def test_nested_learning_overflow_is_rejected_before_any_provider_call(self):

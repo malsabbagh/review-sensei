@@ -23,6 +23,7 @@ from .context import (
 from .coverage import CoverageManifest
 from .diff import DiffAnalysis
 from .errors import (
+    ChunkPreflightError,
     ContextLoadError,
     ProviderError,
     ReviewFormatError,
@@ -388,10 +389,7 @@ class ReviewService:
                     attach_change_coverage=False,
                 )
             except (ReviewInputError, ContextLoadError, ReviewFormatError) as exc:
-                if (
-                    isinstance(exc, ReviewInputError)
-                    and str(exc) == "diff failed bounded preflight"
-                ):
+                if isinstance(exc, ChunkPreflightError):
                     coverage = apply_chunk_outcomes(
                         coverage,
                         paths=chunk.paths,
@@ -644,7 +642,9 @@ class ReviewService:
                 orchestrate=request.orchestrate_large_changes,
             )
         except ReviewInputError as exc:
-            raise ReviewInputError("diff failed bounded preflight") from exc
+            if request.orchestrate_large_changes:
+                raise ChunkPreflightError("diff failed bounded preflight") from exc
+            raise
         if request.orchestrate_large_changes:
             return self._review_chunks_run(
                 request,
