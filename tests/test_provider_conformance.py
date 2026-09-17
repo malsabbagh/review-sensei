@@ -60,7 +60,7 @@ def _openrouter(opener, **kwargs):
         model="anthropic/claude-3.5-sonnet",
         api_key=kwargs.get("api_key", "secret"),
         routing_policy=OpenRouterRoutingPolicy(upstream_provider="anthropic"),
-        opener=opener,
+        _test_opener=opener,
     )
 
 

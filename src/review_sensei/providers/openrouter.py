@@ -28,7 +28,6 @@ from urllib.request import (
     HTTPSHandler,
     Request,
     build_opener,
-    urlopen,
 )
 
 import certifi
@@ -50,6 +49,28 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_APP_REFERER = "https://reviewsensei.dev"
 DEFAULT_APP_TITLE = "ReviewSensei"
 _UPSTREAM_PROVIDER_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _validated_upstream_provider_slug(value: str) -> str:
+    try:
+        validate_bounded_text(
+            value,
+            MAX_UPSTREAM_PROVIDER_BYTES,
+            label="OpenRouter upstream provider",
+            allow_empty=False,
+        )
+    except ReviewInputError as exc:
+        raise ValueError(
+            "OpenRouter upstream provider exceeds the configured size limit"
+        ) from exc
+    slug = value.strip().casefold()
+    if not slug:
+        raise ValueError("OpenRouter upstream provider must be non-empty")
+    if slug != value:
+        raise ValueError("OpenRouter upstream provider must be normalized")
+    if not _UPSTREAM_PROVIDER_SLUG.fullmatch(slug):
+        raise ValueError("OpenRouter upstream provider slug is invalid")
+    return slug
 
 
 def _endpoint_has_userinfo(parsed: Any) -> bool:
@@ -99,26 +120,16 @@ class OpenRouterRoutingPolicy:
     upstream_provider: str
 
     def __post_init__(self) -> None:
-        try:
-            validate_bounded_text(
-                self.upstream_provider,
-                MAX_UPSTREAM_PROVIDER_BYTES,
-                label="OpenRouter upstream provider",
-                allow_empty=False,
-            )
-        except ReviewInputError as exc:
-            raise ValueError(
-                "OpenRouter upstream provider exceeds the configured size limit"
-            ) from exc
-        slug = self.upstream_provider.strip().casefold()
-        if slug != self.upstream_provider:
-            raise ValueError("OpenRouter upstream provider must be normalized")
-        if not _UPSTREAM_PROVIDER_SLUG.fullmatch(slug):
-            raise ValueError("OpenRouter upstream provider slug is invalid")
+        object.__setattr__(
+            self,
+            "upstream_provider",
+            _validated_upstream_provider_slug(self.upstream_provider),
+        )
 
     def to_request_provider(self) -> dict[str, object]:
+        upstream_provider = _validated_upstream_provider_slug(self.upstream_provider)
         return {
-            "order": [self.upstream_provider],
+            "order": [upstream_provider],
             "allow_fallbacks": False,
             "require_parameters": True,
             "data_collection": "deny",
@@ -173,21 +184,22 @@ class _VerifiedHTTPSHandler(HTTPSHandler):
 
 
 def _http_failure_is_transient(code: int) -> bool:
-    return code in {408, 409, 425, 429} or 500 <= code < 600
+    return code in {408, 425, 429} or 500 <= code < 600
 
 
 def _validate_openrouter_header_value(value: str, *, label: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"OpenRouter {label} must be non-empty")
     if any(
-        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
-        for character in value
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
     ):
         raise ValueError(f"OpenRouter {label} contains a forbidden control character")
     try:
         value.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"OpenRouter {label} must contain only ASCII characters") from exc
+        raise ValueError(
+            f"OpenRouter {label} must contain only ASCII characters"
+        ) from exc
 
 
 class OpenRouterProvider:
@@ -208,7 +220,7 @@ class OpenRouterProvider:
         allow_model_override: bool = True,
         app_referer: str = DEFAULT_APP_REFERER,
         app_title: str = DEFAULT_APP_TITLE,
-        opener: Callable[..., Any] = urlopen,
+        _test_opener: Callable[..., Any] | None = None,
     ) -> None:
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("OpenRouter base_url must be non-empty")
@@ -282,7 +294,7 @@ class OpenRouterProvider:
         self.app_referer = app_referer
         self.app_title = app_title
         self._expected_hostname = hostname
-        self._opener = opener
+        self._test_opener = _test_opener
         self._ssl_context = self._build_ssl_context()
         self._safe_opener = build_opener(
             _NoRedirect(),
@@ -385,12 +397,14 @@ class OpenRouterProvider:
             return self.base_url
         return f"{self.base_url}/chat/completions"
 
-    def _call_custom_opener(self, http_request: Request) -> Any:
-        # Custom openers are a test seam only.  Production traffic must use the
-        # built-in ``urlopen`` path so redirect rejection and verified TLS apply.
+    def _call_test_opener(self, http_request: Request) -> Any:
+        # ``_test_opener`` is an internal test seam only.  Production traffic uses
+        # ``_safe_opener`` so redirect rejection and verified TLS always apply.
+        if self._test_opener is None:
+            raise ProviderError("OpenRouter test opener is unavailable")
         if not is_allowlisted_openrouter_endpoint(http_request.full_url):
             raise ProviderError("OpenRouter endpoint is not allowlisted")
-        opener = getattr(self._opener, "open", self._opener)
+        opener = getattr(self._test_opener, "open", self._test_opener)
         try:
             return opener(
                 http_request,
@@ -399,7 +413,10 @@ class OpenRouterProvider:
             )
         except TypeError as exc:
             message = str(exc).casefold()
-            if "unexpected keyword argument" not in message and "required positional" not in message:
+            if (
+                "unexpected keyword argument" not in message
+                and "required positional" not in message
+            ):
                 raise
             raise ProviderError(
                 "OpenRouter opener must accept timeout and context kwargs"
@@ -441,13 +458,12 @@ class OpenRouterProvider:
         )
 
         try:
-            if self._opener is urlopen:
+            if self._test_opener is None:
                 response_ctx = self._safe_opener.open(
                     http_request, timeout=self.timeout_seconds
                 )
             else:
-                # Test seam only: see ``_call_custom_opener`` for allowlist checks.
-                response_ctx = self._call_custom_opener(http_request)
+                response_ctx = self._call_test_opener(http_request)
             with response_ctx as response:
                 body = read_bounded_body(
                     response,

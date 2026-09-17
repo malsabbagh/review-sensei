@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 import certifi
 
@@ -78,7 +78,7 @@ class OpenRouterProviderTests(unittest.TestCase):
                 model="anthropic/claude-3.5-sonnet",
                 api_key="secret",
                 routing_policy=_POLICY,
-                opener=lambda request, timeout, context: _Response(b"{}"),
+                _test_opener=lambda request, timeout, context: _Response(b"{}"),
             )
 
     def test_rejects_header_values_with_control_characters(self):
@@ -88,7 +88,7 @@ class OpenRouterProviderTests(unittest.TestCase):
                 api_key="secret",
                 routing_policy=_POLICY,
                 app_referer="https://reviewsensei.dev\n",
-                opener=lambda request, timeout, context: _Response(b"{}"),
+                _test_opener=lambda request, timeout, context: _Response(b"{}"),
             )
 
     def test_sends_bounded_chat_completion_request(self):
@@ -107,7 +107,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             routing_policy=_POLICY,
             timeout_seconds=7,
             max_output_tokens=123,
-            opener=opener,
+            _test_opener=opener,
         )
         result = provider.complete(ProviderRequest(prompt="review", model=None))
         payload = json.loads(captured["request"].data)
@@ -121,6 +121,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(payload["model"], "anthropic/claude-3.5-sonnet")
         self.assertEqual(payload["provider"]["allow_fallbacks"], False)
         self.assertEqual(payload["provider"]["zdr"], True)
+        self.assertEqual(payload["provider"]["order"], ["anthropic"])
         self.assertEqual(captured["request"].headers["Authorization"], "Bearer secret")
         self.assertEqual(
             captured["request"].headers["Referer"], "https://reviewsensei.dev"
@@ -131,7 +132,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: _Response(
+            _test_opener=lambda request, timeout, context: _Response(
                 b'{"error":{"message":"invalid key"}}'
             ),
         )
@@ -143,7 +144,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: _Response(
+            _test_opener=lambda request, timeout, context: _Response(
                 b'{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}'
             ),
         )
@@ -155,7 +156,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: _Response(
+            _test_opener=lambda request, timeout, context: _Response(
                 b'{"choices":[{"finish_reason":"content_filter","message":{"content":""}}]}'
             ),
         )
@@ -167,7 +168,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: (_ for _ in ()).throw(
+            _test_opener=lambda request, timeout, context: (_ for _ in ()).throw(
                 HTTPError("https://openrouter.ai", 402, "payment", {}, None)
             ),
         )
@@ -180,7 +181,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: (_ for _ in ()).throw(
+            _test_opener=lambda request, timeout, context: (_ for _ in ()).throw(
                 HTTPError("https://openrouter.ai", 429, "rate", {}, None)
             ),
         )
@@ -193,7 +194,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: (_ for _ in ()).throw(
+            _test_opener=lambda request, timeout, context: (_ for _ in ()).throw(
                 URLError("timed out")
             ),
         )
@@ -206,7 +207,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: _Response(
+            _test_opener=lambda request, timeout, context: _Response(
                 b'{"model":"anthropic/claude-3.5-sonnet","system_fingerprint":"fp_123",'
                 b'"choices":[{"message":{"content":"ok"}}]}'
             ),
@@ -226,14 +227,10 @@ class OpenRouterProviderTests(unittest.TestCase):
             api_key="secret",
             routing_policy=_POLICY,
             allow_model_override=False,
-            opener=opener,
+            _test_opener=opener,
         )
-        provider.complete(
-            ProviderRequest(prompt="review", model="openai/gpt-4o-mini")
-        )
-        self.assertEqual(
-            captured["payload"]["model"], "anthropic/claude-3.5-sonnet"
-        )
+        provider.complete(ProviderRequest(prompt="review", model="openai/gpt-4o-mini"))
+        self.assertEqual(captured["payload"]["model"], "anthropic/claude-3.5-sonnet")
 
     def test_registry_requires_routing_policy(self):
         with self.assertRaisesRegex(ProviderError, "routing policy"):
@@ -295,6 +292,8 @@ class OpenRouterProviderTests(unittest.TestCase):
     def test_routing_policy_validation(self):
         with self.assertRaisesRegex(ValueError, "must be normalized"):
             OpenRouterRoutingPolicy(upstream_provider=" Anthropic")
+        with self.assertRaisesRegex(ValueError, "must be non-empty"):
+            OpenRouterRoutingPolicy(upstream_provider="   ")
         with self.assertRaisesRegex(ValueError, "slug is invalid"):
             OpenRouterRoutingPolicy(upstream_provider="bad!")
 
@@ -313,9 +312,7 @@ class OpenRouterProviderTests(unittest.TestCase):
 
     def test_verified_https_handler_rejects_host_mismatch(self):
         context = ssl.create_default_context()
-        handler = _VerifiedHTTPSHandler(
-            context, expected_hostname="openrouter.ai"
-        )
+        handler = _VerifiedHTTPSHandler(context, expected_hostname="openrouter.ai")
         captured: dict[str, object] = {}
 
         def fake_do_open(factory, req):
@@ -330,6 +327,38 @@ class OpenRouterProviderTests(unittest.TestCase):
         assert callable(factory)
         with self.assertRaisesRegex(ProviderError, "TLS host mismatch"):
             factory("evil.example", 443)
+
+    def test_safe_opener_rejects_redirect_end_to_end(self):
+        class _RedirectingOpener:
+            def open(self, request, timeout):
+                handler = _NoRedirect()
+                handler.redirect_request(request, None, 302, "", {}, None)
+                raise AssertionError("redirect_request should have raised")
+
+        with patch(
+            "review_sensei.providers.openrouter.build_opener",
+            return_value=_RedirectingOpener(),
+        ):
+            provider = OpenRouterProvider(
+                model="anthropic/claude-3.5-sonnet",
+                api_key="secret",
+                routing_policy=_POLICY,
+            )
+            with self.assertRaisesRegex(ProviderError, "redirected"):
+                provider.complete(ProviderRequest(prompt="review"))
+
+    def test_http_409_is_not_transient(self):
+        provider = OpenRouterProvider(
+            model="anthropic/claude-3.5-sonnet",
+            api_key="secret",
+            routing_policy=_POLICY,
+            _test_opener=lambda request, timeout, context: (_ for _ in ()).throw(
+                HTTPError("https://openrouter.ai", 409, "conflict", {}, None)
+            ),
+        )
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(ProviderRequest(prompt="private"))
+        self.assertFalse(raised.exception.transient)
 
     def test_default_opener_wires_safe_handlers(self):
         captured: dict[str, object] = {}
@@ -365,7 +394,7 @@ class OpenRouterProviderTests(unittest.TestCase):
                     model="anthropic/claude-3.5-sonnet",
                     api_key="secret",
                     routing_policy=_POLICY,
-                    opener=lambda request, timeout, context: _Response(
+                    _test_opener=lambda request, timeout, context: _Response(
                         b'{"choices":[{"message":{"content":"ok"}}]}'
                     ),
                 )
@@ -377,7 +406,7 @@ class OpenRouterProviderTests(unittest.TestCase):
                 model="anthropic/claude-3.5-sonnet",
                 api_key="secret",
                 routing_policy=_POLICY,
-                opener=lambda request, timeout, context: _Response(
+                _test_opener=lambda request, timeout, context: _Response(
                     b'{"choices":[{"message":{"content":"ok"}}]}'
                 ),
             )
@@ -422,27 +451,25 @@ class OpenRouterProviderTests(unittest.TestCase):
                         OpenRouterProvider._load_ca_bundle(Path("bundle.pem"))
         context.load_verify_locations.assert_called_once_with(cadata="abcdef")
 
-    def test_custom_opener_rejects_non_allowlisted_request_url(self):
+    def test_test_opener_rejects_non_allowlisted_request_url(self):
         provider = OpenRouterProvider(
             base_url="https://openrouter.ai/api/v1",
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
             routing_policy=_POLICY,
-            opener=lambda request, timeout, context: _Response(b"{}"),
+            _test_opener=lambda request, timeout, context: _Response(b"{}"),
         )
         request = Request("https://evil.example/v1/chat/completions")
         with self.assertRaisesRegex(ProviderError, "not allowlisted"):
-            provider._call_custom_opener(request)
+            provider._call_test_opener(request)
 
-    def test_production_opener_is_urlopen(self):
-        self.assertIs(
-            OpenRouterProvider(
-                model="anthropic/claude-3.5-sonnet",
-                api_key="secret",
-                routing_policy=_POLICY,
-            )._opener,
-            urlopen,
+    def test_production_provider_has_no_test_opener(self):
+        provider = OpenRouterProvider(
+            model="anthropic/claude-3.5-sonnet",
+            api_key="secret",
+            routing_policy=_POLICY,
         )
+        self.assertIsNone(provider._test_opener)
 
 
 if __name__ == "__main__":
