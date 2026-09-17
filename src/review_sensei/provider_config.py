@@ -60,13 +60,13 @@ def validate_hosted_workflow_model(
         raise ReviewInputError("model must not start with '-'")
     backend = _effective_hosted_backend(provider_mode, workflow_mode)
     if backend == "openrouter":
+        if ":cloud" in value:
+            raise ReviewInputError("openrouter model must not use ollama cloud suffix")
         if not _OPENROUTER_MODEL_PATTERN.fullmatch(value):
             raise ReviewInputError("openrouter model must be vendor/model slug")
         vendor = value.split("/", 1)[0]
         if vendor not in _OPENROUTER_VENDORS:
             raise ReviewInputError("openrouter model vendor is not allowlisted")
-        if ":cloud" in value:
-            raise ReviewInputError("openrouter model must not use ollama cloud suffix")
         return
     if "/" in value:
         raise ReviewInputError("ollama model must not use vendor/model openrouter slug")
