@@ -269,6 +269,12 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
+        self.assertIn(
+            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
+            workflow,
+        )
+        self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
         self.assertIn("id-token: write", workflow)
         self.assertIn("pull-requests: write", workflow)
         self.assertIn("issues: write", workflow)

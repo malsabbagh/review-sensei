@@ -190,6 +190,7 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         self.assertIn("stages_dir", runner_inputs)
         self.assertIn("categories_dir", runner_inputs)
         self.assertIn("pull_request_title", runner_inputs)
+        self.assertIn("provider_profile", runner_inputs)
         self.assertNotIn("OLLAMA_API_KEY", runner_inputs)
         callers = {
             "repo": REPO_CALLER.read_text(encoding="utf-8"),

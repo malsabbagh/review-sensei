@@ -433,7 +433,10 @@ before release if a caller `with:` key is absent from
 
 `REVIEWSENSEI_PROVIDER_MODE` defaults to `local`. The default local model is
 `qwen3.5:4b`; setting the mode to `cloud` selects
-`deepseek-v4-flash:cloud` and requires `OLLAMA_API_KEY`.
+`deepseek-v4-flash:cloud` and requires `OLLAMA_API_KEY`. OpenRouter is explicit
+opt-in through `REVIEWSENSEI_PROVIDER_PROFILE` (`openrouter-sonnet` or
+`openrouter-gpt`) and the customer-owned `OPENROUTER_API_KEY` secret; empty
+profile values preserve the Ollama local/cloud contract.
 
 `review-sensei --version` reads package metadata and prints an exact `X.Y.Z`
 version. This is the version recorded by the portable manual GitHub Actions

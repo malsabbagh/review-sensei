@@ -43,6 +43,15 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain("head.repo.full_name == github.repository");
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
+    expect(workflow).toContain(
+      "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}",
+    );
+    expect(workflow).toContain(
+      "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
+    );
+    expect(SETUP_VARIABLES).toContainEqual(
+      expect.objectContaining({ name: "REVIEWSENSEI_PROVIDER_PROFILE", value: "" }),
+    );
     expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
     expect(workflow).toContain("enable_auto_approve");
     expect(workflow).toContain(

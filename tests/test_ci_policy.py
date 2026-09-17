@@ -90,13 +90,13 @@ def _reusable_group_templates() -> tuple[str, str]:
         for line in _reusable_workflow_text().splitlines()
         if line.strip().startswith("group:")
     ]
-    if len(groups) != 3:
+    if len(groups) != 4:
         raise AssertionError(
-            f"expected 3 concurrency group templates, found {len(groups)}"
+            f"expected 4 concurrency group templates, found {len(groups)}"
         )
-    workflow_group, cloud_provider, local_provider = groups
-    if cloud_provider != local_provider:
-        raise AssertionError("cloud and local provider group templates diverged")
+    workflow_group, cloud_provider, openrouter_provider, local_provider = groups
+    if cloud_provider != openrouter_provider or cloud_provider != local_provider:
+        raise AssertionError("provider group templates diverged across jobs")
     return workflow_group, cloud_provider
 
 
@@ -309,6 +309,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn(
+            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
+        )
         self.assertIn("id-token: write", text)
         self.assertIn("github.event.pull_request.draft != true", text)
         for block in run_blocks:
@@ -511,6 +515,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("--no-auto-approve", text)
         self.assertIn("inputs.provider_mode == 'cloud'", text)
         self.assertIn("inputs.provider_mode == 'local'", text)
+        self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
+        self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
+        self.assertIn("OPENROUTER_API_KEY is required for OpenRouter provider profile", text)
+        self.assertIn("--profile \"$PROVIDER_PROFILE\" --provider openrouter", text)
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
@@ -518,23 +526,24 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(text.count("needs: validate-provider-mode"), 2)
         self.assertIn('case "$PROVIDER_MODE" in', text)
-        self.assertEqual(text.count("github reply \\\n"), 2)
-        self.assertEqual(text.count("github review \\\n"), 2)
-        self.assertEqual(text.count("--outcome outcome.json"), 2)
-        self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
-        self.assertEqual(text.count("recovery-artifact.json"), 4)
-        self.assertEqual(text.count("Publish or promote"), 2)
+        self.assertIn('case "$PROVIDER_PROFILE" in', text)
+        self.assertEqual(text.count("github reply \\\n"), 3)
+        self.assertEqual(text.count("github review \\\n"), 3)
+        self.assertEqual(text.count("--outcome outcome.json"), 3)
+        self.assertEqual(text.count("--outcome publication-outcome.json"), 3)
+        self.assertEqual(text.count("recovery-artifact.json"), 6)
+        self.assertEqual(text.count("Publish or promote"), 3)
         self.assertNotIn("after AI resolution", text)
         self.assertIn("auto_approve_args", text)
-        self.assertEqual(text.count("reply_exit=$?"), 2)
-        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
+        self.assertEqual(text.count("reply_exit=$?"), 3)
+        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 3)
         self.assertEqual(
-            text.count("mention reply command failed (exit $reply_exit)"), 2
+            text.count("mention reply command failed (exit $reply_exit)"), 3
         )
-        self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 2)
-        self.assertEqual(text.count("Verify mention reply completed"), 2)
-        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
-        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
+        self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 3)
+        self.assertEqual(text.count("Verify mention reply completed"), 3)
+        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 3)
+        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 3)
         self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
 
@@ -548,9 +557,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
-            2,
+            3,
         )
-        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
+        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 3)
         self.assertIn(
             "github.event.pull_request.number || github.run_id",
             text,
@@ -595,9 +604,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 3)
+        self.assertEqual(len(group_lines), 4)
 
-        top_level, cloud, local = group_lines
+        top_level, cloud, openrouter, local = group_lines
         review_selector = "inputs.operation == 'review'"
         reply_selector = "inputs.operation == 'review' && ("
         self.assertIn(review_selector, top_level)
@@ -618,8 +627,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event.pull_request.number || github.run_id) || github.run_id }}"
         )
         self.assertEqual(cloud, expected_provider_group)
+        self.assertEqual(openrouter, expected_provider_group)
         self.assertEqual(local, expected_provider_group)
         self.assertNotIn("-cloud-", cloud)
+        self.assertNotIn("-openrouter-", openrouter)
         self.assertNotIn("-local-", local)
 
         cancel_lines = [
@@ -633,6 +644,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             cancel_lines,
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
             ],
@@ -677,18 +689,18 @@ class ActionPinPolicyTests(unittest.TestCase):
             "(inputs.operation == 'reply' && inputs.enable_github_writes == 'true' "
             "&& inputs.enable_mention_replies == 'true')"
         )
-        self.assertEqual(text.count(expected_gate), 2)
+        self.assertEqual(text.count(expected_gate), 3)
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
             ),
-            2,
+            3,
         )
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'"
             ),
-            2,
+            3,
         )
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
@@ -832,17 +844,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
-            2,
+            3,
         )
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
-            2,
+            3,
         )
         self.assertEqual(
             text.count(
                 '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
             ),
-            2,
+            3,
         )
         self.assertIn(
             '"review-sensei==$expected_version"',
@@ -868,7 +880,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             for block in _run_blocks(text)
             if "REVIEW_SENSEI_WORKFLOW_REF" in block
         ]
-        self.assertEqual(len(install_blocks), 2)
+        self.assertEqual(len(install_blocks), 3)
         for block in install_blocks:
             with self.subTest(block=block[:40]):
                 self.assertLess(
@@ -1087,9 +1099,9 @@ class ReusablePublishGuardTests(unittest.TestCase):
             admission_if + " && steps.publish-admission.outputs.status == 'current'"
         )
         confirm_name = "Confirm live pull-request head is still current"
-        self.assertEqual(text.count(confirm_name), 2)
-        self.assertEqual(text.count(publish_if), 2)
-        self.assertEqual(text.count("id: publish-admission"), 2)
+        self.assertEqual(text.count(confirm_name), 3)
+        self.assertEqual(text.count(publish_if), 3)
+        self.assertEqual(text.count("id: publish-admission"), 3)
         self.assertNotIn(
             "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
             text,
@@ -1097,6 +1109,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
 
         for job_id, publish_name in (
             ("cloud", "Publish or promote validated review through the broker"),
+            ("openrouter", "Publish or promote validated review through the broker"),
             ("local", "Publish or promote trusted local review and learnings"),
         ):
             with self.subTest(job=job_id):
@@ -1174,7 +1187,7 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 3)
+        self.assertEqual(len(group_lines), 4)
         for line in group_lines:
             self.assertIn("github.repository", line)
             self.assertIn("inputs.operation == 'review'", line)
@@ -1183,11 +1196,12 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             self.assertNotIn("github.sha", line)
             self.assertNotIn("github.event.pull_request.head.sha", line)
 
-        top_level, cloud, local = group_lines
+        top_level, cloud, openrouter, local = group_lines
         self.assertIn("github.event.pull_request.number || github.run_id", top_level)
         self.assertIn(
             "needs.authoritative-preflight.outputs.pull_request_number", cloud
         )
+        self.assertEqual(cloud, openrouter)
         self.assertEqual(cloud, local)
 
     def test_manual_and_automatic_reviews_share_the_provider_latest_wins_group(self):
@@ -1302,6 +1316,7 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             cancel_lines,
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
             ],

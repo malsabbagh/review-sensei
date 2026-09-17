@@ -54,7 +54,7 @@ never hashed.
 In scope: CLI `--provider openrouter`, OpenRouter profiles, registry wiring,
 doctor/plan extensions, configuration digests, docs, and offline tests.
 
-Out of scope: workflow/broker changes (#98), live qualification/promotion (O4),
+Out of scope: workflow/broker wiring (#98 is tracked separately), live qualification/promotion (O4),
 arbitrary endpoint overrides, and catalog scraping.
 
 ## Alternatives considered
