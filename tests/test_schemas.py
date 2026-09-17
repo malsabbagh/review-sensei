@@ -29,6 +29,7 @@ SCHEMA_NAMES = (
     "evaluation-corpus",
     "evaluation-report",
     "promotion-record",
+    "openrouter-qualification",
     "run-outcome",
     "recovery-artifact",
     "candidate-finding",

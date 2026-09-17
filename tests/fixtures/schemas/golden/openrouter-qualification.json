@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "engine_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "prompt_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "configuration_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "corpus_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "provider": "openrouter",
+  "model": "anthropic/claude-3.5-haiku",
+  "observed_revision": "pending-operator-live-evidence",
+  "run_count": 1,
+  "evaluated_at": "2026-09-16T00:00:00Z",
+  "reproducibility": {"temperature": 0},
+  "status": "insufficient",
+  "rollback_decision": "hold",
+  "qualification_target": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-3.5-haiku",
+    "upstream_provider": "anthropic",
+    "base_url": "https://openrouter.ai/api/v1",
+    "routing_policy_digest": "97ee4e2219c11ea18a569068db74dbcce5eb8df5366eb8ffeb56ec98b81f11dd"
+  },
+  "evidence_references": [],
+  "limitations": [
+    "Harness-only record; live operator evidence is required before supported status."
+  ]
+}
