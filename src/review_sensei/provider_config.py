@@ -96,6 +96,7 @@ def validate_hosted_workflow_model(
 ) -> None:
     """Validate a hosted workflow model string for the selected backend."""
 
+    _effective_hosted_backend(provider_mode, workflow_mode)
     value = resolve_hosted_workflow_model(
         provider_mode=provider_mode,
         workflow_mode=workflow_mode,

@@ -20,6 +20,26 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             model="",
         )
 
+    def test_unsupported_provider_mode_raises_even_with_empty_model(self) -> None:
+        for provider_mode in ("opnrouter", "cloud-ollama-openrouter"):
+            with self.subTest(provider_mode=provider_mode):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "provider mode is unsupported"
+                ):
+                    validate_hosted_workflow_model(
+                        provider_mode=provider_mode,
+                        workflow_mode="",
+                        model="",
+                    )
+
+    def test_unsupported_provider_mode_rejects_ollama_shaped_model(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "provider mode is unsupported"):
+            validate_hosted_workflow_model(
+                provider_mode="opnrouter",
+                workflow_mode="automatic",
+                model="qwen3.5:4b",
+            )
+
     def test_empty_openrouter_model_validates_default(self) -> None:
         validate_hosted_workflow_model(
             provider_mode="openrouter",
