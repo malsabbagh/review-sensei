@@ -308,12 +308,14 @@ def analyze_diff(
         if not allow_incomplete:
             raise _invalid("diff exceeds the configured byte limit")
         enumeration_complete = False
+    lines_truncated = False
     lines = diff.splitlines()
     if len(lines) > line_limit:
         if not allow_incomplete:
             raise _invalid("diff exceeds the configured line limit")
         enumeration_complete = False
         lines = lines[:line_limit]
+        lines_truncated = True
 
     changed: dict[str, set[int]] = {}
     deleted: dict[str, set[int]] = {}
@@ -750,6 +752,16 @@ def analyze_diff(
             raise _invalid("diff hunk exceeds the line limit")
         if old_seen > hunk_state[1] or new_seen > hunk_state[3]:
             raise _invalid("diff hunk body exceeds its header")
+
+    if lines_truncated and allow_incomplete:
+        enumeration_complete = False
+        stopped_for_budget = True
+        if pending_old_marker and not matched_file_marker:
+            abandon_file()
+        pending_old_marker = False
+        pending_git_header = None
+        pending_rename_from = None
+        rename_from_for_header = None
 
     close_hunk(require_complete=not allow_incomplete)
     close_file()
