@@ -491,8 +491,6 @@ class CoveragePlanningTests(unittest.TestCase):
         budgeted = _BudgetedProvider(provider, budget=budget)
         with self.assertRaises(ReviewInputError):
             budgeted.complete(None)
-        self.assertEqual(budget.calls, 0)
-        budgeted.complete(None)
         self.assertEqual(budget.calls, 1)
         with self.assertRaises(ReviewFormatError):
             budgeted.complete(None)

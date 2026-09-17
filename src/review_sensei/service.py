@@ -161,9 +161,12 @@ class _BudgetedProvider:
         if self._budget.calls >= self._budget.max_calls:
             self._budget.exhausted = True
             raise ReviewFormatError("provider call budget exhausted")
-        response = self._provider.complete(request)
-        self._budget.calls += 1
-        return response
+        try:
+            return self._provider.complete(request)
+        finally:
+            self._budget.calls += 1
+            if self._budget.calls >= self._budget.max_calls:
+                self._budget.exhausted = True
 
 
 def _location_valid(comment: ReviewComment, analysis: DiffAnalysis) -> bool:
@@ -465,14 +468,28 @@ class ReviewService:
             accumulated_proposals.extend(chunk_result.learning_proposals)
             last_model = chunk_result.model
             if chunk_result.review_status != "complete":
+                if chunk_result.review_status == "incomplete":
+                    chunk_outcome = "budget-exhausted"
+                    chunk_reason = "incomplete-enumeration"
+                else:
+                    chunk_outcome = "partially-reviewed"
+                    chunk_reason = "cross-file-relationship"
                 coverage = apply_chunk_outcomes(
                     coverage,
                     paths=chunk.paths,
                     hunk_indexes=chunk.hunk_indexes,
-                    outcome="partially-reviewed",
-                    reason="cross-file-relationship",
+                    outcome=chunk_outcome,
+                    reason=chunk_reason,
                     limits=request.limits,
                 )
+                if chunk_result.review_status == "incomplete":
+                    coverage = CoverageManifest(
+                        files=coverage.files,
+                        hunks=coverage.hunks,
+                        enumeration_complete=False,
+                        enumerated_paths=coverage.enumerated_paths,
+                        limits=coverage.limits,
+                    )
             elif chunk_result.coverage is not None:
                 coverage = merge_chunk_coverage(
                     coverage,
@@ -482,6 +499,16 @@ class ReviewService:
                     limits=request.limits,
                 )
             if budgeted.exhausted:
+                for item in plan.reviewable_chunks:
+                    if item.index > chunk.index:
+                        coverage = apply_chunk_outcomes(
+                            coverage,
+                            paths=item.paths,
+                            hunk_indexes=item.hunk_indexes,
+                            outcome="budget-exhausted",
+                            reason="provider-call-budget",
+                            limits=request.limits,
+                        )
                 break
         planned_chunks = len(plan.reviewable_chunks)
         if chunks_completed == 0:
@@ -503,6 +530,15 @@ class ReviewService:
                 source_context_coverage=self._source_context_coverage(request),
             )
         except ReviewInputError as exc:
+            if "exceeds the configured" in str(exc):
+                return self._finish_run(
+                    tracker=tracker,
+                    status="budget_exhausted",
+                    stage_summary=stage_summary,
+                    diagnostic="output_budget",
+                    repository=request.repository,
+                    pull_request_number=request.pull_request_number,
+                )
             error = ReviewFormatError(
                 "provider output exceeds the configured result limits"
             )

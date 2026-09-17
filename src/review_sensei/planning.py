@@ -509,6 +509,13 @@ def merge_chunk_coverage(
             )
         else:
             file_map[entry.path] = entry
+    for path in aggregate.enumerated_paths:
+        if path not in file_map:
+            file_map[path] = FileCoverage(
+                path=path,
+                outcome="unsupported",
+                reason="incomplete-enumeration",
+            )
     files = tuple(sorted(file_map.values(), key=lambda entry: entry.path))
     hunk_map = {(entry.index, entry.path): entry for entry in aggregate.hunks}
     for chunk_hunk in chunk.hunks:
