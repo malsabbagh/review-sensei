@@ -37,11 +37,11 @@ from .outcomes import (
     recovery_expires_at,
     run_outcome_exit_code,
 )
+from .planning import DEFAULT_TOTAL_WORK_BUDGET
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
-from .planning import DEFAULT_TOTAL_WORK_BUDGET
 from .service import DEFAULT_STAGES, ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
