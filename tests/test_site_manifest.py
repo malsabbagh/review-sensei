@@ -80,6 +80,57 @@ class SiteManifestValidationTests(unittest.TestCase):
         with self.assertRaises(validate_module.SiteManifestError):
             validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
+    def test_cli_enabled_provider_without_supported_label_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        document["providers"][0]["status_labels"] = [
+            "implemented-on-main",
+            "available-in-distribution",
+        ]
+        with self.assertRaises(validate_module.SiteManifestError):
+            validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
+
+    def test_mismatched_npm_version_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        document["release_facts"]["version"] = validate_module.project_version(ROOT)
+        document["release_facts"]["tag"] = f"v{validate_module.project_version(ROOT)}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pyproject.toml").write_text(
+                (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            launcher = root / "packages" / "npm" / "cli"
+            launcher.mkdir(parents=True)
+            (launcher / "package.json").write_text(
+                '{"name":"@reviewsensei/cli","version":"9.9.9"}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(validate_module.SiteManifestError):
+                validate_module.validate_site_manifest(
+                    document, root=root, schema=schema
+                )
+
+    def test_mismatched_release_tag_is_rejected(self) -> None:
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        document["release_facts"]["tag"] = "v0.0.0"
+        with self.assertRaises(validate_module.SiteManifestError):
+            validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
+
+    def test_registered_provider_names_respect_root_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry = root / "src" / "review_sensei" / "providers"
+            registry.mkdir(parents=True)
+            (registry / "registry.py").write_text(
+                'registry.register("fixture", lambda settings: None)\n',
+                encoding="utf-8",
+            )
+            names = validate_module.registered_provider_names(root)
+            self.assertEqual(names, frozenset({"fixture"}))
+
     def test_validate_script_exits_zero(self) -> None:
         self.assertEqual(validate_module.main([]), 0)
 

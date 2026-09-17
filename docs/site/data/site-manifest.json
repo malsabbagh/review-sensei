@@ -166,7 +166,6 @@
         "notes": "Adapter source exists on main, but no named profile, CLI flags, or reusable-workflow path expose OpenRouter yet."
       },
       "status_labels": [
-        "implemented-on-main",
         "planned",
         "source-only",
         "not-implemented",

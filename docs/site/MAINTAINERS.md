@@ -20,8 +20,13 @@ manifest whenever provider or release boundaries change.
    `implemented-on-main`.
 2. Keep `release_facts.version` and `release_facts.tag` aligned with
    `pyproject.toml` and `packages/npm/cli/package.json`.
-3. Use conservative status labels. Planned adapters such as OpenRouter must
-   stay `not-implemented` and must not be labeled `supported`.
+3. Use conservative status labels. A provider is **shipped** only when its
+   registry key is registered and at least one engine surface (`cli`,
+   `evaluate`, or `npx_launcher`) is enabled. Shipped providers must include
+   `implemented-on-main`; CLI-enabled shipped providers must also include
+   `supported`. Unshipped providers (including source-only adapters such as
+   OpenRouter today) must stay `not-implemented` and must not be labeled
+   `supported`.
 4. Point `evidence` entries at repository paths that exist on main.
 5. Run:
 

@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
-import re
 import sys
 import tomllib
 from pathlib import Path
@@ -16,8 +16,8 @@ from jsonschema import Draft202012Validator, ValidationError
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "site" / "data" / "site-manifest.json"
 DEFAULT_SCHEMA = ROOT / "docs" / "site" / "schemas" / "site-manifest.schema.json"
-NPM_LAUNCHER = ROOT / "packages" / "npm" / "cli" / "package.json"
-REGISTRY_PATH = ROOT / "src" / "review_sensei" / "providers" / "registry.py"
+NPM_LAUNCHER_RELATIVE = Path("packages") / "npm" / "cli" / "package.json"
+REGISTRY_RELATIVE_PATH = Path("src") / "review_sensei" / "providers" / "registry.py"
 
 UNSUPPORTED_USER_FACING_LABELS = frozenset({"supported", "available-in-distribution"})
 UNSHIPPED_STATUS_LABELS = frozenset(
@@ -49,9 +49,10 @@ def project_version(root: Path) -> str:
 
 
 def npm_launcher_version(root: Path) -> str:
-    if not NPM_LAUNCHER.exists():
+    launcher = root / NPM_LAUNCHER_RELATIVE
+    if not launcher.exists():
         raise SiteManifestError("npm launcher package.json is missing")
-    value = _load_json(NPM_LAUNCHER)
+    value = _load_json(launcher)
     if not isinstance(value, dict):
         raise SiteManifestError("npm launcher package.json is invalid")
     version = value.get("version")
@@ -61,11 +62,31 @@ def npm_launcher_version(root: Path) -> str:
 
 
 def registered_provider_names(root: Path) -> frozenset[str]:
-    text = (root / REGISTRY_PATH).read_text(encoding="utf-8")
-    matches = re.findall(r'registry\.register\("([^"]+)"', text)
-    if not matches:
+    registry_path = root / REGISTRY_RELATIVE_PATH
+    try:
+        tree = ast.parse(registry_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise SiteManifestError("provider registry could not be parsed") from exc
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "register"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "registry"
+        ):
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            names.append(first.value)
+    if not names:
         raise SiteManifestError("provider registry registrations could not be parsed")
-    return frozenset(matches)
+    return frozenset(names)
 
 
 def validate_schema(document: Any, schema: dict[str, Any]) -> None:
@@ -110,7 +131,7 @@ def validate_release_alignment(root: Path, document: dict[str, Any]) -> None:
     if manifest_version != npm_version:
         raise SiteManifestError(
             f"release_facts.version {manifest_version!r} does not match "
-            f"{NPM_LAUNCHER} {npm_version!r}"
+            f"{NPM_LAUNCHER_RELATIVE} {npm_version!r}"
         )
     expected_tag = f"v{expected}"
     if release["tag"] != expected_tag:
