@@ -72,7 +72,7 @@
       <div class="kicker">Fixture walkthroughs</div>
       <h1>Reproducible review examples</h1>
       <p class="lede">Every walkthrough on this page is a <strong>fixture demonstration</strong> or <strong>illustration</strong> using the CC0-1.0 synthetic corpus in <code>evaluation/v1/</code>. Nothing here is a live public pull request, retained production run, or measured quality claim.</p>
-      <p class="callout" style="margin-top:20px"><strong>Alpha software.</strong> Capabilities and defaults evolve. Re-run the commands below from a checkout of the matching source release to reproduce fixture output byte-for-byte.</p>
+      <p class="callout" style="margin-top:20px"><strong>Alpha software.</strong> Capabilities and defaults evolve. Re-run the commands below from a checkout of the matching source release to reproduce the deterministic review content shown here. Runtime documents also carry additive outcome fields, so treat the corpus evaluator — not a byte comparison — as the reproduction check.</p>
     </div>
   </section>
 
@@ -93,13 +93,17 @@
   --diff evaluation/v1/diffs/off-by-one.patch \
   --model fixture-v1 \
   --no-learning-proposals \
-  --output /tmp/review-sensei-off-by-one.json
+  --output /tmp/review-sensei-off-by-one.json</div>
+        <p>The written document is a <strong>superset</strong> of the corpus baseline below: a run also emits the additive outcome fields <code>review_status</code>, <code>coverage</code>, and <code>finding_lifecycles</code>, so it is not byte-identical to the expected fixture. Compare the deterministic review content instead:</p>
+        <div class="command" aria-label="Comparison command">jq -S '{summary,comments,provider,model,learning_proposals,evidence_policy}' \
+  /tmp/review-sensei-off-by-one.json &gt; /tmp/actual.json
 
-cmp /tmp/review-sensei-off-by-one.json \
-  evaluation/v1/expected/off-by-one.review.json</div>
-        <p>Validate the full corpus:</p>
+jq -S . evaluation/v1/expected/off-by-one.review.json &gt; /tmp/expected.json
+
+diff /tmp/actual.json /tmp/expected.json</div>
+        <p>The authoritative check is the corpus evaluator, which normalizes derived metadata (<code>finding_lifecycles</code>, a <code>complete</code> <code>review_status</code>, and default coverage) before comparing against the expected fixture:</p>
         <div class="command" aria-label="Corpus evaluation command">python -m review_sensei evaluate --mode fixture --corpus evaluation/v1/corpus.json</div>
-        <p>Expected review result (schema: <code>review-result</code>):</p>
+        <p><code>--no-learning-proposals</code> is what keeps <code>learning_proposals</code> empty here; omit it and proposals from the fixture response are retained, as in section 3. Expected review content (schema: <code>review-result</code>):</p>
         <script type="application/json" data-schema="review-result" id="example-off-by-one">{
   "summary": "The pagination change introduces an off-by-one error for page numbers greater than one.",
   "comments": [
@@ -296,7 +300,7 @@ cmp /tmp/review-sensei-off-by-one.json \
   --json
 
 review-sensei doctor --json</div>
-        <p>Approval blockers for this shape include <code>coverage-partial</code> and <code>review-partial</code> when publication and approval controls are enabled. See <a href="/security/" style="color:var(--red-soft);font-weight:700">security &amp; data flow</a> for what approval does and does not guarantee.</p>
+        <p>Approval blockers for this shape include <code>coverage-partial</code> and <code>review-partial</code> when publication and approval controls are enabled; <code>incomplete</code> enumeration raises <code>coverage-incomplete</code> / <code>review-incomplete</code> instead. These identifiers are defined in <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/public-contracts.md" style="color:var(--red-soft);font-weight:700">public contracts</a> — treat that document, not this page, as their source of truth. Coverage blockers are independent of the blocking-finding finalizer, which separately withholds approval while unresolved blocking findings exist. See <a href="/security/" style="color:var(--red-soft);font-weight:700">security &amp; data flow</a> for what approval does and does not guarantee.</p>
       </article>
 
       <div class="content-block">

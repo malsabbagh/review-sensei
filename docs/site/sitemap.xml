@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Manually maintained. This file is not generated from the site sources or the
+  evaluation corpus, so bump the <lastmod> of any page you change in the same
+  commit and add a <url> entry for every new page under docs/site/.
+-->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://reviewsensei.dev/</loc>

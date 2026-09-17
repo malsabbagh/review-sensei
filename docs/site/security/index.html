@@ -65,8 +65,8 @@
           </tr>
           <tr>
             <td><strong>Deterministic evidence checks</strong></td>
-            <td>Opt-in verifier paths can require bounded evidence for specific finding types when enabled in trusted configuration.</td>
-            <td>That every finding was independently verified; default pipelines may not run all evidence paths.</td>
+            <td>The <code>evidence_policy</code> on a result names the publication gate. <code>legacy</code> is the default and publishes single-pass comments unchanged. Under <code>confirmed</code>, only candidates whose evidence exists in the exact reviewed snapshot are publishable, and incomplete verification downgrades the result to <code>partial</code>.</td>
+            <td>That every finding was independently verified. <code>legacy</code> is still the default, so a result without <code>evidence_policy: "confirmed"</code> ran no candidate verification — and a second model's agreement is never treated as proof.</td>
           </tr>
           <tr>
             <td><strong>Model evaluation</strong></td>
@@ -149,6 +149,8 @@
         <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/github-app-auth.md" style="color:var(--red-soft);font-weight:700">GitHub App authentication</a></li>
         <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/SECURITY.md" style="color:var(--red-soft);font-weight:700">Security policy &amp; reporting</a></li>
         <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/evaluation.md" style="color:var(--red-soft);font-weight:700">Evaluation &amp; promotion evidence</a></li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/public-contracts.md" style="color:var(--red-soft);font-weight:700">Public contracts</a> — <code>evidence_policy</code> values and approval blocker identifiers</li>
+        <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/adr/0039-verify-candidate-findings-before-publication.md" style="color:var(--red-soft);font-weight:700">ADR 0039</a> — candidate verification before publication</li>
         <li><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/ownership-and-licensing.md" style="color:var(--red-soft);font-weight:700">Ownership &amp; licensing</a></li>
       </ul>
     </div>
