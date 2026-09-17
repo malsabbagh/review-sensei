@@ -8,13 +8,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .errors import ReviewInputError
-from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 from .providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     OpenRouterRoutingPolicy,
     is_allowlisted_openrouter_endpoint,
 )
 from .providers.profiles import ProviderProfile, get_provider_profile
+from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
 DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud"
