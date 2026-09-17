@@ -204,7 +204,7 @@ class ProviderRegistryTests(unittest.TestCase):
         provider = default_registry().create(
             ProviderSettings.for_profile("deep-verification", api_key="secret")
         )
-        self.assertEqual(provider.model, "deepseek-v4-flash:cloud")
+        self.assertEqual(provider.model, "deepseek-v4.1-flash:cloud")
         self.assertEqual(provider.max_output_tokens, 8192)
 
     def test_profile_rejects_explicit_default_values_that_conflict(self):

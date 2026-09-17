@@ -15,13 +15,13 @@ from .providers.openrouter import (
 from .providers.profiles import ProviderProfile, get_provider_profile
 
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
-DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
+DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud"
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/api"
 DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
-DEFAULT_OPENROUTER_UPSTREAM = "anthropic"
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 

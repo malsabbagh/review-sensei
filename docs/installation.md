@@ -133,7 +133,7 @@ environment used to run ReviewSensei. The CLI reads:
 | `REVIEWSENSEI_PROVIDER` | `ollama` | Provider registry key |
 | `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
 | `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
-| `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4-flash:cloud` | Ollama Cloud model |
+| `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
 | `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
 | `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
 | `OLLAMA_API_KEY` | empty | Optional bearer credential |
@@ -148,7 +148,7 @@ The default configuration is local-first: `REVIEWSENSEI_PROVIDER_MODE=local`
 selects `qwen3.5:4b`, points at a local Ollama API, and leaves
 `OLLAMA_API_KEY` empty. Cloud egress is explicit opt-in: set
 `REVIEWSENSEI_PROVIDER_MODE=cloud` and `OLLAMA_API_KEY`; the default cloud model
-is `deepseek-v4-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
+is `deepseek-v4.1-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
 available as explicit overrides.
 
 Optional CLI `--profile` selects a named preset (`local-private`,
@@ -164,8 +164,8 @@ model:
 | `REVIEWSENSEI_PROVIDER_MODE` | Where it runs | Secret | Default model when `REVIEWSENSEI_MODEL` is empty |
 | --- | --- | --- | --- |
 | `local` or `local-ollama` (default) | Self-hosted runner labelled `ollama` | none | `qwen3.5:4b` |
-| `cloud` or `cloud-ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4-flash:cloud` |
-| `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `anthropic/claude-3.5-sonnet` |
+| `cloud` or `cloud-ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4.1-flash:cloud` |
+| `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
 
 Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
 selected. Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL`
@@ -178,7 +178,7 @@ OpenRouter CLI flags and environment (used with `--provider openrouter` or
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
-| `OPENROUTER_MODEL` | `anthropic/claude-3.5-sonnet` | Default model for unprofiled OpenRouter CLI runs |
+| `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Default model for unprofiled OpenRouter CLI runs |
 | `OPENROUTER_UPSTREAM_PROVIDER` | `anthropic` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
@@ -188,6 +188,8 @@ OpenRouter CLI profiles start `unqualified` and require
 `--allow-unqualified-profile` for live review until separate qualification
 evidence exists. Hosted OpenRouter uses `--provider openrouter --model` and
 derives `OPENROUTER_UPSTREAM_PROVIDER` from the model slug when possible.
+Every OpenRouter request includes `provider.data_collection=deny` (plus
+no fallbacks and zero-data-retention) through the typed routing policy.
 
 To roll back from OpenRouter, set `REVIEWSENSEI_PROVIDER_MODE` back to `local`
 or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.

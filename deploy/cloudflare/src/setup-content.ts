@@ -33,7 +33,7 @@ export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v4";
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
-export const DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud";
+export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
 
 export interface SetupFile {
   path: string;

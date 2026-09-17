@@ -78,7 +78,7 @@
       "inference_destination": {
         "endpoint_scope": "remote",
         "base_url": "https://ollama.com/api",
-        "default_model": "deepseek-v4-flash:cloud"
+        "default_model": "deepseek-v4.1-flash:cloud"
       },
       "credential_ref": "OLLAMA_API_KEY",
       "engine_support": {

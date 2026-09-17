@@ -512,7 +512,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
+          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -653,7 +653,7 @@ jobs:
           SOURCE_KIND: ${{ inputs.source_kind }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4-flash:cloud' }}
+          OLLAMA_MODEL: ${{ inputs.model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         run: |
           if [[ -z "$OLLAMA_API_KEY" ]]; then
@@ -888,16 +888,17 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          MODEL="${REVIEW_MODEL:-anthropic/claude-3.5-sonnet}"
-          case "$MODEL" in
-            openai/*) export OPENROUTER_UPSTREAM_PROVIDER=openai ;;
-            anthropic/*) export OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
-            *)
-              if [[ -z "${OPENROUTER_UPSTREAM_PROVIDER:-}" ]]; then
-                export OPENROUTER_UPSTREAM_PROVIDER=anthropic
-              fi
-              ;;
-          esac
+          MODEL="${REVIEW_MODEL:-deepseek/deepseek-v4.1-flash}"
+          if [[ -z "${OPENROUTER_UPSTREAM_PROVIDER:-}" ]]; then
+            case "$MODEL" in
+              openai/*) OPENROUTER_UPSTREAM_PROVIDER=openai ;;
+              anthropic/*) OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
+              deepseek/*) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+              */*) OPENROUTER_UPSTREAM_PROVIDER="${MODEL%%/*}" ;;
+              *) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+            esac
+            export OPENROUTER_UPSTREAM_PROVIDER
+          fi
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
             exit 1
@@ -1028,16 +1029,17 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          MODEL="${REVIEW_MODEL:-anthropic/claude-3.5-sonnet}"
-          case "$MODEL" in
-            openai/*) export OPENROUTER_UPSTREAM_PROVIDER=openai ;;
-            anthropic/*) export OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
-            *)
-              if [[ -z "${OPENROUTER_UPSTREAM_PROVIDER:-}" ]]; then
-                export OPENROUTER_UPSTREAM_PROVIDER=anthropic
-              fi
-              ;;
-          esac
+          MODEL="${REVIEW_MODEL:-deepseek/deepseek-v4.1-flash}"
+          if [[ -z "${OPENROUTER_UPSTREAM_PROVIDER:-}" ]]; then
+            case "$MODEL" in
+              openai/*) OPENROUTER_UPSTREAM_PROVIDER=openai ;;
+              anthropic/*) OPENROUTER_UPSTREAM_PROVIDER=anthropic ;;
+              deepseek/*) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+              */*) OPENROUTER_UPSTREAM_PROVIDER="${MODEL%%/*}" ;;
+              *) OPENROUTER_UPSTREAM_PROVIDER=deepseek ;;
+            esac
+            export OPENROUTER_UPSTREAM_PROVIDER
+          fi
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
           if [[ "$AUTO_APPROVE" == "true" ]]; then

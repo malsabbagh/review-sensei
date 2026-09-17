@@ -159,7 +159,7 @@ a skipped result without writing to the repository.
 When setup permissions are available, the Worker also creates the missing
 repository variables `REVIEWSENSEI_PROVIDER_MODE=local`,
 `REVIEWSENSEI_LOCAL_MODEL=qwen3.5:4b`, and
-`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4-flash:cloud`. Existing values are left
+`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4.1-flash:cloud`. Existing values are left
 unchanged. `OLLAMA_API_KEY` is a repository secret that the operator must add
 manually when switching the provider mode to `cloud`; the Worker never creates
 blank secrets.

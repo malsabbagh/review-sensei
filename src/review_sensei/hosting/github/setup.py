@@ -46,8 +46,8 @@ UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
 DEFAULT_PROVIDER_MODE = "local"
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
-DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud"
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 SETUP_VARIABLES = (
     ("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
     ("REVIEWSENSEI_MODEL", ""),
@@ -1124,7 +1124,7 @@ provider_mode: local
 base_url: http://127.0.0.1:11434/api
 cloud_base_url: https://ollama.com/api
 local_model: qwen3.5:4b
-cloud_model: deepseek-v4-flash:cloud
+cloud_model: deepseek-v4.1-flash:cloud
 version: 0.1.0
 auto_review: false
 github_writes: false
@@ -1250,7 +1250,7 @@ def _setup_pull_request_body() -> str:
         "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
         "REVIEWSENSEI_MODEL (empty; provider-specific defaults apply), "
         "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
-        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
+        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4.1-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
         "values. Change the opt-in variables explicitly to enable publication. "
         "The selected provider mode applies to automatic/manual reviews and "

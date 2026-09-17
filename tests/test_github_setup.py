@@ -314,7 +314,7 @@ class SetupPlanTests(unittest.TestCase):
             ".github/review-sensei/config.yml"
         ]
         self.assertIn("qwen3.5:4b", config)
-        self.assertIn("deepseek-v4-flash:cloud", config)
+        self.assertIn("deepseek-v4.1-flash:cloud", config)
         uninstall = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-uninstall.yml"
         ]

@@ -134,7 +134,7 @@ Generated setup pull requests contain only:
 The bootstrap creates these plain-text repository variables when they are
 missing: `REVIEWSENSEI_PROVIDER_MODE=local`,
 `REVIEWSENSEI_LOCAL_MODEL=qwen3.5:4b`, and
-`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4-flash:cloud`. It never creates a blank
+`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4.1-flash:cloud`. It never creates a blank
 secret or reads/writes `OLLAMA_API_KEY`; operators add that value through
 Repository Settings when they opt into cloud mode.
 

@@ -403,7 +403,7 @@ describe("setup repository reconciliation", () => {
         "base_url: http://127.0.0.1:11434/api",
         "cloud_base_url: https://ollama.com/api",
         "local_model: qwen3.5:4b",
-        "cloud_model: deepseek-v4-flash:cloud",
+        "cloud_model: deepseek-v4.1-flash:cloud",
         "",
       ].join("\n"),
     };

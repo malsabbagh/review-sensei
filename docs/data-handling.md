@@ -102,7 +102,7 @@ Provider data egress is explicit. The workflow defaults to the
 `http://127.0.0.1:11434/api` with no API key. If an operator sets that variable
 to `cloud`, review and conversation steps send their bounded diff, selected
 context, and authorized thread context to Ollama Cloud
-using `deepseek-v4-flash:cloud` by default and requires `OLLAMA_API_KEY` from
+using `deepseek-v4.1-flash:cloud` by default and requires `OLLAMA_API_KEY` from
 secrets. The workflow does not accept an arbitrary provider URL input, so a
 dispatch-supplied URL cannot redirect the provider credential. Installed
 workflows do not pass `--profile` and do not send `OPENAI_API_KEY`.

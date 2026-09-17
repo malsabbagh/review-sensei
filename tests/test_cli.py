@@ -308,7 +308,7 @@ class CliTests(unittest.TestCase):
         ):
             cloud = _parser().parse_args([])
         self.assertEqual(cloud.base_url, "https://ollama.com/api")
-        self.assertEqual(cloud.model, "deepseek-v4-flash:cloud")
+        self.assertEqual(cloud.model, "deepseek-v4.1-flash:cloud")
 
         with patch.dict(
             "os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "local"}, clear=True

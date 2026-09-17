@@ -117,7 +117,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_LOCAL_MODEL", source)
         self.assertIn("REVIEWSENSEI_CLOUD_MODEL", source)
         self.assertIn("qwen3.5:4b", source)
-        self.assertIn("deepseek-v4-flash:cloud", source)
+        self.assertIn("deepseek-v4.1-flash:cloud", source)
         self.assertIn("review-sensei-uninstall.yml", source)
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)

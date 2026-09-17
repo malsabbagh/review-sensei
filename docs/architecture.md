@@ -153,7 +153,7 @@ workflow binds checkout to `github.event.repository.default_branch` and
 rejects a dispatch `base_ref` that differs from that trusted branch. Cloud
 provider egress is explicit opt-in only: an operator must set the repository
 variable `REVIEWSENSEI_PROVIDER_MODE=cloud`, which uses the fixed Ollama Cloud
-endpoint and the `deepseek-v4-flash:cloud` model by default, and requires
+endpoint and the `deepseek-v4.1-flash:cloud` model by default, and requires
 `OLLAMA_API_KEY`. The workflow does not accept an arbitrary provider URL input,
 so a dispatch-supplied URL cannot redirect the provider credential. The example
 workflow first installs the exact requested `review-sensei==X.Y.Z` package from
