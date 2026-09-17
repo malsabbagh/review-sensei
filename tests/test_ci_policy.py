@@ -1040,17 +1040,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
-            3,
+            4,
         )
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
-            3,
+            4,
         )
         self.assertEqual(
             text.count(
                 '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
             ),
-            3,
+            4,
         )
         self.assertIn(
             '"review-sensei==$expected_version"',
@@ -1078,7 +1078,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             for block in _run_blocks(text)
             if "REVIEW_SENSEI_WORKFLOW_REF" in block
         ]
-        self.assertEqual(len(install_blocks), 3)
+        self.assertEqual(len(install_blocks), 4)
         for block in install_blocks:
             with self.subTest(block=block[:40]):
                 self.assertLess(
