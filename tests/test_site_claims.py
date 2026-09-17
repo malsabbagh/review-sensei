@@ -31,8 +31,15 @@ REQUIRED_QUALIFIERS = {
 INTERNAL_LINK = re.compile(r'href="(/[^"#?]*)"')
 
 
+def _is_deployed(page: Path) -> bool:
+    """Skip partials and drafts, which are not routes GitHub Pages serves."""
+
+    relative = page.relative_to(SITE_ROOT)
+    return not any(part.startswith(("_", ".")) for part in relative.parts)
+
+
 def _pages() -> list[Path]:
-    return sorted(SITE_ROOT.rglob("*.html"))
+    return sorted(page for page in SITE_ROOT.rglob("*.html") if _is_deployed(page))
 
 
 def _read(page: Path) -> str:

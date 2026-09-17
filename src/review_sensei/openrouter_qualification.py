@@ -7,6 +7,7 @@ Fixture-only or incomplete evidence cannot mint ``supported`` status.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import re
@@ -17,6 +18,7 @@ from typing import Any
 
 from .errors import ReviewInputError
 from .evaluation import (
+    MAX_JSON_FILE_BYTES,
     PromotionRecord,
     _report_promotion_fields,
     promotion_record_from_reports,
@@ -38,7 +40,10 @@ _SCHEMA_VERSION = "1.0"
 _INITIAL_MODEL = "anthropic/claude-3.5-haiku"
 _INITIAL_UPSTREAM = "anthropic"
 _ACCEPTED_REPORT_MODES = frozenset({"fixture", "live"})
-MAX_EVIDENCE_ARTIFACT_BYTES = 4 * 1024 * 1024
+# A retained artifact is the same file ``load_evaluation_report`` reads, so it
+# carries the evaluation contract's own JSON ceiling rather than a second,
+# independently drifting bound (ADR 0007).
+MAX_EVIDENCE_ARTIFACT_BYTES = MAX_JSON_FILE_BYTES
 _DEFAULT_LIMITATIONS = (
     "Qualified only for the declared model, upstream provider, and routing "
     "policy; not the full OpenRouter catalog.",
@@ -194,7 +199,7 @@ def _resolve_evidence_references(
     report_artifacts: Sequence[bytes] | None,
     evidence_references: Sequence[str],
     status: str,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], _EvidenceProvenance]:
     declared = _digest_list(tuple(evidence_references), label="evidence_references")
     if report_artifacts is None:
         if status == "supported":
@@ -203,14 +208,29 @@ def _resolve_evidence_references(
                 "report artifacts; evidence_references cannot be accepted "
                 "without bytes the harness can hash itself"
             )
-        return declared
+        return declared, _EvidenceProvenance.UNVERIFIED
     derived = _evidence_references_from_artifacts(report_artifacts, documents)
     if declared and declared != derived:
         raise ReviewInputError(
             "OpenRouter qualification evidence_references do not match the "
             "retained live report artifacts"
         )
-    return derived
+    return derived, _EvidenceProvenance.ARTIFACT_DIGEST
+
+
+class _EvidenceProvenance(enum.Enum):
+    """Where a record's ``evidence_references`` came from.
+
+    The members are module-private so a caller outside this module cannot name
+    anything but the default, which keeps ``supported`` unconstructible by
+    hand: only the mint path (which hashed retained bytes) and the parse path
+    (which is reading an already-published record for verification) can claim
+    a stronger provenance.
+    """
+
+    UNVERIFIED = "unverified"
+    PUBLISHED = "published"
+    ARTIFACT_DIGEST = "artifact-digest"
 
 
 @dataclass(frozen=True)
@@ -221,6 +241,7 @@ class OpenRouterQualificationRecord:
     qualification_target: OpenRouterQualificationTarget
     evidence_references: tuple[str, ...]
     limitations: tuple[str, ...]
+    evidence_provenance: _EvidenceProvenance = _EvidenceProvenance.UNVERIFIED
 
     def __post_init__(self) -> None:
         if self.promotion.provider != _OPENROUTER_PROVIDER:
@@ -247,6 +268,12 @@ class OpenRouterQualificationRecord:
                 "OpenRouter qualification limitations must be non-empty"
             )
         if self.promotion.status == "supported":
+            if self.evidence_provenance is _EvidenceProvenance.UNVERIFIED:
+                raise ReviewInputError(
+                    "supported OpenRouter qualification records cannot be "
+                    "constructed directly; mint one from retained live report "
+                    "artifacts with qualification_record_from_reports"
+                )
             if len(self.evidence_references) < 3:
                 raise ReviewInputError(
                     "supported OpenRouter qualification requires at least three "
@@ -297,7 +324,19 @@ _PROMOTION_RECORD_KEYS = (
 def validate_openrouter_qualification_record(
     value: Mapping[str, Any],
 ) -> OpenRouterQualificationRecord:
-    """Parse and validate one OpenRouter qualification support record."""
+    """Parse one published OpenRouter qualification record structurally.
+
+    This is a schema and self-consistency check only: it validates the document
+    against the ``openrouter-qualification`` contract, rebuilds the promotion
+    record, and confirms the declared ``routing_policy_digest`` matches the
+    target. It cannot verify evidence provenance, because a published document
+    carries digests rather than the retained bytes that produced them. A record
+    parsed here is marked ``PUBLISHED``, not ``ARTIFACT_DIGEST``.
+
+    Callers that need an evidence-bound answer, rather than a well-formed
+    document, must use :func:`require_supported_openrouter_qualification` with
+    the reports and retained artifacts.
+    """
 
     if not isinstance(value, dict):
         raise ReviewInputError("OpenRouter qualification record must be a JSON object")
@@ -325,6 +364,7 @@ def validate_openrouter_qualification_record(
             qualification_target=target,
             evidence_references=tuple(value.get("evidence_references") or ()),
             limitations=tuple(value.get("limitations") or ()),
+            evidence_provenance=_EvidenceProvenance.PUBLISHED,
         )
     except KeyError as exc:
         raise ReviewInputError("OpenRouter qualification record is incomplete") from exc
@@ -397,7 +437,7 @@ def qualification_record_from_reports(
         raise ReviewInputError("OpenRouter qualification requires openrouter provider")
     if promotion.model != target.model:
         raise ReviewInputError("OpenRouter qualification model does not match target")
-    references = _resolve_evidence_references(
+    references, provenance = _resolve_evidence_references(
         documents,
         report_artifacts=report_artifacts,
         evidence_references=evidence_references,
@@ -408,6 +448,7 @@ def qualification_record_from_reports(
         qualification_target=target,
         evidence_references=references,
         limitations=tuple(limitations),
+        evidence_provenance=provenance,
     )
 
 

@@ -286,13 +286,10 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
                 evaluated_at=EVALUATED_AT,
             )
 
-    def test_supported_status_requires_three_evidence_references_in_record(
-        self,
-    ) -> None:
-        reports = [
-            _make_openrouter_report(elapsed_total_ms=index, invocation_id=f"ok-{index}")
-            for index in (1, 2, 3)
-        ]
+    def test_supported_record_cannot_be_constructed_directly(self) -> None:
+        """Only the mint path, which hashed retained bytes, may claim support."""
+
+        reports = _supported_live_reports()
         promotion = promotion_record_from_reports(
             reports,
             observed_revision="openrouter-rev-1",
@@ -300,13 +297,34 @@ class OpenRouterQualificationHarnessTests(unittest.TestCase):
             evaluated_at=EVALUATED_AT,
         )
         self.assertEqual(promotion.status, "supported")
+        for references in ((), ("a" * 64, "b" * 64, "c" * 64)):
+            with self.subTest(references=len(references)):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "cannot be constructed directly"
+                ):
+                    OpenRouterQualificationRecord(
+                        promotion=promotion,
+                        qualification_target=TARGET,
+                        evidence_references=references,
+                        limitations=("test limitation",),
+                    )
+
+    def test_published_supported_record_requires_three_evidence_references(
+        self,
+    ) -> None:
+        reports = _supported_live_reports()
+        artifacts = _retained_artifacts(reports)
+        published = qualification_record_from_reports(
+            reports,
+            target=TARGET,
+            observed_revision="openrouter-rev-1",
+            reproducibility=REPRO,
+            evaluated_at=EVALUATED_AT,
+            report_artifacts=artifacts,
+        ).to_dict()
+        published["evidence_references"] = published["evidence_references"][:2]
         with self.assertRaisesRegex(ReviewInputError, "evidence references"):
-            OpenRouterQualificationRecord(
-                promotion=promotion,
-                qualification_target=TARGET,
-                evidence_references=(),
-                limitations=("test limitation",),
-            )
+            validate_openrouter_qualification_record(published)
 
     def test_three_independent_live_reports_can_build_supported_record(self) -> None:
         reports = _supported_live_reports()

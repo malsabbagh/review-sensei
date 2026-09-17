@@ -116,6 +116,14 @@ or accept `supported` status without them, and rejects `evidence_references`
 that the operator supplies but the bytes do not produce. Digests of
 re-serialized in-memory documents are not interchangeable with these values.
 
+`OpenRouterQualificationRecord` tracks where its `evidence_references` came
+from, and refuses direct construction of a `supported` record: only
+`qualification_record_from_reports` (which hashed the retained bytes) and
+`validate_openrouter_qualification_record` (which is reading an
+already-published document for verification) can produce one. Constructing the
+dataclass by hand with a `supported` promotion and fabricated digests raises
+`ReviewInputError` instead of yielding a publishable record.
+
 Only `status=supported` with at least three evidence references and matching
 live reports can authorize support labels or approval eligibility.
 
