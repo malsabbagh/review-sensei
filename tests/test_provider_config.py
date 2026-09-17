@@ -108,6 +108,23 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 model="deepseek/deepseek-v4.1-flash",
             )
 
+    def test_local_ollama_rejects_cloud_suffix(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "must not use ollama cloud suffix"
+        ):
+            validate_hosted_workflow_model(
+                provider_mode="local-ollama",
+                workflow_mode="automatic",
+                model="deepseek-v4.1-flash:cloud",
+            )
+
+    def test_cloud_ollama_accepts_cloud_suffix(self) -> None:
+        validate_hosted_workflow_model(
+            provider_mode="cloud-ollama",
+            workflow_mode="automatic",
+            model="deepseek-v4.1-flash:cloud",
+        )
+
     def test_model_must_not_start_with_dash(self) -> None:
         with self.assertRaisesRegex(ReviewInputError, "must not start with '-'"):
             validate_hosted_workflow_model(

@@ -971,23 +971,43 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          export MODEL="${REVIEW_MODEL:-deepseek/deepseek-v4.1-flash}"
-          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          export MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
           from review_sensei.errors import ReviewInputError
           from review_sensei.provider_config import (
-              hosted_openrouter_upstream,
+              resolve_hosted_workflow_model,
               validate_hosted_workflow_model,
           )
 
+          raw_model = os.environ.get("REVIEW_MODEL", "")
           try:
               validate_hosted_workflow_model(
                   provider_mode="openrouter",
                   workflow_mode="",
-                  model=os.environ["MODEL"],
+                  model=raw_model,
               )
+              print(
+                  resolve_hosted_workflow_model(
+                      provider_mode="openrouter",
+                      workflow_mode="",
+                      model=raw_model,
+                  )
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
+          )"
+          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import hosted_openrouter_upstream
+
+          try:
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],
@@ -1134,23 +1154,43 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          export MODEL="${REVIEW_MODEL:-deepseek/deepseek-v4.1-flash}"
-          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          export MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
           from review_sensei.errors import ReviewInputError
           from review_sensei.provider_config import (
-              hosted_openrouter_upstream,
+              resolve_hosted_workflow_model,
               validate_hosted_workflow_model,
           )
 
+          raw_model = os.environ.get("REVIEW_MODEL", "")
           try:
               validate_hosted_workflow_model(
                   provider_mode="openrouter",
                   workflow_mode="",
-                  model=os.environ["MODEL"],
+                  model=raw_model,
               )
+              print(
+                  resolve_hosted_workflow_model(
+                      provider_mode="openrouter",
+                      workflow_mode="",
+                      model=raw_model,
+                  )
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          PY
+          )"
+          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import hosted_openrouter_upstream
+
+          try:
               print(
                   hosted_openrouter_upstream(
                       os.environ["MODEL"],
