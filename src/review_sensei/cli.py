@@ -41,6 +41,7 @@ from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
+from .planning import DEFAULT_TOTAL_WORK_BUDGET
 from .service import DEFAULT_STAGES, ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .workflow import prepare_diff
@@ -1567,15 +1568,18 @@ def main(argv: list[str] | None = None) -> int:
         # Read and preflight before loading any provider adapter.  The helper
         # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
+        work_budget = DEFAULT_TOTAL_WORK_BUDGET
         if orchestrate:
-            from .planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
+            from .planning import plan_change
 
             diff = read_bounded_utf8(
                 args.diff,
-                maximum=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
+                maximum=work_budget.max_total_diff_bytes,
                 label="diff",
             )
-            analysis = plan_change(diff, limits=limits, orchestrate=True).analysis
+            analysis = plan_change(
+                diff, limits=limits, orchestrate=True, work_budget=work_budget
+            ).analysis
         else:
             diff = read_bounded_utf8(
                 args.diff,
@@ -1673,6 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_context=context_selection.source_context,
                 untrusted_head_sha=untrusted_head_sha,
                 orchestrate_large_changes=orchestrate,
+                work_budget=work_budget,
             ),
             budget=ResourceBudget.for_limits(limits),
         )

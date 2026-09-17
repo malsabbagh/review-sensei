@@ -197,6 +197,24 @@ class CoveragePlanningTests(unittest.TestCase):
         self.assertEqual(first.chunks[0].related_paths, ("src/b.py",))
         self.assertEqual(first.chunks[1].related_paths, ("src/a.py",))
 
+    def test_max_chunks_one_never_emits_more_than_one_chunk(self):
+        limits = ReviewLimits(max_diff_files=1)
+        plan = plan_change(
+            TWO_FILES,
+            limits=limits,
+            orchestrate=True,
+            work_budget=TotalWorkBudget(max_chunks=1),
+        )
+        self.assertEqual(len(plan.chunks), 1)
+        outcomes = {
+            entry.path: (entry.outcome, entry.reason) for entry in plan.coverage.files
+        }
+        self.assertEqual(outcomes["src/a.py"], ("reviewed", None))
+        self.assertEqual(
+            outcomes["src/b.py"],
+            ("budget-exhausted", "provider-call-budget"),
+        )
+
     def test_max_chunks_overflows_after_limit_without_extra_flush(self):
         limits = ReviewLimits(max_diff_files=1)
         plan = plan_change(

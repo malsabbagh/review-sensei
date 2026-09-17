@@ -157,6 +157,9 @@ class _BudgetedProvider:
     def exhausted(self) -> bool:
         return self._budget.exhausted
 
+    def has_remaining_calls(self) -> bool:
+        return self._budget.calls < self._budget.max_calls
+
     def complete(self, request):
         if self._budget.calls >= self._budget.max_calls:
             self._budget.exhausted = True
@@ -165,8 +168,6 @@ class _BudgetedProvider:
             return self._provider.complete(request)
         finally:
             self._budget.calls += 1
-            if self._budget.calls >= self._budget.max_calls:
-                self._budget.exhausted = True
 
 
 def _location_valid(comment: ReviewComment, analysis: DiffAnalysis) -> bool:
@@ -341,7 +342,7 @@ class ReviewService:
             )
 
         for chunk in plan.reviewable_chunks:
-            if tracker_exhausted() or budgeted.exhausted:
+            if tracker_exhausted() or not budgeted.has_remaining_calls():
                 coverage = apply_chunk_outcomes(
                     coverage,
                     paths=chunk.paths,
@@ -399,7 +400,7 @@ class ReviewService:
                         reason="chunk-preflight-failed",
                         limits=request.limits,
                     )
-                elif budgeted.exhausted:
+                elif not budgeted.has_remaining_calls():
                     coverage = apply_chunk_outcomes(
                         coverage,
                         paths=chunk.paths,
@@ -431,10 +432,14 @@ class ReviewService:
                 continue
             if chunk_run.error is not None or chunk_run.result is None:
                 chunk_outcome = (
-                    "budget-exhausted" if budgeted.exhausted else "partially-reviewed"
+                    "budget-exhausted"
+                    if not budgeted.has_remaining_calls()
+                    else "partially-reviewed"
                 )
                 chunk_reason = (
-                    "provider-call-budget" if budgeted.exhausted else "chunk-failed"
+                    "provider-call-budget"
+                    if not budgeted.has_remaining_calls()
+                    else "chunk-failed"
                 )
                 coverage = apply_chunk_outcomes(
                     coverage,
@@ -444,7 +449,7 @@ class ReviewService:
                     reason=chunk_reason,
                     limits=request.limits,
                 )
-                if budgeted.exhausted:
+                if not budgeted.has_remaining_calls():
                     for item in plan.reviewable_chunks:
                         if item.index > chunk.index:
                             coverage = apply_chunk_outcomes(
@@ -498,7 +503,7 @@ class ReviewService:
                     hunk_indexes=chunk.hunk_indexes,
                     limits=request.limits,
                 )
-            if budgeted.exhausted:
+            if not budgeted.has_remaining_calls():
                 for item in plan.reviewable_chunks:
                     if item.index > chunk.index:
                         coverage = apply_chunk_outcomes(

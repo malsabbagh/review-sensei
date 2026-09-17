@@ -212,8 +212,14 @@ def _pack_records(
     chunk_budget_exhausted = False
 
     def flush() -> None:
-        nonlocal current
+        nonlocal current, chunk_budget_exhausted, overflow_reason
         if not current:
+            return
+        if len(chunks) >= work_budget.max_chunks:
+            overflow_reason = overflow_reason or "provider-call-budget"
+            overflow.extend(current)
+            current = ()
+            chunk_budget_exhausted = True
             return
         chunks.append(
             _chunk_from_records(len(chunks) + 1, current, changed_paths=changed_paths)
@@ -259,19 +265,27 @@ def _coverage_for(
         FileCoverage(path=path, outcome=outcome, reason=reason)
         for path, (outcome, reason) in sorted(file_outcomes.items())
     )
+    enumerated = set(analysis.changed_paths)
     hunks: list[HunkCoverage] = []
     for hunk in analysis.hunk_records:
-        path = hunk.new_path or hunk.old_path
+        path = None
+        for candidate in (hunk.new_path, hunk.old_path):
+            if candidate is not None and candidate in enumerated:
+                path = candidate
+                break
         if path is None:
             continue
         if hunk.index in hunk_outcomes:
             outcome, reason = hunk_outcomes[hunk.index]
         else:
-            outcome, reason = ("unsupported", "incomplete-enumeration")
+            file_outcome = file_outcomes.get(path)
+            if file_outcome is not None and file_outcome[0] != "reviewed":
+                outcome, reason = file_outcome
+            else:
+                outcome, reason = ("unsupported", "incomplete-enumeration")
         hunks.append(
             HunkCoverage(index=hunk.index, path=path, outcome=outcome, reason=reason)
         )
-    enumerated = set(analysis.changed_paths)
     complete = analysis.enumeration_complete and enumerated == set(file_outcomes)
     if not complete:
         # Incomplete enumeration can never be reported as fully reviewed.
