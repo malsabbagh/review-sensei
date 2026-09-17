@@ -913,7 +913,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("permissions: {}", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
         self.assertIn("Install ReviewSensei package (PyPI first, GitHub fallback)", job)
-        self.assertIn("openrouter model is not allowlisted for hosted workflows", job)
+        self.assertNotIn(
+            "deepseek/deepseek-v4.1-flash|anthropic/claude-3.5-sonnet", job
+        )
         install_pos = job.index(
             "Install ReviewSensei package (PyPI first, GitHub fallback)"
         )

@@ -240,18 +240,9 @@ jobs:
           fi
           case "$PROVIDER_MODE" in
             openrouter)
-              if [[ -n "$MODEL" ]]; then
-                if [[ "$MODEL" == *:cloud* ]]; then
-                  echo '::error::openrouter model must not use ollama cloud suffix' >&2
-                  exit 1
-                fi
-                case "$MODEL" in
-                  deepseek/deepseek-v4.1-flash|anthropic/claude-3.5-sonnet|openai/gpt-4o-mini) ;;
-                  *)
-                    echo '::error::openrouter model is not allowlisted for hosted workflows' >&2
-                    exit 1
-                    ;;
-                esac
+              if [[ -n "$MODEL" && "$MODEL" == *:cloud* ]]; then
+                echo '::error::openrouter model must not use ollama cloud suffix' >&2
+                exit 1
               fi
               ;;
             ""|local|local-ollama|cloud|cloud-ollama)
