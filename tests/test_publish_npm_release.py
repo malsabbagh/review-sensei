@@ -62,9 +62,11 @@ class PublishNpmReleaseTests(unittest.TestCase):
         import hashlib
 
         sums_lines: list[str] = []
-        for line in (self.bundle_dir / "integrity.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines():
+        for line in (
+            (self.bundle_dir / "integrity.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ):
             if not line.strip():
                 continue
             record = json.loads(line)
