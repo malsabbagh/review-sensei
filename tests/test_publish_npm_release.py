@@ -21,6 +21,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     fetch_registry_package,
     load_integrity_records,
     package_action,
+    package_version_indexed,
     preflight,
     publish_package,
     publish_platforms,
@@ -127,6 +128,10 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 "scripts.publish_npm_release.fetch_registry_package",
                 side_effect=fake_fetch,
             ),
+            mock.patch(
+                "scripts.publish_npm_release.package_version_indexed",
+                return_value=False,
+            ),
             mock.patch("scripts.publish_npm_release.time.sleep"),
         ):
             preflight(
@@ -172,6 +177,10 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 "scripts.publish_npm_release.fetch_registry_package",
                 side_effect=fake_fetch,
             ),
+            mock.patch(
+                "scripts.publish_npm_release.package_version_indexed",
+                return_value=False,
+            ),
             mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):
             preflight(
@@ -189,6 +198,57 @@ class PublishNpmReleaseTests(unittest.TestCase):
         )
         actions = {item["name"]: item["action"] for item in state["packages"]}
         self.assertEqual(actions[target], "verified")
+
+    def test_preflight_waits_when_package_metadata_lists_version(self) -> None:
+        target = "@reviewsensei/cli-darwin-arm64"
+        responses: dict[str, list[object]] = {
+            target: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                {
+                    "name": target,
+                    "version": "0.5.0",
+                    "dist": {"integrity": f"sha512-{target}"},
+                },
+            ]
+        }
+
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            queue = responses.get(package)
+            if queue is None:
+                raise HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.package_version_indexed",
+                side_effect=lambda package, version: package == target,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=2.0,
+                max_delay_seconds=30.0,
+            )
+
+        sleep.assert_called_once_with(2.0)
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            state["packages"][0]["action"],
+            "verified",
+        )
 
     def test_preflight_retries_transient_http_errors(self) -> None:
         target = "@reviewsensei/cli-linux-x64-gnu"
@@ -216,6 +276,10 @@ class PublishNpmReleaseTests(unittest.TestCase):
             mock.patch(
                 "scripts.publish_npm_release.fetch_registry_package",
                 side_effect=fake_fetch,
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.package_version_indexed",
+                return_value=False,
             ),
             mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):

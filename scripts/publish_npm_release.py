@@ -73,6 +73,34 @@ def publish_state_path(bundle_dir: Path) -> Path:
     return bundle_dir / "publish-state.json"
 
 
+def fetch_package_metadata(package: str) -> dict[str, Any]:
+    url = f"https://registry.npmjs.org/{quote(package, safe='')}"
+    try:
+        with urlopen(url, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError:
+        raise
+    except URLError as exc:
+        raise RegistryTransportError(
+            f"registry request failed for {package}: {exc.reason}"
+        ) from exc
+    except OSError as exc:
+        raise RegistryTransportError(
+            f"registry request failed for {package}: {exc}"
+        ) from exc
+
+
+def package_version_indexed(package: str, version: str) -> bool:
+    try:
+        metadata = fetch_package_metadata(package)
+    except HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+    versions = metadata.get("versions")
+    return isinstance(versions, dict) and version in versions
+
+
 def fetch_registry_package(package: str, version: str) -> dict[str, Any]:
     url = (
         "https://registry.npmjs.org/"
@@ -111,6 +139,17 @@ def classify_registry_state(
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
             if exc.code == 404:
+                if package_version_indexed(package, version):
+                    last_error = (
+                        f"{package}@{version} version document replicating "
+                        f"(attempt {attempt}/{max_attempts})"
+                    )
+                    if attempt >= max_attempts:
+                        break
+                    print(last_error, file=sys.stderr)
+                    time.sleep(min(delay, max_delay_seconds))
+                    delay = min(delay * 1.5, max_delay_seconds)
+                    continue
                 visibility_attempts += 1
                 last_error = (
                     f"{package}@{version} registry preflight not visible yet "
