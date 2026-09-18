@@ -200,7 +200,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         self.assertEqual(action, "verified")
         self.assertGreaterEqual(len(sleep.mock_calls), 2)
 
-    def test_classify_registry_state_does_not_publish_when_final_probe_is_ambiguous(
+    def test_classify_registry_state_retries_when_final_probe_is_ambiguous(
         self,
     ) -> None:
         package = "@reviewsensei/cli-darwin-x64"
@@ -263,6 +263,53 @@ class PublishNpmReleaseTests(unittest.TestCase):
             )
 
         self.assertEqual(action, "verified")
+
+    def test_classify_registry_state_fails_when_packument_probe_stays_inconclusive(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-darwin-x64"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 2,
+            packument_url: [
+                HTTPError("url", 503, "unavailable", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 2,
+        }
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[str(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                PublishError,
+                "packument probe remained inconclusive after 2 attempts",
+            ):
+                classify_registry_state(
+                    package,
+                    version,
+                    integrity,
+                    max_attempts=2,
+                    preflight_404_attempts=1,
+                    initial_delay_seconds=1.0,
+                    max_delay_seconds=1.0,
+                )
 
     def test_preflight_marks_propagating_package_verified_via_urlopen(self) -> None:
         target = "@reviewsensei/cli-darwin-arm64"
@@ -888,6 +935,83 @@ class PublishNpmReleaseTests(unittest.TestCase):
             )
         publish.assert_called_once()
         readback.assert_called_once()
+
+    def test_publish_package_surfaces_integrity_mismatch_after_publish_failure(
+        self,
+    ) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-x64"
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": package, "action": "publish"}],
+        )
+        tarball = self.bundle_dir / records[package]["file"]
+        tarball.write_bytes(b"tarball")
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.publish_tarball",
+                side_effect=PublishError("npm publish failed with exit code 1"),
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+                side_effect=PublishError(
+                    "published npm bytes do not match the attested release bundle: "
+                    f"{package}@{records[package]['version']}"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                PublishError,
+                "published npm bytes do not match the attested release bundle",
+            ):
+                publish_package(
+                    self.bundle_dir,
+                    package,
+                    "0.5.0",
+                    records,
+                    max_attempts=1,
+                    initial_delay_seconds=0.0,
+                    max_delay_seconds=0.0,
+                )
+
+    def test_publish_package_reraises_publish_error_when_readback_exhausted(
+        self,
+    ) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-x64"
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": package, "action": "publish"}],
+        )
+        tarball = self.bundle_dir / records[package]["file"]
+        tarball.write_bytes(b"tarball")
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.publish_tarball",
+                side_effect=PublishError("npm publish failed with exit code 1"),
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+                side_effect=PublishError(
+                    "@reviewsensei/cli-darwin-x64@0.5.0 registry readback not ready yet "
+                    "(HTTP 404, attempt 1/1)"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                PublishError, "npm publish failed with exit code 1"
+            ):
+                publish_package(
+                    self.bundle_dir,
+                    package,
+                    "0.5.0",
+                    records,
+                    max_attempts=1,
+                    initial_delay_seconds=0.0,
+                    max_delay_seconds=0.0,
+                )
 
     def test_publish_package_rejects_verified_state_when_registry_integrity_mismatches(
         self,

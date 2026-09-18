@@ -161,7 +161,10 @@ def classify_registry_state(
                         f"probe inconclusive (attempt {attempt}/{max_attempts})"
                     )
                     if attempt >= max_attempts:
-                        break
+                        raise PublishError(
+                            f"{package}@{version} registry preflight packument "
+                            f"probe remained inconclusive after {max_attempts} attempts"
+                        )
                     print(last_error, file=sys.stderr)
                     time.sleep(min(delay, max_delay_seconds))
                     delay = min(delay * 1.5, max_delay_seconds)
@@ -175,7 +178,10 @@ def classify_registry_state(
                     final_indexed = package_version_indexed(package, version)
                     if final_indexed is not False:
                         if attempt >= max_attempts:
-                            break
+                            raise PublishError(
+                                f"{package}@{version} registry preflight remained "
+                                f"ambiguous after {max_attempts} attempts"
+                            )
                         print(
                             f"{package}@{version} registry preflight still "
                             "ambiguous after 404 probes; continuing to poll",
@@ -403,7 +409,11 @@ def publish_package(
                 initial_delay_seconds=initial_delay_seconds,
                 max_delay_seconds=max_delay_seconds,
             )
-        except PublishError:
+        except PublishError as readback_exc:
+            if "published npm bytes do not match the attested release bundle" in str(
+                readback_exc
+            ):
+                raise readback_exc
             raise exc
         print(
             "Registry already contained the attested bytes after a publish failure for "
