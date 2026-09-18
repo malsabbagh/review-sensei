@@ -33,6 +33,7 @@ DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
 DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
 BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
+BUNDLE_METADATA_MAX_BYTES = 4096
 
 
 class PublishError(RuntimeError):
@@ -70,20 +71,37 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     path = bundle_metadata_path(bundle_dir)
     if not path.is_file():
         return None
-    metadata = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_bytes()
+    if len(raw) > BUNDLE_METADATA_MAX_BYTES:
+        raise PublishError("release bundle bundle-metadata.json exceeds size limit")
+    try:
+        metadata = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PublishError("release bundle has invalid bundle-metadata.json") from exc
     if not isinstance(metadata, dict):
         raise PublishError("release bundle has invalid bundle-metadata.json")
-    return metadata
+    allowed_keys = {"version", "source_sha"}
+    if set(metadata) != allowed_keys:
+        raise PublishError("release bundle bundle-metadata.json has unexpected fields")
+    version = metadata.get("version")
+    source_sha = metadata.get("source_sha")
+    if not isinstance(version, str) or not version:
+        raise PublishError("release bundle metadata is missing version")
+    if not isinstance(source_sha, str) or not source_sha:
+        raise PublishError("release bundle metadata is missing source_sha")
+    return {"version": version, "source_sha": source_sha}
 
 
-def verify_bundle_version(bundle_dir: Path, version: str) -> None:
+def verify_bundle_version(
+    bundle_dir: Path, version: str
+) -> dict[str, dict[str, str]]:
     metadata = load_bundle_metadata(bundle_dir)
-    if metadata is not None and metadata.get("version") != version:
+    if metadata is not None and metadata["version"] != version:
         raise PublishError(
             "release bundle version "
-            f"{metadata.get('version')!r} does not match requested {version!r}"
+            f"{metadata['version']!r} does not match requested {version!r}"
         )
-    load_integrity_records(bundle_dir, version)
+    return load_integrity_records(bundle_dir, version)
 
 
 def verify_resumed_bundle(
@@ -92,18 +110,26 @@ def verify_resumed_bundle(
     *,
     expected_source_sha: str | None = None,
 ) -> None:
-    verify_bundle_version(bundle_dir, version)
     metadata = load_bundle_metadata(bundle_dir)
     if metadata is None:
+        if expected_source_sha is not None:
+            raise PublishError(
+                "resumed release bundle is missing bundle-metadata.json; "
+                "only bundles produced after bundle metadata recording can be resumed"
+            )
+        verify_bundle_version(bundle_dir, version)
         return
-    source_sha = metadata.get("source_sha")
-    if not isinstance(source_sha, str) or not source_sha:
-        raise PublishError("release bundle metadata is missing source_sha")
-    if expected_source_sha is not None and source_sha != expected_source_sha:
+    if metadata["version"] != version:
+        raise PublishError(
+            "release bundle version "
+            f"{metadata['version']!r} does not match requested {version!r}"
+        )
+    if expected_source_sha is not None and metadata["source_sha"] != expected_source_sha:
         raise PublishError(
             "resumed release bundle source_sha "
-            f"{source_sha!r} does not match attested run {expected_source_sha!r}"
+            f"{metadata['source_sha']!r} does not match attested run {expected_source_sha!r}"
         )
+    load_integrity_records(bundle_dir, version)
 
 
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
@@ -603,9 +629,9 @@ def preflight(
             version,
             expected_source_sha=expected_source_sha,
         )
+        records = load_integrity_records(bundle_dir, version)
     else:
-        verify_bundle_version(bundle_dir, version)
-    records = load_integrity_records(bundle_dir, version)
+        records = verify_bundle_version(bundle_dir, version)
     retry_kwargs = {
         "max_attempts": max_attempts,
         "preflight_404_attempts": preflight_404_attempts,

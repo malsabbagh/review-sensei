@@ -479,6 +479,30 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("publish_npm_release.py verify-bundle", self.workflow)
         self.assertIn("release/npm/bundle-metadata.json", self.workflow)
         self.assertIn("actions: read", self.workflow)
+        self.assertIn("Check out repository for resumed run validation", self.workflow)
+        self.assertIn("resume-source", self.workflow)
+        native_section = self.workflow.split("  native-build:", maxsplit=1)[1].split(
+            "  assemble-npm:", maxsplit=1
+        )[0]
+        native_if = next(
+            line for line in native_section.splitlines() if line.startswith("    if:")
+        )
+        self.assertIn("inputs.resume_bundle_run_id == ''", native_if)
+        assemble_section = self.workflow.split("  assemble-npm:", maxsplit=1)[1].split(
+            "  publish-npm:", maxsplit=1
+        )[0]
+        assemble_if = next(
+            line for line in assemble_section.splitlines() if line.startswith("    if:")
+        )
+        self.assertIn("inputs.resume_bundle_run_id == ''", assemble_if)
+        self.assertIn(
+            'if: ${{ inputs.resume_bundle_run_id == \'\' }}',
+            self.workflow,
+        )
+        self.assertIn(
+            'if: ${{ inputs.resume_bundle_run_id != \'\' }}',
+            self.workflow,
+        )
 
 
 class ReleaseDocumentationTests(unittest.TestCase):

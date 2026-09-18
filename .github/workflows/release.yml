@@ -207,6 +207,8 @@ jobs:
           python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
       - name: Pack and validate exact npm tarballs
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p release/npm
@@ -243,11 +245,12 @@ jobs:
           done
           python - <<'PY'
           import json
+          import os
           import pathlib
           import subprocess
 
           source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          version = "${GITHUB_REF_NAME#v}"
+          version = os.environ["RELEASE_VERSION"].removeprefix("v")
           metadata = {"version": version, "source_sha": source_sha}
           pathlib.Path("release/npm/bundle-metadata.json").write_text(
               json.dumps(metadata, indent=2) + "\n",

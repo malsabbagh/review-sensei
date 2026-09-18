@@ -31,7 +31,11 @@ fresh rebuild for the same version. Either re-run the failed workflow job from
 GitHub Actions, or dispatch `publish-npm.yml` again with `resume_bundle_run_id`
 set to the failed run ID so the workflow reuses that run's attested
 `review-sensei-npm-release-bundle` artifact instead of rebuilding new tarballs.
-The resumed bundle must match the version you are publishing; packages already
+Resume requires a bundle that includes `bundle-metadata.json` (produced by
+workflows after this metadata recording landed). Older bundles without that file
+are not eligible for resume. The resumed run must be a failed or cancelled
+manual `publish-npm` dispatch from the default branch of this repository, and
+its attested source commit must match the requested version. Packages already
 verified on the registry are skipped and only missing packages are published.
 It also
 installs the launcher in a clean Linux prefix, verifies that
