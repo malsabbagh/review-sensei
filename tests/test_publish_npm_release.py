@@ -18,6 +18,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     PLATFORM_PACKAGES,
     PublishError,
     RegistryTransportError,
+    IntegrityMismatchError,
     classify_registry_state,
     fetch_registry_package,
     load_integrity_records,
@@ -850,10 +851,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 "dist": {"integrity": "sha512-wrong"},
             },
         ):
-            with self.assertRaisesRegex(
-                PublishError,
-                "published npm bytes do not match the attested release bundle",
-            ):
+            with self.assertRaises(IntegrityMismatchError):
                 read_back_with_retry(
                     "@reviewsensei/cli",
                     "0.5.0",
@@ -955,16 +953,13 @@ class PublishNpmReleaseTests(unittest.TestCase):
             ),
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",
-                side_effect=PublishError(
+                side_effect=IntegrityMismatchError(
                     "published npm bytes do not match the attested release bundle: "
-                    f"{package}@{records[package]['version']}"
+                    f"{package}@0.5.0"
                 ),
             ),
         ):
-            with self.assertRaisesRegex(
-                PublishError,
-                "published npm bytes do not match the attested release bundle",
-            ):
+            with self.assertRaises(IntegrityMismatchError):
                 publish_package(
                     self.bundle_dir,
                     package,
@@ -1027,15 +1022,12 @@ class PublishNpmReleaseTests(unittest.TestCase):
             mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",
-                side_effect=PublishError(
+                side_effect=IntegrityMismatchError(
                     "published npm bytes do not match the attested release bundle"
                 ),
             ),
         ):
-            with self.assertRaisesRegex(
-                PublishError,
-                "published npm bytes do not match the attested release bundle",
-            ):
+            with self.assertRaises(IntegrityMismatchError):
                 publish_package(
                     self.bundle_dir,
                     package,

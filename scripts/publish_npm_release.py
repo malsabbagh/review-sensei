@@ -39,6 +39,10 @@ class RegistryTransportError(PublishError):
     """Raised when the npm registry cannot be reached over the network."""
 
 
+class IntegrityMismatchError(PublishError):
+    """Raised when registry bytes do not match the attested release bundle."""
+
+
 def is_retryable_registry_http_error(code: int) -> bool:
     return code in {404, 429} or code >= 500
 
@@ -228,7 +232,7 @@ def classify_registry_state(
             or not isinstance(dist, dict)
             or dist.get("integrity") != expected_integrity
         ):
-            raise PublishError(
+            raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
                 f"{package}@{version}"
             )
@@ -328,7 +332,7 @@ def read_back_with_retry(
             or not isinstance(dist, dict)
             or dist.get("integrity") != expected_integrity
         ):
-            raise PublishError(
+            raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
                 f"{package}@{version}"
             )
@@ -410,9 +414,7 @@ def publish_package(
                 max_delay_seconds=max_delay_seconds,
             )
         except PublishError as readback_exc:
-            if "published npm bytes do not match the attested release bundle" in str(
-                readback_exc
-            ):
+            if isinstance(readback_exc, IntegrityMismatchError):
                 raise readback_exc
             raise exc
         print(
