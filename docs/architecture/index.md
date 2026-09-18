@@ -71,7 +71,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0006`](../adr/0006-hosted-github-app-architecture.md) | Superseded | Hosted GitHub App as one release-unit modular service | #6; retained for history; superseded by open-source-first direction |
 | [`0007`](../adr/0007-bound-untrusted-review-inputs-and-publisher-outputs.md) | Accepted | Bounded review inputs and publisher outputs | #7; Multi-tenant security boundary |
 | [`0008`](../adr/0008-versioned-public-schemas-and-compatibility.md) | Proposed | Versioned public schemas and compatibility guarantees | #10; Public JSON, CLI, provider, and error contracts |
-| [`0009`](../adr/0009-ci-quality-supply-chain-gates.md) | Accepted | CI quality and supply-chain gates | #3; Pinned Actions, package/schema checks, CodeQL, and required checks |
+| [`0009`](../adr/0009-ci-quality-supply-chain-gates.md) | Accepted | CI quality and supply-chain gates | #3; GitHub-hosted runners, pinned Actions, package/schema checks, CodeQL, and required checks |
 | [`0010`](../adr/0010-secure-package-release-engineering-and-provenance.md) | Proposed | Secure package release engineering and provenance | #4; package metadata, trusted publishing, and rollback |
 | [`0011`](../adr/0011-portable-immutable-github-actions-workflow.md) | Proposed | Portable immutable manual GitHub Actions workflow | #15; PyPI-first package install with pinned source fallback, local-first provider defaults, bounded prepare-diff |
 | [`0012`](../adr/0012-privacy-safe-review-quality-evaluation.md) | Accepted | Keep synthetic evaluation offline by default with explicit live egress | #9; Versioned corpus/report schemas and deterministic fixture CI |
