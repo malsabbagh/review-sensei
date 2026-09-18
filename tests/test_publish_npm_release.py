@@ -12,6 +12,8 @@ from scripts.publish_npm_release import (
     ALL_PACKAGES,
     PLATFORM_PACKAGES,
     PublishError,
+    RegistryTransportError,
+    fetch_registry_package,
     load_integrity_records,
     package_action,
     preflight,
@@ -45,6 +47,65 @@ class PublishNpmReleaseTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_fetch_registry_package_propagates_http_error(self) -> None:
+        error = HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+        with mock.patch(
+            "scripts.publish_npm_release.urlopen",
+            side_effect=error,
+        ):
+            with self.assertRaises(HTTPError) as ctx:
+                fetch_registry_package("@reviewsensei/cli", "0.5.0")
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_fetch_registry_package_wraps_transport_errors(self) -> None:
+        with mock.patch(
+            "scripts.publish_npm_release.urlopen",
+            side_effect=TimeoutError("timed out"),
+        ):
+            with self.assertRaises(RegistryTransportError) as ctx:
+                fetch_registry_package("@reviewsensei/cli", "0.5.0")
+        self.assertIn("timed out", str(ctx.exception))
+
+    def test_read_back_retries_http_error_from_fetch(self) -> None:
+        responses: list[object] = [
+            HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "name": "@reviewsensei/cli-linux-x64-gnu",
+                        "version": "0.5.0",
+                        "dist": {
+                            "integrity": "sha512-@reviewsensei/cli-linux-x64-gnu",
+                        },
+                    }
+                ).encode("utf-8")
+            ),
+        ]
+
+        def fake_urlopen(*_args: object, **_kwargs: object) -> io.BytesIO:
+            item = responses.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            read_back_with_retry(
+                "@reviewsensei/cli-linux-x64-gnu",
+                "0.5.0",
+                "sha512-@reviewsensei/cli-linux-x64-gnu",
+                max_attempts=3,
+                initial_delay_seconds=2.0,
+                max_delay_seconds=30.0,
+            )
+
+        sleep.assert_called_once_with(2.0)
 
     def test_preflight_marks_missing_packages_for_publish(self) -> None:
         def fake_fetch(package: str, version: str) -> dict[str, object]:
@@ -196,7 +257,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
     def test_read_back_maps_transport_error(self) -> None:
         with mock.patch(
             "scripts.publish_npm_release.fetch_registry_package",
-            side_effect=PublishError(
+            side_effect=RegistryTransportError(
                 "registry request failed for @reviewsensei/cli: timed out"
             ),
         ):

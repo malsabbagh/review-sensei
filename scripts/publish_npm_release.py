@@ -27,10 +27,15 @@ ALL_PACKAGES = PLATFORM_PACKAGES + (LAUNCHER_PACKAGE,)
 DEFAULT_READBACK_ATTEMPTS = 30
 DEFAULT_READBACK_INITIAL_DELAY_SECONDS = 2.0
 DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
+DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
 
 
 class PublishError(RuntimeError):
     """Raised when npm publication or readback verification fails."""
+
+
+class RegistryTransportError(PublishError):
+    """Raised when the npm registry cannot be reached over the network."""
 
 
 def is_retryable_registry_http_error(code: int) -> bool:
@@ -75,8 +80,16 @@ def fetch_registry_package(package: str, version: str) -> dict[str, Any]:
     try:
         with urlopen(url, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
+    except HTTPError:
+        raise
+    except URLError as exc:
+        raise RegistryTransportError(
+            f"registry request failed for {package}: {exc.reason}"
+        ) from exc
     except OSError as exc:
-        raise PublishError(f"registry request failed for {package}: {exc}") from exc
+        raise RegistryTransportError(
+            f"registry request failed for {package}: {exc}"
+        ) from exc
 
 
 def classify_registry_state(
@@ -92,10 +105,8 @@ def classify_registry_state(
         raise PublishError(
             f"registry preflight failed for {package}: HTTP {exc.code}"
         ) from exc
-    except URLError as exc:
-        raise PublishError(
-            f"registry preflight failed for {package}: {exc.reason}"
-        ) from exc
+    except (URLError, RegistryTransportError) as exc:
+        raise PublishError(f"registry preflight failed for {package}: {exc}") from exc
 
     dist = remote.get("dist")
     if (
@@ -168,9 +179,7 @@ def read_back_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             remote = fetch_registry_package(package, version)
-        except PublishError as exc:
-            if "registry request failed" not in str(exc):
-                raise
+        except RegistryTransportError as exc:
             last_error = (
                 f"{package}@{version} registry readback transport failure "
                 f"(attempt {attempt}/{max_attempts}): {exc}"
@@ -198,7 +207,7 @@ def read_back_with_retry(
             continue
         except URLError as exc:
             raise PublishError(
-                f"registry readback failed for {package}: {exc.reason}"
+                f"registry readback failed for {package}: {exc}"
             ) from exc
 
         dist = remote.get("dist")
@@ -218,19 +227,29 @@ def read_back_with_retry(
     raise PublishError(last_error)
 
 
-def publish_tarball(tarball: Path) -> None:
-    subprocess.run(
-        [
-            "npm",
-            "publish",
-            "--ignore-scripts",
-            str(tarball),
-            "--access",
-            "public",
-            "--provenance",
-        ],
-        check=True,
-    )
+def publish_tarball(
+    tarball: Path,
+    *,
+    timeout_seconds: float = DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS,
+) -> None:
+    try:
+        subprocess.run(
+            [
+                "npm",
+                "publish",
+                "--ignore-scripts",
+                str(tarball),
+                "--access",
+                "public",
+                "--provenance",
+            ],
+            check=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PublishError(
+            f"npm publish timed out after {timeout_seconds:.0f}s for {tarball.name}"
+        ) from exc
 
 
 def publish_package(

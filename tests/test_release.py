@@ -339,6 +339,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn('--version "${GITHUB_REF_NAME#v}"', self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
+        self.assertIn("shell: bash", self.workflow)
         self.assertNotIn("remote_version=$(npm view", self.workflow)
 
     def test_workflow_is_tag_only(self):
