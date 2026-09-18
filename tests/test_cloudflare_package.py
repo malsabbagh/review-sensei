@@ -204,51 +204,56 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)
 
-    def test_released_runner_switch_v4_fixture_matches_python_and_worker_copies(self):
+    def test_released_runner_switch_v4_fixture_copies_share_canonical_digest(self):
         import hashlib
 
         from review_sensei.hosting.github.setup import (
             RELEASED_RUNNER_SWITCH_V4_SHA256,
+            _released_runner_switch_v4_caller_bytes,
             _released_runner_switch_v4_workflow,
             _tagged_workflow,
         )
 
-        fixture = (
+        canonical = (
             ROOT
             / "tests"
             / "fixtures"
             / "setup-legacy"
             / "released-v4-resolve-trigger-runner-switch.yml"
         ).read_text(encoding="utf-8")
-        package_fixture = (
-            ROOT
-            / "src"
-            / "review_sensei"
-            / "hosting"
-            / "github"
-            / "fixtures"
-            / "released-v4-resolve-trigger-runner-switch.yml"
-        ).read_text(encoding="utf-8")
-        worker_fixture = (
-            CLOUDFLARE / "fixtures" / "released-v4-resolve-trigger-runner-switch.yml"
-        ).read_text(encoding="utf-8")
+        copies = {
+            "python-package": (
+                ROOT
+                / "src"
+                / "review_sensei"
+                / "hosting"
+                / "github"
+                / "fixtures"
+                / "released-v4-resolve-trigger-runner-switch.yml"
+            ).read_text(encoding="utf-8"),
+            "worker-bundle-source": (
+                CLOUDFLARE / "fixtures" / "released-v4-resolve-trigger-runner-switch.yml"
+            ).read_text(encoding="utf-8"),
+        }
         self.assertEqual(
-            hashlib.sha256(fixture.encode()).hexdigest(),
+            hashlib.sha256(canonical.encode()).hexdigest(),
             RELEASED_RUNNER_SWITCH_V4_SHA256,
         )
-        self.assertEqual(fixture, package_fixture)
-        self.assertEqual(fixture, worker_fixture)
-        self.assertEqual(_released_runner_switch_v4_workflow("v4"), fixture)
+        for name, content in copies.items():
+            with self.subTest(copy=name):
+                self.assertEqual(content, canonical)
+        self.assertEqual(_released_runner_switch_v4_caller_bytes(), canonical)
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), canonical)
         self.assertEqual(
             _tagged_workflow("v4"),
             (
                 ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
-        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+        ts_source = (CLOUDFLARE / "src" / "released-runner-switch-v4-caller.ts").read_text(
             encoding="utf-8"
         )
-        self.assertIn("export function releasedRunnerSwitchV4WorkflowTemplate", ts_source)
+        self.assertIn("releasedRunnerSwitchV4CallerFixture", ts_source)
         self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
 
     def test_setup_builders_share_constants_and_variables(self):

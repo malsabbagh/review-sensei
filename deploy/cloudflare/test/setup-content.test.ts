@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import {
+  RELEASED_RUNNER_SWITCH_V4_SHA256,
+  releasedRunnerSwitchV4CallerBytes,
+} from "../src/released-runner-switch-v4-caller";
 import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_VARIABLES,
@@ -72,21 +77,29 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("head_sha || github.run_id");
   });
 
-  it("reconstructs the released runner-switch v4 caller from the canonical fixture", () => {
-    const fixture = readFileSync(
+  it("loads the released runner-switch caller through the shipping module", () => {
+    const caller = releasedRunnerSwitchV4CallerBytes();
+    expect(
+      createHash("sha256").update(caller).digest("hex"),
+    ).toBe(RELEASED_RUNNER_SWITCH_V4_SHA256);
+    expect(releasedRunnerSwitchV4WorkflowTemplate("v4")).toBe(caller);
+    expect(releasedRunnerSwitchV4WorkflowTemplate("stable")).toBe(
+      caller.replaceAll(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@stable",
+      ),
+    );
+  });
+
+  it("matches the canonical repository fixture bytes", () => {
+    const canonical = readFileSync(
       new URL(
         "../../../tests/fixtures/setup-legacy/released-v4-resolve-trigger-runner-switch.yml",
         import.meta.url,
       ),
       "utf8",
     );
-    expect(releasedRunnerSwitchV4WorkflowTemplate("v4")).toBe(fixture);
-    expect(releasedRunnerSwitchV4WorkflowTemplate("stable")).toBe(
-      fixture.replaceAll(
-        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
-        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@stable",
-      ),
-    );
+    expect(releasedRunnerSwitchV4CallerBytes()).toBe(canonical);
   });
 
   it("generates one provider-neutral reusable job with the supplied tag", () => {

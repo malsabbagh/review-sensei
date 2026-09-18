@@ -43,6 +43,13 @@
 			]
 		}
 	],
+	"rules": [
+		{
+			"type": "Text",
+			"globs": ["**/fixtures/*.yml"],
+			"fallthrough": true
+		}
+	],
 	"observability": {
 		"redact_query_string": false,
 		"logs": {

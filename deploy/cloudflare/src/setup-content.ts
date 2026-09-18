@@ -7,14 +7,12 @@
  * to the workflow; this module never handles its value.
  */
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+  RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
+  releasedRunnerSwitchV4CallerBytes,
+} from "./released-runner-switch-v4-caller";
 
 const GITHUB_EXPRESSION = "@@";
-const RELEASED_RUNNER_SWITCH_V4_SHA256 =
-  "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e";
-const RELEASED_RUNNER_SWITCH_V4_TAG_MARKER =
-  "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const PUBLIC_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LEGACY_V3_SOURCE_INPUTS = [
@@ -744,27 +742,6 @@ function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
 
 const PROVIDER_PARITY_DRAFT_SKIP =
   "      github.event.pull_request.draft != true &&\n";
-
-let releasedRunnerSwitchV4CallerBytesCache: string | undefined;
-
-function releasedRunnerSwitchV4CallerBytes(): string {
-  if (releasedRunnerSwitchV4CallerBytesCache !== undefined) {
-    return releasedRunnerSwitchV4CallerBytesCache;
-  }
-  const content = readFileSync(
-    new URL(
-      "../fixtures/released-v4-resolve-trigger-runner-switch.yml",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-  const digest = createHash("sha256").update(content).digest("hex");
-  if (digest !== RELEASED_RUNNER_SWITCH_V4_SHA256) {
-    throw new Error("released runner-switch v4 caller fixture digest mismatch");
-  }
-  releasedRunnerSwitchV4CallerBytesCache = content;
-  return content;
-}
 
 /** Byte-exact released setup-v4 caller retained for managed migration. */
 export function releasedRunnerSwitchV4WorkflowTemplate(
