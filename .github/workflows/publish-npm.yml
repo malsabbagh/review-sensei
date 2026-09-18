@@ -150,7 +150,7 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
-    if: ${{ always() && needs.verify-request.result == 'success' && needs.native-build.result == 'success' && inputs.resume_bundle_run_id == '' }}
+    if: ${{ needs.verify-request.result == 'success' && needs.native-build.result == 'success' && inputs.resume_bundle_run_id == '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -335,6 +335,10 @@ jobs:
           DISPATCH_SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
         run: |
           set -euo pipefail
+          if [[ -z "${DISPATCH_SOURCE_SHA:-}" ]]; then
+            echo "verify-request did not produce a dispatch source SHA" >&2
+            exit 1
+          fi
           run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository,displayTitle)"
           bundle_source_sha="$(python3 - "$run_json" <<'PY'
           import json
@@ -401,7 +405,9 @@ jobs:
             while read -r _ _ filename; do
               gh attestation verify "$filename" \
                 --repo "$GITHUB_REPOSITORY" \
-                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml"
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
+                --source-ref "refs/heads/$DEFAULT_BRANCH" \
+                --source-digest "$bundle_source_sha"
             done < SHA256SUMS
           )
           rm -rf release/npm

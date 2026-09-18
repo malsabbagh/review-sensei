@@ -497,7 +497,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             resume_section,
         )
         self.assertIn("resume_staging", resume_section)
-        self.assertIn("gh attestation verify", resume_section)
+        self.assertIn('--source-digest "$bundle_source_sha"', resume_section)
+        self.assertIn('--source-ref "refs/heads/$DEFAULT_BRANCH"', resume_section)
+        self.assertIn(
+            "verify-request did not produce a dispatch source SHA", resume_section
+        )
         self.assertIn("DISPATCH_SOURCE_SHA", resume_section)
         self.assertIn(
             "resume_bundle_run_id must reference a run from the dispatch source commit",

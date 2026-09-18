@@ -1413,18 +1413,6 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 expected_source_sha="a" * 40,
             )
 
-    def test_verify_resumed_bundle_rejects_legacy_bundle_when_source_sha_required(
-        self,
-    ) -> None:
-        from scripts.publish_npm_release import verify_resumed_bundle
-
-        with self.assertRaisesRegex(PublishError, "bundle-metadata.json"):
-            verify_resumed_bundle(
-                self.bundle_dir,
-                "0.5.0",
-                expected_source_sha="a" * 40,
-            )
-
     def test_verify_resumed_bundle_checks_metadata_source_sha(self) -> None:
         from scripts.publish_npm_release import verify_resumed_bundle
 
@@ -1528,6 +1516,26 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 self.bundle_dir, "0.5.0", expected_source_sha="a" * 40
             )
 
+    def test_verify_bundle_command_accepts_matching_source_sha(self) -> None:
+        from scripts.publish_npm_release import main
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        exit_code = main(
+            [
+                "verify-bundle",
+                "--bundle-dir",
+                str(self.bundle_dir),
+                "--version",
+                "0.5.0",
+                "--expected-source-sha",
+                "a" * 40,
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+
     def test_verify_bundle_command_requires_expected_source_sha(self) -> None:
         from scripts.publish_npm_release import main
 
@@ -1554,26 +1562,31 @@ class PublishNpmReleaseTests(unittest.TestCase):
             load_bundle_metadata(self.bundle_dir)
 
     def test_preflight_resume_rejects_metadata_source_sha_mismatch(self) -> None:
+        import io
+        from unittest import mock
+
         from scripts.publish_npm_release import main
 
         (self.bundle_dir / "bundle-metadata.json").write_text(
             json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
             encoding="utf-8",
         )
-        exit_code = main(
-            [
-                "preflight",
-                "--bundle-dir",
-                str(self.bundle_dir),
-                "--version",
-                "0.5.0",
-                "--expected-source-sha",
-                "b" * 40,
-                "--readback-attempts",
-                "1",
-            ]
-        )
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            exit_code = main(
+                [
+                    "preflight",
+                    "--bundle-dir",
+                    str(self.bundle_dir),
+                    "--version",
+                    "0.5.0",
+                    "--expected-source-sha",
+                    "b" * 40,
+                    "--readback-attempts",
+                    "1",
+                ]
+            )
         self.assertEqual(exit_code, 1)
+        self.assertIn("does not match attested run", stderr.getvalue())
 
 
 if __name__ == "__main__":
