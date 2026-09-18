@@ -1401,12 +1401,17 @@ class PublishNpmReleaseTests(unittest.TestCase):
         publish.assert_not_called()
         readback.assert_not_called()
 
-    def test_verify_resumed_bundle_accepts_legacy_bundle_without_expected_sha(
+    def test_verify_resumed_bundle_accepts_legacy_bundle_without_metadata(
         self,
     ) -> None:
         from scripts.publish_npm_release import verify_resumed_bundle
 
-        verify_resumed_bundle(self.bundle_dir, "0.5.0")
+        with self.assertRaisesRegex(PublishError, "missing bundle-metadata.json"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="a" * 40,
+            )
 
     def test_verify_resumed_bundle_rejects_legacy_bundle_when_source_sha_required(
         self,
@@ -1476,6 +1481,16 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(PublishError, "invalid source_sha"):
             load_bundle_metadata(self.bundle_dir)
 
+    def test_load_bundle_metadata_rejects_invalid_version(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0 ", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid version"):
+            load_bundle_metadata(self.bundle_dir)
+
     def test_load_bundle_metadata_rejects_short_source_sha(self) -> None:
         from scripts.publish_npm_release import load_bundle_metadata
 
@@ -1508,8 +1523,10 @@ class PublishNpmReleaseTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.bundle_dir / "integrity.jsonl").unlink()
-        with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
-            verify_resumed_bundle(self.bundle_dir, "0.5.0")
+        with self.assertRaisesRegex(PublishError, "missing integrity.jsonl"):
+            verify_resumed_bundle(
+                self.bundle_dir, "0.5.0", expected_source_sha="a" * 40
+            )
 
     def test_verify_bundle_command_requires_expected_source_sha(self) -> None:
         from scripts.publish_npm_release import main
@@ -1535,6 +1552,28 @@ class PublishNpmReleaseTests(unittest.TestCase):
         (self.bundle_dir / "bundle-metadata.json").write_bytes(oversized)
         with self.assertRaisesRegex(PublishError, "exceeds size limit"):
             load_bundle_metadata(self.bundle_dir)
+
+    def test_preflight_resume_rejects_metadata_source_sha_mismatch(self) -> None:
+        from scripts.publish_npm_release import main
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        exit_code = main(
+            [
+                "preflight",
+                "--bundle-dir",
+                str(self.bundle_dir),
+                "--version",
+                "0.5.0",
+                "--expected-source-sha",
+                "b" * 40,
+                "--readback-attempts",
+                "1",
+            ]
+        )
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

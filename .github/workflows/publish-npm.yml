@@ -28,7 +28,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: publish-npm-${{ inputs.version }}
@@ -290,14 +289,16 @@ jobs:
 
   publish-npm:
     name: Publish npm packages
-    needs: [verify-request, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped')) }}
+    needs: [verify-request, native-build, assemble-npm]
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm
       url: https://www.npmjs.com/org/reviewsensei
     permissions:
       contents: read
+      actions: read
+      attestations: read
       id-token: write
     steps:
       - name: Set up pinned Node.js
@@ -340,14 +341,18 @@ jobs:
           RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
           VERSION: ${{ inputs.version }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
         run: |
           set -euo pipefail
-          mkdir -p release/npm
           run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository,displayTitle)"
           bundle_source_sha="$(python3 - "$run_json" <<'PY'
           import json
           import os
           import sys
+
+          def fail(message: str) -> None:
+              print(message, file=sys.stderr)
+              sys.exit(1)
 
           run = json.loads(sys.argv[1])
           expected_repo = os.environ["GITHUB_REPOSITORY"]
@@ -355,50 +360,65 @@ jobs:
           version = os.environ["VERSION"]
           run_id = str(run["databaseId"])
           if run_id != os.environ["RESUME_BUNDLE_RUN_ID"]:
-              raise SystemExit("resume_bundle_run_id does not match attested workflow run")
+              fail("resume_bundle_run_id does not match attested workflow run")
           if run.get("workflowName") != "Publish npm packages":
-              raise SystemExit("resume_bundle_run_id must reference a publish-npm workflow run")
+              fail("resume_bundle_run_id must reference a publish-npm workflow run")
           if run.get("conclusion") not in {"failure", "cancelled"}:
-              raise SystemExit("resume_bundle_run_id must reference a failed or cancelled run")
+              fail("resume_bundle_run_id must reference a failed or cancelled run")
           if run.get("event") != "workflow_dispatch":
-              raise SystemExit("resume_bundle_run_id must reference a manual publish-npm dispatch")
+              fail("resume_bundle_run_id must reference a manual publish-npm dispatch")
           if run.get("headBranch") != expected_branch:
-              raise SystemExit("resume_bundle_run_id must reference a default-branch dispatch")
+              fail("resume_bundle_run_id must reference a default-branch dispatch")
           head_repo = run.get("headRepository") or {}
           owner = (head_repo.get("owner") or {}).get("login")
           name = head_repo.get("name")
           if f"{owner}/{name}" != expected_repo:
-              raise SystemExit("resume_bundle_run_id must reference this repository")
+              fail("resume_bundle_run_id must reference this repository")
           display_title = run.get("displayTitle") or ""
           if display_title.startswith("publish-npm "):
               if display_title != f"publish-npm {version}":
-                  raise SystemExit(
+                  fail(
                       "resume_bundle_run_id must reference a publish-npm run for the same version"
                   )
           head_sha = run.get("headSha")
           if not isinstance(head_sha, str) or not head_sha:
-              raise SystemExit("resume_bundle_run_id is missing attested head SHA")
+              fail("resume_bundle_run_id is missing attested head SHA")
+          if head_sha != os.environ["DISPATCH_SOURCE_SHA"]:
+              fail(
+                  "resume_bundle_run_id must reference a run from the dispatch source commit"
+              )
           print(head_sha)
           PY
           )"
-          git -C resume-source fetch --depth 1 origin "$DEFAULT_BRANCH"
+          git -C resume-source fetch origin "$bundle_source_sha"
           git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
           git -C resume-source checkout "$bundle_source_sha"
           python resume-source/scripts/check_release_version.py --tag "v$VERSION"
-          resume_check_dir="$RUNNER_TEMP/resume-bundle-check"
-          rm -rf "$resume_check_dir"
-          mkdir -p "$resume_check_dir" release/npm
+          resume_staging="$RUNNER_TEMP/resume-bundle-staging"
+          rm -rf "$resume_staging"
+          mkdir -p "$resume_staging"
           gh run download "$RESUME_BUNDLE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name review-sensei-npm-release-bundle \
-            --dir "$resume_check_dir"
+            --dir "$resume_staging"
           python resume-source/scripts/publish_npm_release.py verify-bundle \
-            --bundle-dir "$resume_check_dir" \
+            --bundle-dir "$resume_staging" \
             --version "$VERSION" \
             --expected-source-sha "$bundle_source_sha"
-          shopt -s dotglob
-          mv "$resume_check_dir"/* release/npm/
-          shopt -u dotglob
+          (
+            cd "$resume_staging"
+            while read -r _ _ filename; do
+              gh attestation verify "$filename" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml"
+            done < SHA256SUMS
+          )
+          rm -rf release/npm
+          mkdir -p release/npm
+          cp -a "$resume_staging"/. release/npm/
+          test -f release/npm/integrity.jsonl
+          test -f release/npm/bundle-metadata.json
+          test -f release/npm/SHA256SUMS
           echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify downloaded npm tarball checksums
@@ -460,10 +480,18 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
-        run: >-
-          python source/scripts/publish_npm_release.py preflight
-          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-          --version "$VERSION"
+          RESUME_SOURCE_SHA: ${{ steps.resume-bundle.outputs.bundle_source_sha }}
+        run: |
+          set -euo pipefail
+          args=(
+            python source/scripts/publish_npm_release.py preflight
+            --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+            --version "$VERSION"
+          )
+          if [[ -n "${RESUME_SOURCE_SHA:-}" ]]; then
+            args+=(--expected-source-sha "$RESUME_SOURCE_SHA")
+          fi
+          "${args[@]}"
 
       - name: Publish platform packages first and read back integrity
         shell: bash

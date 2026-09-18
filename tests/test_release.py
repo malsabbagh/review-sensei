@@ -430,7 +430,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             publish_if_line,
         )
         self.assertIn(
-            "inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'",
+            "inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped'",
             publish_if_line,
         )
         self.assertIn("environment:\n      name: npm", self.workflow)
@@ -495,11 +495,32 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             'display_title != f"publish-npm {version}"',
             resume_section,
         )
-        self.assertIn("resume_check_dir", resume_section)
+        self.assertIn("resume_staging", resume_section)
+        self.assertIn("gh attestation verify", resume_section)
+        self.assertIn("DISPATCH_SOURCE_SHA", resume_section)
+        self.assertIn(
+            "resume_bundle_run_id must reference a run from the dispatch source commit",
+            resume_section,
+        )
+        self.assertIn("test -f release/npm/integrity.jsonl", resume_section)
         self.assertIn('--version "$VERSION"', resume_section)
         self.assertIn('--expected-source-sha "$bundle_source_sha"', resume_section)
-        self.assertIn("release/npm/bundle-metadata.json", self.workflow)
-        self.assertIn("actions: read", self.workflow)
+        publish_section = self.workflow.split("  publish-npm:", maxsplit=1)[1]
+        publish_permissions = publish_section.split("    steps:", maxsplit=1)[0]
+        self.assertIn("actions: read", publish_permissions)
+        self.assertIn("attestations: read", publish_permissions)
+        self.assertIn(
+            "needs.native-build.result == 'skipped'",
+            publish_section.split("    steps:", maxsplit=1)[0],
+        )
+        self.assertNotIn(
+            "needs.assemble-npm.result == 'skipped'",
+            publish_section.split("    if:", maxsplit=1)[1].split("\n", maxsplit=1)[0],
+        )
+        preflight_section = self.workflow.split(
+            "Verify registry state against attested tarballs", maxsplit=1
+        )[1].split("Publish platform packages first", maxsplit=1)[0]
+        self.assertIn("--expected-source-sha", preflight_section)
         self.assertIn("Check out repository for resumed run validation", self.workflow)
         self.assertIn("resume-source", self.workflow)
         native_section = self.workflow.split("  native-build:", maxsplit=1)[1].split(

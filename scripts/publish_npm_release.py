@@ -15,6 +15,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from scripts.check_release_version import TAG_PATTERN
+
 REGISTRY_USER_AGENT = "review-sensei-npm-publish/1.0"
 
 PLATFORM_PACKAGES = (
@@ -73,6 +75,10 @@ def _is_git_sha(value: str) -> bool:
     )
 
 
+def _is_release_version(value: str) -> bool:
+    return bool(TAG_PATTERN.fullmatch(f"v{value}"))
+
+
 def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     path = bundle_metadata_path(bundle_dir)
     if not path.is_file():
@@ -94,6 +100,10 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     source_sha = metadata.get("source_sha")
     if not isinstance(version, str) or not version:
         raise PublishError("release bundle metadata is missing version")
+    if not _is_release_version(version):
+        raise PublishError(
+            f"release bundle metadata has invalid version at {path}: {version!r}"
+        )
     if not isinstance(source_sha, str) or not source_sha:
         raise PublishError("release bundle metadata is missing source_sha")
     if not _is_git_sha(source_sha):
@@ -115,30 +125,26 @@ def verify_resumed_bundle(
     bundle_dir: Path,
     version: str,
     *,
-    expected_source_sha: str | None = None,
+    expected_source_sha: str,
 ) -> dict[str, dict[str, str]]:
-    if expected_source_sha is not None and not _is_git_sha(expected_source_sha):
+    if not _is_git_sha(expected_source_sha):
         raise PublishError("expected source SHA is not a canonical git commit")
     metadata = load_bundle_metadata(bundle_dir)
     if metadata is None:
-        if expected_source_sha is not None:
-            raise PublishError(
-                "resumed release bundle is missing bundle-metadata.json; "
-                "only bundles produced after bundle metadata recording can be resumed"
-            )
-        return verify_bundle_version(bundle_dir, version)
+        raise PublishError(
+            f"resumed release bundle at {bundle_dir} is missing bundle-metadata.json; "
+            "only bundles produced after bundle metadata recording can be resumed"
+        )
     if metadata["version"] != version:
         raise PublishError(
             "release bundle version "
             f"{metadata['version']!r} does not match requested {version!r}"
         )
-    if (
-        expected_source_sha is not None
-        and metadata["source_sha"] != expected_source_sha
-    ):
+    if metadata["source_sha"] != expected_source_sha:
         raise PublishError(
             "resumed release bundle source_sha "
-            f"{metadata['source_sha']!r} does not match attested run {expected_source_sha!r}"
+            f"{metadata['source_sha']!r} does not match attested run "
+            f"{expected_source_sha!r} in {bundle_dir}"
         )
     return load_integrity_records(bundle_dir, version)
 
@@ -146,7 +152,9 @@ def verify_resumed_bundle(
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     integrity_path = bundle_dir / "integrity.jsonl"
     if not integrity_path.is_file():
-        raise PublishError("release bundle has an invalid package integrity set")
+        raise PublishError(
+            f"release bundle is missing integrity.jsonl at {integrity_path}"
+        )
     records = [
         json.loads(line)
         for line in integrity_path.read_text(encoding="utf-8").splitlines()
@@ -156,7 +164,9 @@ def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str
         item["name"]: item for item in records if item.get("version") == version
     }
     if set(expected) != set(ALL_PACKAGES) or len(expected) != len(records):
-        raise PublishError("release bundle has an invalid package integrity set")
+        raise PublishError(
+            f"release bundle has an invalid package integrity set in {bundle_dir}"
+        )
     return expected
 
 
