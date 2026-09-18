@@ -155,6 +155,8 @@ jobs:
     name: Assemble and validate npm package set
     needs: native-build
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     permissions:
       contents: read
       id-token: write

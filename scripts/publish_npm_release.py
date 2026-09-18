@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -94,19 +95,37 @@ def fetch_package_metadata(package: str) -> dict[str, Any]:
         ) from exc
 
 
-def package_version_indexed(package: str, version: str) -> bool | None:
+class PackumentProbeState(str, Enum):
+    VERSION_INDEXED = "version_indexed"
+    VERSION_ABSENT = "version_absent"
+    PACKUMENT_MISSING = "packument_missing"
+    INCONCLUSIVE = "inconclusive"
+
+
+def probe_packument_version_state(package: str, version: str) -> PackumentProbeState:
     try:
         metadata = fetch_package_metadata(package)
     except HTTPError as exc:
         if exc.code == 404:
-            return False
+            return PackumentProbeState.PACKUMENT_MISSING
         if is_retryable_registry_http_error(exc.code):
-            return None
+            return PackumentProbeState.INCONCLUSIVE
         raise
     except RegistryTransportError:
-        return None
+        return PackumentProbeState.INCONCLUSIVE
     versions = metadata.get("versions")
-    return isinstance(versions, dict) and version in versions
+    if isinstance(versions, dict) and version in versions:
+        return PackumentProbeState.VERSION_INDEXED
+    return PackumentProbeState.VERSION_ABSENT
+
+
+def package_version_indexed(package: str, version: str) -> bool | None:
+    probe = probe_packument_version_state(package, version)
+    if probe == PackumentProbeState.VERSION_INDEXED:
+        return True
+    if probe == PackumentProbeState.INCONCLUSIVE:
+        return None
+    return False
 
 
 def fetch_registry_package(package: str, version: str) -> dict[str, Any]:
@@ -142,13 +161,48 @@ def classify_registry_state(
     delay = initial_delay_seconds
     last_error = "unknown registry preflight failure"
     visibility_attempts = 0
+    packument_seen = False
+
+    def continue_after_ambiguous_preflight(
+        final_probe: PackumentProbeState,
+        *,
+        reason: str,
+    ) -> str | None:
+        nonlocal delay
+        if final_probe == PackumentProbeState.VERSION_ABSENT:
+            return "publish"
+        if (
+            final_probe == PackumentProbeState.PACKUMENT_MISSING
+            and not packument_seen
+            and attempt >= max_attempts
+        ):
+            return "publish"
+        if attempt >= max_attempts:
+            raise PublishError(
+                f"{package}@{version} registry preflight remained "
+                f"ambiguous after {max_attempts} attempts ({reason})"
+            )
+        print(
+            f"{package}@{version} registry preflight still "
+            f"ambiguous after 404 probes ({reason}); continuing to poll",
+            file=sys.stderr,
+        )
+        time.sleep(min(delay, max_delay_seconds))
+        delay = min(delay * 1.5, max_delay_seconds)
+        return None
+
     for attempt in range(1, max_attempts + 1):
         try:
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
             if exc.code == 404:
-                indexed = package_version_indexed(package, version)
-                if indexed is True:
+                probe = probe_packument_version_state(package, version)
+                if probe in {
+                    PackumentProbeState.VERSION_INDEXED,
+                    PackumentProbeState.VERSION_ABSENT,
+                }:
+                    packument_seen = True
+                if probe == PackumentProbeState.VERSION_INDEXED:
                     last_error = (
                         f"{package}@{version} version document replicating "
                         f"(attempt {attempt}/{max_attempts})"
@@ -159,10 +213,24 @@ def classify_registry_state(
                     time.sleep(min(delay, max_delay_seconds))
                     delay = min(delay * 1.5, max_delay_seconds)
                     continue
-                if indexed is None:
+                if probe == PackumentProbeState.INCONCLUSIVE:
                     last_error = (
                         f"{package}@{version} registry preflight packument "
                         f"probe inconclusive (attempt {attempt}/{max_attempts})"
+                    )
+                    if attempt >= max_attempts:
+                        raise PublishError(
+                            f"{package}@{version} registry preflight packument "
+                            f"probe remained inconclusive after {max_attempts} attempts"
+                        )
+                    print(last_error, file=sys.stderr)
+                    time.sleep(min(delay, max_delay_seconds))
+                    delay = min(delay * 1.5, max_delay_seconds)
+                    continue
+                if probe == PackumentProbeState.PACKUMENT_MISSING and packument_seen:
+                    last_error = (
+                        f"{package}@{version} registry preflight packument "
+                        f"transiently missing (attempt {attempt}/{max_attempts})"
                     )
                     if attempt >= max_attempts:
                         raise PublishError(
@@ -179,22 +247,19 @@ def classify_registry_state(
                     f"(HTTP 404, probe {visibility_attempts}/{preflight_404_attempts})"
                 )
                 if visibility_attempts >= preflight_404_attempts:
-                    final_indexed = package_version_indexed(package, version)
-                    if final_indexed is not False:
-                        if attempt >= max_attempts:
-                            raise PublishError(
-                                f"{package}@{version} registry preflight remained "
-                                f"ambiguous after {max_attempts} attempts"
-                            )
-                        print(
-                            f"{package}@{version} registry preflight still "
-                            "ambiguous after 404 probes; continuing to poll",
-                            file=sys.stderr,
-                        )
-                        time.sleep(min(delay, max_delay_seconds))
-                        delay = min(delay * 1.5, max_delay_seconds)
-                        continue
-                    return "publish"
+                    final_probe = probe_packument_version_state(package, version)
+                    if final_probe in {
+                        PackumentProbeState.VERSION_INDEXED,
+                        PackumentProbeState.VERSION_ABSENT,
+                    }:
+                        packument_seen = True
+                    action = continue_after_ambiguous_preflight(
+                        final_probe,
+                        reason=final_probe.value,
+                    )
+                    if action is not None:
+                        return action
+                    continue
                 print(last_error, file=sys.stderr)
                 time.sleep(min(delay, max_delay_seconds))
                 delay = min(delay * 1.5, max_delay_seconds)

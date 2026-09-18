@@ -17,6 +17,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     ALL_PACKAGES,
     PLATFORM_PACKAGES,
     IntegrityMismatchError,
+    PackumentProbeState,
     PublishError,
     RegistryTransportError,
     classify_registry_state,
@@ -266,6 +267,124 @@ class PublishNpmReleaseTests(unittest.TestCase):
 
         self.assertEqual(action, "verified")
 
+    def test_classify_registry_state_waits_when_packument_transiently_missing(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-darwin-arm64"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        indexed_packument = json.dumps(
+            {
+                "name": package,
+                "versions": {version: {"name": package, "version": version}},
+            }
+        ).encode("utf-8")
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": package,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            packument_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                *[io.BytesIO(indexed_packument) for _ in range(8)],
+            ],
+        }
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[str(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=4,
+                preflight_404_attempts=2,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        self.assertEqual(action, "verified")
+
+    def test_classify_registry_state_waits_when_packument_already_lists_version(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-darwin-arm64"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        packument_body = json.dumps(
+            {
+                "name": package,
+                "versions": {version: {"name": package, "version": version}},
+            }
+        ).encode("utf-8")
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": package,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            packument_url: [io.BytesIO(packument_body) for _ in range(6)],
+        }
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[str(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return io.BytesIO(item.read())
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        self.assertEqual(action, "verified")
+
     def test_classify_registry_state_fails_when_packument_probe_stays_inconclusive(
         self,
     ) -> None:
@@ -434,8 +553,8 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 side_effect=fake_fetch,
             ),
             mock.patch(
-                "scripts.publish_npm_release.package_version_indexed",
-                return_value=False,
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
             ),
             mock.patch("scripts.publish_npm_release.time.sleep"),
         ):
@@ -483,8 +602,8 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 side_effect=fake_fetch,
             ),
             mock.patch(
-                "scripts.publish_npm_release.package_version_indexed",
-                return_value=False,
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
             ),
             mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):
@@ -532,8 +651,12 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 side_effect=fake_fetch,
             ),
             mock.patch(
-                "scripts.publish_npm_release.package_version_indexed",
-                side_effect=lambda package, version: package == target,
+                "scripts.publish_npm_release.probe_packument_version_state",
+                side_effect=lambda package, version: (
+                    PackumentProbeState.VERSION_INDEXED
+                    if package == target
+                    else PackumentProbeState.VERSION_ABSENT
+                ),
             ),
             mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):
@@ -583,8 +706,8 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 side_effect=fake_fetch,
             ),
             mock.patch(
-                "scripts.publish_npm_release.package_version_indexed",
-                return_value=False,
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
             ),
             mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):

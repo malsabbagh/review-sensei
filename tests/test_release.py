@@ -350,6 +350,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "ref: ${{ needs.assemble-npm.outputs.source_sha }}", self.workflow
         )
+        self.assertIn("outputs:\n      source_sha:", self.workflow)
         self.assertIn('test "$SOURCE_SHA" = "$GITHUB_SHA"', self.workflow)
         self.assertIn("test -f source/scripts/publish_npm_release.py", self.workflow)
         self.assertIn(
@@ -402,6 +403,15 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "Assert helper checkout matches attested build source", self.workflow
+        )
+        self.assertIn(
+            'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', self.workflow
+        )
+        self.assertNotIn(
+            'test "$SOURCE_SHA" = "$GITHUB_SHA"',
+            self.workflow.split("Assert helper checkout matches attested build source")[
+                1
+            ].split("Configure bootstrap authentication when present")[0],
         )
         self.assertIn('test "$source_sha" = "$GITHUB_SHA"', self.workflow)
         self.assertIn(
