@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 from scripts.write_bundle_metadata import (
-    BundleMetadataError,
     SHA256SUMS_FILENAME,
+    BundleMetadataError,
     main,
     normalize_release_version,
     resolve_executed_source_sha,
