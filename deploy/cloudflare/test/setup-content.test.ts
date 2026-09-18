@@ -32,7 +32,7 @@ describe("setup-v4 public boundary", () => {
     expect(() => validatePublicWorkflowTag("v4.")).toThrow();
     expect(() => validatePublicWorkflowTag("v4.lock")).toThrow();
     expect(() => validatePublicWorkflowTag("v4\n")).toThrow();
-    expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v4");
+    expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v5");
   });
 
   it("generates fork-safe callers at the supplied public workflow tag", () => {
@@ -67,9 +67,9 @@ describe("setup-v4 public boundary", () => {
   });
 
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
-    const workflow = buildTaggedV4SetupFiles("v4")[0].content;
+    const workflow = buildTaggedV4SetupFiles("v5")[0].content;
     expect(workflow).toContain(
-      "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+      "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
     );
     expect(workflow).not.toMatch(/^\s*group:.*head_sha/m);
     expect(workflow).not.toContain("source_comment_id || head_sha");
@@ -132,7 +132,7 @@ describe("setup-v4 public boundary", () => {
       readFileSync(
         new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
         "utf8",
-      ).replace("@v4", `@${tag}`),
+      ).replace("@v5", `@${tag}`),
     );
   });
 });

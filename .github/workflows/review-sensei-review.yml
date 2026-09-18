@@ -307,10 +307,11 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')))
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}

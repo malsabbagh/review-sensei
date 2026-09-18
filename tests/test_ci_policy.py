@@ -257,18 +257,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         """
         self.assertEqual(check_workflow_text(text), [])
 
-    def test_public_reusable_workflow_uses_the_managed_v4_tag(self):
+    def test_public_reusable_workflow_uses_the_managed_v5_tag(self):
         self.assertEqual(
             check_workflow_text(
                 "jobs:\n  call:\n    uses: "
                 "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@"
-                + "v4\n"
+                + "v5\n"
             ),
             [],
         )
         violations = check_workflow_text(
             "jobs:\n  call:\n    uses: "
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5\n"
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4\n"
         )
         self.assertEqual(len(violations), 1)
         self.assertIn("40-character commit SHA", violations[0])
@@ -307,7 +307,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertTrue(run_blocks)
         self.assertIn("# ReviewSensei setup version: 4", text)
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
@@ -332,7 +332,7 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertIn(f"inputs.{input_name}", text)
         self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
         self.assertIn("REVIEWSENSEI_AUTO_APPROVE", text)
-        self.assertEqual(text.count("review-sensei-run.yml@" + "v4"), 1)
+        self.assertEqual(text.count("review-sensei-run.yml@" + "v5"), 1)
         self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
         )
@@ -1003,7 +1003,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("setup-python@", job)
         self.assertNotIn("validate_hosted_workflow_model", job)
 
-    def test_dogfood_caller_intentionally_omits_model_input(self):
+    def test_dogfood_caller_matches_generated_setup_template(self):
         repo_root = Path(__file__).resolve().parents[1]
         dogfood = (
             repo_root / ".github" / "workflows" / "review-sensei-review.yml"
@@ -1011,8 +1011,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         example = (
             repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", example)
-        self.assertNotIn("model: ${{ vars.REVIEWSENSEI_MODEL", dogfood)
+        self.assertEqual(example, dogfood)
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", dogfood)
         self.assertIn("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE", dogfood)
 
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
@@ -1193,7 +1193,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         python_line = next(
             line
-            for line in _resolve_trigger_workflow("v4").splitlines()
+            for line in _resolve_trigger_workflow("v5").splitlines()
             if line.startswith("run-name:")
         )
         worker_source = (
@@ -1272,10 +1272,12 @@ class ActionPinPolicyTests(unittest.TestCase):
     def test_active_workflow_jobs_use_recognized_github_hosted_runners(self):
         workflow_root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         workflow_paths = sorted(workflow_root.glob("*.yml"))
-        allowed_runs_on = (
+        github_hosted_runs_on = (
             re.compile(r"^runs-on: ubuntu-latest$"),
             re.compile(r"^runs-on: \$\{\{ matrix\.os \}\}$"),
-            re.compile(r"^runs-on: \[self-hosted, linux, x64, ollama\]$"),
+        )
+        ollama_self_hosted = re.compile(
+            r"^runs-on: \[self-hosted, linux, x64, ollama\]$"
         )
         self.assertTrue(workflow_paths)
         for workflow in workflow_paths:
@@ -1296,8 +1298,15 @@ class ActionPinPolicyTests(unittest.TestCase):
                 for line in runs_on_lines:
                     self.assertNotIn("ENABLE_UBICLOUD_HOSTED", line)
                     self.assertNotIn("ubicloud-standard-2", line)
+                    if workflow.name == "review-sensei-run.yml":
+                        self.assertTrue(
+                            line == "runs-on: ubuntu-latest"
+                            or ollama_self_hosted.match(line),
+                            msg=f"{workflow.name} has unrecognized runner: {line}",
+                        )
+                        continue
                     self.assertTrue(
-                        any(pattern.match(line) for pattern in allowed_runs_on),
+                        any(pattern.match(line) for pattern in github_hosted_runs_on),
                         msg=f"{workflow.name} has unrecognized runner: {line}",
                     )
 

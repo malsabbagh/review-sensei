@@ -55,7 +55,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             config["vars"],
             {
-                "PUBLIC_WORKFLOW_TAG": "v4",
+                "PUBLIC_WORKFLOW_TAG": "v5",
             },
         )
 
@@ -245,7 +245,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(_released_runner_switch_v4_caller_bytes(), canonical)
         self.assertEqual(_released_runner_switch_v4_workflow("v4"), canonical)
         self.assertEqual(
-            _tagged_workflow("v4"),
+            _tagged_workflow("v5"),
             (
                 ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
@@ -338,7 +338,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotRegex(example, r"(?m)^concurrency:")
         self.assertNotIn("group:", example)
         self.assertIn(
-            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             example,
         )
         self.assertIn("not a hosted review engine", readme)

@@ -141,11 +141,11 @@ is not a hosted review service, webhook receiver, or durable delivery store.
 ### GitHub App setup-v4 integration
 
 The optional setup-v4 integration adds a reviewable, generated caller by using
-the operator-managed `v4` git tag as the only update channel:
-`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4`.
+the operator-managed `v5` git tag as the only update channel:
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5`.
 The Worker validates the tag before writing the caller, and the Cloudflare
 broker resolves the same tag at capability exchange time and checks the
-executing workflow SHA. Moving `v4` is therefore the public cutoff action.
+executing workflow SHA. Moving `v5` is therefore the public cutoff action.
 The selected provider mode applies consistently to automatic pull-request
 reviews, manual reviews, learning proposals, artifacts, and authorized
 `@sensei` conversations. Cloud runs use GitHub-hosted compute; local runs use

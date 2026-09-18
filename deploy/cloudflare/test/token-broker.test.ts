@@ -9,7 +9,7 @@ import { TokenBroker } from "../src/token-broker";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
-const TAG = "v4";
+const TAG = "v5";
 
 function claims(overrides: Record<string, unknown> = {}) {
   return {

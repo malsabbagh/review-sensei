@@ -257,7 +257,7 @@ class SetupPlanTests(unittest.TestCase):
         ]
         self.assertIn("# ReviewSensei setup version: 4", workflow)
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             workflow,
         )
         self.assertIn(
@@ -339,7 +339,7 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             dynamic.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_build_plan_uses_the_supplied_tag(self):
@@ -368,7 +368,7 @@ class SetupPlanTests(unittest.TestCase):
                 / "examples/github-actions/review-sensei-review.yml"
             )
             .read_text(encoding="utf-8")
-            .replace("@v4", "@stable"),
+            .replace("@v5", "@stable"),
         )
         self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
         self.assertEqual(
@@ -631,7 +631,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_stale_v4_setup_following_another_tag_is_migrated(self):
@@ -652,7 +652,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
@@ -732,7 +732,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         migrated = next(
             file.content for file in branch_request[6] if file.path == WORKFLOW_PATH
         )
-        self.assertEqual(migrated, _tagged_workflow("v4"))
+        self.assertEqual(migrated, _tagged_workflow("v5"))
         self.assertEqual(_released_runner_switch_v4_workflow("v4"), released)
 
     def test_released_provider_parity_v4_caller_without_resolve_trigger_is_migrated(
@@ -812,7 +812,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         transport = FileTransport(
             files={
                 ".github/workflows/review-sensei-review.yml": workflow.replace(
-                    "@v4", "@v4.lock"
+                    "@v5", "@v5.lock"
                 )
             }
         )
@@ -1371,7 +1371,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 installation_token="ghs_opaque",
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
-                public_workflow_tag="v4",
+                public_workflow_tag="v5",
             )
         )
         self.assertIn("/compare/", calls[1][1])
@@ -1396,7 +1396,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 installation_token="ghs_opaque",
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
-                public_workflow_tag="v4",
+                public_workflow_tag="v5",
             )
         )
         self.assertEqual(len(calls), 1)

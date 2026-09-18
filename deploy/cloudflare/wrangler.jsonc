@@ -6,7 +6,7 @@
 	"workers_dev": true,
 	"preview_urls": true,
 	"vars": {
-		"PUBLIC_WORKFLOW_TAG": "v4"
+		"PUBLIC_WORKFLOW_TAG": "v5"
 	},
 	"routes": [
 		{

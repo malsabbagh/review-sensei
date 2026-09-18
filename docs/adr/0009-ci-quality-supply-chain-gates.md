@@ -22,7 +22,7 @@ entries across Ubuntu, Windows, and macOS; dedicated quality, schema, package,
 and CodeQL jobs; and a stable `Required checks` aggregate. Third-party Actions
 use full commit SHAs with same-line release comments. The public ReviewSensei
 reusable workflow is the deliberate exception: setup-v4 follows its protected
-`@v4` tag, while the broker verifies the tag's runtime commit. Dependabot updates
+`@v5` tag, while the broker verifies the tag's runtime commit. Dependabot updates
 GitHub Actions and pip tooling weekly from the repository root. Workflow
 permissions default to `contents: read`. CodeQL requests no `security-events:
 write` permission, retains its generated SARIF as a workflow artifact, and uses

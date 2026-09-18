@@ -73,7 +73,7 @@ PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v4 update channel. The Worker validates the
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
-DEFAULT_PUBLIC_WORKFLOW_TAG = "v4"
+DEFAULT_PUBLIC_WORKFLOW_TAG = "v5"
 RELEASED_RUNNER_SWITCH_V4_SHA256 = (
     "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
 )
@@ -1103,7 +1103,7 @@ def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
     caller = _released_runner_switch_v4_caller_bytes()
-    if tag == DEFAULT_PUBLIC_WORKFLOW_TAG:
+    if tag == "v4":
         return caller
     return caller.replace(
         _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
