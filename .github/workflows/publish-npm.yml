@@ -309,6 +309,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C source status --porcelain=v1)"
           test -f source/scripts/publish_npm_release.py
 
       - name: Configure bootstrap authentication when present

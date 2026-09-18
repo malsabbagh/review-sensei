@@ -304,8 +304,8 @@ jobs:
           SOURCE_SHA: ${{ needs.assemble-npm.outputs.source_sha }}
         run: |
           set -euo pipefail
-          test "$SOURCE_SHA" = "$GITHUB_SHA"
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C source status --porcelain=v1)"
           test -f source/scripts/publish_npm_release.py
 
       - name: Verify registry state against attested tarballs

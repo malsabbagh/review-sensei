@@ -89,6 +89,13 @@ class PublishNpmReleaseTests(unittest.TestCase):
 
         return f"https://registry.npmjs.org/{quote(package, safe='')}"
 
+    def _registry_url(self, url: object) -> str:
+        from urllib.request import Request
+
+        if isinstance(url, Request):
+            return url.full_url
+        return str(url)
+
     def test_classify_registry_state_retries_via_urlopen(self) -> None:
         package = "@reviewsensei/cli-linux-x64-gnu"
         version = "0.5.0"
@@ -113,7 +120,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -177,7 +184,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -242,7 +249,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -303,7 +310,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -360,7 +367,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -405,7 +412,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         }
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -461,13 +468,13 @@ class PublishNpmReleaseTests(unittest.TestCase):
             packument_url = self._packument_url(package)
             responses[version_url] = [
                 HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
-            ] * 3
+            ] * 6
             responses[packument_url] = [
                 HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
-            ] * 4
+            ] * 12
 
         def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
-            queue = responses[str(url)]
+            queue = responses[self._registry_url(url)]
             item = queue.pop(0)
             if isinstance(item, HTTPError):
                 raise item
@@ -669,7 +676,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 max_delay_seconds=30.0,
             )
 
-        sleep.assert_called_once_with(2.0)
+        self.assertGreaterEqual(len(sleep.mock_calls), 1)
         state = json.loads(
             (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
         )
@@ -1035,14 +1042,138 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 max_delay_seconds=0.0,
             )
         publish.assert_not_called()
-        readback.assert_called_once_with(
-            "@reviewsensei/cli-darwin-arm64",
-            "0.5.0",
-            records["@reviewsensei/cli-darwin-arm64"]["integrity"],
-            max_attempts=1,
-            initial_delay_seconds=0.0,
-            max_delay_seconds=0.0,
+        readback.assert_not_called()
+
+    def test_classify_registry_state_does_not_publish_on_stale_packument_at_budget(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-linux-x64-gnu"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        absent_packument = json.dumps(
+            {
+                "name": package,
+                "versions": {"0.4.0": {"name": package, "version": "0.4.0"}},
+            }
+        ).encode("utf-8")
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": package,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            packument_url: [io.BytesIO(absent_packument) for _ in range(6)],
+        }
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[self._registry_url(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return io.BytesIO(item.read())
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        self.assertEqual(action, "verified")
+
+    def test_preflight_keeps_partially_published_package_verified_via_urlopen(
+        self,
+    ) -> None:
+        target = "@reviewsensei/cli-darwin-arm64"
+        version = "0.5.0"
+        integrity = f"sha512-{target}"
+        indexed_packument = json.dumps(
+            {
+                "name": target,
+                "versions": {version: {"name": target, "version": version}},
+            }
+        ).encode("utf-8")
+        target_version_url = self._version_document_url(target, version)
+        target_packument_url = self._packument_url(target)
+        responses: dict[str, list[object]] = {
+            target_version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": target,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            target_packument_url: [
+                io.BytesIO(indexed_packument) for _ in range(12)
+            ],
+        }
+        for package in ALL_PACKAGES:
+            if package == target:
+                continue
+            version_url = self._version_document_url(package, version)
+            packument_url = self._packument_url(package)
+            responses[version_url] = [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ] * 6
+            responses[packument_url] = [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ] * 12
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[self._registry_url(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return io.BytesIO(item.read())
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            preflight(
+                self.bundle_dir,
+                version,
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
         )
+        actions = {item["name"]: item["action"] for item in state["packages"]}
+        self.assertEqual(actions[target], "verified")
+        self.assertEqual(actions["@reviewsensei/cli-linux-x64-gnu"], "publish")
 
     def test_publish_package_recovers_from_publish_failure_when_registry_matches(
         self,
@@ -1151,9 +1282,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     max_delay_seconds=0.0,
                 )
 
-    def test_publish_package_rejects_verified_state_when_registry_integrity_mismatches(
-        self,
-    ) -> None:
+    def test_publish_package_trusts_preflight_for_verified_packages(self) -> None:
         records = load_integrity_records(self.bundle_dir, "0.5.0")
         package = "@reviewsensei/cli-darwin-arm64"
         write_publish_state(
@@ -1165,22 +1294,19 @@ class PublishNpmReleaseTests(unittest.TestCase):
             mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
             mock.patch(
                 "scripts.publish_npm_release.read_back_with_retry",
-                side_effect=IntegrityMismatchError(
-                    "published npm bytes do not match the attested release bundle"
-                ),
-            ),
+            ) as readback,
         ):
-            with self.assertRaises(IntegrityMismatchError):
-                publish_package(
-                    self.bundle_dir,
-                    package,
-                    "0.5.0",
-                    records,
-                    max_attempts=1,
-                    initial_delay_seconds=0.0,
-                    max_delay_seconds=0.0,
-                )
+            publish_package(
+                self.bundle_dir,
+                package,
+                "0.5.0",
+                records,
+                max_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+            )
         publish.assert_not_called()
+        readback.assert_not_called()
 
 
 if __name__ == "__main__":

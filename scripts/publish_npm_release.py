@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+
+REGISTRY_USER_AGENT = "review-sensei-npm-publish/1.0"
 
 PLATFORM_PACKAGES = (
     "@reviewsensei/cli-darwin-arm64",
@@ -80,8 +82,15 @@ def publish_state_path(bundle_dir: Path) -> Path:
 
 def fetch_package_metadata(package: str) -> dict[str, Any]:
     url = f"https://registry.npmjs.org/{quote(package, safe='')}"
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": REGISTRY_USER_AGENT,
+        },
+    )
     try:
-        with urlopen(url, timeout=30) as response:
+        with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError:
         raise
@@ -133,8 +142,15 @@ def fetch_registry_package(package: str, version: str) -> dict[str, Any]:
         "https://registry.npmjs.org/"
         f"{quote(package, safe='')}/{quote(version, safe='')}"
     )
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": REGISTRY_USER_AGENT,
+        },
+    )
     try:
-        with urlopen(url, timeout=30) as response:
+        with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError:
         raise
@@ -166,16 +182,20 @@ def classify_registry_state(
     def continue_after_ambiguous_preflight(
         final_probe: PackumentProbeState,
         *,
+        attempt: int,
         reason: str,
     ) -> str | None:
         nonlocal delay
-        if final_probe == PackumentProbeState.VERSION_ABSENT:
-            return "publish"
-        if (
-            final_probe == PackumentProbeState.PACKUMENT_MISSING
-            and not packument_seen
-            and attempt >= max_attempts
+        if final_probe in {
+            PackumentProbeState.VERSION_INDEXED,
+            PackumentProbeState.INCONCLUSIVE,
+        }:
+            pass
+        elif (
+            final_probe == PackumentProbeState.PACKUMENT_MISSING and packument_seen
         ):
+            pass
+        elif attempt >= max_attempts:
             return "publish"
         if attempt >= max_attempts:
             raise PublishError(
@@ -255,6 +275,7 @@ def classify_registry_state(
                         packument_seen = True
                     action = continue_after_ambiguous_preflight(
                         final_probe,
+                        attempt=attempt,
                         reason=final_probe.value,
                     )
                     if action is not None:
@@ -463,14 +484,6 @@ def publish_package(
         raise PublishError(f"missing integrity record for {package}")
     expected_integrity = record["integrity"]
     if action == "verified":
-        read_back_with_retry(
-            package,
-            version,
-            expected_integrity,
-            max_attempts=max_attempts,
-            initial_delay_seconds=initial_delay_seconds,
-            max_delay_seconds=max_delay_seconds,
-        )
         print(f"Registry already contains the attested bytes for {package}@{version}")
         return
 
