@@ -283,7 +283,7 @@ jobs:
     # Resume dispatches are selected only by resume_bundle_run_id; assemble-npm must
     # be skipped on that path so a fresh bundle was not assembled in this run.
     needs: [verify-request, native-build, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped')) }}
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.native-build.result == 'success' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm

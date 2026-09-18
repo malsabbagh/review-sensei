@@ -427,7 +427,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("inputs.publish", publish_if_line)
         self.assertIn(
-            "inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success'",
+            "inputs.resume_bundle_run_id == '' && needs.native-build.result == 'success' && needs.assemble-npm.result == 'success'",
             publish_if_line,
         )
         self.assertIn(
