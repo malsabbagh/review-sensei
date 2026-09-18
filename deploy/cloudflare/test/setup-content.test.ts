@@ -7,6 +7,7 @@ import {
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  releasedRunnerSwitchV4WorkflowTemplate,
   validatePublicWorkflowTag,
   validatePublicWorkflowSha,
 } from "../src/setup-content";
@@ -69,6 +70,23 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("source_comment_id || head_sha");
     expect(workflow).not.toContain("head_sha || head_ref || run_id");
     expect(workflow).not.toContain("head_sha || github.run_id");
+  });
+
+  it("reconstructs the released runner-switch v4 caller from the canonical fixture", () => {
+    const fixture = readFileSync(
+      new URL(
+        "../../../tests/fixtures/setup-legacy/released-v4-resolve-trigger-runner-switch.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(releasedRunnerSwitchV4WorkflowTemplate("v4")).toBe(fixture);
+    expect(releasedRunnerSwitchV4WorkflowTemplate("stable")).toBe(
+      fixture.replaceAll(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@stable",
+      ),
+    );
   });
 
   it("generates one provider-neutral reusable job with the supplied tag", () => {

@@ -116,11 +116,10 @@ Worker and npm launcher sources are included alongside Python. Stale "private
 repository" wording in the Decision section is historical; do not infer
 reduced public-repo permissions from it.
 
-## Amendment (2026-09-18) — remove Ubicloud runner switch
+## Amendment (2026-09-18) — remove optional runner switch
 
-The optional `ENABLE_UBICLOUD_HOSTED` repository variable and
-`ubicloud-standard-2` runner selector are removed. Public MIT repositories have
-unlimited GitHub Actions usage, so repository CI jobs use GitHub-hosted runners
+The optional `ENABLE_UBICLOUD_HOSTED` repository variable and alternate Linux
+runner selector are removed. Repository CI jobs now use GitHub-hosted runners
 and the complete cross-platform compatibility matrix is the only supported lane.
 Historical Decision text that described an alternate Linux-only runner mode is
 superseded by this amendment.

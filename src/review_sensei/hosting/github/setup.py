@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import hashlib
 import json
 import re
@@ -73,6 +74,12 @@ PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
 DEFAULT_PUBLIC_WORKFLOW_TAG = "v4"
+RELEASED_RUNNER_SWITCH_V4_SHA256 = (
+    "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
+)
+_RELEASED_RUNNER_SWITCH_V4_TAG_MARKER = (
+    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
+)
 # Retained for exact setup-v3 and SHA-pinned setup-v4 migration recognition.
 DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
 SETUP_VERSION_PATTERN = re.compile(
@@ -251,7 +258,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
-                _ubicloud_runner_switch_workflow(tag_matches[0]),
+                _released_runner_switch_v4_workflow(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
                 _historical_tagged_v4_workflow(tag_matches[0]),
@@ -716,11 +723,25 @@ jobs:
 
 
 _PROVIDER_PARITY_DRAFT_SKIP = "      github.event.pull_request.draft != true &&\n"
-_CURRENT_RESOLVE_TRIGGER_RUNS_ON = "    runs-on: ubuntu-latest\n"
-_UBICLOUD_RUNNER_SWITCH_RUNS_ON = (
-    "    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && "
-    "'ubicloud-standard-2' || 'ubuntu-latest' }}\n"
-)
+
+
+@functools.lru_cache(maxsize=1)
+def _released_runner_switch_v4_caller_bytes() -> str:
+    """Return the byte-exact released setup-v4 caller before runner-switch removal."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("released-v4-resolve-trigger-runner-switch.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != RELEASED_RUNNER_SWITCH_V4_SHA256:
+        raise GitHubSetupError(
+            "released runner-switch v4 caller fixture digest mismatch"
+        )
+    return content
 
 
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
@@ -1077,21 +1098,17 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
     return _resolve_trigger_workflow(public_workflow_tag)
 
 
-def _ubicloud_runner_switch_workflow(public_workflow_tag: str) -> str:
-    """Return the released resolve-trigger caller before Ubicloud removal."""
+def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
+    """Return the released setup-v4 caller retained for managed migration."""
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
-    current = _resolve_trigger_workflow(tag)
-    previous = current.replace(
-        _CURRENT_RESOLVE_TRIGGER_RUNS_ON,
-        _UBICLOUD_RUNNER_SWITCH_RUNS_ON,
-        1,
+    caller = _released_runner_switch_v4_caller_bytes()
+    if tag == DEFAULT_PUBLIC_WORKFLOW_TAG:
+        return caller
+    return caller.replace(
+        _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
     )
-    if previous == current:
-        raise GitHubSetupError(
-            "resolve-trigger runs-on line is missing from the current caller"
-        )
-    return previous
 
 
 def _provider_parity_workflow_before_draft_skip(public_workflow_tag: str) -> str:

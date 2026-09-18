@@ -20,7 +20,7 @@ import {
   previousProviderParityWorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
-  ubicloudRunnerSwitchWorkflowTemplate,
+  releasedRunnerSwitchV4WorkflowTemplate,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
   validatePublicWorkflowSha,
@@ -275,7 +275,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     try {
       return (
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
-        content === ubicloudRunnerSwitchWorkflowTemplate(publicWorkflowTag) ||
+        content === releasedRunnerSwitchV4WorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowBeforeDraftSkip(publicWorkflowTag) ||
         content === previousProviderParityWorkflowTemplate(publicWorkflowTag) ||

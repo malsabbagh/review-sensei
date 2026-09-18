@@ -204,25 +204,52 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)
 
-    def test_setup_v4_workflow_templates_match_between_python_and_worker(self):
+    def test_released_runner_switch_v4_fixture_matches_python_and_worker_copies(self):
+        import hashlib
+
         from review_sensei.hosting.github.setup import (
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+            _released_runner_switch_v4_workflow,
             _tagged_workflow,
-            _ubicloud_runner_switch_workflow,
         )
 
-        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
-            encoding="utf-8"
+        fixture = (
+            ROOT
+            / "tests"
+            / "fixtures"
+            / "setup-legacy"
+            / "released-v4-resolve-trigger-runner-switch.yml"
+        ).read_text(encoding="utf-8")
+        package_fixture = (
+            ROOT
+            / "src"
+            / "review_sensei"
+            / "hosting"
+            / "github"
+            / "fixtures"
+            / "released-v4-resolve-trigger-runner-switch.yml"
+        ).read_text(encoding="utf-8")
+        worker_fixture = (
+            CLOUDFLARE / "fixtures" / "released-v4-resolve-trigger-runner-switch.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(fixture.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
         )
-        self.assertIn("export function ubicloudRunnerSwitchWorkflowTemplate", ts_source)
+        self.assertEqual(fixture, package_fixture)
+        self.assertEqual(fixture, worker_fixture)
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), fixture)
         self.assertEqual(
             _tagged_workflow("v4"),
             (
                 ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
-        released = _ubicloud_runner_switch_workflow("v4")
-        self.assertIn("ENABLE_UBICLOUD_HOSTED", released)
-        self.assertNotEqual(released, _tagged_workflow("v4"))
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("export function releasedRunnerSwitchV4WorkflowTemplate", ts_source)
+        self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
 
     def test_setup_builders_share_constants_and_variables(self):
         import re

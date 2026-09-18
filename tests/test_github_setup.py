@@ -22,7 +22,9 @@ from review_sensei.hosting.github.setup import (
     _historical_provider_parity_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
-    _ubicloud_runner_switch_workflow,
+    RELEASED_RUNNER_SWITCH_V4_SHA256,
+    _released_runner_switch_v4_workflow,
+    _tagged_workflow,
 )
 
 BASE_SHA = "b" * 40
@@ -704,11 +706,17 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertEqual(results[0].status, "skipped_unknown_setup")
         self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
 
-    def test_released_ubicloud_runner_switch_v4_caller_is_migrated(self):
+    def test_released_runner_switch_v4_caller_is_migrated(self):
+        released = self.historical_fixture(
+            "released-v4-resolve-trigger-runner-switch.yml"
+        )
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+        )
         plan = SetupPlanBuilder().build("owner/repo")
         files = {file.path: file.content for file in plan.files}
-        files[WORKFLOW_PATH] = _ubicloud_runner_switch_workflow("v4")
-        self.assertIn("ENABLE_UBICLOUD_HOSTED", files[WORKFLOW_PATH])
+        files[WORKFLOW_PATH] = released
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(
@@ -724,8 +732,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         migrated = next(
             file.content for file in branch_request[6] if file.path == WORKFLOW_PATH
         )
-        self.assertNotIn("ENABLE_UBICLOUD_HOSTED", migrated)
-        self.assertIn("runs-on: ubuntu-latest", migrated)
+        self.assertEqual(migrated, _tagged_workflow("v4"))
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), released)
 
     def test_released_provider_parity_v4_caller_without_resolve_trigger_is_migrated(
         self,

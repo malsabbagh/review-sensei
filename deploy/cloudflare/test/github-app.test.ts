@@ -16,7 +16,7 @@ import {
   buildSetupFiles,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
-  ubicloudRunnerSwitchWorkflowTemplate,
+  releasedRunnerSwitchV4WorkflowTemplate,
 } from "../src/setup-content";
 
 const SHA = "a".repeat(40);
@@ -548,13 +548,17 @@ describe("setup repository reconciliation", () => {
     ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
-  it("migrates the released resolve-trigger caller with the Ubicloud runner switch", async () => {
+  it("migrates the released resolve-trigger caller with the runner switch", async () => {
     const fake = new FakeGitHub();
     const files = Object.fromEntries(
       buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
     );
-    files[SETUP_FILE_PATHS[0]] = ubicloudRunnerSwitchWorkflowTemplate(TAG);
-    expect(files[SETUP_FILE_PATHS[0]]).toContain("ENABLE_UBICLOUD_HOSTED");
+    files[SETUP_FILE_PATHS[0]] = historicalFixture(
+      "released-v4-resolve-trigger-runner-switch.yml",
+    );
+    expect(files[SETUP_FILE_PATHS[0]]).toBe(
+      releasedRunnerSwitchV4WorkflowTemplate(TAG),
+    );
     fake.files = files;
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
