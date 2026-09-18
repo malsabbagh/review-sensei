@@ -220,7 +220,10 @@ def _hosted_ollama_allows_cloud_suffix(provider_mode: str, workflow_mode: str) -
     if mode in {"local", "local-ollama"}:
         return False
     if mode == "":
-        return workflow_mode.strip().lower() != "manual"
+        wf = workflow_mode.strip().lower()
+        if wf not in {"automatic", "manual"}:
+            return False
+        return wf != "manual"
     return False
 
 

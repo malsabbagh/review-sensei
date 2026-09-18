@@ -1026,7 +1026,7 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          VALIDATED_MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
@@ -1047,6 +1047,7 @@ jobs:
               raise SystemExit(1) from exc
           print(resolved, end="")
           PY
+          )"
           unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
             echo '::error::hosted OpenRouter resolution failed' >&2
@@ -1054,6 +1055,10 @@ jobs:
           }
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
+          if [[ "$MODEL" != "$VALIDATED_MODEL" ]]; then
+            echo '::error::resolved hosted OpenRouter model does not match workflow env' >&2
+            exit 1
+          fi
           export MODEL OPENROUTER_UPSTREAM_PROVIDER
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
@@ -1189,7 +1194,7 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          VALIDATED_MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
@@ -1210,6 +1215,7 @@ jobs:
               raise SystemExit(1) from exc
           print(resolved, end="")
           PY
+          )"
           unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
             echo '::error::hosted OpenRouter resolution failed' >&2
@@ -1217,6 +1223,10 @@ jobs:
           }
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
+          if [[ "$MODEL" != "$VALIDATED_MODEL" ]]; then
+            echo '::error::resolved hosted OpenRouter model does not match workflow env' >&2
+            exit 1
+          fi
           export MODEL OPENROUTER_UPSTREAM_PROVIDER
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()

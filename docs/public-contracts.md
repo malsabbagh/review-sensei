@@ -444,6 +444,21 @@ published hosted allowlist. OpenRouter requires the customer-owned
 version. This is the version recorded by the portable manual GitHub Actions
 workflow before a review runs.
 
+The command also supports workflow helper subcommands for hosted runs:
+
+```bash
+review-sensei resolve-hosted-openrouter both
+```
+
+`resolve-hosted-openrouter` accepts `model`, `upstream`, or `both`. It reads
+hosted workflow environment variables (`MODE`, `CALLER_MODEL`,
+`HOSTED_REVIEWSENSEI_MODEL`, optional `BACKEND_MODEL`/`BACKEND_DEFAULT`, and
+`OPENROUTER_UPSTREAM_PROVIDER`), validates the model against the published
+hosted OpenRouter allowlist, and prints the resolved value to stdout. The
+`both` action emits `model<TAB>upstream` with no trailing newline; the reusable
+workflow depends on that exact tab-separated format when deriving
+`OPENROUTER_UPSTREAM_PROVIDER`.
+
 The command also supports a `prepare-diff` subcommand for portable diff
 preparation in consumer repositories:
 
