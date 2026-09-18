@@ -18,9 +18,15 @@ on:
         required: true
         type: boolean
         default: false
+      resume_bundle_run_id:
+        description: "Optional failed workflow run ID whose attested npm release bundle should be reused instead of rebuilding"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: publish-npm-${{ inputs.version }}
@@ -55,16 +61,26 @@ jobs:
         id: source
         env:
           VERSION: ${{ inputs.version }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
         run: |
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
           test "$source_sha" = "$GITHUB_SHA"
           python scripts/check_release_version.py --tag "v$VERSION"
+          if [[ -n "$RESUME_BUNDLE_RUN_ID" ]]; then
+            case "$RESUME_BUNDLE_RUN_ID" in
+              (*[!0-9]*|'')
+                echo "resume_bundle_run_id must be a numeric workflow run ID"
+                exit 1
+                ;;
+            esac
+          fi
           printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
   native-build:
     name: Native standalone (${{ matrix.target }})
     needs: verify-request
+    if: ${{ inputs.resume_bundle_run_id == '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -133,6 +149,7 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
+    if: ${{ always() && needs.verify-request.result == 'success' && (needs.native-build.result == 'success' || needs.native-build.result == 'skipped') && inputs.resume_bundle_run_id == '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -238,6 +255,20 @@ jobs:
               record.write(json.dumps({"file": path.name, "name": package_record["name"], "version": package_record["version"], "sha256": hex_digest, "integrity": sri}) + "\n")
           PY
           done
+          python - "$VERSION" <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          version = sys.argv[1]
+          source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          metadata = {"version": version, "source_sha": source_sha}
+          pathlib.Path("release/npm/bundle-metadata.json").write_text(
+              json.dumps(metadata, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Attest exact npm tarballs
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -253,11 +284,12 @@ jobs:
             release/npm/*.tgz
             release/npm/SHA256SUMS
             release/npm/integrity.jsonl
+            release/npm/bundle-metadata.json
 
   publish-npm:
     name: Publish npm packages
     needs: [verify-request, assemble-npm]
-    if: ${{ inputs.publish }}
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && (needs.assemble-npm.result == 'success' || needs.assemble-npm.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -282,11 +314,32 @@ jobs:
         run: npm install --global --ignore-scripts npm@11.5.1
 
       - name: Download validated npm release bundle
+        if: ${{ inputs.resume_bundle_run_id == '' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           # Single-artifact downloads still extract directly into path in v8.
           name: review-sensei-npm-release-bundle
           path: release/npm
+
+      - name: Download npm release bundle from prior workflow run
+        if: ${{ inputs.resume_bundle_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/npm
+          run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName)"
+          run_id="$(printf '%s' "$run_json" | python -c 'import json, sys; print(json.load(sys.stdin)["databaseId"])')"
+          conclusion="$(printf '%s' "$run_json" | python -c 'import json, sys; print(json.load(sys.stdin)["conclusion"])')"
+          workflow_name="$(printf '%s' "$run_json" | python -c 'import json, sys; print(json.load(sys.stdin)["workflowName"])')"
+          test "$run_id" = "$RESUME_BUNDLE_RUN_ID"
+          test "$workflow_name" = "Publish npm packages"
+          test "$conclusion" = "failure" || test "$conclusion" = "cancelled"
+          gh run download "$RESUME_BUNDLE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name review-sensei-npm-release-bundle \
+            --dir release/npm
 
       - name: Verify downloaded npm tarball checksums
         shell: bash
@@ -311,6 +364,20 @@ jobs:
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
           test -z "$(git -C source status --porcelain=v1)"
           test -f source/scripts/publish_npm_release.py
+
+      - name: Verify resumed npm release bundle provenance
+        if: ${{ inputs.resume_bundle_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          bundle_source_sha="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)"
+          python source/scripts/publish_npm_release.py verify-bundle \
+            --bundle-dir "$GITHUB_WORKSPACE/release/npm" \
+            --version "$VERSION" \
+            --expected-source-sha "$bundle_source_sha"
 
       - name: Configure bootstrap authentication when present
         shell: bash

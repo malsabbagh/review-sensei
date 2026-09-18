@@ -241,6 +241,19 @@ jobs:
               record.write(json.dumps({"file": path.name, "name": package_record["name"], "version": package_record["version"], "sha256": hex_digest, "integrity": sri}) + "\n")
           PY
           done
+          python - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+
+          source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          version = "${GITHUB_REF_NAME#v}"
+          metadata = {"version": version, "source_sha": source_sha}
+          pathlib.Path("release/npm/bundle-metadata.json").write_text(
+              json.dumps(metadata, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
       - name: Attest exact npm tarballs
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -254,6 +267,7 @@ jobs:
             release/npm/*.tgz
             release/npm/SHA256SUMS
             release/npm/integrity.jsonl
+            release/npm/bundle-metadata.json
       - name: Record attested source commit
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

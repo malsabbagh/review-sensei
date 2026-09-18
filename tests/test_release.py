@@ -420,7 +420,13 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
 
     def test_npm_publish_is_protected_and_platform_first(self):
-        self.assertIn("if: ${{ inputs.publish }}", self.workflow)
+        publish_section = self.workflow.split("  publish-npm:", maxsplit=1)[1]
+        publish_if_line = next(
+            line
+            for line in publish_section.splitlines()
+            if line.startswith("    if:")
+        )
+        self.assertIn("inputs.publish", publish_if_line)
         self.assertIn("environment:\n      name: npm", self.workflow)
         self.assertIn("id-token: write", self.workflow)
         self.assertIn("group: publish-npm-${{ inputs.version }}", self.workflow)
@@ -464,6 +470,17 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("npm audit signatures", self.workflow)
+
+    def test_partial_publish_can_resume_prior_attested_bundle(self):
+        self.assertIn("resume_bundle_run_id:", self.workflow)
+        self.assertIn("inputs.resume_bundle_run_id == ''", self.workflow)
+        self.assertIn(
+            "Download npm release bundle from prior workflow run", self.workflow
+        )
+        self.assertIn("gh run download", self.workflow)
+        self.assertIn("publish_npm_release.py verify-bundle", self.workflow)
+        self.assertIn("release/npm/bundle-metadata.json", self.workflow)
+        self.assertIn("actions: read", self.workflow)
 
 
 class ReleaseDocumentationTests(unittest.TestCase):

@@ -24,7 +24,16 @@ preflights every package: a registry entry must be absent or already match the
 attested tarball's exact npm SRI. It publishes missing platform packages first,
 reads back each exact version and `dist.integrity`, then publishes
 `@reviewsensei/cli` last. This makes a transient partial run safely retryable
-only when already-published bytes exactly match the release bundle. It also
+when already-published bytes exactly match the release bundle.
+
+If a publish job fails after some packages reach the registry, do not dispatch a
+fresh rebuild for the same version. Either re-run the failed workflow job from
+GitHub Actions, or dispatch `publish-npm.yml` again with `resume_bundle_run_id`
+set to the failed run ID so the workflow reuses that run's attested
+`review-sensei-npm-release-bundle` artifact instead of rebuilding new tarballs.
+The resumed bundle must match the version you are publishing; packages already
+verified on the registry are skipped and only missing packages are published.
+It also
 installs the launcher in a clean Linux prefix, verifies that
 `node_modules/.bin/review-sensei` resolves to the launcher rather than a
 platform package, and runs its help command. The npm lane is deliberately

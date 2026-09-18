@@ -32,6 +32,7 @@ DEFAULT_READBACK_INITIAL_DELAY_SECONDS = 2.0
 DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
 DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
+BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
 
 
 class PublishError(RuntimeError):
@@ -59,6 +60,50 @@ def retry_delay_seconds(
     if retry_after is not None and retry_after.isdigit():
         return min(float(retry_after), max_delay_seconds)
     return min(delay, max_delay_seconds)
+
+
+def bundle_metadata_path(bundle_dir: Path) -> Path:
+    return bundle_dir / BUNDLE_METADATA_FILENAME
+
+
+def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
+    path = bundle_metadata_path(bundle_dir)
+    if not path.is_file():
+        return None
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise PublishError("release bundle has invalid bundle-metadata.json")
+    return metadata
+
+
+def verify_bundle_version(bundle_dir: Path, version: str) -> None:
+    metadata = load_bundle_metadata(bundle_dir)
+    if metadata is not None and metadata.get("version") != version:
+        raise PublishError(
+            "release bundle version "
+            f"{metadata.get('version')!r} does not match requested {version!r}"
+        )
+    load_integrity_records(bundle_dir, version)
+
+
+def verify_resumed_bundle(
+    bundle_dir: Path,
+    version: str,
+    *,
+    expected_source_sha: str | None = None,
+) -> None:
+    verify_bundle_version(bundle_dir, version)
+    metadata = load_bundle_metadata(bundle_dir)
+    if metadata is None:
+        return
+    source_sha = metadata.get("source_sha")
+    if not isinstance(source_sha, str) or not source_sha:
+        raise PublishError("release bundle metadata is missing source_sha")
+    if expected_source_sha is not None and source_sha != expected_source_sha:
+        raise PublishError(
+            "resumed release bundle source_sha "
+            f"{source_sha!r} does not match attested run {expected_source_sha!r}"
+        )
 
 
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
@@ -335,7 +380,9 @@ def classify_registry_state(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}"
+                f"{package}@{version}. Resume the failed workflow run or dispatch "
+                "publish-npm.yml with resume_bundle_run_id set to the run that "
+                "produced this bundle instead of rebuilding."
             )
         return "verified"
 
@@ -445,7 +492,9 @@ def read_back_with_retry(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}"
+                f"{package}@{version}. Resume the failed workflow run or dispatch "
+                "publish-npm.yml with resume_bundle_run_id set to the run that "
+                "produced this bundle instead of rebuilding."
             )
         print(f"Verified registry readback for {package}@{version}")
         return
@@ -546,7 +595,16 @@ def preflight(
     preflight_404_attempts: int,
     initial_delay_seconds: float,
     max_delay_seconds: float,
+    expected_source_sha: str | None = None,
 ) -> None:
+    if expected_source_sha is not None:
+        verify_resumed_bundle(
+            bundle_dir,
+            version,
+            expected_source_sha=expected_source_sha,
+        )
+    else:
+        verify_bundle_version(bundle_dir, version)
     records = load_integrity_records(bundle_dir, version)
     retry_kwargs = {
         "max_attempts": max_attempts,
@@ -612,10 +670,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("preflight", "publish-platforms", "publish-launcher"),
+        choices=("preflight", "publish-platforms", "publish-launcher", "verify-bundle"),
     )
     parser.add_argument("--bundle-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument(
+        "--expected-source-sha",
+        help=(
+            "When resuming a partial publish, require bundle-metadata.json "
+            "source_sha to match this commit."
+        ),
+    )
     parser.add_argument(
         "--readback-attempts",
         type=int,
@@ -650,11 +715,18 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     try:
-        if args.command == "preflight":
+        if args.command == "verify-bundle":
+            verify_resumed_bundle(
+                bundle_dir,
+                args.version,
+                expected_source_sha=args.expected_source_sha,
+            )
+        elif args.command == "preflight":
             preflight(
                 bundle_dir,
                 args.version,
                 preflight_404_attempts=args.preflight_404_attempts,
+                expected_source_sha=args.expected_source_sha,
                 **retry_kwargs,
             )
         elif args.command == "publish-platforms":

@@ -1401,6 +1401,44 @@ class PublishNpmReleaseTests(unittest.TestCase):
         publish.assert_not_called()
         readback.assert_not_called()
 
+    def test_verify_resumed_bundle_accepts_legacy_bundle_without_metadata(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        verify_resumed_bundle(
+            self.bundle_dir,
+            "0.5.0",
+            expected_source_sha="a" * 40,
+        )
+
+    def test_verify_resumed_bundle_checks_metadata_source_sha(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        verify_resumed_bundle(
+            self.bundle_dir,
+            "0.5.0",
+            expected_source_sha="a" * 40,
+        )
+        with self.assertRaisesRegex(PublishError, "does not match attested run"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="b" * 40,
+            )
+
+    def test_verify_bundle_version_rejects_metadata_version_mismatch(self) -> None:
+        from scripts.publish_npm_release import verify_bundle_version
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.4.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "does not match requested"):
+            verify_bundle_version(self.bundle_dir, "0.5.0")
+
 
 if __name__ == "__main__":
     unittest.main()
