@@ -596,6 +596,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("provider_profile:", generated_caller)
         self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
         self.assertNotIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
+        setup_body = SetupPlanBuilder().build("owner/repo").pull_request.body
+        self.assertIn("REVIEWSENSEI_PROVIDER_PROFILE", setup_body)
+        self.assertIn("delete that deprecated repository variable", setup_body)
         self.assertIn("provider_profile:", reusable)
         self.assertIn("provider_profile is unused", reusable)
 

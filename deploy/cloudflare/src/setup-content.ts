@@ -1000,8 +1000,9 @@ export const SETUP_PULL_REQUEST_BODY =
   "self-hosted runner; both support reviews and authorized conversations. All write and artifact " +
   "switches default to false. Cloud mode passes the existing customer-owned " +
   "OLLAMA_API_KEY and OPENROUTER_API_KEY secrets by name only; the App never creates or reads their values. " +
-  "If you previously used REVIEWSENSEI_PROVIDER_PROFILE for OpenRouter, clear that repository variable and set " +
-  "REVIEWSENSEI_PROVIDER_MODE=openrouter with an allowlisted REVIEWSENSEI_MODEL instead; non-empty provider_profile " +
-  "inputs now fail closed in the reusable workflow. " +
+  "If you previously used REVIEWSENSEI_PROVIDER_PROFILE for OpenRouter, delete that deprecated repository variable " +
+  "(Settings → Secrets and variables → Actions → Variables) and set " +
+  "REVIEWSENSEI_PROVIDER_MODE=openrouter with an allowlisted REVIEWSENSEI_MODEL instead; leaving provider_profile " +
+  "non-empty or forwarding it to the reusable workflow now fails closed. " +
   "Migration changes only these generated paths through a reviewable PR and " +
   "never overwrites custom or future setup files.";
