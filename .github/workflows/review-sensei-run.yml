@@ -467,7 +467,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud' }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud-ollama' }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -1010,7 +1010,6 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          OPENROUTER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || 'deepseek/deepseek-v4.1-flash' }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -1026,66 +1025,10 @@ jobs:
             exit 1
           fi
           unset OPENROUTER_UPSTREAM_PROVIDER
-          resolved_model="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              print(
-                  validate_resolved_hosted_job_model(
-                      provider_mode="openrouter",
-                      workflow_mode=os.environ.get("MODE", ""),
-                      caller_model=os.environ.get("CALLER_MODEL", ""),
-                      reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  ),
-                  end="",
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          PY
-          )"
-          if [[ "$resolved_model" == *$'\n'* ]]; then
-            echo '::error::resolved OpenRouter model must be a single line' >&2
-            exit 1
-          fi
-          if [[ ! "$resolved_model" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
-            echo '::error::resolved OpenRouter model must be a vendor/model slug' >&2
-            exit 1
-          fi
-          if [[ "$resolved_model" != "$OPENROUTER_MODEL" ]]; then
-            echo '::error::resolved OpenRouter model does not match workflow env' >&2
-            exit 1
-          fi
-          export MODEL="$resolved_model"
-          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import hosted_openrouter_upstream
-
-          try:
-              print(
-                  hosted_openrouter_upstream(
-                      os.environ["MODEL"],
-                      configured_upstream=os.environ.get("OPENROUTER_UPSTREAM_PROVIDER"),
-                  ),
-                  end="",
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          PY
-          )"
-          if [[ -z "$OPENROUTER_UPSTREAM_PROVIDER" || "$OPENROUTER_UPSTREAM_PROVIDER" == *$'\n'* ]]; then
-            echo '::error::OPENROUTER_UPSTREAM_PROVIDER could not be resolved' >&2
-            exit 1
-          fi
-          export OPENROUTER_UPSTREAM_PROVIDER
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/python" scripts/resolve_hosted_openrouter_workflow.py both)"
+          MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
+          OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
+          export MODEL OPENROUTER_UPSTREAM_PROVIDER
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
             exit 1
@@ -1213,73 +1156,16 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          OPENROUTER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || 'deepseek/deepseek-v4.1-flash' }}
         run: |
           if [[ -z "$OPENROUTER_API_KEY" ]]; then
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
           unset OPENROUTER_UPSTREAM_PROVIDER
-          resolved_model="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              print(
-                  validate_resolved_hosted_job_model(
-                      provider_mode="openrouter",
-                      workflow_mode=os.environ.get("MODE", ""),
-                      caller_model=os.environ.get("CALLER_MODEL", ""),
-                      reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  ),
-                  end="",
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          PY
-          )"
-          if [[ "$resolved_model" == *$'\n'* ]]; then
-            echo '::error::resolved OpenRouter model must be a single line' >&2
-            exit 1
-          fi
-          if [[ ! "$resolved_model" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
-            echo '::error::resolved OpenRouter model must be a vendor/model slug' >&2
-            exit 1
-          fi
-          if [[ "$resolved_model" != "$OPENROUTER_MODEL" ]]; then
-            echo '::error::resolved OpenRouter model does not match workflow env' >&2
-            exit 1
-          fi
-          export MODEL="$resolved_model"
-          OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import hosted_openrouter_upstream
-
-          try:
-              print(
-                  hosted_openrouter_upstream(
-                      os.environ["MODEL"],
-                      configured_upstream=os.environ.get("OPENROUTER_UPSTREAM_PROVIDER"),
-                  ),
-                  end="",
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          PY
-          )"
-          if [[ -z "$OPENROUTER_UPSTREAM_PROVIDER" || "$OPENROUTER_UPSTREAM_PROVIDER" == *$'\n'* ]]; then
-            echo '::error::OPENROUTER_UPSTREAM_PROVIDER could not be resolved' >&2
-            exit 1
-          fi
-          export OPENROUTER_UPSTREAM_PROVIDER
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/python" scripts/resolve_hosted_openrouter_workflow.py both)"
+          MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
+          OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
+          export MODEL OPENROUTER_UPSTREAM_PROVIDER
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
           if [[ "$AUTO_APPROVE" == "true" ]]; then
@@ -1375,7 +1261,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'local' }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'local-ollama' }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}

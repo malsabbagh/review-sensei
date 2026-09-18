@@ -133,6 +133,8 @@ def validate_resolved_hosted_job_model(
         backend_model=backend_model,
         backend_default=backend_default,
     )
+    if not resolved.strip():
+        raise ReviewInputError("hosted job model could not be resolved")
     validate_hosted_workflow_model(
         provider_mode=provider_mode,
         workflow_mode=workflow_mode,

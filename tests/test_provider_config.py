@@ -259,6 +259,19 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 backend_default=DEFAULT_LOCAL_MODEL,
             )
 
+    def test_resolved_fails_when_model_cannot_be_resolved(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "hosted job model could not be resolved"
+        ):
+            validate_resolved_hosted_job_model(
+                provider_mode="cloud-ollama",
+                workflow_mode="automatic",
+                caller_model="",
+                reviewsensei_model="",
+                backend_model="",
+                backend_default="",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
