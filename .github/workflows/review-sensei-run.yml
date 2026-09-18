@@ -581,6 +581,7 @@ jobs:
       - name: Run cloud-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -613,7 +614,7 @@ jobs:
           try:
               resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode="",
+                  workflow_mode=os.environ.get("MODE", ""),
                   caller_model=os.environ.get("CALLER_MODEL", ""),
                   reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   backend_model=os.environ.get("BACKEND_MODEL", ""),
@@ -744,6 +745,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -776,7 +778,7 @@ jobs:
           try:
               resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode="",
+                  workflow_mode=os.environ.get("MODE", ""),
                   caller_model=os.environ.get("CALLER_MODEL", ""),
                   reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   backend_model=os.environ.get("BACKEND_MODEL", ""),
@@ -1004,6 +1006,7 @@ jobs:
       - name: Run OpenRouter-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1034,7 +1037,7 @@ jobs:
               print(
                   validate_resolved_hosted_job_model(
                       provider_mode="openrouter",
-                      workflow_mode="",
+                      workflow_mode=os.environ.get("MODE", ""),
                       caller_model=os.environ.get("CALLER_MODEL", ""),
                       reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   ),
@@ -1197,6 +1200,7 @@ jobs:
         # matching cloud/local. There is no separate YAML finalizer step.
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1227,7 +1231,7 @@ jobs:
               print(
                   validate_resolved_hosted_job_model(
                       provider_mode="openrouter",
-                      workflow_mode="",
+                      workflow_mode=os.environ.get("MODE", ""),
                       caller_model=os.environ.get("CALLER_MODEL", ""),
                       reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   ),
@@ -1466,6 +1470,7 @@ jobs:
       - name: Prepare and run trusted local review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1497,7 +1502,7 @@ jobs:
           try:
               resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode="",
+                  workflow_mode=os.environ.get("MODE", ""),
                   caller_model=os.environ.get("CALLER_MODEL", ""),
                   reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   backend_model=os.environ.get("BACKEND_MODEL", ""),
@@ -1634,6 +1639,7 @@ jobs:
         id: reply
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
+          MODE: ${{ inputs.mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1660,7 +1666,7 @@ jobs:
           try:
               resolved = validate_resolved_hosted_job_model(
                   provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode="",
+                  workflow_mode=os.environ.get("MODE", ""),
                   caller_model=os.environ.get("CALLER_MODEL", ""),
                   reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
                   backend_model=os.environ.get("BACKEND_MODEL", ""),

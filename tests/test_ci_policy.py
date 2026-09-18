@@ -627,11 +627,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("--provider openrouter --model", review_step)
         self.assertIn("hosted_openrouter_upstream", review_step)
         self.assertNotIn("openrouter model vendor is not allowlisted", review_step)
+        openrouter_model_env = (
+            "OPENROUTER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model "
+            "|| vars.REVIEWSENSEI_MODEL || 'deepseek/deepseek-v4.1-flash' }}"
+        )
+        self.assertIn(openrouter_model_env, review_step)
         reply_step = _step_block(
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
         self.assertIn("--provider openrouter --model", reply_step)
         self.assertIn("hosted_openrouter_upstream", reply_step)
+        self.assertIn(openrouter_model_env, reply_step)
         publish_step = _step_block(
             openrouter_job, "Publish or promote validated review through the broker"
         )
