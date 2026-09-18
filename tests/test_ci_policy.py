@@ -967,6 +967,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             "resolved hosted model does not match workflow env",
             workflow_text,
         )
+        self.assertIn(
+            "resolved OpenRouter model does not match workflow env",
+            workflow_text,
+        )
 
     def test_validate_provider_mode_job_validates_model_input(self):
         workflow_text = _reusable_workflow_text()
@@ -1120,16 +1124,16 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
             3,
         )
-        self.assertIn("Install ReviewSensei and validate hosted model", text)
+        self.assertNotIn("Install ReviewSensei and validate hosted model", text)
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
-            4,
+            3,
         )
         self.assertEqual(
             text.count(
                 '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
             ),
-            4,
+            3,
         )
         self.assertIn(
             '"review-sensei==$expected_version"',

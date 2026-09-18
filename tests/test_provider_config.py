@@ -59,12 +59,20 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             DEFAULT_OPENROUTER_MODEL,
         )
 
-    def test_empty_workflow_mode_is_allowed(self) -> None:
+    def test_empty_workflow_mode_is_allowed_for_explicit_provider(self) -> None:
         validate_hosted_workflow_model(
             provider_mode="cloud-ollama",
             workflow_mode="",
             model="qwen3.5:4b",
         )
+
+    def test_empty_provider_mode_requires_workflow_mode(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "workflow mode is invalid"):
+            validate_hosted_workflow_model(
+                provider_mode="",
+                workflow_mode="",
+                model="qwen3.5:4b",
+            )
 
     def test_openrouter_rejects_ollama_cloud_slug(self) -> None:
         with self.assertRaisesRegex(

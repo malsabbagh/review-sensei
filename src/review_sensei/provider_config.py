@@ -195,8 +195,6 @@ def _effective_hosted_backend(provider_mode: str, workflow_mode: str) -> str:
     if mode != "":
         raise ReviewInputError("provider mode is unsupported")
     wf = workflow_mode.strip().lower()
-    if not wf:
-        return "ollama"
     if wf not in {"automatic", "manual"}:
         raise ReviewInputError("workflow mode is invalid")
     return "ollama"
