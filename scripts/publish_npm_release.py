@@ -27,6 +27,7 @@ ALL_PACKAGES = PLATFORM_PACKAGES + (LAUNCHER_PACKAGE,)
 DEFAULT_READBACK_ATTEMPTS = 30
 DEFAULT_READBACK_INITIAL_DELAY_SECONDS = 2.0
 DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
+DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
 
 
@@ -98,21 +99,24 @@ def classify_registry_state(
     expected_integrity: str,
     *,
     max_attempts: int = DEFAULT_READBACK_ATTEMPTS,
+    preflight_404_attempts: int = DEFAULT_PREFLIGHT_404_ATTEMPTS,
     initial_delay_seconds: float = DEFAULT_READBACK_INITIAL_DELAY_SECONDS,
     max_delay_seconds: float = DEFAULT_READBACK_MAX_DELAY_SECONDS,
 ) -> str:
     delay = initial_delay_seconds
     last_error = "unknown registry preflight failure"
+    visibility_attempts = 0
     for attempt in range(1, max_attempts + 1):
         try:
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
             if exc.code == 404:
+                visibility_attempts += 1
                 last_error = (
                     f"{package}@{version} registry preflight not visible yet "
-                    f"(HTTP 404, attempt {attempt}/{max_attempts})"
+                    f"(HTTP 404, probe {visibility_attempts}/{preflight_404_attempts})"
                 )
-                if attempt >= max_attempts:
+                if visibility_attempts >= preflight_404_attempts:
                     return "publish"
                 print(last_error, file=sys.stderr)
                 time.sleep(min(delay, max_delay_seconds))
@@ -310,6 +314,14 @@ def publish_package(
         raise PublishError(f"missing integrity record for {package}")
     expected_integrity = record["integrity"]
     if action == "verified":
+        read_back_with_retry(
+            package,
+            version,
+            expected_integrity,
+            max_attempts=max_attempts,
+            initial_delay_seconds=initial_delay_seconds,
+            max_delay_seconds=max_delay_seconds,
+        )
         print(f"Registry already contains the attested bytes for {package}@{version}")
         return
 
@@ -331,12 +343,14 @@ def preflight(
     version: str,
     *,
     max_attempts: int,
+    preflight_404_attempts: int,
     initial_delay_seconds: float,
     max_delay_seconds: float,
 ) -> None:
     records = load_integrity_records(bundle_dir, version)
     retry_kwargs = {
         "max_attempts": max_attempts,
+        "preflight_404_attempts": preflight_404_attempts,
         "initial_delay_seconds": initial_delay_seconds,
         "max_delay_seconds": max_delay_seconds,
     }
@@ -417,6 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_READBACK_MAX_DELAY_SECONDS,
     )
+    parser.add_argument(
+        "--preflight-404-attempts",
+        type=int,
+        default=DEFAULT_PREFLIGHT_404_ATTEMPTS,
+    )
     return parser
 
 
@@ -432,7 +451,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "preflight":
-            preflight(bundle_dir, args.version, **retry_kwargs)
+            preflight(
+                bundle_dir,
+                args.version,
+                preflight_404_attempts=args.preflight_404_attempts,
+                **retry_kwargs,
+            )
         elif args.command == "publish-platforms":
             publish_platforms(bundle_dir, args.version, **retry_kwargs)
         else:

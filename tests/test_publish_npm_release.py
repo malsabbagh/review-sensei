@@ -132,7 +132,8 @@ class PublishNpmReleaseTests(unittest.TestCase):
             preflight(
                 self.bundle_dir,
                 "0.5.0",
-                max_attempts=1,
+                max_attempts=3,
+                preflight_404_attempts=1,
                 initial_delay_seconds=1.0,
                 max_delay_seconds=1.0,
             )
@@ -177,6 +178,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 self.bundle_dir,
                 "0.5.0",
                 max_attempts=3,
+                preflight_404_attempts=2,
                 initial_delay_seconds=2.0,
                 max_delay_seconds=30.0,
             )
@@ -221,6 +223,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 self.bundle_dir,
                 "0.5.0",
                 max_attempts=3,
+                preflight_404_attempts=2,
                 initial_delay_seconds=2.0,
                 max_delay_seconds=30.0,
             )
@@ -471,7 +474,12 @@ class PublishNpmReleaseTests(unittest.TestCase):
             "0.5.0",
             [{"name": package, "action": "verified"} for package in ALL_PACKAGES],
         )
-        with mock.patch("scripts.publish_npm_release.publish_tarball") as publish:
+        with (
+            mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+            ) as readback,
+        ):
             publish_package(
                 self.bundle_dir,
                 "@reviewsensei/cli-darwin-arm64",
@@ -481,6 +489,48 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 initial_delay_seconds=0.0,
                 max_delay_seconds=0.0,
             )
+        publish.assert_not_called()
+        readback.assert_called_once_with(
+            "@reviewsensei/cli-darwin-arm64",
+            "0.5.0",
+            records["@reviewsensei/cli-darwin-arm64"]["integrity"],
+            max_attempts=1,
+            initial_delay_seconds=0.0,
+            max_delay_seconds=0.0,
+        )
+
+    def test_publish_package_rejects_verified_state_when_registry_integrity_mismatches(
+        self,
+    ) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-arm64"
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": package, "action": "verified"}],
+        )
+        with (
+            mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+                side_effect=PublishError(
+                    "published npm bytes do not match the attested release bundle"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                PublishError,
+                "published npm bytes do not match the attested release bundle",
+            ):
+                publish_package(
+                    self.bundle_dir,
+                    package,
+                    "0.5.0",
+                    records,
+                    max_attempts=1,
+                    initial_delay_seconds=0.0,
+                    max_delay_seconds=0.0,
+                )
         publish.assert_not_called()
 
 
