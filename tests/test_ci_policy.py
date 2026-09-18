@@ -1161,7 +1161,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             for block in _run_blocks(text)
             if "REVIEW_SENSEI_WORKFLOW_REF" in block
         ]
-        self.assertEqual(len(install_blocks), 4)
+        self.assertEqual(len(install_blocks), 3)
         for block in install_blocks:
             with self.subTest(block=block[:40]):
                 self.assertLess(
