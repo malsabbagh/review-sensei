@@ -167,7 +167,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
 <main id="main">
 <section class="hero">
   <div class="container">
-    <div class="eyebrow"><span class="dot"></span> Release 0.1.1 · Three installation routes</div>
+    <div class="eyebrow"><span class="dot"></span> Release 0.5.0 · Three installation routes</div>
     <h1>Get to your first review without guessing where code runs.</h1>
     <p class="lede">
       ReviewSensei is free, open-source software. Inference, GitHub Actions minutes, and self-hosted runner capacity are yours to provision.
@@ -295,7 +295,7 @@ https://github.com/apps/reviewsensei
 
 REVIEWSENSEI_AUTO_REVIEW=true
 REVIEWSENSEI_GITHUB_WRITES=true
-REVIEWSENSEI_VERSION=0.1.1</pre>
+REVIEWSENSEI_VERSION=0.5.0</pre>
           <button class="copy" type="button" data-copy="cmd-app" aria-label="Copy App-assisted setup commands">Copy</button>
         </div>
         <h4>Cleanup / disable / uninstall</h4>
@@ -316,14 +316,14 @@ REVIEWSENSEI_VERSION=0.1.1</pre>
         <div class="command-wrap">
           <pre class="command" id="cmd-actions"># examples/github-actions/review-sensei-review.yml
 REVIEWSENSEI_PROVIDER_MODE=local
-REVIEWSENSEI_VERSION=0.1.1
+REVIEWSENSEI_VERSION=0.5.0
 REVIEWSENSEI_AUTO_REVIEW=false
 REVIEWSENSEI_GITHUB_WRITES=false
 OLLAMA_API_KEY</pre>
           <button class="copy" type="button" data-copy="cmd-actions" aria-label="Copy Manual Actions configuration">Copy</button>
         </div>
         <div class="command-wrap">
-          <pre class="command" id="cmd-actions-install">pip install review-sensei==0.1.1
+          <pre class="command" id="cmd-actions-install">pip install review-sensei==0.5.0
 review-sensei doctor --json</pre>
           <button class="copy" type="button" data-copy="cmd-actions-install" aria-label="Copy package install commands">Copy</button>
         </div>
@@ -343,13 +343,13 @@ review-sensei doctor --json</pre>
           <div class="meta-item"><dt>First-success output</dt><dd><code>review-sensei doctor --json</code> reports <code>status: pass</code>; full review writes <code>review.json</code>.</dd></div>
         </dl>
         <div class="command-wrap">
-          <pre class="command" id="cmd-cli-pip">pip install review-sensei==0.1.1
+          <pre class="command" id="cmd-cli-pip">pip install review-sensei==0.5.0
 review-sensei doctor --json</pre>
           <button class="copy" type="button" data-copy="cmd-cli-pip" aria-label="Copy pip install commands">Copy</button>
         </div>
         <div class="command-wrap">
-          <pre class="command" id="cmd-cli-npm">npx --yes @reviewsensei/cli@0.1.1 --version
-npx --yes @reviewsensei/cli@0.1.1 prepare-diff \
+          <pre class="command" id="cmd-cli-npm">npx --yes @reviewsensei/cli@0.5.0 --version
+npx --yes @reviewsensei/cli@0.5.0 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch</pre>
           <button class="copy" type="button" data-copy="cmd-cli-npm" aria-label="Copy npm launcher commands">Copy</button>
         </div>
@@ -373,15 +373,15 @@ review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
         <p class="note" style="margin-top:24px"><strong>JavaScript is disabled.</strong> Expand each path below.</p>
         <details class="path-accordion" open>
           <summary>App-assisted GitHub reviews</summary>
-          <div class="accordion-body"><p style="color:#a4a8a5">Install the App, merge setup PR, set <code>REVIEWSENSEI_VERSION=0.1.1</code>.</p></div>
+          <div class="accordion-body"><p style="color:#a4a8a5">Install the App, merge setup PR, set <code>REVIEWSENSEI_VERSION=0.5.0</code>.</p></div>
         </details>
         <details class="path-accordion">
           <summary>Manual Actions setup</summary>
-          <div class="accordion-body"><p style="color:#a4a8a5">Copy example workflow; <code>pip install review-sensei==0.1.1</code>.</p></div>
+          <div class="accordion-body"><p style="color:#a4a8a5">Copy example workflow; <code>pip install review-sensei==0.5.0</code>.</p></div>
         </details>
         <details class="path-accordion">
           <summary>Local CLI</summary>
-          <div class="accordion-body"><p style="color:#a4a8a5"><code>npx --yes @reviewsensei/cli@0.1.1</code> or pip install.</p></div>
+          <div class="accordion-body"><p style="color:#a4a8a5"><code>npx --yes @reviewsensei/cli@0.5.0</code> or pip install.</p></div>
         </details>
       </div>
     </noscript>
@@ -398,7 +398,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
       <article class="link-card"><h3>Security</h3><p>Trust boundaries and data handling.</p><a href="/security/">Security overview →</a></article>
       <article class="link-card"><h3>Providers</h3><p>Ollama local and cloud adapters.</p><a href="https://github.com/malsabbagh/review-sensei#providers">Provider matrix →</a></article>
       <article class="link-card"><h3>Examples</h3><p>Portable GitHub Actions workflow.</p><a href="https://github.com/malsabbagh/review-sensei/tree/main/examples/github-actions">Workflow examples →</a></article>
-      <article class="link-card"><h3>Release info</h3><p>Version <code>0.1.1</code> release notes.</p><a href="https://github.com/malsabbagh/review-sensei/releases">Releases →</a></article>
+      <article class="link-card"><h3>Release info</h3><p>Version <code>0.5.0</code> release notes.</p><a href="https://github.com/malsabbagh/review-sensei/releases">Releases →</a></article>
       <article class="link-card"><h3>Installation guide</h3><p>Full install and workflow details.</p><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">Canonical install docs →</a></article>
       <article class="link-card"><h3>Data handling</h3><p>What leaves your repository.</p><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/data-handling.md">Data handling →</a></article>
     </div>

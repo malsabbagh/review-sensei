@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0",
-  "last_updated": "2026-09-16",
+  "last_updated": "2026-09-18",
   "release_facts": {
-    "version": "0.1.1",
-    "tag": "v0.1.1",
+    "version": "0.5.0",
+    "tag": "v0.5.0",
     "python_package": "review-sensei",
     "npm_launcher": "@reviewsensei/cli",
     "npm_platform_packages": [
@@ -17,13 +17,13 @@
       {
         "name": "Reusable runner",
         "path": ".github/workflows/review-sensei-run.yml",
-        "ref": "v4",
-        "notes": "Public setup-v4 callers pin this reusable workflow through the operator-managed v4 tag."
+        "ref": "v5",
+        "notes": "Public setup-v4 callers pin this reusable workflow through the operator-managed v5 tag."
       },
       {
         "name": "Example caller",
         "path": "examples/github-actions/review-sensei-review.yml",
-        "ref": "v4",
+        "ref": "v5",
         "notes": "Documents PyPI-first install with executing-commit fallback and compatibility manifest proof."
       }
     ],

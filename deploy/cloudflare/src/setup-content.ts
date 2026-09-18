@@ -69,7 +69,7 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_MODEL", value: "" },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
-  { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
+  { name: "REVIEWSENSEI_VERSION", value: "0.5.0" },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
   { name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" },
   { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
@@ -911,7 +911,7 @@ function configFile(
   includeLearningProposals = false,
 ): string {
   const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
-  const packageVersion = version === 3 ? "0.1.0" : "0.1.1";
+  const packageVersion = version === 3 ? "0.1.0" : "0.5.0";
   return (
     `# ReviewSensei setup version: ${version}\n` +
     `setup_version: ${version}\n` +

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "review-sensei"
-version = "0.1.1"
+version = "0.5.0"
 description = "Provider-neutral AI code review engine with an Ollama adapter."
 readme = "README.md"
 requires-python = ">=3.11"

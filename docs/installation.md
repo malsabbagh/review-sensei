@@ -9,8 +9,8 @@ install lifecycle hook. An external `git` executable is also required for
 `prepare-diff`.
 
 ```bash
-npx --yes @reviewsensei/cli@0.1.1 --version
-npx --yes @reviewsensei/cli@0.1.1 prepare-diff \
+npx --yes @reviewsensei/cli@0.5.0 --version
+npx --yes @reviewsensei/cli@0.5.0 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
 
@@ -51,8 +51,8 @@ Optional `--network` probes are read-only GETs. Example local output:
 
 ```text
 status: pass
-version: 0.1.1
-pass: package — 0.1.1
+version: 0.5.0
+pass: package — 0.5.0
 pass: packaged-assets — default stages and categories available
 pass: provider-mode — local (offline check)
 pass: stages — packaged default stages selected
