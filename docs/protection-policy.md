@@ -54,9 +54,8 @@ commits, and do **not** include GitHub's `update` rule. Authorized operators
 with write access can move the tag; a blanket `always` bypass is not an accepted
 way to make the channel movable. Unauthorized deletion must still be rejected.
 Keep `refs/tags/v4` similarly protected while the broker still accepts `v4`
-during migration. The checked-in contract currently lists `v4` under
-`movable_channels`; attach the same channel ruleset to `v5` as operator
-evidence.
+during migration. The checked-in contract lists both `v4` and `v5` under
+`movable_channels`; attach a channel ruleset for each tag as operator evidence.
 
 ## Configuration evidence versus behavioral tests
 

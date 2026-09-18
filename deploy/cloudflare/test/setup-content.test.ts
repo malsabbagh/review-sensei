@@ -11,6 +11,7 @@ import {
   SETUP_VARIABLES,
   SETUP_VERSION,
   brokerAcceptedPublicWorkflowTags,
+  buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
@@ -152,7 +153,10 @@ describe("setup-v4 public boundary", () => {
     );
     expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("version: 0.5.0");
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).toContain(
-      "version: 0.1.0",
+      "version: 0.1.1",
+    );
+    expect(buildHistoricalProviderParityV4SetupFiles(tag)[2].content).toContain(
+      "version: 0.1.1",
     );
     expect(workflow).toBe(
       readFileSync(

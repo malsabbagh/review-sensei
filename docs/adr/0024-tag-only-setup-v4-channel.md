@@ -87,8 +87,18 @@ The operator-managed public reusable-workflow tag is now `v5`:
   not publish a package tag named `v5.0.0`; `release.yml` matches `v*.*.*`
   and would collide with the movable workflow channel.
 
-The broker still accepts both `v4` and `v5` during migration. New setup output
-and current-tag no-op recognition follow the configured write channel (`v5`).
-Moving `v5` is the public cutoff action. Protect `refs/tags/v5` the same way
-as the historical `v4` channel; keep `v4` protected until that acceptance is
-removed.
+The broker still accepts both `v4` and `v5` during migration through
+`BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS` in
+`src/review_sensei/hosting/github/setup.py` and
+`deploy/cloudflare/src/setup-content.ts` (`brokerAcceptedPublicWorkflowTags`).
+The Worker write channel remains `PUBLIC_WORKFLOW_TAG`; the broker authorizes
+either the configured tag or a bounded legacy tag from that list while both
+tags remain protected. Tests:
+`deploy/cloudflare/test/token-broker.test.ts` and
+`tests/test_github_setup.py::test_broker_accepts_v4_and_v5_during_channel_migration`.
+
+New setup output and current-tag no-op recognition follow the configured write
+channel (`v5`). Moving `v5` is the public cutoff action. Protect
+`refs/tags/v5` the same way as the historical `v4` channel; keep `v4`
+protected until that acceptance is removed. The checked-in protection policy now
+lists both tags under `movable_channels`.

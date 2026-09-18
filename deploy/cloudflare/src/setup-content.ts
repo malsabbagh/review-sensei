@@ -48,8 +48,10 @@ export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
 export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash";
 export const REVIEWSENSEI_VERSION = "0.5.0";
-/** Package version embedded in historical setup-v3/v4 recognition bytes. */
-export const HISTORICAL_SETUP_PACKAGE_VERSION = "0.1.0";
+/** Package version embedded in byte-exact setup-v3 recognition templates. */
+export const HISTORICAL_V3_SETUP_PACKAGE_VERSION = "0.1.0";
+/** Package version embedded in byte-exact setup-v4 recognition templates. */
+export const HISTORICAL_V4_SETUP_PACKAGE_VERSION = "0.1.1";
 
 export interface SetupFile {
   path: string;
@@ -919,7 +921,9 @@ function configFile(
     packageVersion ??
     (version === SETUP_VERSION
       ? REVIEWSENSEI_VERSION
-      : HISTORICAL_SETUP_PACKAGE_VERSION);
+      : version === 3
+        ? HISTORICAL_V3_SETUP_PACKAGE_VERSION
+        : HISTORICAL_V4_SETUP_PACKAGE_VERSION);
   return (
     `# ReviewSensei setup version: ${version}\n` +
     `setup_version: ${version}\n` +
@@ -963,7 +967,7 @@ export function buildPinnedV4SetupFiles(
         SETUP_VERSION,
         false,
         false,
-        HISTORICAL_SETUP_PACKAGE_VERSION,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
       ),
     },
   ];
@@ -1010,7 +1014,7 @@ export function buildHistoricalTaggedV4SetupFiles(
         SETUP_VERSION,
         false,
         false,
-        HISTORICAL_SETUP_PACKAGE_VERSION,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
       ),
     },
   ];
@@ -1039,7 +1043,7 @@ export function buildHistoricalProviderParityV4SetupFiles(
         SETUP_VERSION,
         false,
         false,
-        HISTORICAL_SETUP_PACKAGE_VERSION,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
       ),
     },
   ];
