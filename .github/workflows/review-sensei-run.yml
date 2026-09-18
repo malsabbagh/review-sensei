@@ -195,11 +195,19 @@ jobs:
               ;;
             *) active_provider=invalid ;;
           esac
-          {
-            echo "normalized_provider_mode=$PROVIDER_MODE"
-            echo "normalized_model=$MODEL"
-            echo "active_provider=$active_provider"
-          } >> "$GITHUB_OUTPUT"
+          case "$PROVIDER_MODE" in
+            cloud) resolved_provider_mode=cloud-ollama ;;
+            local) resolved_provider_mode=local-ollama ;;
+            openrouter|cloud-ollama|local-ollama) resolved_provider_mode="$PROVIDER_MODE" ;;
+            "")
+              if [[ "$MODE" == "manual" ]]; then
+                resolved_provider_mode=local-ollama
+              else
+                resolved_provider_mode=cloud-ollama
+              fi
+              ;;
+            *) resolved_provider_mode=invalid ;;
+          esac
           if [[ -n "$PROVIDER_PROFILE" ]]; then
             echo '::error::provider_profile is unused; set provider_mode to openrouter and model via REVIEWSENSEI_MODEL.' >&2
             exit 1
@@ -286,6 +294,11 @@ jobs:
               fi
               ;;
           esac
+          {
+            echo "normalized_provider_mode=$resolved_provider_mode"
+            echo "normalized_model=$MODEL"
+            echo "active_provider=$active_provider"
+          } >> "$GITHUB_OUTPUT"
 
   authoritative-preflight:
     needs: validate-provider-mode

@@ -517,23 +517,21 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("--enable-auto-approve", text)
         self.assertIn("--no-auto-approve", text)
         self.assertIn(
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud'",
+            "needs.validate-provider-mode.outputs.active_provider == 'cloud'",
             text,
         )
         self.assertIn(
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama'",
+            "needs.validate-provider-mode.outputs.active_provider == 'local'",
             text,
         )
         self.assertIn(
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local'",
+            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'",
             text,
         )
+        self.assertIn("resolved_provider_mode=cloud-ollama", text)
+        self.assertIn("resolved_provider_mode=local-ollama", text)
         self.assertIn(
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama'",
-            text,
-        )
-        self.assertIn(
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'",
+            'echo "normalized_provider_mode=$resolved_provider_mode"',
             text,
         )
         self.assertIn("OPENROUTER_API_KEY is required for OpenRouter mode", text)
