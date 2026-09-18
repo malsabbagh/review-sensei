@@ -315,7 +315,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.workflow)
 
-    def test_tag_release_does_not_publish_npm(self):
+    def test_tag_release_publishes_npm(self):
         self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
         for job in ("native-build", "assemble-npm", "publish-npm"):
             match = re.search(
@@ -324,11 +324,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             )
             self.assertIsNotNone(match)
             assert match is not None
-            self.assertIn(
-                "    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}",
+            self.assertNotIn(
+                "refs/heads/__disabled_npm_release__",
                 match.group("body"),
             )
         self.assertIn("Publish npm packages with Trusted Publishing", self.workflow)
+        self.assertIn("environment:\n      name: npm", self.workflow)
 
     def test_workflow_is_tag_only(self):
         self.assertIn('"v*.*.*"', self.workflow)

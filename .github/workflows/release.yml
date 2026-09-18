@@ -91,8 +91,6 @@ jobs:
             release/review-sensei-sbom.spdx.json
 
   native-build:
-    # npm publication is owned exclusively by the public manual lane.
-    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
     name: Native standalone (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -154,8 +152,6 @@ jobs:
           path: dist/standalone/${{ matrix.target }}/review-sensei
 
   assemble-npm:
-    # npm publication is owned exclusively by the public manual lane.
-    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
     name: Assemble and validate npm package set
     needs: native-build
     runs-on: ubuntu-latest
@@ -258,8 +254,6 @@ jobs:
             release/npm/integrity.jsonl
 
   publish-npm:
-    # npm publication is owned exclusively by the public manual lane.
-    if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
     name: Publish npm packages with Trusted Publishing
     needs: assemble-npm
     runs-on: ubuntu-latest
