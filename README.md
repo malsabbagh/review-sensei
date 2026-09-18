@@ -499,6 +499,54 @@ review-sensei --diff pr.patch
 
 ## Providers
 
+The shipped registry keys are `ollama`, `openai-compatible`, and `openrouter`.
+See the [provider matrix on reviewsensei.dev](https://reviewsensei.dev/providers/)
+and [`docs/installation.md`](docs/installation.md) for operator defaults.
+
+Installed GitHub workflows select the backend with `REVIEWSENSEI_PROVIDER_MODE`
+and do not pass `--profile`:
+
+| `REVIEWSENSEI_PROVIDER_MODE` | Registry key | Where it runs | Secret | Default model |
+| --- | --- | --- | --- | --- |
+| `local` or `local-ollama` (default) | `ollama` | Self-hosted runner labelled `ollama` | none | `qwen3.5:4b` |
+| `cloud` or `cloud-ollama` | `ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4.1-flash:cloud` |
+| `openrouter` | `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
+
+Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
+selected. Hosted OpenRouter accepts only the published allowlist in
+`provider_config.HOSTED_OPENROUTER_DEFAULTS`.
+
+Named CLI profiles are immutable presets via `--profile` or
+`ProviderSettings.for_profile(...)`:
+
+| Profile | Adapter and endpoint | Credential | Budget |
+| --- | --- | --- | --- |
+| `local-private` (aliases `local`, `private`, `local/private`) | local Ollama (`127.0.0.1`) | none | 900s, 4,096 output tokens |
+| `fast-triage` | OpenAI-compatible (`api.openai.com`) | explicit `OPENAI_API_KEY` value | 120s, 2,048 output tokens |
+| `deep-verification` | Ollama Cloud | explicit `OLLAMA_API_KEY` value | 900s, 8,192 output tokens |
+| `openrouter-sonnet` | OpenRouter (`openrouter.ai`) | explicit `OPENROUTER_API_KEY` value | 120s, 4,096 output tokens |
+| `openrouter-gpt` | OpenRouter (`openrouter.ai`) | explicit `OPENROUTER_API_KEY` value | 120s, 2,048 output tokens |
+
+Profiles select exactly one provider; they do not race or fail over between
+providers. Profile construction does not read environment variables, so callers
+must deliberately retrieve and pass a credential when policy requires one.
+A stage configuration may set `provider_profile` to a canonical name;
+unprofiled and `local-private` runs reject a remote stage profile, and a
+remote run may only narrow a stage to `local-private`. The reusable workflow
+enables Ollama local/cloud and hosted OpenRouter through
+`REVIEWSENSEI_PROVIDER_MODE`; `fast-triage` and OpenRouter CLI profiles remain
+explicit CLI/evaluate paths only.
+
+Use `review-sensei --profile local-private --provider ollama --diff pr.patch`
+for the local preset, `--profile fast-triage --provider openai-compatible` with
+`OPENAI_API_KEY` for the OpenAI Chat Completions slice, or
+`--provider openrouter --profile openrouter-sonnet` with `OPENROUTER_API_KEY`
+for OpenRouter. OpenRouter CLI profiles start `unqualified` and require
+`--allow-unqualified-profile` for live review until separate qualification
+evidence exists. Live evaluation of a remote profile still requires
+`--allow-live-model` and `--allow-data-egress`; fixture reports cannot promote
+a profile.
+
 The core depends on this small interface:
 
 ```python
@@ -513,32 +561,6 @@ Registering another provider means translating `ProviderRequest` into that
 provider's API and returning `ProviderResponse`. The review service, diff
 validation, output schema, and GitHub-independent behavior remain unchanged.
 See [the architecture guide](docs/architecture.md).
-
-The registry includes one explicit additional adapter, `openai-compatible`, for
-OpenAI Chat Completions-compatible HTTPS endpoints. It requires an API key at
-construction time and never falls back to Ollama. Deterministic presets are
-available through `ProviderSettings.for_profile(...)`:
-
-| Profile | Adapter and endpoint | Credential | Budget |
-| --- | --- | --- | --- |
-| `local-private` (aliases `local`, `private`, `local/private`) | local Ollama (`127.0.0.1`) | none | 900s, 4,096 output tokens |
-| `fast-triage` | OpenAI-compatible (`api.openai.com`) | explicit `OPENAI_API_KEY` value | 120s, 2,048 output tokens |
-| `deep-verification` | Ollama Cloud | explicit `OLLAMA_API_KEY` value | 900s, 8,192 output tokens |
-
-Profiles select exactly one provider; they do not race or fail over between
-providers. Profile construction does not read environment variables, so callers
-must deliberately retrieve and pass a credential when policy requires one.
-CLI `--profile` selects the same presets. A stage configuration may set
-`provider_profile` to a canonical name; unprofiled and `local-private` runs
-reject a remote stage profile, and a remote run may only narrow a stage to
-`local-private`. The installed GitHub workflows keep the existing local/cloud
-variables and do not pass `--profile` or an OpenAI endpoint.
-
-Use `review-sensei --profile local-private --provider ollama --diff pr.patch`
-for the local preset, or `--profile fast-triage --provider openai-compatible`
-with `OPENAI_API_KEY` for the explicit OpenAI Chat Completions slice. Live
-evaluation of a remote profile still requires `--allow-live-model` and
-`--allow-data-egress`; fixture reports cannot promote a profile.
 
 The OpenAI-compatible adapter is restricted to `https://api.openai.com` by
 default and rejects redirects so its bearer token cannot be silently forwarded

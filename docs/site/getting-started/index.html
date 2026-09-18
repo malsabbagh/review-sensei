@@ -156,7 +156,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
     <a class="brand" href="/">ReviewSensei<span class="dev">.dev</span></a>
     <nav class="nav-links" aria-label="Primary">
       <a href="/">Home</a>
-      <a href="https://github.com/malsabbagh/review-sensei#providers">Providers</a>
+      <a href="/providers/">Providers</a>
       <a href="https://github.com/malsabbagh/review-sensei/releases">Releases</a>
       <a href="/security/">Security</a>
       <a class="nav-cta" href="#paths" aria-current="page">Getting started</a>
@@ -276,9 +276,9 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
         <p style="color:#a4a8a5">Install the ReviewSensei GitHub App on selected repositories. The App opens a setup pull request; review execution stays in your GitHub Actions environment.</p>
         <dl class="meta-grid">
           <div class="meta-item"><dt>Execution location</dt><dd>Your repository's GitHub Actions runners — <code>ubuntu-latest</code> (cloud) or labelled self-hosted runner (<code>self-hosted, linux, x64, ollama</code>) for local mode.</dd></div>
-          <div class="meta-item"><dt>Provider destination</dt><dd><code>http://127.0.0.1:11434/api</code> (local, default) or <code>https://ollama.com/api</code> (cloud, explicit opt-in).</dd></div>
-          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud only), <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_LOCAL_MODEL</code>, <code>REVIEWSENSEI_CLOUD_MODEL</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
-          <div class="meta-item"><dt>Compute / inference cost</dt><dd>You pay for Actions minutes (or self-hosted hardware) and your Ollama or Ollama Cloud usage.</dd></div>
+          <div class="meta-item"><dt>Provider destination</dt><dd><code>http://127.0.0.1:11434/api</code> (local, default), <code>https://ollama.com/api</code> (cloud, explicit opt-in), or <code>https://openrouter.ai/api/v1</code> (<code>REVIEWSENSEI_PROVIDER_MODE=openrouter</code>).</dd></div>
+          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_MODEL</code>, <code>REVIEWSENSEI_LOCAL_MODEL</code>, <code>REVIEWSENSEI_CLOUD_MODEL</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
+          <div class="meta-item"><dt>Compute / inference cost</dt><dd>You pay for Actions minutes (or self-hosted hardware) and your Ollama, Ollama Cloud, or OpenRouter usage.</dd></div>
           <div class="meta-item"><dt>Enabled writes (defaults)</dt><dd>Setup PR only until merged. Generated variables default all write switches to <code>false</code>.</dd></div>
           <div class="meta-item"><dt>First-success output</dt><dd>One App-authored review with inline comments on an eligible PR after enabling <code>REVIEWSENSEI_AUTO_REVIEW=true</code> and <code>REVIEWSENSEI_GITHUB_WRITES=true</code>.</dd></div>
         </dl>
@@ -286,7 +286,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
         <ol class="steps">
           <li><strong>Install the App</strong> on selected repositories.</li>
           <li><strong>Merge</strong> the generated setup pull request.</li>
-          <li><strong>Configure provider mode</strong> via repository variables. Cloud mode requires <code>OLLAMA_API_KEY</code> as a repository secret.</li>
+          <li><strong>Configure provider mode</strong> via repository variables. Cloud mode requires <code>OLLAMA_API_KEY</code>; OpenRouter mode requires <code>OPENROUTER_API_KEY</code>.</li>
           <li><strong>Enable controls deliberately</strong> — analysis first, then publication.</li>
         </ol>
         <div class="command-wrap">
@@ -307,8 +307,8 @@ REVIEWSENSEI_VERSION=0.5.0</pre>
         <p style="color:#a4a8a5">Copy the supported example workflow without installing the GitHub App. You own the workflow, runner labels, secrets, and every control switch.</p>
         <dl class="meta-grid">
           <div class="meta-item"><dt>Execution location</dt><dd>GitHub Actions on your runner. Local mode requires self-hosted runner labelled <code>ollama</code>.</dd></div>
-          <div class="meta-item"><dt>Provider destination</dt><dd>Local: <code>http://127.0.0.1:11434/api</code>. Cloud: <code>https://ollama.com/api</code>.</dd></div>
-          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code>, <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
+          <div class="meta-item"><dt>Provider destination</dt><dd>Local: <code>http://127.0.0.1:11434/api</code>. Cloud: <code>https://ollama.com/api</code>. OpenRouter: <code>https://openrouter.ai/api/v1</code>.</dd></div>
+          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code>, <code>OPENROUTER_API_KEY</code>, <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_MODEL</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>Actions minutes or self-hosted capacity plus provider inference.</dd></div>
           <div class="meta-item"><dt>Enabled writes</dt><dd>Controlled by repository variables; defaults match setup-v4.</dd></div>
           <div class="meta-item"><dt>First-success output</dt><dd>Validated <code>review.json</code> artifact (if upload enabled) and a review on the PR when publication is enabled.</dd></div>
@@ -396,7 +396,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
     </div>
     <div class="links-grid">
       <article class="link-card"><h3>Security</h3><p>Trust boundaries and data handling.</p><a href="/security/">Security overview →</a></article>
-      <article class="link-card"><h3>Providers</h3><p>Ollama local and cloud adapters.</p><a href="https://github.com/malsabbagh/review-sensei#providers">Provider matrix →</a></article>
+      <article class="link-card"><h3>Providers</h3><p>Ollama local/cloud, OpenRouter, and CLI-only OpenAI-compatible presets.</p><a href="/providers/">Provider matrix →</a></article>
       <article class="link-card"><h3>Examples</h3><p>Portable GitHub Actions workflow.</p><a href="https://github.com/malsabbagh/review-sensei/tree/main/examples/github-actions">Workflow examples →</a></article>
       <article class="link-card"><h3>Release info</h3><p>Version <code>0.5.0</code> release notes.</p><a href="https://github.com/malsabbagh/review-sensei/releases">Releases →</a></article>
       <article class="link-card"><h3>Installation guide</h3><p>Full install and workflow details.</p><a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">Canonical install docs →</a></article>

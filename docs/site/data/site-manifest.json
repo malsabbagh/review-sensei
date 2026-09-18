@@ -148,36 +148,41 @@
       "id": "openrouter",
       "title": "OpenRouter",
       "provider": "openrouter",
-      "profile": null,
+      "profile": "openrouter-sonnet / openrouter-gpt (CLI profiles)",
       "inference_destination": {
         "endpoint_scope": "remote",
         "base_url": "https://openrouter.ai/api/v1",
-        "default_model": null
+        "default_model": "deepseek/deepseek-v4.1-flash"
       },
       "credential_ref": "OPENROUTER_API_KEY",
       "engine_support": {
-        "cli": false,
-        "evaluate": false,
-        "npx_launcher": false
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
       },
       "workflow_support": {
-        "reusable_workflow": false,
-        "provider_mode": null,
-        "notes": "Adapter source exists on main, but no named profile, CLI flags, or reusable-workflow path expose OpenRouter yet."
+        "reusable_workflow": true,
+        "provider_mode": "openrouter",
+        "notes": "Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=openrouter and repository OPENROUTER_API_KEY secret."
       },
       "status_labels": [
-        "planned",
-        "source-only",
-        "not-implemented",
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported",
         "experimental"
       ],
       "evidence": [
         "src/review_sensei/providers/registry.py",
-        "src/review_sensei/providers/openrouter.py"
+        "src/review_sensei/providers/openrouter.py",
+        "src/review_sensei/providers/profiles.py",
+        "docs/installation.md",
+        "docs/data-handling.md",
+        "docs/adr/0045-openrouter-trusted-configuration.md"
       ],
       "limitations": [
-        "Registry registers openrouter, but engine surfaces remain disabled until routing policy and operator docs ship.",
-        "No named profile or workflow provider mode selects OpenRouter in installed callers."
+        "Hosted OpenRouter accepts only the published allowlist in provider_config.HOSTED_OPENROUTER_DEFAULTS.",
+        "OpenRouter CLI profiles start unqualified and require --allow-unqualified-profile for live review until separate qualification evidence exists.",
+        "Hosted workflows reject allow_unqualified_profile=true; use the CLI for unqualified profile runs."
       ]
     }
   ]
