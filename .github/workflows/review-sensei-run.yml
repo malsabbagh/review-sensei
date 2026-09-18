@@ -1025,7 +1025,7 @@ jobs:
             exit 1
           fi
           unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/python" scripts/resolve_hosted_openrouter_workflow.py both)"
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
           export MODEL OPENROUTER_UPSTREAM_PROVIDER
@@ -1162,7 +1162,7 @@ jobs:
             exit 1
           fi
           unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/python" scripts/resolve_hosted_openrouter_workflow.py both)"
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
           export MODEL OPENROUTER_UPSTREAM_PROVIDER

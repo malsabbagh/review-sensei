@@ -512,7 +512,7 @@ def _parser() -> argparse.ArgumentParser:
         epilog=(
             "Additional commands use the same first-token dispatch as "
             "prepare-diff, evaluate, github, and promotion: doctor, plan, "
-            "prepare-diff, evaluate, github, promotion."
+            "prepare-diff, evaluate, github, promotion, resolve-hosted-openrouter."
         ),
     )
     parser.add_argument(
@@ -674,6 +674,27 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_RECOVERY_TTL_SECONDS,
         help="Expiry window for --recovery-artifact (max 86400 seconds)",
+    )
+    return parser
+
+
+def _resolve_hosted_openrouter_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei resolve-hosted-openrouter",
+        description=(
+            "Resolve and validate hosted OpenRouter model and upstream "
+            "from workflow environment variables."
+        ),
+    )
+    parser.add_argument(
+        "action",
+        choices=("model", "upstream", "both"),
+        help="Emit resolved model, upstream, or both as a tab-separated line.",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the installed ReviewSensei version and exit",
     )
     return parser
 
@@ -1642,6 +1663,14 @@ def main(argv: list[str] | None = None) -> int:
         ) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
+    if args_list and args_list[0] == "resolve-hosted-openrouter":
+        args = _resolve_hosted_openrouter_parser().parse_args(args_list[1:])
+        if args.version:
+            print(_package_version())
+            return 0
+        from .hosting.openrouter_workflow import emit_hosted_openrouter_resolution
+
+        return emit_hosted_openrouter_resolution(args.action)
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
         if args.version:
