@@ -17,12 +17,12 @@ from review_sensei.hosting.github import (
 )
 from review_sensei.hosting.github.setup import (
     CONFIG_PATH,
+    RELEASED_RUNNER_SWITCH_V4_SHA256,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
     _historical_provider_parity_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
-    RELEASED_RUNNER_SWITCH_V4_SHA256,
     _released_runner_switch_v4_workflow,
     _tagged_workflow,
 )

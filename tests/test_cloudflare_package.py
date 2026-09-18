@@ -232,7 +232,9 @@ class CloudflarePackageTests(unittest.TestCase):
                 / "released-v4-resolve-trigger-runner-switch.yml"
             ).read_text(encoding="utf-8"),
             "worker-bundle-source": (
-                CLOUDFLARE / "fixtures" / "released-v4-resolve-trigger-runner-switch.yml"
+                CLOUDFLARE
+                / "fixtures"
+                / "released-v4-resolve-trigger-runner-switch.yml"
             ).read_text(encoding="utf-8"),
         }
         self.assertEqual(
@@ -250,9 +252,9 @@ class CloudflarePackageTests(unittest.TestCase):
                 ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
-        ts_source = (CLOUDFLARE / "src" / "released-runner-switch-v4-caller.ts").read_text(
-            encoding="utf-8"
-        )
+        ts_source = (
+            CLOUDFLARE / "src" / "released-runner-switch-v4-caller.ts"
+        ).read_text(encoding="utf-8")
         self.assertIn("releasedRunnerSwitchV4CallerFixture", ts_source)
         self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
 
