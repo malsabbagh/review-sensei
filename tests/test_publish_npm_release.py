@@ -164,7 +164,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     json.dumps(
                         {
                             "name": package,
-                            "versions": {version: {"name": package, "version": version}},
+                            "versions": {
+                                version: {"name": package, "version": version}
+                            },
                         }
                     ).encode("utf-8")
                 ),
@@ -227,7 +229,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     json.dumps(
                         {
                             "name": package,
-                            "versions": {version: {"name": package, "version": version}},
+                            "versions": {
+                                version: {"name": package, "version": version}
+                            },
                         }
                     ).encode("utf-8")
                 ),
