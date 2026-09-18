@@ -202,7 +202,8 @@ The signed assertion must use issuer
 `workflow_ref`, `workflow_sha`, `job_workflow_ref`, `job_workflow_sha`,
 `run_id`, `run_attempt`, and `runner_environment` (plus the documented actor
 and ref claims). `installation_id` is not trusted or accepted as a caller
-claim. The broker requires the configured public v4 tag ref and resolves that
+claim. The broker requires the configured public workflow tag ref (`v5` by
+default; `v4` remains accepted during migration) and resolves that
 tag to compare the runtime workflow SHA,
 claims replay/rate state in the SQLite ledger before any GitHub API capacity is
 consumed, resolves the installation server-side, obtains an installation-scoped

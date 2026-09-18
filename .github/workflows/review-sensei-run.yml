@@ -1,7 +1,7 @@
 name: ReviewSensei reusable runner
 
 # This is the public reusable workflow. Setup-v4 callers use the
-# operator-managed v4 git tag as their update channel. The OIDC broker resolves
+# operator-managed v5 git tag as their update channel. The OIDC broker resolves
 # that tag at capability-exchange time and requires the executing workflow SHA
 # to match it. PyPI remains the primary package channel; the source fallback
 # installs the executing workflow commit SHA directly.

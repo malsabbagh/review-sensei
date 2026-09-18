@@ -125,3 +125,10 @@ bind the exact base SHA and update channel in
 rules from the v3 amendment still apply. Reinstall and permission-acceptance
 events remain the supported trigger; deploying the Worker does not replay old
 deliveries.
+
+## Amendment - public channel `v5`
+
+The configured write channel is now `v5`. The Worker writes both reusable-
+workflow references to `@v5`. A byte-exact setup-v4 caller following another
+accepted tag (including `v4`) remains managed stale content and migrates to
+the configured tag. The broker still accepts `v4` during migration.

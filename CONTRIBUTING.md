@@ -149,7 +149,8 @@ approval.
 Third-party Actions in `.github/workflows` and `examples/github-actions` are
 pinned to full commit SHAs with same-line release comments. The sole exception
 is the public ReviewSensei reusable workflow, which intentionally follows the
-protected `@v4` setup channel and is checked by the OIDC broker at runtime.
+protected `@v5` setup channel and is checked by the OIDC broker at runtime.
+The broker still accepts `@v4` during migration.
 Dependabot updates the pins weekly; review the resulting diff and rerun
 `python scripts/check_action_pins.py`. CI and tests must remain credential-free.
 

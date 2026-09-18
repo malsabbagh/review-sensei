@@ -41,7 +41,7 @@ REQUIRED_SETUP_PERMISSIONS = frozenset(
 )
 SETUP_VERSION = 4
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
-CURRENT_PACKAGE_VERSION = "0.1.1"
+CURRENT_PACKAGE_VERSION = "0.5.0"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
@@ -54,7 +54,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_MODEL", ""),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
-    ("REVIEWSENSEI_VERSION", "0.1.1"),
+    ("REVIEWSENSEI_VERSION", "0.5.0"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_AUTO_APPROVE", "true"),
     ("REVIEWSENSEI_LEARNING_PROPOSALS", "false"),
@@ -620,7 +620,7 @@ def _provider_parity_workflow(public_workflow_tag: str) -> str:
 # ReviewSensei setup version: 4
 name: ReviewSensei review
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
@@ -778,7 +778,7 @@ def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.

@@ -174,3 +174,9 @@ Although GitHub exposes top-level pull-request timeline comments through the
 issue-comments endpoint, `issue_reply` is restricted to verified pull-request
 conversations and therefore requests `pull_requests: write`, not
 `issues: write`. It never authorizes replies on ordinary issues.
+
+## Amendment - public channel `v5`
+
+The broker requires the configured public workflow tag in `job_workflow_ref`.
+The write channel is now `@refs/tags/v5`; `v4` remains accepted during
+migration. The runtime `job_workflow_sha` must still match the resolved tag.

@@ -90,6 +90,12 @@ message that hosted runs do not forward `--allow-unqualified-profile`; operator
 opt-in is `REVIEWSENSEI_PROVIDER_MODE=openrouter` plus a published allowlist
 slug.
 
+## Amendment - public channel `v5`
+
+Callers forward `REVIEWSENSEI_PROVIDER_MODE`, `REVIEWSENSEI_MODEL`, and
+`OPENROUTER_API_KEY` after the public `v5` tag includes this contract. `v4`
+remains accepted during migration.
+
 ## Alternatives considered
 
 ### Reusing `openai-compatible` with an OpenRouter base URL

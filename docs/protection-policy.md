@@ -21,9 +21,10 @@ GitHub and retain the authoritative API response as evidence.
   contract. Do not add a blanket `always` bypass or a bot bypass; record any
   recovery use.
 - Immutable semantic version tags (`vMAJOR.MINOR.PATCH`) cannot be deleted or
-  replaced. `v4` is the sole movable operator-managed setup channel, and every
-  promotion is recorded in `.publication/publication-ledger.jsonl`. Compatibility
-  manifests add an audited previous/new `v4` target pair bound to one digest;
+  replaced. `v5` is the current movable operator-managed setup channel; `v4`
+  remains accepted during migration and should stay protected. Record promotions
+  in `.publication/publication-ledger.jsonl`. Compatibility
+  manifests add an audited previous/new channel target pair bound to one digest;
   actually moving the tag remains an operator action restricted by this policy.
 
 ## GitHub fnmatch versus policy regex
@@ -47,12 +48,14 @@ failing the regex. Do not "tighten" this by switching to `refs/tags/v*`,
 in the disposable-validation checklist below remain required because
 configuration readback cannot prove GitHub's matcher equals the regex.
 
-The movable `v4` channel is a separately protected, intentionally updatable
-tag. Its accepted include pattern is the exact ref `refs/tags/v4`. That
-ruleset must restrict deletion and require signed commits, and it must **not**
-include GitHub's `update` rule. Authorized operators with write access can
-move the tag; a blanket `always` bypass is not an accepted way to make `v4`
-movable. Unauthorized deletion must still be rejected.
+The movable write channel is now `v5`. Protect `refs/tags/v5` with the same
+ruleset shape as the historical `v4` channel: restrict deletion, require signed
+commits, and do **not** include GitHub's `update` rule. Authorized operators
+with write access can move the tag; a blanket `always` bypass is not an accepted
+way to make the channel movable. Unauthorized deletion must still be rejected.
+Keep `refs/tags/v4` similarly protected while the broker still accepts `v4`
+during migration. The checked-in contract lists both `v4` and `v5` under
+`movable_channels`; attach a channel ruleset for each tag as operator evidence.
 
 ## Configuration evidence versus behavioral tests
 
@@ -160,7 +163,10 @@ request metadata.
 
 ## v4 promotion audit record
 
-Publication provenance and `v4` promotions share
+The live write channel is `v5`. The ledger record type `v4_promotion` and
+required `tag` field `v4` are historical schema names for the original movable
+channel; keep using that helper until the schema is versioned. Publication
+provenance and channel promotions share
 `.publication/publication-ledger.jsonl`. Do not invent a hosted ledger.
 A `v4` promotion line is a JSON object with `record_type` `v4_promotion`,
 `tag` `v4`, `previous_sha`, `new_sha` (distinct 40-character lowercase git
@@ -179,7 +185,7 @@ that records the operator action, then re-run the checker with
 
 These steps are behavioral evidence. Perform them on a disposable fork or
 throwaway repository that copies the intended rulesets. Do not force-push,
-delete, or retarget production `vX.Y.Z` tags or the production `v4` tag.
+delete, or retarget production `vX.Y.Z` tags or the production `v5` / `v4` tags.
 
 1. Failing or missing `Required checks` cannot merge via the ordinary
    contributor path. Open a disposable PR whose required aggregate is red or

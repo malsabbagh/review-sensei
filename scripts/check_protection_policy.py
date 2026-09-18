@@ -23,7 +23,33 @@ _IMMUTABLE_TAG_PATTERN = r"^v[0-9]+\.[0-9]+\.[0-9]+$"
 # regex.  This is the only accepted conservative translation of
 # tags.immutable_pattern; it is broader than the regex (see docs/protection-policy.md).
 _GITHUB_IMMUTABLE_TAG_INCLUDE = ("refs/tags/v[0-9]*.[0-9]*.[0-9]*",)
-_GITHUB_CHANNEL_TAG_INCLUDE = ("refs/tags/v4",)
+
+
+def _channel_ref_include(channel: str) -> tuple[str, ...]:
+    return (f"refs/tags/{channel}",)
+
+
+def _movable_channels(policy: dict[str, Any]) -> list[str]:
+    tags = policy.get("tags")
+    if not isinstance(tags, dict):
+        return ["v4"]
+    channels = tags.get("movable_channels")
+    if not isinstance(channels, list) or not channels:
+        return ["v4"]
+    return [str(channel) for channel in channels]
+
+
+def _channel_tag_from_include(
+    policy: dict[str, Any], include: list[str] | None
+) -> str | None:
+    if include is None:
+        return None
+    for channel in _movable_channels(policy):
+        if include == list(_channel_ref_include(channel)):
+            return channel
+    return None
+
+
 _V4_PROMOTION_RECORD_TYPE = "v4_promotion"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _OPERATOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -134,7 +160,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
     tags = policy.get("tags")
     expected_tags = {
         "immutable_pattern": _IMMUTABLE_TAG_PATTERN,
-        "movable_channels": ["v4"],
+        "movable_channels": ["v4", "v5"],
         "promotion_record": ".publication/publication-ledger.jsonl",
     }
     if not isinstance(tags, dict):
@@ -479,22 +505,31 @@ def compare_tag_readback(policy: dict[str, Any], readback: dict[str, Any]) -> li
 
 
 def compare_channel_readback(
-    policy: dict[str, Any], readback: dict[str, Any]
+    policy: dict[str, Any],
+    readback: dict[str, Any],
+    *,
+    channel_tag: str | None = None,
 ) -> list[str]:
-    """Compare the movable v4 channel tag ruleset with API readback.
+    """Compare a movable workflow-channel tag ruleset with API readback.
 
     Deletion must be restricted.  The ``update`` rule must be absent so
-    authorized operators can move ``v4``.  Unsigned replacement is still
-    forbidden via ``required_signatures``.  Blanket ``always`` bypass is not
-    an accepted way to make the channel movable.
+    authorized operators can move the channel tag.  Unsigned replacement is
+    still forbidden via ``required_signatures``.  Blanket ``always`` bypass is
+    not an accepted way to make the channel movable.
     """
 
-    label = "v4 channel"
     errors = validate_policy(policy)
-    errors.extend(_tag_target_errors(readback, label))
-    include, include_errors = _ref_include_list(readback, label)
+    include, include_errors = _ref_include_list(readback, "channel")
     errors.extend(include_errors)
-    expected_include = list(_GITHUB_CHANNEL_TAG_INCLUDE)
+    resolved_channel = channel_tag or _channel_tag_from_include(policy, include)
+    if resolved_channel is None:
+        errors.append(
+            "channel readback does not match any movable workflow channel tag"
+        )
+        return errors
+    label = f"{resolved_channel} channel"
+    errors.extend(_tag_target_errors(readback, label))
+    expected_include = list(_channel_ref_include(resolved_channel))
     if include is not None and include != expected_include:
         errors.append(
             f"{label} readback must include {expected_include!r}; got {include!r}"
@@ -545,9 +580,9 @@ def compare_readback_dir(policy: dict[str, Any], directory: Path) -> list[str]:
 
     branch: list[dict[str, Any]] = []
     immutable: list[dict[str, Any]] = []
-    channel: list[dict[str, Any]] = []
+    channels: dict[str, dict[str, Any]] = {}
     expected_immutable = list(_GITHUB_IMMUTABLE_TAG_INCLUDE)
-    expected_channel = list(_GITHUB_CHANNEL_TAG_INCLUDE)
+    movable_channels = _movable_channels(policy)
     for path, payload in captures:
         target = payload.get("target")
         if target == "branch":
@@ -559,14 +594,21 @@ def compare_readback_dir(policy: dict[str, Any], directory: Path) -> list[str]:
         include, include_errors = _ref_include_list(payload, f"tag ruleset {path.name}")
         if include == expected_immutable:
             immutable.append(payload)
-        elif include == expected_channel:
-            channel.append(payload)
-        else:
-            errors.extend(include_errors)
-            errors.append(
-                f"tag ruleset {path.name} does not match the immutable "
-                "fnmatch translation or the v4 channel pattern"
-            )
+            continue
+        channel_tag = _channel_tag_from_include(policy, include)
+        if channel_tag is not None:
+            if channel_tag in channels:
+                errors.append(
+                    f"readback directory contains multiple {channel_tag} channel rulesets"
+                )
+            else:
+                channels[channel_tag] = payload
+            continue
+        errors.extend(include_errors)
+        errors.append(
+            f"tag ruleset {path.name} does not match the immutable "
+            "fnmatch translation or a movable workflow-channel pattern"
+        )
 
     if len(branch) > 1:
         errors.append("readback directory contains multiple branch rulesets")
@@ -582,12 +624,17 @@ def compare_readback_dir(policy: dict[str, Any], directory: Path) -> list[str]:
     else:
         errors.extend(compare_tag_readback(policy, immutable[0]))
 
-    if not channel:
-        errors.append("missing tag protection: v4 channel ruleset was not captured")
-    elif len(channel) > 1:
-        errors.append("readback directory contains multiple v4 channel rulesets")
-    else:
-        errors.extend(compare_channel_readback(policy, channel[0]))
+    for channel_tag in movable_channels:
+        if channel_tag not in channels:
+            errors.append(
+                f"missing tag protection: {channel_tag} channel ruleset was not captured"
+            )
+        else:
+            errors.extend(
+                compare_channel_readback(
+                    policy, channels[channel_tag], channel_tag=channel_tag
+                )
+            )
     return errors
 
 

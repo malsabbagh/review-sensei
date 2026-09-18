@@ -262,6 +262,7 @@ class CloudflarePackageTests(unittest.TestCase):
         import re
 
         from review_sensei.hosting.github.setup import (
+            CURRENT_PACKAGE_VERSION,
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
             DEFAULT_OPENROUTER_MODEL,
@@ -285,6 +286,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "DEFAULT_LOCAL_MODEL": DEFAULT_LOCAL_MODEL,
             "DEFAULT_CLOUD_MODEL": DEFAULT_CLOUD_MODEL,
             "DEFAULT_OPENROUTER_MODEL": DEFAULT_OPENROUTER_MODEL,
+            "REVIEWSENSEI_VERSION": CURRENT_PACKAGE_VERSION,
         }
         block_match = re.search(
             r"export const SETUP_VARIABLES.*?=\s*\[(.*?)\];",

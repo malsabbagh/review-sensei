@@ -221,3 +221,10 @@ approved public cutoff.
 - Related PR: not configured
 - Supersedes: none
 - Superseded by: none
+
+## Amendment - public channel `v5`
+
+The operator-managed workflow tag is now `v5`. The Worker writes `@v5` into
+both reusable-workflow references. Package release tags remain immutable
+`vX.Y.Z`; do not use `v5.0.0` as a package tag. The broker still accepts `v4`
+during migration.

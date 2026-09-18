@@ -194,3 +194,8 @@ and no-store responses. The Worker still does not execute reviews or persist
 source, diff, provider, assertion, token, or review data. `PUBLIC_WORKFLOW_TAG`
 is the setup-v4 workflow channel: setup validates that the tag exists and the
 broker resolves that tag at exchange time, requiring its runtime SHA to match.
+
+## Amendment - public channel `v5`
+
+The default Worker write channel is `PUBLIC_WORKFLOW_TAG=v5`. Generated
+setup-v4 callers follow `@v5`. The broker still accepts `v4` during migration.

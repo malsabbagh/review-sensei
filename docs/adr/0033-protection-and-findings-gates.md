@@ -70,3 +70,11 @@ tag-ruleset comparison added to the read-only checker:
 - Local `--policy` checks remain configuration evidence only. Live ruleset
   application, disposable merge tests, and production tag moves stay
   maintainer-operator evidence for #26.
+
+## Amendment - public channel `v5`
+
+The current generated-caller write channel is `v5`. Protect `refs/tags/v5`
+with the same channel-ruleset shape as historical `v4`. Keep `v4` protected
+while the broker still accepts it. The checked-in protection policy now lists
+`movable_channels: ["v4", "v5"]`. The `v4_promotion` ledger record type name
+remains the original schema until that contract is versioned.

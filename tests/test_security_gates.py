@@ -1058,7 +1058,8 @@ class ProtectionPolicyTests(unittest.TestCase):
             module._GITHUB_IMMUTABLE_TAG_INCLUDE,
             ("refs/tags/v[0-9]*.[0-9]*.[0-9]*",),
         )
-        self.assertEqual(module._GITHUB_CHANNEL_TAG_INCLUDE, ("refs/tags/v4",))
+        self.assertEqual(module._channel_ref_include("v4"), ("refs/tags/v4",))
+        self.assertEqual(module._channel_ref_include("v5"), ("refs/tags/v5",))
         policy = module.load_object(ROOT / ".github" / "protection-policy.json")
         self.assertEqual(
             policy["tags"]["immutable_pattern"], module._IMMUTABLE_TAG_PATTERN
@@ -1070,9 +1071,15 @@ class ProtectionPolicyTests(unittest.TestCase):
         immutable = module.load_object(
             PROTECTION_FIXTURES / "immutable-tag-ruleset.json"
         )
-        channel = module.load_object(PROTECTION_FIXTURES / "v4-channel-ruleset.json")
+        v4_channel = module.load_object(PROTECTION_FIXTURES / "v4-channel-ruleset.json")
+        v5_channel = module.load_object(PROTECTION_FIXTURES / "v5-channel-ruleset.json")
         self.assertEqual(module.compare_tag_readback(policy, immutable), [])
-        self.assertEqual(module.compare_channel_readback(policy, channel), [])
+        self.assertEqual(
+            module.compare_channel_readback(policy, v4_channel, channel_tag="v4"), []
+        )
+        self.assertEqual(
+            module.compare_channel_readback(policy, v5_channel, channel_tag="v5"), []
+        )
 
     def test_immutable_tag_deletion_allowed_fails_closed(self):
         module = _load_script("check_protection_policy.py")

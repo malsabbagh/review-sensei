@@ -47,6 +47,11 @@ export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
 export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash";
+export const REVIEWSENSEI_VERSION = "0.5.0";
+/** Package version embedded in byte-exact setup-v3 recognition templates. */
+export const HISTORICAL_V3_SETUP_PACKAGE_VERSION = "0.1.0";
+/** Package version embedded in byte-exact setup-v4 recognition templates. */
+export const HISTORICAL_V4_SETUP_PACKAGE_VERSION = "0.1.1";
 
 export interface SetupFile {
   path: string;
@@ -69,7 +74,7 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_MODEL", value: "" },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
-  { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
+  { name: "REVIEWSENSEI_VERSION", value: REVIEWSENSEI_VERSION },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
   { name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" },
   { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
@@ -290,7 +295,7 @@ export function providerParityWorkflowTemplate(publicWorkflowTag: string): strin
   return String.raw`# ReviewSensei setup version: 4
 name: ReviewSensei review
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
@@ -426,7 +431,7 @@ function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
 name: ReviewSensei review
 run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
@@ -909,9 +914,16 @@ function configFile(
   version: number,
   includeAutoApprove = false,
   includeLearningProposals = false,
+  packageVersion?: string,
 ): string {
   const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
-  const packageVersion = version === 3 ? "0.1.0" : "0.1.1";
+  const resolvedPackageVersion =
+    packageVersion ??
+    (version === SETUP_VERSION
+      ? REVIEWSENSEI_VERSION
+      : version === 3
+        ? HISTORICAL_V3_SETUP_PACKAGE_VERSION
+        : HISTORICAL_V4_SETUP_PACKAGE_VERSION);
   return (
     `# ReviewSensei setup version: ${version}\n` +
     `setup_version: ${version}\n` +
@@ -922,7 +934,7 @@ function configFile(
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
     `cloud_model: ${DEFAULT_CLOUD_MODEL}\n` +
-    `version: ${packageVersion}\n` +
+    `version: ${resolvedPackageVersion}\n` +
     "auto_review: false\n" +
     autoApprove +
     (includeLearningProposals ? "learning_proposals: false\n" : "") +
@@ -949,7 +961,15 @@ export function buildPinnedV4SetupFiles(
         "# ReviewSensei setup version: 4",
       ),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
+    {
+      path: SETUP_FILE_PATHS[2],
+      content: configFile(
+        SETUP_VERSION,
+        false,
+        false,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
+      ),
+    },
   ];
 }
 
@@ -988,7 +1008,15 @@ export function buildHistoricalTaggedV4SetupFiles(
         "# ReviewSensei setup version: 4",
       ),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
+    {
+      path: SETUP_FILE_PATHS[2],
+      content: configFile(
+        SETUP_VERSION,
+        false,
+        false,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
+      ),
+    },
   ];
 }
 
@@ -1009,7 +1037,15 @@ export function buildHistoricalProviderParityV4SetupFiles(
         "# ReviewSensei setup version: 4",
       ),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile(SETUP_VERSION) },
+    {
+      path: SETUP_FILE_PATHS[2],
+      content: configFile(
+        SETUP_VERSION,
+        false,
+        false,
+        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
+      ),
+    },
   ];
 }
 
@@ -1051,7 +1087,7 @@ export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
   "This pull request adds or updates the ReviewSensei setup-v4 caller, which " +
-  "follows the operator-managed public v4 git tag. " +
+  "follows the operator-managed public v5 git tag. " +
   "Cloud operations use GitHub-hosted compute and local operations use the labelled " +
   "self-hosted runner; both support reviews and authorized conversations. All write and artifact " +
   "switches default to false. Cloud mode passes the existing customer-owned " +

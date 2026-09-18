@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-18
+
+- Official first public package cutoff: PyPI `review-sensei==0.5.0` and npm `@reviewsensei/cli@0.5.0` with matching platform packages, published through GitHub OIDC Trusted Publishing. Setup-v4 callers follow the movable public workflow tag `v5` (`PUBLIC_WORKFLOW_TAG=v5`, `@v5`); package versions remain immutable `X.Y.Z` (`v0.5.0`). The broker still accepts `v4` during migration via `BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS` / `brokerAcceptedPublicWorkflowTags`.
 
 - Hosted GitHub setup selects the backend with `REVIEWSENSEI_PROVIDER_MODE`
   (`local-ollama`, `cloud-ollama`, or `openrouter`; `local` and `cloud` are
@@ -24,20 +26,10 @@
   Operators can emit or validate records with `review-sensei promotion` or
   `scripts/validate_promotion_record.py` without adding live or secret flags to
   CI.
-
-## 0.1.1 - 2026-09-08
-
-- Fixed standalone HTTPS provider calls by bundling and using a trusted CA
-  bundle in native npm executables.
-- Bumped the Python distribution and all npm launcher/platform packages to
-  `0.1.1`.
-
-## Unreleased
-
 - Added the issue #35 compatibility-manifest contract that binds workflow
   commit, Python, npm, schema, and Worker identities with exact digests and
   trusted provenance. PyPI-primary and executing-commit fallback paths prove
-  that identity; live disposable-repository canary and `v4` movement stay
+  that identity; live disposable-repository canary and `v5` movement stay
   operator-only.
 - Wired deterministic candidate-finding evidence verification into publication
   so only snapshot-bound confirmed candidates become findings. Legacy
@@ -197,8 +189,14 @@
 - Added explicit live-model and remote-egress acknowledgements with offline CI.
 - Added evaluation documentation, architecture boundaries, and ADR 0012.
 
-## Unreleased
+## 0.1.1 - 2026-09-08
 
+- Fixed standalone HTTPS provider calls by bundling and using a trusted CA
+  bundle in native npm executables.
+- Bumped the Python distribution and all npm launcher/platform packages to
+  `0.1.1`.
+
+## 0.1.0 - 2026-08-02
 - Prepared reproducible package release metadata, archive validation, and a
   tag-driven OIDC/provenance/SBOM workflow for the first `0.1.0` publication.
 - Added the provider-neutral, downward-only `ReviewLimits` contract for
@@ -221,9 +219,6 @@
   (`http://127.0.0.1:11434/api`, no API key) and documented cloud provider
   egress as explicit opt-in.
 - Added ADR 0011 for the portable immutable workflow decision.
-
-## 0.1.0 - 2026-08-02
-
 - Added repository-local learning entries and validated learning proposals for
   future GitHub draft-PR persistence.
 - Added provider-neutral review domain models and validation.
