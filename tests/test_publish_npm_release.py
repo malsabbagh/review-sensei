@@ -6,13 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
 from urllib.error import HTTPError
 
 from scripts.publish_npm_release import (
     ALL_PACKAGES,
     PublishError,
-    classify_registry_state,
     load_integrity_records,
     preflight,
     publish_package,
@@ -45,8 +43,6 @@ class PublishNpmReleaseTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_preflight_marks_missing_packages_for_publish(self) -> None:
-        from urllib.error import HTTPError
-
         def fake_fetch(package: str, version: str) -> dict[str, object]:
             if package.endswith("darwin-arm64"):
                 return {
