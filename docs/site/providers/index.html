@@ -188,23 +188,23 @@ h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:
 </article>
 <article class="card">
   <h3>OpenRouter</h3>
-  <div class="label-row"><span class="label warn">planned</span><span class="label warn">source only</span><span class="label muted">not implemented</span><span class="label warn">experimental</span></div>
+  <div class="label-row"><span class="label positive">implemented on main</span><span class="label positive">available in distribution</span><span class="label positive">supported</span><span class="label warn">experimental</span></div>
   <ul class="meta-list">
     <li><strong>Provider</strong><span>openrouter</span></li>
-    <li><strong>Profile</strong><span>none</span></li>
+    <li><strong>Profile</strong><span>openrouter-sonnet / openrouter-gpt (CLI profiles)</span></li>
     <li><strong>Destination</strong><span>https://openrouter.ai/api/v1 (remote)</span></li>
-    <li><strong>Model</strong><span>not fixed</span></li>
+    <li><strong>Model</strong><span>deepseek/deepseek-v4.1-flash</span></li>
     <li><strong>Credential</strong><span>OPENROUTER_API_KEY</span></li>
-    <li><strong>Workflow</strong><span>not applicable · reusable workflow no</span></li>
+    <li><strong>Workflow</strong><span>openrouter · reusable workflow yes</span></li>
   </ul>
-  <p>Adapter source exists on main, but no named profile, CLI flags, or reusable-workflow path expose OpenRouter yet.</p>
+  <p>Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=openrouter and repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only.</p>
   <ul class="meta-list">
-    <li><strong>CLI</strong><span>no</span></li>
-    <li><strong>evaluate</strong><span>no</span></li>
-    <li><strong>npx launcher</strong><span>no</span></li>
+    <li><strong>CLI</strong><span>yes</span></li>
+    <li><strong>evaluate</strong><span>yes</span></li>
+    <li><strong>npx launcher</strong><span>yes</span></li>
   </ul>
-  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/openrouter.py</code></div></div>
-  <ul style="margin-top:12px;padding-left:18px"><li>Registry registers openrouter, but engine surfaces remain disabled until routing policy and operator docs ship.</li><li>No named profile or workflow provider mode selects OpenRouter in installed callers.</li></ul>
+  <div class="evidence"><strong style="color:#dedbd2;font-size:12px;text-transform:uppercase;letter-spacing:.08em">Evidence</strong><div><code class="path-chip">src/review_sensei/providers/registry.py</code><code class="path-chip">src/review_sensei/providers/openrouter.py</code><code class="path-chip">src/review_sensei/providers/profiles.py</code><code class="path-chip">src/review_sensei/provider_config.py</code><code class="path-chip">packages/npm/cli/README.md</code><code class="path-chip">tests/test_cli.py</code><code class="path-chip">docs/installation.md</code><code class="path-chip">docs/data-handling.md</code><code class="path-chip">docs/adr/0045-openrouter-trusted-configuration.md</code></div></div>
+  <ul style="margin-top:12px;padding-left:18px"><li>Hosted OpenRouter accepts only the published allowlist in provider_config.HOSTED_OPENROUTER_DEFAULTS; the default_model matches DEFAULT_OPENROUTER_MODEL (deepseek/deepseek-v4.1-flash).</li><li>CLI profiles openrouter-sonnet and openrouter-gpt remain unqualified and require --allow-unqualified-profile for live review; tests/test_cli.py covers the opt-in and fail-closed paths.</li><li>The npx launcher forwards argv to the Python CLI; reaching OpenRouter still requires explicit --provider openrouter (or --profile) plus OPENROUTER_API_KEY.</li><li>Hosted workflows reject allow_unqualified_profile=true; use the CLI for unqualified profile runs.</li></ul>
 </article>
     </div>
   </div>

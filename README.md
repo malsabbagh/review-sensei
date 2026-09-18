@@ -499,6 +499,12 @@ review-sensei --diff pr.patch
 
 ## Providers
 
+The shipped registry keys are `ollama`, `openai-compatible`, and `openrouter`.
+Operator defaults, workflow modes, named profiles, credentials, and hosted
+OpenRouter allowlists are documented in [`docs/installation.md`](docs/installation.md).
+The release-aware public matrix lives at
+[reviewsensei.dev/providers/](https://reviewsensei.dev/providers/).
+
 The core depends on this small interface:
 
 ```python
@@ -513,32 +519,6 @@ Registering another provider means translating `ProviderRequest` into that
 provider's API and returning `ProviderResponse`. The review service, diff
 validation, output schema, and GitHub-independent behavior remain unchanged.
 See [the architecture guide](docs/architecture.md).
-
-The registry includes one explicit additional adapter, `openai-compatible`, for
-OpenAI Chat Completions-compatible HTTPS endpoints. It requires an API key at
-construction time and never falls back to Ollama. Deterministic presets are
-available through `ProviderSettings.for_profile(...)`:
-
-| Profile | Adapter and endpoint | Credential | Budget |
-| --- | --- | --- | --- |
-| `local-private` (aliases `local`, `private`, `local/private`) | local Ollama (`127.0.0.1`) | none | 900s, 4,096 output tokens |
-| `fast-triage` | OpenAI-compatible (`api.openai.com`) | explicit `OPENAI_API_KEY` value | 120s, 2,048 output tokens |
-| `deep-verification` | Ollama Cloud | explicit `OLLAMA_API_KEY` value | 900s, 8,192 output tokens |
-
-Profiles select exactly one provider; they do not race or fail over between
-providers. Profile construction does not read environment variables, so callers
-must deliberately retrieve and pass a credential when policy requires one.
-CLI `--profile` selects the same presets. A stage configuration may set
-`provider_profile` to a canonical name; unprofiled and `local-private` runs
-reject a remote stage profile, and a remote run may only narrow a stage to
-`local-private`. The installed GitHub workflows keep the existing local/cloud
-variables and do not pass `--profile` or an OpenAI endpoint.
-
-Use `review-sensei --profile local-private --provider ollama --diff pr.patch`
-for the local preset, or `--profile fast-triage --provider openai-compatible`
-with `OPENAI_API_KEY` for the explicit OpenAI Chat Completions slice. Live
-evaluation of a remote profile still requires `--allow-live-model` and
-`--allow-data-egress`; fixture reports cannot promote a profile.
 
 The OpenAI-compatible adapter is restricted to `https://api.openai.com` by
 default and rejects redirects so its bearer token cannot be silently forwarded
