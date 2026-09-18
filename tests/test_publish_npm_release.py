@@ -522,7 +522,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 PublishError,
-                "registry preflight remained ambiguous after 2 attempts",
+                "version document replicating \\(attempt 2/2\\)",
             ):
                 classify_registry_state(
                     package,

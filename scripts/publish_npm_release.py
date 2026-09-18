@@ -269,6 +269,18 @@ def classify_registry_state(
                     f"{package}@{version} registry preflight not visible yet "
                     f"(HTTP 404, probe {visibility_attempts}/{preflight_404_attempts})"
                 )
+                if (
+                    probe == PackumentProbeState.PACKUMENT_MISSING
+                    and not packument_seen
+                    and attempt >= max_attempts
+                ):
+                    return "publish"
+                if (
+                    probe == PackumentProbeState.VERSION_ABSENT
+                    and packument_seen
+                    and attempt >= max_attempts
+                ):
+                    return "publish"
                 if visibility_attempts >= preflight_404_attempts:
                     final_probe = probe_packument_version_state(package, version)
                     if final_probe in {
@@ -506,7 +518,7 @@ def publish_package(
             )
         except PublishError as readback_exc:
             if isinstance(readback_exc, IntegrityMismatchError):
-                raise readback_exc
+                raise readback_exc from exc
             raise exc from readback_exc
         print(
             f"Publish failure recovered via registry readback: {exc}", file=sys.stderr
