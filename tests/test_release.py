@@ -337,6 +337,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "source/scripts/publish_npm_release.py publish-launcher", self.workflow
         )
+        self.assertIn('--version "${GITHUB_REF_NAME#v}"', self.workflow)
+        self.assertIn("persist-credentials: false", self.workflow)
+        self.assertNotIn("remote_version=$(npm view", self.workflow)
 
     def test_workflow_is_tag_only(self):
         self.assertIn('"v*.*.*"', self.workflow)
@@ -385,7 +388,8 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "source/scripts/publish_npm_release.py publish-launcher", self.workflow
         )
-        self.assertNotIn("npm view", self.workflow)
+        self.assertIn("persist-credentials: false", self.workflow)
+        self.assertNotIn("remote_version=$(npm view", self.workflow)
         self.assertLess(
             self.workflow.index("Publish platform packages first"),
             self.workflow.index("Publish launcher last"),

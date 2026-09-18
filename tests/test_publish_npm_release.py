@@ -10,11 +10,13 @@ from urllib.error import HTTPError, URLError
 
 from scripts.publish_npm_release import (
     ALL_PACKAGES,
+    PLATFORM_PACKAGES,
     PublishError,
     load_integrity_records,
     package_action,
     preflight,
     publish_package,
+    publish_platforms,
     read_back_with_retry,
     retry_delay_seconds,
     write_publish_state,
@@ -190,6 +192,68 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     "sha512-@reviewsensei/cli",
                     max_attempts=3,
                 )
+
+    def test_read_back_maps_transport_error(self) -> None:
+        with mock.patch(
+            "scripts.publish_npm_release.fetch_registry_package",
+            side_effect=TimeoutError("timed out"),
+        ):
+            with self.assertRaisesRegex(PublishError, "transport failure"):
+                read_back_with_retry(
+                    "@reviewsensei/cli",
+                    "0.5.0",
+                    "sha512-@reviewsensei/cli",
+                    max_attempts=1,
+                )
+
+    def test_publish_platforms_publishes_missing_platform_and_retries_readback(
+        self,
+    ) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        target = PLATFORM_PACKAGES[1]
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [
+                *[
+                    {"name": package, "action": "verified"}
+                    for package in PLATFORM_PACKAGES
+                    if package != target
+                ],
+                {"name": target, "action": "publish"},
+                {"name": "@reviewsensei/cli", "action": "publish"},
+            ],
+        )
+        tarball = self.bundle_dir / records[target]["file"]
+        tarball.write_bytes(b"tarball")
+        responses: list[object] = [
+            HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+            {
+                "name": target,
+                "version": "0.5.0",
+                "dist": {"integrity": records[target]["integrity"]},
+            },
+        ]
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.publish_tarball",
+            ) as publish,
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=responses,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            publish_platforms(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=2,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        publish.assert_called_once_with(tarball)
 
     def test_read_back_maps_url_error(self) -> None:
         with mock.patch(

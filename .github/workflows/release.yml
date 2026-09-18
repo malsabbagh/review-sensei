@@ -288,9 +288,11 @@ jobs:
       - name: Check out publish helper sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           path: source
+          persist-credentials: false
+          show-progress: false
       - name: Verify registry state against attested tarballs
         run: >-
           python source/scripts/publish_npm_release.py preflight

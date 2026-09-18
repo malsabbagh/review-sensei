@@ -299,6 +299,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           path: source
+          persist-credentials: false
+          show-progress: false
 
       - name: Configure bootstrap authentication when present
         shell: bash

@@ -72,8 +72,11 @@ def fetch_registry_package(package: str, version: str) -> dict[str, Any]:
         "https://registry.npmjs.org/"
         f"{quote(package, safe='')}/{quote(version, safe='')}"
     )
-    with urlopen(url, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(url, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except OSError as exc:
+        raise PublishError(f"registry request failed for {package}: {exc}") from exc
 
 
 def classify_registry_state(
@@ -165,6 +168,19 @@ def read_back_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             remote = fetch_registry_package(package, version)
+        except PublishError as exc:
+            if "registry request failed" not in str(exc):
+                raise
+            last_error = (
+                f"{package}@{version} registry readback transport failure "
+                f"(attempt {attempt}/{max_attempts}): {exc}"
+            )
+            if attempt >= max_attempts:
+                break
+            print(last_error, file=sys.stderr)
+            time.sleep(min(delay, max_delay_seconds))
+            delay = min(delay * 1.5, max_delay_seconds)
+            continue
         except HTTPError as exc:
             if not is_retryable_registry_http_error(exc.code):
                 raise PublishError(
@@ -228,7 +244,10 @@ def publish_package(
     max_delay_seconds: float,
 ) -> None:
     action = package_action(bundle_dir, package, version)
-    expected_integrity = records[package]["integrity"]
+    record = records.get(package)
+    if record is None:
+        raise PublishError(f"missing integrity record for {package}")
+    expected_integrity = record["integrity"]
     if action == "verified":
         print(f"Registry already contains the attested bytes for {package}@{version}")
         return
