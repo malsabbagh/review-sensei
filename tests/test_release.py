@@ -298,6 +298,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_build_validation_provenance_and_release_steps_exist(self):
         for marker in (
             "check_release_version.py",
+            "write_bundle_metadata.py",
             "python -m build --sdist --wheel",
             "validate_release.py",
             'pip install --disable-pip-version-check "${wheels[0]}"',
@@ -521,6 +522,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "Verify registry state against attested tarballs", maxsplit=1
         )[1].split("Publish platform packages first", maxsplit=1)[0]
         self.assertIn("--expected-source-sha", preflight_section)
+        self.assertIn("write_bundle_metadata.py", self.workflow)
         self.assertIn("Check out repository for resumed run validation", self.workflow)
         self.assertIn("resume-source", self.workflow)
         native_section = self.workflow.split("  native-build:", maxsplit=1)[1].split(

@@ -38,12 +38,16 @@ manual `publish-npm` dispatch from the default branch of this repository, and
 its attested source commit and bundle metadata version must match the requested
 version. The run title `publish-npm X.Y.Z` is an advisory check for newer runs;
 `bundle-metadata.json` and GitHub artifact attestation are the authoritative
-bindings. Before resuming, confirm the referenced run's head SHA is the commit
+bindings. The workflow's `verify-bundle` helper checks bundle structure and
+metadata only; attestation verification runs separately in the resume path.
+Before resuming, confirm the referenced run's head SHA is the commit
 you intended to release; the resume path trusts that run's attested source and
 does not publish bytes built from a different dispatch commit. The resumed
 dispatch reuses the prior run's attested tarballs and `source_sha`; it does not
 publish bytes built from the resuming dispatch commit. Do not combine resume
-with a fresh rebuild for the same version. Packages already verified on the
+with a fresh rebuild for the same version. Non-resume publishes still accept
+legacy bundles that lack `bundle-metadata.json`; resume requires metadata and
+attestation. Packages already verified on the
 registry are skipped and only missing packages are published.
 It also
 installs the launcher in a clean Linux prefix, verifies that

@@ -112,6 +112,11 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
 
 
 def verify_bundle_version(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
+    """Validate bundle version metadata when present, then load integrity records.
+
+    Bundles without ``bundle-metadata.json`` still pass on the non-resume publish
+    path; only ``integrity.jsonl`` is required there for backwards compatibility.
+    """
     metadata = load_bundle_metadata(bundle_dir)
     if metadata is not None and metadata["version"] != version:
         raise PublishError(
