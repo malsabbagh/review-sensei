@@ -36,6 +36,13 @@ const LEGACY_V3_UNINSTALL_BODY =
 export const SETUP_VERSION = 4;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v5";
+export const PUBLIC_REPOSITORY = "malsabbagh/review-sensei";
+export const PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
+/** Public workflow tags the OIDC broker still accepts during channel migrations. */
+export const BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS: readonly string[] = [
+  "v4",
+  "v5",
+];
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
@@ -99,6 +106,35 @@ export function validatePublicWorkflowTag(value: string): string {
     throw new Error("PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag");
   }
   return value;
+}
+
+/** Return the configured channel plus any in-flight migration tags. */
+export function brokerAcceptedPublicWorkflowTags(
+  configuredTag: string,
+): readonly string[] {
+  const configured = validatePublicWorkflowTag(configuredTag);
+  const accepted = new Set<string>([configured, ...BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS]);
+  for (const tag of BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS) {
+    validatePublicWorkflowTag(tag);
+  }
+  return [...accepted];
+}
+
+/** Parse the public reusable-workflow tag from an OIDC `job_workflow_ref`. */
+export function publicWorkflowTagFromJobRef(jobWorkflowRef: string): string | null {
+  const prefix = `${PUBLIC_REPOSITORY}/${PUBLIC_WORKFLOW_PATH}@refs/tags/`;
+  if (
+    typeof jobWorkflowRef !== "string" ||
+    !jobWorkflowRef.startsWith(prefix) ||
+    jobWorkflowRef.length <= prefix.length
+  ) {
+    return null;
+  }
+  try {
+    return validatePublicWorkflowTag(jobWorkflowRef.slice(prefix.length));
+  } catch {
+    return null;
+  }
 }
 
 function workflowTemplate(publicWorkflowRef: string): string {

@@ -1,7 +1,13 @@
 import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
-import { validatePublicWorkflowTag } from "./setup-content";
+import {
+  PUBLIC_REPOSITORY,
+  PUBLIC_WORKFLOW_PATH,
+  brokerAcceptedPublicWorkflowTags,
+  publicWorkflowTagFromJobRef,
+  validatePublicWorkflowTag,
+} from "./setup-content";
 
 const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -47,6 +53,20 @@ function capability(value: unknown): Capability {
 
 function workflowRef(repository: string, tag: string): string {
   return `${repository}/${WORKFLOW_PATH}@refs/tags/${tag}`;
+}
+
+function authorizeObservedWorkflowTag(
+  configuredTag: string,
+  jobWorkflowRef: string,
+): string {
+  const observedTag = publicWorkflowTagFromJobRef(jobWorkflowRef);
+  if (
+    observedTag === null ||
+    !brokerAcceptedPublicWorkflowTags(configuredTag).includes(observedTag)
+  ) {
+    throw new Error("broker_workflow_rejected");
+  }
+  return observedTag;
 }
 
 async function claimLedger(
@@ -112,11 +132,13 @@ export class TokenBroker {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
     });
-    const publicWorkflowTag = validatePublicWorkflowTag(
-      this.env.PUBLIC_WORKFLOW_TAG ?? "",
+    const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
+    const observedTag = authorizeObservedWorkflowTag(
+      configuredTag,
+      claims.job_workflow_ref,
     );
-    const runtime = await this.github.publicWorkflowRuntimeShas(publicWorkflowTag);
-    this.authorizeClaims(claims, publicWorkflowTag, runtime);
+    const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
+    this.authorizeClaims(claims, observedTag, runtime);
     // Reject replay/rate abuse immediately after cryptographic and local
     // policy validation, before consuming shared GitHub App API capacity.
     const ledgerState = await claimLedger(
@@ -167,15 +189,15 @@ export class TokenBroker {
     if (!REPOSITORY_PATTERN.test(claims.repository)) {
       throw new Error("broker_repository_rejected");
     }
-    // v4 is the operator-managed update channel. Resolve its current commit
-    // above, then require both the tag ref and a runtime SHA bound to that tag.
-    // GitHub Actions emits the peeled commit for lightweight tags and the tag
-    // object SHA for annotated tags; accept either when it matches this tag.
+    // Resolve the observed public tag above, then require both the canonical
+    // tag ref and a runtime SHA bound to that tag. GitHub Actions emits the
+    // peeled commit for lightweight tags and the tag object SHA for annotated
+    // tags; accept either when it matches the resolved tag.
     const workflowShaAuthorized =
       claims.job_workflow_sha === runtime.commitSha ||
       claims.job_workflow_sha === runtime.refSha;
     const workflowAuthorized =
-      claims.job_workflow_ref === workflowRef("malsabbagh/review-sensei", publicWorkflowTag) &&
+      claims.job_workflow_ref === workflowRef(PUBLIC_REPOSITORY, publicWorkflowTag) &&
       workflowShaAuthorized;
     if (!workflowAuthorized) {
       throw new Error("broker_workflow_rejected");

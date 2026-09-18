@@ -16,13 +16,16 @@ from review_sensei.hosting.github import (
     VerifiedDelivery,
 )
 from review_sensei.hosting.github.setup import (
+    BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
+    _broker_accepted_public_workflow_tags,
     _historical_provider_parity_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
+    _public_workflow_tag_from_job_ref,
     _released_runner_switch_v4_workflow,
     _tagged_workflow,
 )
@@ -380,6 +383,24 @@ class SetupPlanTests(unittest.TestCase):
         for tag in ("", "refs/tags/v4", "v4..next", "v4.", "v4.lock", "v4\n"):
             with self.subTest(tag=tag), self.assertRaises(GitHubSetupError):
                 SetupPlanBuilder(public_workflow_tag=tag)
+
+    def test_broker_accepts_v4_and_v5_during_channel_migration(self):
+        self.assertEqual(BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS, ("v4", "v5"))
+        self.assertEqual(_broker_accepted_public_workflow_tags("v4"), ("v4", "v5"))
+        self.assertEqual(_broker_accepted_public_workflow_tags("v5"), ("v5", "v4"))
+        self.assertEqual(
+            _public_workflow_tag_from_job_ref(
+                "malsabbagh/review-sensei/.github/workflows/"
+                "review-sensei-run.yml@refs/tags/v5"
+            ),
+            "v5",
+        )
+        self.assertIsNone(
+            _public_workflow_tag_from_job_ref(
+                "malsabbagh/review-sensei/.github/workflows/"
+                "review-sensei-run.yml@v5"
+            )
+        )
 
     def test_builder_rejects_sha_configuration_for_current_v4(self):
         with self.assertRaises(GitHubSetupError):

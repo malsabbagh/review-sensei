@@ -74,6 +74,9 @@ PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
 DEFAULT_PUBLIC_WORKFLOW_TAG = "v5"
+BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS = ("v4", "v5")
+PUBLIC_REPOSITORY = "malsabbagh/review-sensei"
+PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
 RELEASED_RUNNER_SWITCH_V4_SHA256 = (
     "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
 )
@@ -373,6 +376,29 @@ def _validate_public_workflow_sha(value: str) -> str:
             "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters"
         )
     return value
+
+
+def _broker_accepted_public_workflow_tags(configured_tag: str) -> tuple[str, ...]:
+    """Return the configured channel plus in-flight migration tags."""
+
+    configured = _validate_public_workflow_tag(configured_tag)
+    accepted = dict.fromkeys(
+        (configured, *BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS),
+        None,
+    )
+    for tag in BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS:
+        _validate_public_workflow_tag(tag)
+    return tuple(accepted)
+
+
+def _public_workflow_tag_from_job_ref(job_workflow_ref: str) -> str | None:
+    prefix = f"{PUBLIC_REPOSITORY}/{PUBLIC_WORKFLOW_PATH}@refs/tags/"
+    if not job_workflow_ref.startswith(prefix) or len(job_workflow_ref) <= len(prefix):
+        return None
+    try:
+        return _validate_public_workflow_tag(job_workflow_ref[len(prefix) :])
+    except GitHubSetupError:
+        return None
 
 
 def _validate_public_workflow_tag(value: str) -> str:

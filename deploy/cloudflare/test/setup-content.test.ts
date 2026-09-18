@@ -6,12 +6,15 @@ import {
   releasedRunnerSwitchV4CallerBytes,
 } from "../src/released-runner-switch-v4-caller";
 import {
+  BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
   DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  brokerAcceptedPublicWorkflowTags,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  publicWorkflowTagFromJobRef,
   releasedRunnerSwitchV4WorkflowTemplate,
   validatePublicWorkflowTag,
   validatePublicWorkflowSha,
@@ -33,6 +36,25 @@ describe("setup-v4 public boundary", () => {
     expect(() => validatePublicWorkflowTag("v4.lock")).toThrow();
     expect(() => validatePublicWorkflowTag("v4\n")).toThrow();
     expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v5");
+  });
+
+  it("accepts both migration tags in the broker policy helper", () => {
+    expect(BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS).toEqual(["v4", "v5"]);
+    expect(brokerAcceptedPublicWorkflowTags("v4")).toEqual(["v4", "v5"]);
+    expect(brokerAcceptedPublicWorkflowTags("v5")).toEqual(["v5", "v4"]);
+  });
+
+  it("parses the public workflow tag from OIDC job refs", () => {
+    expect(
+      publicWorkflowTagFromJobRef(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+      ),
+    ).toBe("v5");
+    expect(
+      publicWorkflowTagFromJobRef(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+      ),
+    ).toBeNull();
   });
 
   it("generates fork-safe callers at the supplied public workflow tag", () => {

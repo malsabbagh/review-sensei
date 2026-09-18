@@ -106,11 +106,13 @@ PUBLIC_WORKFLOW_TAG=v5
 resolves the tag through GitHub's public Git ref advertisement before writing
 generated callers; it retains the REST ref lookup as a fallback. This avoids
 GitHub's low anonymous REST quota while preserving the tag-to-commit check.
-The OIDC broker resolves the same tag at capability exchange time and requires
-the runtime workflow SHA to match that resolution. Moving the tag is therefore
-an operator-controlled release action; protect the tag and publish the
-reviewed snapshot before moving it. A Worker deploy does not create or move
-the public tag.
+The OIDC broker resolves the observed public tag from the OIDC
+`job_workflow_ref` at capability exchange time and requires the runtime workflow
+SHA to match that resolution. During channel migrations the broker accepts both
+`v4` and `v5` while `PUBLIC_WORKFLOW_TAG` remains the write channel for new
+setup output. Moving the tag is therefore an operator-controlled release
+action; protect the tag and publish the reviewed snapshot before moving it. A
+Worker deploy does not create or move the public tag.
 
 After deployment, set the GitHub App webhook URL to:
 
