@@ -481,12 +481,9 @@ external write, and uses a dedicated PyPI environment with GitHub OIDC Trusted
 Publishing rather than a long-lived upload token. The build also emits
 checksums, an SBOM, and GitHub artifact attestations before the publish and
 GitHub-release jobs attach the immutable assets. Workflow permissions are
-scoped per job and third-party actions are pinned to full commit SHAs. When the repository variable
-`ENABLE_UBICLOUD_HOSTED` is `true`, every active workflow job uses the
-`ubicloud-standard-2` Linux runner; the compatibility workflow omits its
-Windows/macOS entries because those hosts are not available in that mode. An
-unset or false variable retains the GitHub-hosted Ubuntu fallback and the full
-cross-platform compatibility matrix.
+scoped per job and third-party actions are pinned to full commit SHAs. Active
+workflow jobs use GitHub-hosted runners, including the full cross-platform
+compatibility matrix.
 
 The public repository separately owns `.github/workflows/publish-npm.yml` for
 the standalone launcher and native platform packages. Its manual release is

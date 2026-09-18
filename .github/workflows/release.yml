@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     name: Build and attest release bundle
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -108,7 +108,7 @@ jobs:
             os: ubuntu-latest
           - target: win32-x64
             os: windows-latest
-    runs-on: ${{ (matrix.os == 'ubuntu-latest' && vars.ENABLE_UBICLOUD_HOSTED == 'true') && 'ubicloud-standard-2' || matrix.os }}
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -158,7 +158,7 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/heads/__disabled_npm_release__') }}
     name: Assemble and validate npm package set
     needs: native-build
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -370,7 +370,7 @@ jobs:
   publish:
     name: Publish to PyPI with Trusted Publishing
     needs: build
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/review-sensei
@@ -395,7 +395,7 @@ jobs:
   github-release:
     name: Create GitHub release assets
     needs: build
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:

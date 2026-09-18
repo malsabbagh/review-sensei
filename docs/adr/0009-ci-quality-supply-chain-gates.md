@@ -29,12 +29,8 @@ not have GitHub Code Scanning enabled, CodeQL requests no `security-events:
 write` permission, retains its generated SARIF as a workflow artifact, and
 uses the deterministic local gate instead of attempting an unavailable upload.
 
-The repository variable `ENABLE_UBICLOUD_HOSTED` controls runner selection. When
-it is `true`, all Linux jobs use the `ubicloud-standard-2` runner and the
-compatibility matrix includes only its Ubuntu entries; Windows and macOS lanes
-are skipped before runner allocation because Ubicloud does not provide those
-hosts. When the variable is unset or false, Linux jobs use GitHub-hosted
-`ubuntu-latest` and the complete cross-platform matrix remains available.
+Linux jobs use GitHub-hosted `ubuntu-latest` and the complete cross-platform
+compatibility matrix remains available.
 
 Pin the direct CI tools in `requirements/ci.txt`. Build an sdist and wheel,
 then install only the wheel into a fresh
@@ -96,20 +92,17 @@ No package release or deployment is part of this rollout.
 
 ## Follow-up
 
-When fallback mode is enabled, read back hosted Windows/macOS and Python
-3.12–3.14 results, the CodeQL SARIF artifact, and the `Required checks` ruleset
-after publication; keep the existing issue #7 ADR 0007 unchanged.
+Read back hosted Windows/macOS and Python 3.12–3.14 results, the CodeQL SARIF
+artifact, and the `Required checks` ruleset after publication; keep the
+existing issue #7 ADR 0007 unchanged.
 
 ## Consequences
 
 Contributors get reproducible local commands and a branch-coverage floor, while
-the stable aggregate gives branch protection one durable contract. In Ubicloud
-mode, Linux compatibility and the quality gates run on the same hosted runner;
-Windows/macOS behavior is intentionally deferred until fallback mode is
-enabled. CodeQL artifact review and ruleset enforcement still require hosted
-evidence; local gates do not substitute for those checks. GitHub Code Scanning
-upload remains a documented follow-up once the repository is eligible for that
-feature.
+the stable aggregate gives branch protection one durable contract. CodeQL
+artifact review and ruleset enforcement still require hosted evidence; local
+gates do not substitute for those checks. GitHub Code Scanning upload remains
+a documented follow-up once the repository is eligible for that feature.
 
 ## Amendment (2026-09-16) — public repository findings gate
 

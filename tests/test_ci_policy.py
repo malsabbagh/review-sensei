@@ -614,7 +614,6 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
         self.assertIn(local_fallback_gate, reusable)
-        self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
 
         self.assertIn("repository id must be a positive decimal integer", reusable)
         openrouter_job = _job_section(reusable, "openrouter")
@@ -1270,77 +1269,15 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn('chmod u=rwx,go=rx "${payloads[0]}"', text)
 
-    def test_ci_omits_non_ubicloud_matrix_lanes_when_enabled(self):
-        workflow = (
-            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
-        )
-        text = workflow.read_text(encoding="utf-8")
-        match = re.search(
-            r"matrix: \$\{\{ fromJSON\(vars\.ENABLE_UBICLOUD_HOSTED == 'true'"
-            r" && '(?P<enabled>\{.*?\})' \|\| '(?P<fallback>\{.*\})'\) \}\}",
-            text,
-        )
-        self.assertIsNotNone(match)
-        assert match is not None
-        enabled = json.loads(match.group("enabled"))
-        fallback = json.loads(match.group("fallback"))
-        self.assertEqual(
-            enabled,
-            {
-                "include": [
-                    {"os": "ubuntu-latest", "python-version": "3.11"},
-                    {"os": "ubuntu-latest", "python-version": "3.14"},
-                ]
-            },
-        )
-        self.assertEqual(
-            fallback,
-            {
-                "include": [
-                    {"os": "ubuntu-latest", "python-version": "3.11"},
-                    {"os": "windows-latest", "python-version": "3.12"},
-                    {"os": "macos-latest", "python-version": "3.13"},
-                    {"os": "ubuntu-latest", "python-version": "3.14"},
-                ]
-            },
-        )
-
-    def test_every_active_workflow_job_uses_the_ubicloud_switch(self):
+    def test_active_workflows_do_not_reference_ubicloud_runner_switch(self):
         workflow_root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         workflow_paths = sorted(workflow_root.glob("*.yml"))
         self.assertTrue(workflow_paths)
         for workflow in workflow_paths:
             with self.subTest(workflow=workflow.name):
-                if workflow.name == "review-sensei-run.yml":
-                    # This public reusable workflow intentionally runs
-                    # on GitHub-hosted compute (automatic cloud) or the explicit
-                    # trusted Ollama self-hosted label; the repository's private
-                    # CI runner policy does not apply to this public contract.
-                    continue
-                lines = workflow.read_text(encoding="utf-8").splitlines()
-                runs_on_lines = [
-                    line.strip()
-                    for line in lines
-                    if line.strip().startswith("runs-on:")
-                ]
-                if not runs_on_lines:
-                    # A caller of a reusable workflow has no runner of its
-                    # own. Its called workflow owns runner selection instead.
-                    self.assertTrue(
-                        [line for line in lines if line.strip().startswith("uses:")]
-                    )
-                    continue
-                self.assertTrue(runs_on_lines)
-                for line in runs_on_lines:
-                    # npm Trusted Publishing must use an explicitly eligible
-                    # GitHub-hosted runner, independent of the private
-                    # Ubicloud switch used by repository CI.
-                    if workflow.name in {"release.yml", "publish-npm.yml"} and line == (
-                        "runs-on: ubuntu-latest"
-                    ):
-                        continue
-                    self.assertIn("vars.ENABLE_UBICLOUD_HOSTED", line)
-                    self.assertIn("ubicloud-standard-2", line)
+                text = workflow.read_text(encoding="utf-8")
+                self.assertNotIn("ENABLE_UBICLOUD_HOSTED", text)
+                self.assertNotIn("ubicloud-standard-2", text)
 
     def test_package_job_records_digests_and_runs_packaged_dist_safe_tests(self):
         workflow = (
