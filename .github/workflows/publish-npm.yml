@@ -1,6 +1,7 @@
 name: Publish npm packages
 
-run-name: publish-npm ${{ inputs.version }}
+# Must stay byte-identical to the Python resume check: f"publish-npm {version}"
+run-name: publish-npm ${{ github.event.inputs.version }}
 
 on:
   workflow_dispatch:
@@ -150,6 +151,7 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
+    # Skipped on resume dispatches and when native-build did not succeed.
     if: ${{ needs.verify-request.result == 'success' && needs.native-build.result == 'success' && inputs.resume_bundle_run_id == '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -278,10 +280,10 @@ jobs:
 
   publish-npm:
     name: Publish npm packages
-    # Resume dispatches skip native-build; require that skip explicitly instead of
-    # inferring from assemble-npm being skipped for unrelated reasons.
+    # Resume dispatches are selected only by resume_bundle_run_id; assemble-npm must
+    # be skipped on that path so a fresh bundle was not assembled in this run.
     needs: [verify-request, native-build, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped')) }}
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -388,7 +390,7 @@ jobs:
           )"
           git -C resume-source fetch origin "$bundle_source_sha"
           git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
-          git -C resume-source checkout "$bundle_source_sha"
+          git -C resume-source checkout --detach "$bundle_source_sha"
           python resume-source/scripts/check_release_version.py --tag "v$VERSION"
           resume_staging="$RUNNER_TEMP/resume-bundle-staging"
           rm -rf "$resume_staging"

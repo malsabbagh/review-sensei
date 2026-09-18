@@ -431,7 +431,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             publish_if_line,
         )
         self.assertIn(
-            "inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped'",
+            "inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'",
             publish_if_line,
         )
         self.assertIn("environment:\n      name: npm", self.workflow)
@@ -480,7 +480,9 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
 
     def test_partial_publish_can_resume_prior_attested_bundle(self):
         self.assertIn("resume_bundle_run_id:", self.workflow)
-        self.assertIn("run-name: publish-npm ${{ inputs.version }}", self.workflow)
+        self.assertIn(
+            "run-name: publish-npm ${{ github.event.inputs.version }}", self.workflow
+        )
         self.assertIn("inputs.resume_bundle_run_id == ''", self.workflow)
         self.assertIn(
             "Download npm release bundle from prior workflow run", self.workflow
@@ -519,6 +521,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "resume_bundle_run_id must reference a run from the dispatch source commit",
             resume_section,
         )
+        self.assertIn("checkout --detach", resume_section)
         self.assertIn("test -f release/npm/integrity.jsonl", resume_section)
         self.assertIn('--version "$VERSION"', resume_section)
         self.assertIn('--expected-source-sha "$bundle_source_sha"', resume_section)
@@ -526,14 +529,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         publish_permissions = publish_section.split("    steps:", maxsplit=1)[0]
         self.assertIn("actions: read", publish_permissions)
         self.assertIn("attestations: read", publish_permissions)
-        self.assertIn(
-            "needs.native-build.result == 'skipped'",
-            publish_section.split("    steps:", maxsplit=1)[0],
-        )
-        self.assertIn(
-            "needs.assemble-npm.result == 'skipped'",
-            publish_section.split("    if:", maxsplit=1)[1].split("\n", maxsplit=1)[0],
-        )
+        publish_if = publish_section.split("    if:", maxsplit=1)[1].split(
+            "\n", maxsplit=1
+        )[0]
+        self.assertIn("inputs.resume_bundle_run_id != ''", publish_if)
+        self.assertIn("needs.assemble-npm.result == 'skipped'", publish_if)
         preflight_section = self.workflow.split(
             "Verify registry state against attested tarballs", maxsplit=1
         )[1].split("Publish platform packages first", maxsplit=1)[0]

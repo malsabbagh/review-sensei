@@ -135,7 +135,10 @@ def _parse_sha256sums_entry(line: str, *, sums_path: Path) -> tuple[str, str]:
         raise PublishError(
             f"release bundle has invalid SHA256SUMS digest in {sums_path}: {line!r}"
         )
-    filename = filename.lstrip("*").strip()
+    if filename.startswith("*"):
+        filename = filename[1:].strip()
+    else:
+        filename = filename.strip()
     if not _is_safe_bundle_member_name(filename):
         raise PublishError(
             f"release bundle SHA256SUMS entry has unsafe filename in {sums_path}: "
