@@ -574,6 +574,39 @@ class PublishNpmReleaseTests(unittest.TestCase):
             max_delay_seconds=0.0,
         )
 
+    def test_publish_package_recovers_from_publish_failure_when_registry_matches(
+        self,
+    ) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-x64"
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": package, "action": "publish"}],
+        )
+        tarball = self.bundle_dir / records[package]["file"]
+        tarball.write_bytes(b"tarball")
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.publish_tarball",
+                side_effect=PublishError("npm publish failed with exit code 1"),
+            ) as publish,
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+            ) as readback,
+        ):
+            publish_package(
+                self.bundle_dir,
+                package,
+                "0.5.0",
+                records,
+                max_attempts=2,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+            )
+        publish.assert_called_once()
+        readback.assert_called_once()
+
     def test_publish_package_rejects_verified_state_when_registry_integrity_mismatches(
         self,
     ) -> None:

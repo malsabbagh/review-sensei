@@ -366,7 +366,25 @@ def publish_package(
 
     tarball = tarball_for_package(bundle_dir, package, version, records)
     print(f"Publishing {package}@{version} from {tarball.name}")
-    publish_tarball(tarball)
+    try:
+        publish_tarball(tarball)
+    except PublishError as exc:
+        try:
+            read_back_with_retry(
+                package,
+                version,
+                expected_integrity,
+                max_attempts=max_attempts,
+                initial_delay_seconds=initial_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+        except PublishError:
+            raise exc
+        print(
+            "Registry already contained the attested bytes after a publish failure for "
+            f"{package}@{version}"
+        )
+        return
     read_back_with_retry(
         package,
         version,
