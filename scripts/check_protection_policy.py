@@ -23,6 +23,8 @@ _IMMUTABLE_TAG_PATTERN = r"^v[0-9]+\.[0-9]+\.[0-9]+$"
 # regex.  This is the only accepted conservative translation of
 # tags.immutable_pattern; it is broader than the regex (see docs/protection-policy.md).
 _GITHUB_IMMUTABLE_TAG_INCLUDE = ("refs/tags/v[0-9]*.[0-9]*.[0-9]*",)
+
+
 def _channel_ref_include(channel: str) -> tuple[str, ...]:
     return (f"refs/tags/{channel}",)
 
@@ -46,6 +48,8 @@ def _channel_tag_from_include(
         if include == list(_channel_ref_include(channel)):
             return channel
     return None
+
+
 _V4_PROMOTION_RECORD_TYPE = "v4_promotion"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _OPERATOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
