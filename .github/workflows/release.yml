@@ -293,7 +293,6 @@ jobs:
           path: source
           persist-credentials: false
           show-progress: false
-
       - name: Assert helper checkout matches attested build source
         shell: bash
         env:
