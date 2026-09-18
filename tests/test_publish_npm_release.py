@@ -21,7 +21,6 @@ from scripts.publish_npm_release import (  # noqa: E402
     fetch_registry_package,
     load_integrity_records,
     package_action,
-    package_version_indexed,
     preflight,
     publish_package,
     publish_platforms,
