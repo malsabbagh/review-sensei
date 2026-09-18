@@ -96,30 +96,59 @@ def classify_registry_state(
     package: str,
     version: str,
     expected_integrity: str,
+    *,
+    max_attempts: int = DEFAULT_READBACK_ATTEMPTS,
+    initial_delay_seconds: float = DEFAULT_READBACK_INITIAL_DELAY_SECONDS,
+    max_delay_seconds: float = DEFAULT_READBACK_MAX_DELAY_SECONDS,
 ) -> str:
-    try:
-        remote = fetch_registry_package(package, version)
-    except HTTPError as exc:
-        if exc.code == 404:
-            return "publish"
-        raise PublishError(
-            f"registry preflight failed for {package}: HTTP {exc.code}"
-        ) from exc
-    except (URLError, RegistryTransportError) as exc:
-        raise PublishError(f"registry preflight failed for {package}: {exc}") from exc
+    delay = initial_delay_seconds
+    last_error = "unknown registry preflight failure"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            remote = fetch_registry_package(package, version)
+        except HTTPError as exc:
+            if exc.code == 404:
+                return "publish"
+            if not is_retryable_registry_http_error(exc.code):
+                raise PublishError(
+                    f"registry preflight failed for {package}: HTTP {exc.code}"
+                ) from exc
+            last_error = (
+                f"{package}@{version} registry preflight not ready yet "
+                f"(HTTP {exc.code}, attempt {attempt}/{max_attempts})"
+            )
+            if attempt >= max_attempts:
+                break
+            print(last_error, file=sys.stderr)
+            time.sleep(retry_delay_seconds(exc, delay, max_delay_seconds))
+            delay = min(delay * 1.5, max_delay_seconds)
+            continue
+        except RegistryTransportError as exc:
+            last_error = (
+                f"{package}@{version} registry preflight transport failure "
+                f"(attempt {attempt}/{max_attempts}): {exc}"
+            )
+            if attempt >= max_attempts:
+                break
+            print(last_error, file=sys.stderr)
+            time.sleep(min(delay, max_delay_seconds))
+            delay = min(delay * 1.5, max_delay_seconds)
+            continue
 
-    dist = remote.get("dist")
-    if (
-        remote.get("name") != package
-        or remote.get("version") != version
-        or not isinstance(dist, dict)
-        or dist.get("integrity") != expected_integrity
-    ):
-        raise PublishError(
-            "published npm bytes do not match the attested release bundle: "
-            f"{package}@{version}"
-        )
-    return "verified"
+        dist = remote.get("dist")
+        if (
+            remote.get("name") != package
+            or remote.get("version") != version
+            or not isinstance(dist, dict)
+            or dist.get("integrity") != expected_integrity
+        ):
+            raise PublishError(
+                "published npm bytes do not match the attested release bundle: "
+                f"{package}@{version}"
+            )
+        return "verified"
+
+    raise PublishError(last_error)
 
 
 def write_publish_state(
@@ -284,14 +313,27 @@ def publish_package(
     )
 
 
-def preflight(bundle_dir: Path, version: str) -> None:
+def preflight(
+    bundle_dir: Path,
+    version: str,
+    *,
+    max_attempts: int,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+) -> None:
     records = load_integrity_records(bundle_dir, version)
+    retry_kwargs = {
+        "max_attempts": max_attempts,
+        "initial_delay_seconds": initial_delay_seconds,
+        "max_delay_seconds": max_delay_seconds,
+    }
     state = []
     for package in ALL_PACKAGES:
         action = classify_registry_state(
             package,
             version,
             records[package]["integrity"],
+            **retry_kwargs,
         )
         state.append({"name": package, "action": action})
         print(f"{package}: {action}")
@@ -377,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "preflight":
-            preflight(bundle_dir, args.version)
+            preflight(bundle_dir, args.version, **retry_kwargs)
         elif args.command == "publish-platforms":
             publish_platforms(bundle_dir, args.version, **retry_kwargs)
         else:

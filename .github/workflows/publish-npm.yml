@@ -296,11 +296,20 @@ jobs:
       - name: Check out publish helper sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verify-request.outputs.source_sha }}
           fetch-depth: 1
           path: source
           persist-credentials: false
           show-progress: false
+
+      - name: Assert helper checkout matches attested build source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Configure bootstrap authentication when present
         shell: bash

@@ -361,6 +361,12 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             'test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"', self.workflow
         )
         self.assertIn("ref: ${{ github.sha }}", self.workflow)
+        self.assertIn(
+            "ref: ${{ needs.verify-request.outputs.source_sha }}", self.workflow
+        )
+        self.assertIn(
+            "Assert helper checkout matches attested build source", self.workflow
+        )
         self.assertIn('test "$source_sha" = "$GITHUB_SHA"', self.workflow)
         self.assertIn(
             'python scripts/check_release_version.py --tag "v$VERSION"', self.workflow
