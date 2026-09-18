@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -44,6 +45,37 @@ def canonical_git_sha(source_sha: str) -> str:
     return source_sha
 
 
+def resolve_git_head_sha() -> str:
+    try:
+        head_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        raise BundleMetadataError(
+            "unable to resolve checkout HEAD for bundle metadata"
+        ) from exc
+    return canonical_git_sha(head_sha)
+
+
+def resolve_executed_source_sha(*, explicit: str | None) -> str:
+    head_sha = resolve_git_head_sha()
+    github_sha = os.environ.get("GITHUB_SHA")
+    if github_sha:
+        github_sha = canonical_git_sha(github_sha)
+        if github_sha != head_sha:
+            raise BundleMetadataError(
+                "GITHUB_SHA does not match the current checkout HEAD"
+            )
+    executed_sha = head_sha
+    if explicit is not None:
+        explicit_sha = canonical_git_sha(explicit)
+        if explicit_sha != executed_sha:
+            raise BundleMetadataError("source SHA does not match the executed commit")
+        return explicit_sha
+    return executed_sha
+
+
 def write_bundle_metadata(
     bundle_dir: Path,
     *,
@@ -76,12 +108,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    source_sha = args.source_sha
-    if source_sha is None:
-        source_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip()
     try:
+        source_sha = resolve_executed_source_sha(explicit=args.source_sha)
         path = write_bundle_metadata(
             args.bundle_dir,
             version=args.version,

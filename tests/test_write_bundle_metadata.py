@@ -10,7 +10,9 @@ from pathlib import Path
 
 from scripts.write_bundle_metadata import (
     BundleMetadataError,
+    main,
     normalize_release_version,
+    resolve_executed_source_sha,
     write_bundle_metadata,
 )
 
@@ -55,6 +57,52 @@ class WriteBundleMetadataTests(unittest.TestCase):
                 version="0.5.0",
                 source_sha="not-a-sha",
             )
+
+    def test_resolve_executed_source_sha_defaults_to_head(self) -> None:
+        from unittest import mock
+
+        head_sha = "a" * 40
+        with mock.patch(
+            "scripts.write_bundle_metadata.resolve_git_head_sha",
+            return_value=head_sha,
+        ):
+            self.assertEqual(resolve_executed_source_sha(explicit=None), head_sha)
+
+    def test_resolve_executed_source_sha_rejects_mismatch(self) -> None:
+        from unittest import mock
+
+        head_sha = "a" * 40
+        with mock.patch(
+            "scripts.write_bundle_metadata.resolve_git_head_sha",
+            return_value=head_sha,
+        ):
+            with self.assertRaisesRegex(
+                BundleMetadataError,
+                "does not match the executed commit",
+            ):
+                resolve_executed_source_sha(explicit="b" * 40)
+
+    def test_main_rejects_git_head_resolution_failure(self) -> None:
+        import io
+        from unittest import mock
+
+        with mock.patch(
+            "scripts.write_bundle_metadata.resolve_git_head_sha",
+            side_effect=BundleMetadataError(
+                "unable to resolve checkout HEAD for bundle metadata"
+            ),
+        ):
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                exit_code = main(
+                    [
+                        "--bundle-dir",
+                        str(self.bundle_dir),
+                        "--version",
+                        "0.5.0",
+                    ]
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("unable to resolve checkout HEAD", stderr.getvalue())
 
 
 if __name__ == "__main__":

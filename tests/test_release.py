@@ -431,7 +431,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             publish_if_line,
         )
         self.assertIn(
-            "inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'",
+            "inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped'",
             publish_if_line,
         )
         self.assertIn("environment:\n      name: npm", self.workflow)
