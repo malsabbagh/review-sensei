@@ -65,7 +65,7 @@ containing `/v1/`.
 | `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
-| `channel-promotion.schema.json` | Audited `v4` promotion or rollback record |
+| `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
 
 Compatibility-manifest worker ranges support bounded numeric, caret, tilde, and
 wildcard forms. An unqualified `x` or `*` is intentionally an explicit
@@ -83,11 +83,11 @@ checksum fetched beside an untrusted artifact is rejected.
 
 Implemented now: validating and building that manifest, proving PyPI-primary
 and executing-commit install identity, binding fixture/downstream canary
-evidence from the #34 contract, recording serialized `v4` promotion/rollback,
+evidence from the #34 contract, recording serialized workflow-channel promotion/rollback,
 and failing closed on mismatched digests, outdated Worker ranges, partial
 publication, and in-flight tag movement. Operator-only / future: assembling
 the complete multi-lane artifact set, live disposable-repository canary,
-attestation verification at consumer install time, and actually moving `v4`.
+attestation verification at consumer install time, and actually moving `v5`.
 
 The `$id` policy is fixed: the path after the package namespace must include
 `/v1/` for v1 documents. Schema identity is the `$id`. Legacy review-result

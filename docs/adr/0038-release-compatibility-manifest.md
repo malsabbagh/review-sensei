@@ -111,3 +111,11 @@ and documentation. Do not reuse a published package version.
 - Operator-owned `v4` tag protection evidence from #26.
 - Optional consumer-side attestation verification during install, without
   fetching an unauthenticated sidecar digest.
+
+## Amendment - public channel `v5`
+
+The movable operator-managed write channel is now `v5`. Do not move it until
+publication is complete and canary evidence binds the digest. Immutable
+`vX.Y.Z` package tags remain unreplaceable. The broker still accepts `v4`
+during migration. The protection-policy `v4_promotion` ledger record type is
+a historical schema name.

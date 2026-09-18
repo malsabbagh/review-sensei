@@ -112,14 +112,28 @@ can affect the package identity.
 
 ## Public reusable-workflow tag channel
 
-The customer setup contract follows the separate `v4` tag in the public
+The customer setup contract follows the separate `v5` tag in the public
 `malsabbagh/review-sensei` repository. This tag is not a package-version tag:
 it identifies the reviewed reusable workflow snapshot and may be moved only by
 the release owner as part of an approved public cutoff. Do not move it from an
 unreviewed or unpublished snapshot.
 
+Keep these names distinct:
+
+- **setup-v4** is the generated caller format (`SETUP_VERSION = 4`). It is not
+  the git tag.
+- **`v5`** is the movable public workflow channel. Generated callers use
+  `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.
+- **`0.5.0` / `v0.5.0`** is the immutable Python and npm package cutoff.
+  `release.yml` publishes PyPI from `v*.*.*` tags. Do not create a package tag
+  named `v5.0.0`; that would collide with the `v*.*.*` release trigger and
+  confuse the workflow channel with a library version.
+
+The broker still accepts both `v4` and `v5` during migration. New setup output
+follows `v5`.
+
 After the audited public snapshot is published, configure the Cloudflare
-Worker with `PUBLIC_WORKFLOW_TAG=v4` and deploy it. Move `v4` to the reviewed
+Worker with `PUBLIC_WORKFLOW_TAG=v5` and deploy it. Move `v5` to the reviewed
 public snapshot, then trigger a fresh App installation/permission event to
 reconcile repositories. The broker resolves the tag at capability exchange
 time and checks the runtime workflow SHA against that resolution. The reusable
@@ -127,7 +141,7 @@ workflow installs its source fallback from the executing workflow SHA directly.
 
 A Python/PyPI release still uses an immutable `vX.Y.Z` tag and the `Release`
 workflow above. Publishing an npm package or deploying the Worker does not move
-the public `v4` tag or replay historical App deliveries; each is a separate,
+the public `v5` tag or replay historical App deliveries; each is a separate,
 operator-owned cutoff step.
 
 ## Compatibility manifest and release sequencing
@@ -160,22 +174,23 @@ artifact.
 
 Sequencing is build → verify → canary bind → publish/promote. Fixture
 downstream evidence from #34 can bind the exact manifest digest. A live
-disposable-repository canary is operator-only and cannot authorize `v4`
+disposable-repository canary is operator-only and cannot authorize workflow-channel
 promotion in this contract. Promotion is serialized, records previous and new
-`v4` targets, and is refused when publication is partial or a package version
+channel targets, and is refused when publication is partial or a package version
 would be replaced. A `partial` publication state means at least one lane is
 published but not all five; finish the remaining lanes (for example the npm
 launcher after platform packages per ADR 0031) before retrying promotion with
 the same manifest. A `failed` state means every lane is still unpublished and
 also blocks promotion until a fresh manifest is built from new artifact bytes.
 Rollback uses the previous immutable channel target and records both SHAs. If
-`v4` moves during a run, the default is fail-closed retry; bounded grace exists
+the write-channel tag moves during a run, the default is fail-closed retry; bounded grace exists
 only as an explicit in-memory authorized record for that run.
 
 Implemented by this change: the manifest schema, digest builder, identity
 proof APIs, canary-binding record, and promotion/rollback records. Operator-only:
 assembling every lane's bytes, live canary, attestation verification on a
-consumer runner, and moving or protecting `v4` in GitHub (see #26).
+consumer runner, and moving or protecting `v5` in GitHub (keep `v4` protected
+while the broker still accepts it; see #26).
 
 ## Local build and verification
 

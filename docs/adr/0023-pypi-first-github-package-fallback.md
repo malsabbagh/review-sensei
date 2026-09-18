@@ -136,3 +136,10 @@ Worker/workflow pair; no review-content data migration is required.
   Publishing release workflow.
 - Move the public `v4` tag whenever a future source snapshot is introduced
   before its PyPI publication; no separate SHA variable is updated.
+
+## Amendment - public channel `v5`
+
+The installer validates the configured workflow tag and writes `@v5`. Deploy
+the Worker with `PUBLIC_WORKFLOW_TAG=v5`, then move `v5` to the reviewed
+snapshot. The broker still accepts `v4` during migration. Package tags remain
+immutable `vX.Y.Z`.

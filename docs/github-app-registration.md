@@ -170,7 +170,7 @@ review; an uninstall/reinstall cycle is not required.
 
 ## Issue-64 setup-v4 lifecycle
 
-Setup-v4 adds the public reusable workflow boundary. The operator-managed `v4`
+Setup-v4 adds the public reusable workflow boundary. The operator-managed `v5`
 git tag is the update channel: the Worker validates it before setup and the
 generated caller follows the tag. The caller requests
 `contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
@@ -187,7 +187,7 @@ setup PR. Add the secret manually when enabling cloud mode.
 
 | Delivery | Reconciliation | Write rule |
 | --- | --- | --- |
-| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3/v4 -> one setup-v4 PR; current v4 -> no-op |
+| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3/v4 -> one setup-v4 PR; current tag-following setup-v4 -> no-op |
 | `installation.new_permissions_accepted` | Repeat the same selected-repository inspection | Reuse one open setup PR; custom/malformed/future -> zero writes |
 | `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v4 PR per repository |
 | removed/deleted/suspended/unsupported | Do not reconcile setup | No setup write |

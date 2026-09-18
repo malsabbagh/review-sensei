@@ -220,7 +220,7 @@ or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.
 
 The setup-v4 caller example in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
-uses the operator-managed `v4` git tag directly. The Worker validates that tag
+uses the operator-managed `v5` git tag directly. The Worker validates that tag
 during installation/reconciliation, and the broker resolves the same tag when
 authorizing a run (using the public Git ref advertisement before a bounded REST
 fallback on GitHub.com). That workflow
@@ -237,7 +237,7 @@ version-string and executing-SHA checks; digest/manifest verification is the
 implemented release contract in `review_sensei.release_manifest` and is not
 satisfied by fetching a checksum beside an untrusted artifact. Live
 disposable-repository canary evidence from #34 is operator-only; fixture
-downstream tests bind the exact manifest digest before any `v4` promotion.
+downstream tests bind the exact manifest digest before any workflow-channel promotion.
 It then checks out only trusted base content, validates refs, and computes a
 bounded diff without installing or executing the
 head branch.
@@ -326,7 +326,7 @@ for manual review and preserves learnings, existing variables, and secrets.
 ## Setup-v4 and tag-based reusable workflow
 
 The current generated setup is version 4. The caller follows the public
-`malsabbagh/review-sensei` reusable workflow at the operator-managed `v4` git
+`malsabbagh/review-sensei` reusable workflow at the operator-managed `v5` git
 tag and passes only bounded event inputs. It requests `contents: read`,
 `pull-requests: read`, `issues: read`, and `id-token: write`; generated write
 and artifact switches are all `false`.
@@ -351,7 +351,7 @@ secret values during setup and the App never creates, retrieves, logs,
 persists, or interpolates a secret value into generated output. Add the
 customer-owned `OLLAMA_API_KEY` yourself only when explicitly enabling cloud
 mode. `OPENROUTER_API_KEY` is forwarded by generated callers only after the
-public `v4` tag includes the reusable-workflow contract.
+public `v5` tag includes the reusable-workflow contract.
 
 Setup reconciliation is PR-only and changes only the three generated paths.
 `installation.created` (including reinstall),
@@ -359,7 +359,7 @@ Setup reconciliation is PR-only and changes only the three generated paths.
 `installation_repositories.added` inspect absent, legacy, and v2 clients.
 They reuse an existing open setup PR and produce at most one deterministic
 `review-sensei/setup-v4-<base12>-<tag>` PR for the exact base and update
-channel. Current v4 is a no-op. A byte-exact
+channel. Current tag-following setup-v4 is a no-op. A byte-exact
 managed v3 workflow or a managed v4 workflow following another valid tag is
 stale and is migrated; custom,
 malformed, and future versions are skipped without writes. A deployment alone
@@ -382,7 +382,7 @@ is rejected.
 
 The release order is: merge the implementation; publish the audited public
 snapshot; set Worker `PUBLIC_WORKFLOW_TAG` only; deploy the Worker; move the
-public `v4` tag to that same snapshot; update and accept
+public `v5` tag to that same snapshot; update and accept
 App permissions or reinstall/re-add the App;
 verify setup PR reconciliation; merge desired setup PRs; enable repository
 opt-ins; and only then run hosted acceptance. Rollback is a code-only

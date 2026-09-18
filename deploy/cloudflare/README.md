@@ -180,7 +180,7 @@ delivery, the Worker reads only the three generated paths from the repository's
 default branch, bounded to 128 KiB each. An older ReviewSensei setup (including
 the original unmarked workflow/configuration) causes the existing setup branch
 to be refreshed and a migration PR to be opened. A current setup is a no-op.
-The v4 caller follows `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
+The setup-v4 caller follows `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
 at the configured `PUBLIC_WORKFLOW_TAG` (default `v5`); invalid values or an
 unavailable tag fail closed before any setup write.
 If a known path contains custom content, a malformed marker, or a future setup
@@ -198,8 +198,9 @@ when its parent is the named base SHA, its author is the ReviewSensei App, its
 exact generated content is current, and its comparison changes generated paths
 only. Any pre-existing or concurrent mismatch returns
 `skipped_branch_conflict`; setup never force-moves a ref.
-The broker accepts only the configured v4 tag ref and its current runtime SHA,
-so a stale caller must merge its tag-following migration PR before it can
+The broker accepts the configured write-channel tag (`v5` by default) and,
+during migration, also accepts `v4`. The runtime SHA must match the resolved
+tag, so a stale caller must merge its tag-following migration PR before it can
 obtain a new cloud capability.
 
 Deploying the Worker does not replay old webhook deliveries. After deployment,

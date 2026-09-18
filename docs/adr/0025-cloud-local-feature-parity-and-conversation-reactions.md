@@ -158,3 +158,10 @@ Negative or tradeoffs:
 - Related PR: not configured
 - Supersedes: provider-specific feature restrictions in ADR 0022
 - Superseded by: not configured
+
+## Amendment - public channel `v5`
+
+The protected write channel is now `v5`. Older setup-v4 callers that still
+follow `v4` remain recognized until their migration PR is merged; the broker
+accepts both tags during that window. Rollout moves `v5` to the public
+commit; rollback moves `v5` back to the previous public workflow commit.

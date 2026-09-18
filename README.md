@@ -7,12 +7,13 @@ providers later.
 
 > Alpha: this repository provides an open-source review engine and CLI. The
 > primary usage path is running ReviewSensei in your own GitHub Actions
-> workflow. Setup-v4 callers follow the operator-managed public `v4` tag; the
+> workflow. Setup-v4 callers follow the operator-managed public `v5` tag; the
 > Worker validates that tag before creating the setup PR and the broker resolves
-> it again when issuing a capability. The example workflow installs the
+> it again when issuing a capability. The broker still accepts `v4` during
+> migration. The example workflow installs the
 > requested exact package from PyPI first and falls back to its executing commit
 > only when the distribution is unavailable. Both paths prove the intended
-> release identity against a compatibility manifest; live canary and `v4`
+> release identity against a compatibility manifest; live canary and `v5`
 > movement remain operator-only. It
 > defaults to a local Ollama endpoint and does not require a hosted backend.
 
@@ -159,7 +160,7 @@ name (`secrets.OLLAMA_API_KEY`) to the public reusable workflow. The App
 does not create, read, persist, log, or reveal that secret value. The Worker
 broker issues a short-lived, capability-scoped installation token for each
 authorized exchange after verifying
-the signed Actions OIDC identity, exact v4 workflow ref and runtime SHA,
+the signed Actions OIDC identity, exact `v5` workflow ref and runtime SHA,
 repository identity, fork status, installation, replay state, and rate limit.
 For each write operation, the workflow obtains a separate short-lived token for
 the requested capability: `review_publish` for review publication,
@@ -179,7 +180,7 @@ branch, pull request, and default variables.
 
 Installation, reinstall, permission-acceptance, and repository-added events
 reconcile absent or older generated clients through at most one setup-v4 PR.
-Current v4 is a no-op; managed v3 and older generated clients are migrated
+Current tag-following setup-v4 is a no-op; managed v3 and older generated clients are migrated
 through a setup PR, while custom, malformed, and future setup files are no-write
 cases. See [`docs/installation.md`](docs/installation.md),
 [`docs/github-app-registration.md`](docs/github-app-registration.md), and the
@@ -553,7 +554,7 @@ network egress path for Ollama deployments.
 ## GitHub integration
 
 The GitHub App opens a setup-v4 PR containing a thin caller that follows the
-operator-managed `v4` public git tag. The reusable workflow prefers the
+operator-managed `v5` public git tag. The reusable workflow prefers the
 requested exact package from PyPI and falls back to its executing workflow
 commit only when that package/version is unavailable. Unrelated PyPI
 installation failures remain fatal. All nine

@@ -620,7 +620,7 @@ def _provider_parity_workflow(public_workflow_tag: str) -> str:
 # ReviewSensei setup version: 4
 name: ReviewSensei review
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
@@ -778,7 +778,7 @@ def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
-# The installer and this example follow the operator-managed v4 git tag. Moving
+# The installer and this example follow the operator-managed v5 git tag. Moving
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.

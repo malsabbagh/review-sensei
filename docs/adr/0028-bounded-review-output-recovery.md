@@ -118,3 +118,9 @@ required.
 ## Links
 
 - Related ADRs: 0001, 0007, 0022, 0026
+
+## Amendment - public channel `v5`
+
+Rollout still requires a reviewed package and public-workflow release. Moving
+the public `v5` tag or deploying the broker remains a separate operator
+action. `v4` remains accepted during migration.

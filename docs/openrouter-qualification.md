@@ -206,7 +206,7 @@ Ordinary CI runs `tests/test_openrouter_qualification.py` and
 
 ## Release compatibility and canary
 
-Before moving the public `v4` channel or enabling website support labels:
+Before moving the public `v5` channel or enabling website support labels:
 
 1. Build a compatibility manifest from exact Python, npm, workflow, schema, and
    Worker artifacts ([releasing.md](releasing.md)).

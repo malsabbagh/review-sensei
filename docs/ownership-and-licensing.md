@@ -80,7 +80,7 @@ review and an explicitly scoped, maintainer-approved decision.
 | GitHub App | `https://github.com/apps/reviewsensei` (linked from the site and registration docs) | Registration/branding docs in [`docs/github-app-registration.md`](github-app-registration.md). **App owner account and recovery control: not verified beyond public App URL and docs.** |
 | PyPI | project name `review-sensei` | Publication runbook: [`docs/releasing.md`](releasing.md). **Publisher account recovery: not assessed in-repo.** |
 | npm scope / packages | `@reviewsensei/cli` and platform packages | Same releasing docs; Trusted Publishing / bootstrap described there. **npm org recovery: not assessed in-repo.** |
-| GitHub Releases / tags | repository Releases and protected tags (for example setup `v4`) | Maintainer release authority per [`CONTRIBUTING.md`](../CONTRIBUTING.md) and [`docs/releasing.md`](releasing.md). |
+| GitHub Releases / tags | repository Releases and protected tags (for example setup channel `v5`) | Maintainer release authority per [`CONTRIBUTING.md`](../CONTRIBUTING.md) and [`docs/releasing.md`](releasing.md). |
 | Cloudflare Worker / broker endpoints | Operator-deployed Workers (see `deploy/cloudflare/`) | Architecture notes that no live account is configured **in this repository**. Official production hostnames, if any, are operational—not proven exclusive software copyright. |
 
 Distinguish **operational/account control** (who can publish packages, move

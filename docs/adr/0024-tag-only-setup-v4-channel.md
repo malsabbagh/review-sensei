@@ -72,3 +72,23 @@ redeploying the prior Worker; no customer default branch is written directly.
   move during a running workflow; the runtime SHA check remains required.
 - An arbitrary branch or caller-supplied ref was rejected because it expands the
   trust boundary beyond the protected public release channel.
+
+## Amendment - public channel `v5` (package `0.5.0`)
+
+Setup generation remains setup-v4 (`SETUP_VERSION = 4`). That name is the
+generated-caller format, not the git tag.
+
+The operator-managed public reusable-workflow tag is now `v5`:
+
+- Generated callers reference
+  `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5`.
+- The Worker write channel is `PUBLIC_WORKFLOW_TAG=v5`.
+- Package versions remain immutable `X.Y.Z` (`v0.5.0` for this cutoff). Do
+  not publish a package tag named `v5.0.0`; `release.yml` matches `v*.*.*`
+  and would collide with the movable workflow channel.
+
+The broker still accepts both `v4` and `v5` during migration. New setup output
+and current-tag no-op recognition follow the configured write channel (`v5`).
+Moving `v5` is the public cutoff action. Protect `refs/tags/v5` the same way
+as the historical `v4` channel; keep `v4` protected until that acceptance is
+removed.

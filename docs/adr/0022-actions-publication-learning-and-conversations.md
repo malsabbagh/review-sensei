@@ -145,3 +145,11 @@ PyPI package is not yet available.
 - [Public contracts](../public-contracts.md)
 - [Cloudflare Worker package](../../deploy/cloudflare/README.md)
 - [ADR 0025](0025-cloud-local-feature-parity-and-conversation-reactions.md)
+
+## Amendment - public channel `v5`
+
+The generated setup-v4 caller now follows
+`malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5`.
+Configure `PUBLIC_WORKFLOW_TAG=v5`. The broker still accepts `v4` during
+migration. Moving `v5` is the public cutoff; package releases remain immutable
+`vX.Y.Z`.

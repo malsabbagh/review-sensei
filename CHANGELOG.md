@@ -2,7 +2,7 @@
 
 ## 0.5.0 - 2026-09-18
 
-- Official first public package cutoff: PyPI `review-sensei==0.5.0` and npm `@reviewsensei/cli@0.5.0` with matching platform packages, published through GitHub OIDC Trusted Publishing.
+- Official first public package cutoff: PyPI `review-sensei==0.5.0` and npm `@reviewsensei/cli@0.5.0` with matching platform packages, published through GitHub OIDC Trusted Publishing. Setup-v4 callers follow the movable public workflow tag `v5` (`PUBLIC_WORKFLOW_TAG=v5`, `@v5`); package versions remain immutable `X.Y.Z` (`v0.5.0`). The broker still accepts `v4` during migration.
 
 - Hosted GitHub setup selects the backend with `REVIEWSENSEI_PROVIDER_MODE`
   (`local-ollama`, `cloud-ollama`, or `openrouter`; `local` and `cloud` are
@@ -29,7 +29,7 @@
 - Added the issue #35 compatibility-manifest contract that binds workflow
   commit, Python, npm, schema, and Worker identities with exact digests and
   trusted provenance. PyPI-primary and executing-commit fallback paths prove
-  that identity; live disposable-repository canary and `v4` movement stay
+  that identity; live disposable-repository canary and `v5` movement stay
   operator-only.
 - Wired deterministic candidate-finding evidence verification into publication
   so only snapshot-bound confirmed candidates become findings. Legacy

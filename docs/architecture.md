@@ -506,7 +506,7 @@ public schema version, and Worker identity. Build output is valid only when
 every named artifact is present with an exact SHA-256 digest and an explicit
 trusted provenance mechanism. Missing or extra artifacts fail closed. The
 PyPI-primary and executing-commit install paths prove that identity in
-`review_sensei.release_manifest`; live disposable-repository canary and `v4`
+`review_sensei.release_manifest`; live disposable-repository canary and `v5`
 tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
 
 ## Public landing-page analytics boundary
@@ -607,7 +607,7 @@ Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:
 
 ```text
-customer setup-v4 caller (operator-managed @v4 tag; all five opt-ins false)
+customer setup-v4 caller (operator-managed @v5 tag; all five opt-ins false)
     -> public reusable workflow
        -> trusted-base checkout and bounded diff
        -> PyPI package or executing-SHA public GitHub source fallback
@@ -615,7 +615,7 @@ customer setup-v4 caller (operator-managed @v4 tag; all five opt-ins false)
        -> typed result/reply validation
        -> Actions OIDC assertion
           -> Cloudflare POST /github/token
-             -> exact @v4 ref + tag-resolved runtime SHA + installation resolution + metadata-scoped repository/fork checks
+             -> exact @v5 ref + tag-resolved runtime SHA + installation resolution + metadata-scoped repository/fork checks
              -> hashed replay/rate Durable Object claim
              -> one least-privileged capability token
        -> App-authored exact-head review (COMMENT or eligible APPROVE), learning PR, or authorized reply
@@ -623,7 +623,7 @@ customer setup-v4 caller (operator-managed @v4 tag; all five opt-ins false)
 ```
 
 The generated setup PR is limited to the workflow caller, uninstall workflow,
-and config file. The operator-managed v4 tag is validated during
+and config file. The operator-managed v5 tag is validated during
 installation/reconciliation and remains in the generated caller; the broker
 resolves the tag at capability exchange time and checks the runtime SHA. The workflow may
 receive the existing customer-owned `OLLAMA_API_KEY` only through a literal
