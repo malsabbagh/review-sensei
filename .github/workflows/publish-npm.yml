@@ -331,6 +331,7 @@ jobs:
           path: release/npm
 
       - name: Download npm release bundle from prior workflow run
+        id: resume-bundle
         if: ${{ inputs.resume_bundle_run_id != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -371,10 +372,11 @@ jobs:
           print(head_sha)
           PY
           )"
-          git -C resume-source fetch --depth 1 origin "$bundle_source_sha"
+          git -C resume-source fetch --depth 1 origin "$DEFAULT_BRANCH"
+          git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
           git -C resume-source checkout "$bundle_source_sha"
           python resume-source/scripts/check_release_version.py --tag "v$VERSION"
-          echo "BUNDLE_SOURCE_SHA=$bundle_source_sha" >> "$GITHUB_ENV"
+          echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
           gh run download "$RESUME_BUNDLE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name review-sensei-npm-release-bundle \
@@ -408,13 +410,13 @@ jobs:
         if: ${{ inputs.resume_bundle_run_id != '' }}
         env:
           VERSION: ${{ inputs.version }}
-          BUNDLE_SOURCE_SHA: ${{ env.BUNDLE_SOURCE_SHA }}
         run: |
           set -euo pipefail
+          test -n "${{ steps.resume-bundle.outputs.bundle_source_sha }}"
           python source/scripts/publish_npm_release.py verify-bundle \
             --bundle-dir "$GITHUB_WORKSPACE/release/npm" \
             --version "$VERSION" \
-            --expected-source-sha "$BUNDLE_SOURCE_SHA"
+            --expected-source-sha "${{ steps.resume-bundle.outputs.bundle_source_sha }}"
 
       - name: Configure bootstrap authentication when present
         shell: bash

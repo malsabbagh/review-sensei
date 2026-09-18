@@ -1511,6 +1511,20 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
             verify_resumed_bundle(self.bundle_dir, "0.5.0")
 
+    def test_verify_bundle_command_requires_expected_source_sha(self) -> None:
+        from scripts.publish_npm_release import main
+
+        exit_code = main(
+            [
+                "verify-bundle",
+                "--bundle-dir",
+                str(self.bundle_dir),
+                "--version",
+                "0.5.0",
+            ]
+        )
+        self.assertEqual(exit_code, 1)
+
     def test_load_bundle_metadata_rejects_oversized_file(self) -> None:
         from scripts.publish_npm_release import BUNDLE_METADATA_MAX_BYTES
         from scripts.publish_npm_release import load_bundle_metadata

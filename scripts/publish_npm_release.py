@@ -75,7 +75,8 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     path = bundle_metadata_path(bundle_dir)
     if not path.is_file():
         return None
-    raw = path.read_bytes()
+    with path.open("rb") as handle:
+        raw = handle.read(BUNDLE_METADATA_MAX_BYTES + 1)
     if len(raw) > BUNDLE_METADATA_MAX_BYTES:
         raise PublishError("release bundle bundle-metadata.json exceeds size limit")
     try:
@@ -749,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "verify-bundle":
+            if not args.expected_source_sha:
+                raise PublishError("verify-bundle requires --expected-source-sha")
             verify_resumed_bundle(
                 bundle_dir,
                 args.version,

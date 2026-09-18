@@ -35,8 +35,11 @@ Resume requires a bundle that includes `bundle-metadata.json` (produced by
 workflows after this metadata recording landed). Older bundles without that file
 are not eligible for resume. The resumed run must be a failed or cancelled
 manual `publish-npm` dispatch from the default branch of this repository, and
-its attested source commit must match the requested version. Packages already
-verified on the registry are skipped and only missing packages are published.
+its attested source commit must match the requested version. The resumed
+dispatch reuses the prior run's attested tarballs and `source_sha`; it does not
+publish bytes built from the resuming dispatch commit. Do not combine resume
+with a fresh rebuild for the same version. Packages already verified on the
+registry are skipped and only missing packages are published.
 It also
 installs the launcher in a clean Linux prefix, verifies that
 `node_modules/.bin/review-sensei` resolves to the launcher rather than a

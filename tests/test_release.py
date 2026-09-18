@@ -425,8 +425,14 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             line for line in publish_section.splitlines() if line.startswith("    if:")
         )
         self.assertIn("inputs.publish", publish_if_line)
-        self.assertIn("inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success'", publish_if_line)
-        self.assertIn("inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'", publish_if_line)
+        self.assertIn(
+            "inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success'",
+            publish_if_line,
+        )
+        self.assertIn(
+            "inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'",
+            publish_if_line,
+        )
         self.assertIn("environment:\n      name: npm", self.workflow)
         self.assertIn("id-token: write", self.workflow)
         self.assertIn("group: publish-npm-${{ inputs.version }}", self.workflow)
@@ -505,6 +511,15 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             'if: ${{ inputs.resume_bundle_run_id != \'\' }}',
             self.workflow,
         )
+        verify_section = self.workflow.split(
+            "Verify resumed npm release bundle provenance", maxsplit=1
+        )[1].split("Configure bootstrap authentication when present", maxsplit=1)[0]
+        self.assertIn(
+            '--expected-source-sha "${{ steps.resume-bundle.outputs.bundle_source_sha }}"',
+            verify_section,
+        )
+        self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
+        self.assertIn('id: resume-bundle', self.workflow)
 
 
 class ReleaseDocumentationTests(unittest.TestCase):
