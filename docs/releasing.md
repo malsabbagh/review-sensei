@@ -36,9 +36,10 @@ workflows after this metadata recording landed). Older bundles without that file
 are not eligible for resume. The resumed run must be a failed or cancelled
 manual `publish-npm` dispatch from the default branch of this repository, and
 its attested source commit and bundle metadata version must match the requested
-version. The run title `publish-npm X.Y.Z` is an advisory check for newer runs;
-`bundle-metadata.json` and GitHub artifact attestation are the authoritative
-bindings. The workflow's `verify-bundle` helper checks bundle structure and
+version. The run title must be exactly `publish-npm X.Y.Z`. Attestation
+verification binds each tarball to that run's source commit ref and digest via
+`--source-ref` and `--source-digest`; `bundle-metadata.json` provides a secondary
+check. The workflow's `verify-bundle` helper checks bundle structure and
 metadata only; attestation verification runs separately in the resume path.
 Before resuming, confirm the referenced run's head SHA is the commit
 you intended to release; the resume path trusts that run's attested source and

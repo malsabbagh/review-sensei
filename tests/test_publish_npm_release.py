@@ -1401,7 +1401,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         publish.assert_not_called()
         readback.assert_not_called()
 
-    def test_verify_resumed_bundle_accepts_legacy_bundle_without_metadata(
+    def test_verify_resumed_bundle_rejects_legacy_bundle_when_source_sha_required(
         self,
     ) -> None:
         from scripts.publish_npm_release import verify_resumed_bundle

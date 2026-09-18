@@ -370,11 +370,10 @@ jobs:
           if f"{owner}/{name}" != expected_repo:
               fail("resume_bundle_run_id must reference this repository")
           display_title = run.get("displayTitle") or ""
-          if display_title.startswith("publish-npm "):
-              if display_title != f"publish-npm {version}":
-                  fail(
-                      "resume_bundle_run_id must reference a publish-npm run for the same version"
-                  )
+          if display_title != f"publish-npm {version}":
+              fail(
+                  "resume_bundle_run_id must reference a publish-npm run for the same version"
+              )
           head_sha = run.get("headSha")
           if not isinstance(head_sha, str) or not head_sha:
               fail("resume_bundle_run_id is missing attested head SHA")

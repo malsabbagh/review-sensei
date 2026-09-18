@@ -491,12 +491,13 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "Download npm release bundle from prior workflow run", maxsplit=1
         )[1].split("Verify downloaded npm tarball checksums", maxsplit=1)[0]
         self.assertIn("displayTitle", resume_section)
-        self.assertIn('display_title.startswith("publish-npm ")', resume_section)
         self.assertIn(
             'display_title != f"publish-npm {version}"',
             resume_section,
         )
+        self.assertNotIn('display_title.startswith("publish-npm ")', resume_section)
         self.assertIn("resume_staging", resume_section)
+        self.assertIn("gh attestation verify", resume_section)
         self.assertIn('--source-digest "$bundle_source_sha"', resume_section)
         self.assertIn('--source-ref "refs/heads/$DEFAULT_BRANCH"', resume_section)
         self.assertIn(
