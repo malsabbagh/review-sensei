@@ -822,7 +822,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 max_delay_seconds=1.0,
             )
 
-        publish.assert_called_once_with(tarball)
+        publish.assert_called_once_with(tarball.resolve())
 
     def test_read_back_retries_transport_error_via_urlopen(self) -> None:
         responses: list[object] = [
