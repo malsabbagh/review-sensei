@@ -278,9 +278,19 @@ def tarball_for_package(
     record = records[package]
     if record.get("version") != version:
         raise PublishError(f"integrity record version mismatch for {package}")
-    tarball = bundle_dir / record["file"]
+    file_name = record.get("file")
+    if not isinstance(file_name, str) or not file_name.endswith(".tgz"):
+        raise PublishError(f"invalid tarball name for {package}")
+    tarball = (bundle_dir / file_name).resolve()
+    bundle_root = bundle_dir.resolve()
+    try:
+        tarball.relative_to(bundle_root)
+    except ValueError as exc:
+        raise PublishError(
+            f"tarball path escapes bundle directory for {package}"
+        ) from exc
     if not tarball.is_file():
-        raise PublishError(f"missing release tarball for {package}: {tarball}")
+        raise PublishError(f"missing release tarball for {package}: {tarball.name}")
     return tarball
 
 
@@ -416,7 +426,8 @@ def publish_package(
         except PublishError as readback_exc:
             if isinstance(readback_exc, IntegrityMismatchError):
                 raise readback_exc
-            raise exc
+            raise exc from readback_exc
+        print(f"Publish failure recovered via registry readback: {exc}", file=sys.stderr)
         print(
             "Registry already contained the attested bytes after a publish failure for "
             f"{package}@{version}"

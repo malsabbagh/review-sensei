@@ -28,6 +28,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     publish_platforms,
     read_back_with_retry,
     retry_delay_seconds,
+    tarball_for_package,
     write_publish_state,
 )
 
@@ -607,6 +608,25 @@ class PublishNpmReleaseTests(unittest.TestCase):
     def test_load_integrity_records_rejects_version_mismatch(self) -> None:
         with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
             load_integrity_records(self.bundle_dir, "0.4.0")
+
+    def test_tarball_for_package_rejects_paths_outside_bundle(self) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-arm64"
+        records[package] = {**records[package], "file": "../outside.tgz"}
+        outside = self.bundle_dir.parent / "outside.tgz"
+        outside.write_bytes(b"tarball")
+        try:
+            with self.assertRaisesRegex(PublishError, "escapes bundle directory"):
+                tarball_for_package(self.bundle_dir, package, "0.5.0", records)
+        finally:
+            outside.unlink(missing_ok=True)
+
+    def test_tarball_for_package_rejects_non_tgz_names(self) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-arm64"
+        records[package] = {**records[package], "file": "cli-0.5.0.txt"}
+        with self.assertRaisesRegex(PublishError, "invalid tarball name"):
+            tarball_for_package(self.bundle_dir, package, "0.5.0", records)
 
     def test_package_action_rejects_stale_publish_state_version(self) -> None:
         write_publish_state(

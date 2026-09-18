@@ -304,26 +304,27 @@ jobs:
           set -euo pipefail
           test "$SOURCE_SHA" = "$GITHUB_SHA"
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -f source/scripts/publish_npm_release.py
 
       - name: Verify registry state against attested tarballs
         shell: bash
         run: >-
           python source/scripts/publish_npm_release.py preflight
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "${GITHUB_REF_NAME#v}"
 
       - name: Publish platform packages first and read back integrity
         shell: bash
         run: >-
           python source/scripts/publish_npm_release.py publish-platforms
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "${GITHUB_REF_NAME#v}"
 
       - name: Publish launcher last and read back integrity
         shell: bash
         run: >-
           python source/scripts/publish_npm_release.py publish-launcher
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "${GITHUB_REF_NAME#v}"
 
   publish:

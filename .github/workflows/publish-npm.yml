@@ -310,6 +310,7 @@ jobs:
           set -euo pipefail
           test "$SOURCE_SHA" = "$GITHUB_SHA"
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -f source/scripts/publish_npm_release.py
 
       - name: Configure bootstrap authentication when present
         shell: bash
@@ -331,27 +332,30 @@ jobs:
           fi
 
       - name: Verify registry state against attested tarballs
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: >-
           python source/scripts/publish_npm_release.py preflight
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "$VERSION"
 
       - name: Publish platform packages first and read back integrity
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: >-
           python source/scripts/publish_npm_release.py publish-platforms
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "$VERSION"
 
       - name: Publish launcher last and read back integrity
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: >-
           python source/scripts/publish_npm_release.py publish-launcher
-          --bundle-dir release/npm
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "$VERSION"
 
       - name: Verify a clean Linux consumer installation

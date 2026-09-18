@@ -338,6 +338,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "source/scripts/publish_npm_release.py publish-launcher", self.workflow
         )
         self.assertIn('--version "${GITHUB_REF_NAME#v}"', self.workflow)
+        self.assertIn('--bundle-dir "$GITHUB_WORKSPACE/release/npm"', self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
         self.assertIn(
             "Assert helper checkout matches attested build source", self.workflow
@@ -350,10 +351,31 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "ref: ${{ needs.assemble-npm.outputs.source_sha }}", self.workflow
         )
         self.assertIn('test "$SOURCE_SHA" = "$GITHUB_SHA"', self.workflow)
+        self.assertIn("test -f source/scripts/publish_npm_release.py", self.workflow)
         self.assertIn(
             'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', self.workflow
         )
         self.assertIn("shell: bash", self.workflow)
+        self.assertLess(
+            self.workflow.index("Check out publish helper sources"),
+            self.workflow.index("Assert helper checkout matches attested build source"),
+        )
+        self.assertLess(
+            self.workflow.index("Assert helper checkout matches attested build source"),
+            self.workflow.index("Verify registry state against attested tarballs"),
+        )
+        self.assertLess(
+            self.workflow.index("Verify registry state against attested tarballs"),
+            self.workflow.index(
+                "Publish platform packages first and read back integrity"
+            ),
+        )
+        self.assertLess(
+            self.workflow.index(
+                "Publish platform packages first and read back integrity"
+            ),
+            self.workflow.index("Publish launcher last and read back integrity"),
+        )
         self.assertNotIn("remote_version=$(npm view", self.workflow)
 
     def test_workflow_is_tag_only(self):
@@ -403,6 +425,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("Verify registry state against attested tarballs", self.workflow)
         self.assertIn("source/scripts/publish_npm_release.py preflight", self.workflow)
+        self.assertIn('--bundle-dir "$GITHUB_WORKSPACE/release/npm"', self.workflow)
         self.assertIn(
             "source/scripts/publish_npm_release.py publish-platforms", self.workflow
         )
@@ -410,10 +433,19 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "source/scripts/publish_npm_release.py publish-launcher", self.workflow
         )
         self.assertIn("persist-credentials: false", self.workflow)
+        self.assertIn("test -f source/scripts/publish_npm_release.py", self.workflow)
         self.assertNotIn("remote_version=$(npm view", self.workflow)
         self.assertLess(
+            self.workflow.index("Check out publish helper sources"),
+            self.workflow.index("Assert helper checkout matches attested build source"),
+        )
+        self.assertLess(
+            self.workflow.index("Assert helper checkout matches attested build source"),
+            self.workflow.index("Verify registry state against attested tarballs"),
+        )
+        self.assertLess(
+            self.workflow.index("Verify registry state against attested tarballs"),
             self.workflow.index("Publish platform packages first"),
-            self.workflow.index("Publish launcher last"),
         )
         self.assertIn("Verify a clean Linux consumer installation", self.workflow)
         self.assertIn(
