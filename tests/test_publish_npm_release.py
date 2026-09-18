@@ -16,9 +16,9 @@ if str(ROOT) not in sys.path:
 from scripts.publish_npm_release import (  # noqa: E402
     ALL_PACKAGES,
     PLATFORM_PACKAGES,
+    IntegrityMismatchError,
     PublishError,
     RegistryTransportError,
-    IntegrityMismatchError,
     classify_registry_state,
     fetch_registry_package,
     load_integrity_records,
