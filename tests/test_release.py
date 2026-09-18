@@ -504,7 +504,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             resume_section.index("sha256sum --check SHA256SUMS"),
             resume_section.index("gh attestation verify"),
         )
-        self.assertIn("list-sha256sum-subjects", resume_section)
+        self.assertIn("list-attestation-subjects", resume_section)
         self.assertNotIn("while read -r _ _ filename", resume_section)
         self.assertIn("gh attestation verify", resume_section)
         self.assertIn('--source-digest "$bundle_source_sha"', resume_section)

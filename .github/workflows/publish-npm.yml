@@ -70,12 +70,10 @@ jobs:
           test "$source_sha" = "$GITHUB_SHA"
           python scripts/check_release_version.py --tag "v$VERSION"
           if [[ -n "$RESUME_BUNDLE_RUN_ID" ]]; then
-            case "$RESUME_BUNDLE_RUN_ID" in
-              (*[!0-9]*|'')
-                echo "resume_bundle_run_id must be a numeric workflow run ID"
-                exit 1
-                ;;
-            esac
+            if [[ ! "$RESUME_BUNDLE_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "resume_bundle_run_id must be a numeric workflow run ID"
+              exit 1
+            fi
           fi
           printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
@@ -415,7 +413,7 @@ jobs:
                 --source-ref "refs/heads/$DEFAULT_BRANCH" \
                 --source-digest "$bundle_source_sha"
             done < <(
-              python resume-source/scripts/publish_npm_release.py list-sha256sum-subjects \
+              python resume-source/scripts/publish_npm_release.py list-attestation-subjects \
                 --bundle-dir "$resume_staging"
             )
           )

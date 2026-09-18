@@ -1510,6 +1510,16 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(PublishError, "unsafe filename"):
             list_sha256sum_subjects(self.bundle_dir)
 
+    def test_list_attestation_subjects_omits_bundle_metadata(self) -> None:
+        from scripts.publish_npm_release import list_attestation_subjects
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        subjects = list_attestation_subjects(self.bundle_dir)
+        self.assertTrue(all(name.endswith(".tgz") for name in subjects))
+        self.assertNotIn("bundle-metadata.json", subjects)
+
     def test_preflight_resume_requires_bundle_metadata(self) -> None:
         from scripts.publish_npm_release import preflight
 

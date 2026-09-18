@@ -179,6 +179,14 @@ def list_sha256sum_subjects(bundle_dir: Path) -> list[str]:
     return [filename for _, filename in iter_sha256sum_entries(bundle_dir)]
 
 
+def list_attestation_subjects(bundle_dir: Path) -> list[str]:
+    return [
+        filename
+        for filename in list_sha256sum_subjects(bundle_dir)
+        if filename.endswith(".tgz")
+    ]
+
+
 def _checksum_subject_max_bytes(filename: str) -> int:
     if filename == BUNDLE_METADATA_FILENAME:
         return BUNDLE_METADATA_MAX_BYTES
@@ -819,6 +827,7 @@ def build_parser() -> argparse.ArgumentParser:
             "publish-launcher",
             "verify-bundle",
             "list-sha256sum-subjects",
+            "list-attestation-subjects",
         ),
     )
     parser.add_argument("--bundle-dir", type=Path, required=True)
@@ -874,6 +883,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "list-sha256sum-subjects":
             for filename in list_sha256sum_subjects(bundle_dir):
+                print(filename)
+        elif args.command == "list-attestation-subjects":
+            for filename in list_attestation_subjects(bundle_dir):
                 print(filename)
         elif args.command == "preflight":
             preflight(
