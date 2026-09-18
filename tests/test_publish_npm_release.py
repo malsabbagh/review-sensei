@@ -54,6 +54,35 @@ class PublishNpmReleaseTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_resume_bundle_files(
+        self,
+        *,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        import hashlib
+
+        sums_lines: list[str] = []
+        for line in (self.bundle_dir / "integrity.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            tarball_name = Path(record["file"]).name
+            tarball_path = self.bundle_dir / tarball_name
+            tarball_path.write_bytes(f"tarball-{tarball_name}".encode())
+            digest = hashlib.sha256(tarball_path.read_bytes()).hexdigest()
+            sums_lines.append(f"{digest}  {tarball_name}")
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            "\n".join(sums_lines) + "\n",
+            encoding="utf-8",
+        )
+        if metadata is not None:
+            (self.bundle_dir / "bundle-metadata.json").write_text(
+                json.dumps(metadata, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
@@ -1413,12 +1442,26 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 expected_source_sha="a" * 40,
             )
 
+    def test_verify_resumed_bundle_rejects_tarball_checksum_mismatch(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        tarball = next(self.bundle_dir.glob("*.tgz"))
+        tarball.write_bytes(tarball.read_bytes() + b"tampered")
+        with self.assertRaisesRegex(PublishError, "does not match SHA256SUMS"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="a" * 40,
+            )
+
     def test_verify_resumed_bundle_checks_metadata_source_sha(self) -> None:
         from scripts.publish_npm_release import verify_resumed_bundle
 
-        (self.bundle_dir / "bundle-metadata.json").write_text(
-            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
-            encoding="utf-8",
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
         )
         verify_resumed_bundle(
             self.bundle_dir,
@@ -1510,6 +1553,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
             json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
             encoding="utf-8",
         )
+        self._write_resume_bundle_files()
         (self.bundle_dir / "integrity.jsonl").unlink()
         with self.assertRaisesRegex(PublishError, "missing integrity.jsonl"):
             verify_resumed_bundle(
@@ -1519,9 +1563,8 @@ class PublishNpmReleaseTests(unittest.TestCase):
     def test_verify_bundle_command_accepts_matching_source_sha(self) -> None:
         from scripts.publish_npm_release import main
 
-        (self.bundle_dir / "bundle-metadata.json").write_text(
-            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
-            encoding="utf-8",
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
         )
         exit_code = main(
             [

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -111,6 +112,31 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     return {"version": version, "source_sha": source_sha}
 
 
+def verify_bundle_checksums(bundle_dir: Path) -> None:
+    sums_path = bundle_dir / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise PublishError(f"release bundle is missing SHA256SUMS at {sums_path}")
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, _, filename = line.partition("  ")
+        filename = filename.strip()
+        if not digest or not filename:
+            raise PublishError(
+                f"release bundle has invalid SHA256SUMS entry in {sums_path}: {line!r}"
+            )
+        tarball_path = bundle_dir / filename
+        if not tarball_path.is_file():
+            raise PublishError(
+                f"release bundle is missing tarball {filename!r} declared in SHA256SUMS"
+            )
+        actual_digest = hashlib.sha256(tarball_path.read_bytes()).hexdigest()
+        if actual_digest != digest:
+            raise PublishError(
+                f"release bundle tarball {filename!r} does not match SHA256SUMS"
+            )
+
+
 def verify_bundle_version(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     """Validate bundle version metadata when present, then load integrity records.
 
@@ -151,6 +177,7 @@ def verify_resumed_bundle(
             f"{metadata['source_sha']!r} does not match attested run "
             f"{expected_source_sha!r} in {bundle_dir}"
         )
+    verify_bundle_checksums(bundle_dir)
     return load_integrity_records(bundle_dir, version)
 
 
