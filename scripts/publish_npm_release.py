@@ -108,7 +108,16 @@ def classify_registry_state(
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
             if exc.code == 404:
-                return "publish"
+                last_error = (
+                    f"{package}@{version} registry preflight not visible yet "
+                    f"(HTTP 404, attempt {attempt}/{max_attempts})"
+                )
+                if attempt >= max_attempts:
+                    return "publish"
+                print(last_error, file=sys.stderr)
+                time.sleep(min(delay, max_delay_seconds))
+                delay = min(delay * 1.5, max_delay_seconds)
+                continue
             if not is_retryable_registry_http_error(exc.code):
                 raise PublishError(
                     f"registry preflight failed for {package}: HTTP {exc.code}"

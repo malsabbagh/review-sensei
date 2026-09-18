@@ -293,6 +293,13 @@ jobs:
           path: source
           persist-credentials: false
           show-progress: false
+
+      - name: Assert helper checkout matches attested build source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA"
+
       - name: Verify registry state against attested tarballs
         shell: bash
         run: >-

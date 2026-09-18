@@ -339,6 +339,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn('--version "${GITHUB_REF_NAME#v}"', self.workflow)
         self.assertIn("persist-credentials: false", self.workflow)
+        self.assertIn(
+            "Assert helper checkout matches attested build source", self.workflow
+        )
+        self.assertIn(
+            'test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow
+        )
         self.assertIn("shell: bash", self.workflow)
         self.assertNotIn("remote_version=$(npm view", self.workflow)
 
