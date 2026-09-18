@@ -288,6 +288,10 @@ def publish_tarball(
         raise PublishError(
             f"npm publish timed out after {timeout_seconds:.0f}s for {tarball.name}"
         ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise PublishError(
+            f"npm publish failed with exit code {exc.returncode} for {tarball.name}"
+        ) from exc
 
 
 def publish_package(
@@ -436,9 +440,6 @@ def main(argv: list[str] | None = None) -> int:
     except PublishError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    except subprocess.CalledProcessError as exc:
-        print(f"npm publish failed with exit code {exc.returncode}", file=sys.stderr)
-        return exc.returncode or 1
     return 0
 
 

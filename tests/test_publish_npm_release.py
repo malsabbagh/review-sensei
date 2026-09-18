@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from scripts.publish_npm_release import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.publish_npm_release import (  # noqa: E402
     ALL_PACKAGES,
     PLATFORM_PACKAGES,
     PublishError,

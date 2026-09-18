@@ -342,8 +342,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "Assert helper checkout matches attested build source", self.workflow
         )
+        self.assertIn("SOURCE_SHA: ${{ github.sha }}", self.workflow)
+        self.assertIn('test "$SOURCE_SHA" = "$GITHUB_SHA"', self.workflow)
         self.assertIn(
-            'test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow
+            'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', self.workflow
         )
         self.assertIn("shell: bash", self.workflow)
         self.assertNotIn("remote_version=$(npm view", self.workflow)

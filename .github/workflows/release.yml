@@ -296,9 +296,12 @@ jobs:
 
       - name: Assert helper checkout matches attested build source
         shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Verify registry state against attested tarballs
         shell: bash
