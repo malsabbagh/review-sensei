@@ -427,7 +427,9 @@ def publish_package(
             if isinstance(readback_exc, IntegrityMismatchError):
                 raise readback_exc
             raise exc from readback_exc
-        print(f"Publish failure recovered via registry readback: {exc}", file=sys.stderr)
+        print(
+            f"Publish failure recovered via registry readback: {exc}", file=sys.stderr
+        )
         print(
             "Registry already contained the attested bytes after a publish failure for "
             f"{package}@{version}"
