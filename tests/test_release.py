@@ -422,9 +422,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
     def test_npm_publish_is_protected_and_platform_first(self):
         publish_section = self.workflow.split("  publish-npm:", maxsplit=1)[1]
         publish_if_line = next(
-            line
-            for line in publish_section.splitlines()
-            if line.startswith("    if:")
+            line for line in publish_section.splitlines() if line.startswith("    if:")
         )
         self.assertIn("inputs.publish", publish_if_line)
         self.assertIn("environment:\n      name: npm", self.workflow)
