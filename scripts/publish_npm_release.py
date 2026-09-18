@@ -90,13 +90,17 @@ def fetch_package_metadata(package: str) -> dict[str, Any]:
         ) from exc
 
 
-def package_version_indexed(package: str, version: str) -> bool:
+def package_version_indexed(package: str, version: str) -> bool | None:
     try:
         metadata = fetch_package_metadata(package)
     except HTTPError as exc:
         if exc.code == 404:
             return False
+        if is_retryable_registry_http_error(exc.code):
+            return None
         raise
+    except RegistryTransportError:
+        return None
     versions = metadata.get("versions")
     return isinstance(versions, dict) and version in versions
 
@@ -139,10 +143,22 @@ def classify_registry_state(
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
             if exc.code == 404:
-                if package_version_indexed(package, version):
+                indexed = package_version_indexed(package, version)
+                if indexed is True:
                     last_error = (
                         f"{package}@{version} version document replicating "
                         f"(attempt {attempt}/{max_attempts})"
+                    )
+                    if attempt >= max_attempts:
+                        break
+                    print(last_error, file=sys.stderr)
+                    time.sleep(min(delay, max_delay_seconds))
+                    delay = min(delay * 1.5, max_delay_seconds)
+                    continue
+                if indexed is None:
+                    last_error = (
+                        f"{package}@{version} registry preflight packument "
+                        f"probe inconclusive (attempt {attempt}/{max_attempts})"
                     )
                     if attempt >= max_attempts:
                         break
@@ -156,6 +172,18 @@ def classify_registry_state(
                     f"(HTTP 404, probe {visibility_attempts}/{preflight_404_attempts})"
                 )
                 if visibility_attempts >= preflight_404_attempts:
+                    final_indexed = package_version_indexed(package, version)
+                    if final_indexed is not False:
+                        if attempt >= max_attempts:
+                            break
+                        print(
+                            f"{package}@{version} registry preflight still "
+                            "ambiguous after 404 probes; continuing to poll",
+                            file=sys.stderr,
+                        )
+                        time.sleep(min(delay, max_delay_seconds))
+                        delay = min(delay * 1.5, max_delay_seconds)
+                        continue
                     return "publish"
                 print(last_error, file=sys.stderr)
                 time.sleep(min(delay, max_delay_seconds))
@@ -286,10 +314,6 @@ def read_back_with_retry(
             time.sleep(retry_delay_seconds(exc, delay, max_delay_seconds))
             delay = min(delay * 1.5, max_delay_seconds)
             continue
-        except URLError as exc:
-            raise PublishError(
-                f"registry readback failed for {package}: {exc}"
-            ) from exc
 
         dist = remote.get("dist")
         if (
@@ -313,13 +337,14 @@ def publish_tarball(
     *,
     timeout_seconds: float = DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS,
 ) -> None:
+    resolved_tarball = tarball.resolve()
     try:
         subprocess.run(
             [
                 "npm",
                 "publish",
                 "--ignore-scripts",
-                str(tarball),
+                str(resolved_tarball),
                 "--access",
                 "public",
                 "--provenance",
