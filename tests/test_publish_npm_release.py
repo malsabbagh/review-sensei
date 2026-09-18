@@ -196,7 +196,9 @@ class PublishNpmReleaseTests(unittest.TestCase):
     def test_read_back_maps_transport_error(self) -> None:
         with mock.patch(
             "scripts.publish_npm_release.fetch_registry_package",
-            side_effect=TimeoutError("timed out"),
+            side_effect=PublishError(
+                "registry request failed for @reviewsensei/cli: timed out"
+            ),
         ):
             with self.assertRaisesRegex(PublishError, "transport failure"):
                 read_back_with_retry(
