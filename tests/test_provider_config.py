@@ -218,6 +218,15 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 reviewsensei_model="qwen3.5:4b",
             )
 
+    def test_resolved_openrouter_accepts_shared_reviewsensei_model(self) -> None:
+        resolved = validate_resolved_hosted_job_model(
+            provider_mode="openrouter",
+            workflow_mode="",
+            caller_model="",
+            reviewsensei_model=DEFAULT_OPENROUTER_MODEL,
+        )
+        self.assertEqual(resolved, DEFAULT_OPENROUTER_MODEL)
+
     def test_resolved_cloud_rejects_openrouter_shared_model(self) -> None:
         with self.assertRaisesRegex(
             ReviewInputError, "must not use vendor/model openrouter slug"

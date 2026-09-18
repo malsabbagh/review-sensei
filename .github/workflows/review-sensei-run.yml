@@ -145,14 +145,12 @@ jobs:
     outputs:
       normalized_provider_mode: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_provider_mode }}
       normalized_model: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_model }}
+      active_provider: ${{ steps.reject-unsupported-provider-mode.outputs.active_provider }}
     steps:
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
       - name: Reject unsupported provider mode
         id: reject-unsupported-provider-mode
         env:
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
+          PROVIDER_MODE: ${{ inputs.provider_mode }}
           MODE: ${{ inputs.mode }}
           MODEL: ${{ inputs.model }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
@@ -184,9 +182,23 @@ jobs:
               exit 1
               ;;
           esac
+          case "$PROVIDER_MODE" in
+            openrouter) active_provider=openrouter ;;
+            local|local-ollama) active_provider=local ;;
+            cloud|cloud-ollama) active_provider=cloud ;;
+            "")
+              if [[ "$MODE" == "manual" ]]; then
+                active_provider=local
+              else
+                active_provider=cloud
+              fi
+              ;;
+            *) active_provider=invalid ;;
+          esac
           {
             echo "normalized_provider_mode=$PROVIDER_MODE"
             echo "normalized_model=$MODEL"
+            echo "active_provider=$active_provider"
           } >> "$GITHUB_OUTPUT"
           if [[ -n "$PROVIDER_PROFILE" ]]; then
             echo '::error::provider_profile is unused; set provider_mode to openrouter and model via REVIEWSENSEI_MODEL.' >&2
@@ -270,66 +282,6 @@ jobs:
               fi
               ;;
           esac
-
-      - name: Install ReviewSensei and validate hosted model
-        env:
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
-          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
-          PROVIDER_MODE: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_provider_mode }}
-          MODE: ${{ inputs.mode }}
-          MODEL: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_model }}
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
-          expected_version="${REVIEW_SENSEI_VERSION#v}"
-          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
-            exit 1
-          fi
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
-            exit 1
-          fi
-          if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
-            "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee -a "$pypi_log"; then
-            install_source="PyPI"
-          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
-            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
-            "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
-            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
-          else
-            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
-            exit 1
-          fi
-          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
-          if [[ "$installed_version" != "$expected_version" ]]; then
-            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
-            exit 1
-          fi
-          "$python_bin" -m pip check
-          echo "Installed ReviewSensei $installed_version from $install_source."
-          "$python_bin" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_hosted_workflow_model
-
-          try:
-              validate_hosted_workflow_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  model=os.environ.get("MODEL", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          PY
 
   authoritative-preflight:
     needs: validate-provider-mode
@@ -463,7 +415,7 @@ jobs:
     needs: [validate-provider-mode, authoritative-preflight]
     # Compatibility marker for consumers that inspect the historical single
     # dependency spelling: needs: validate-provider-mode
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud' || needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama' || (needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'automatic'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'cloud'
     concurrency:
       # All provider modes share this review group, so a newer cloud review
       # cancels an older local review (and vice versa) for the same PR. Reply
@@ -885,7 +837,7 @@ jobs:
 
   openrouter:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'openrouter'
     concurrency:
       # OpenRouter shares the provider review group with cloud/local so a newer
       # review for the same PR cancels any in-flight provider-mode review.
@@ -1052,7 +1004,8 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          export MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          unset OPENROUTER_UPSTREAM_PROVIDER
+          resolved_model="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
@@ -1066,13 +1019,23 @@ jobs:
                       workflow_mode="",
                       caller_model=os.environ.get("CALLER_MODEL", ""),
                       reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  )
+                  ),
+                  end="",
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
           PY
           )"
+          if [[ "$resolved_model" == *$'\n'* ]]; then
+            echo '::error::resolved OpenRouter model must be a single line' >&2
+            exit 1
+          fi
+          if [[ ! "$resolved_model" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo '::error::resolved OpenRouter model must be a vendor/model slug' >&2
+            exit 1
+          fi
+          export MODEL="$resolved_model"
           OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
@@ -1228,7 +1191,8 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
-          export MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          unset OPENROUTER_UPSTREAM_PROVIDER
+          resolved_model="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
 
@@ -1242,13 +1206,23 @@ jobs:
                       workflow_mode="",
                       caller_model=os.environ.get("CALLER_MODEL", ""),
                       reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  )
+                  ),
+                  end="",
               )
           except ReviewInputError as exc:
               print(f"::error::{exc}", file=sys.stderr)
               raise SystemExit(1) from exc
           PY
           )"
+          if [[ "$resolved_model" == *$'\n'* ]]; then
+            echo '::error::resolved OpenRouter model must be a single line' >&2
+            exit 1
+          fi
+          if [[ ! "$resolved_model" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo '::error::resolved OpenRouter model must be a vendor/model slug' >&2
+            exit 1
+          fi
+          export MODEL="$resolved_model"
           OPENROUTER_UPSTREAM_PROVIDER="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
           import sys
@@ -1335,7 +1309,7 @@ jobs:
 
   local:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && (needs.validate-provider-mode.outputs.normalized_provider_mode == 'local' || needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama' || (needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'manual'))
+    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'local'
     concurrency:
       # Keep this key byte-for-byte equivalent to the cloud job. A newer
       # review therefore cancels any older provider-mode review for the same

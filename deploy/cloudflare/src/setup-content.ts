@@ -873,7 +873,9 @@ function configFile(
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +
-    "upload_artifacts: false\n"
+    "upload_artifacts: false\n" +
+    "stages_dir: ''\n" +
+    "categories_dir: ''\n"
   );
 }
 

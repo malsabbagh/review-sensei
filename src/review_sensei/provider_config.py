@@ -99,6 +99,7 @@ def resolve_hosted_job_model(
 ) -> str:
     """Return the model a hosted provider job resolves from its fallback chain."""
 
+    _effective_hosted_backend(provider_mode, workflow_mode)
     for candidate in (caller_model, reviewsensei_model, backend_model):
         value = candidate.strip()
         if value:

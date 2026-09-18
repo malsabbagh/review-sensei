@@ -125,6 +125,36 @@ class CloudflarePackageTests(unittest.TestCase):
             'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
         )
 
+    def test_v4_config_matches_ts_builder_bytes(self):
+        from review_sensei.hosting.github.setup import (
+            CURRENT_PACKAGE_VERSION,
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            _v4_config_file,
+        )
+
+        expected_ts = (
+            "# ReviewSensei setup version: 4\n"
+            "setup_version: 4\n"
+            "provider: ollama\n"
+            "provider_mode: local\n"
+            "model: ''\n"
+            "base_url: http://127.0.0.1:11434/api\n"
+            "cloud_base_url: https://ollama.com/api\n"
+            f"local_model: {DEFAULT_LOCAL_MODEL}\n"
+            f"cloud_model: {DEFAULT_CLOUD_MODEL}\n"
+            f"version: {CURRENT_PACKAGE_VERSION}\n"
+            "auto_review: false\n"
+            "learning_proposals: false\n"
+            "github_writes: false\n"
+            "learning_prs: false\n"
+            "mention_replies: false\n"
+            "upload_artifacts: false\n"
+            "stages_dir: ''\n"
+            "categories_dir: ''\n"
+        )
+        self.assertEqual(_v4_config_file(), expected_ts)
+
     def test_v4_config_core_fields_match_ts_builder(self):
         from review_sensei.hosting.github.setup import (
             CURRENT_PACKAGE_VERSION,

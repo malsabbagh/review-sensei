@@ -601,16 +601,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("provider_profile:", reusable)
         self.assertIn("provider_profile is unused", reusable)
 
-        openrouter_gate = "needs.validate-provider-mode.outputs.normalized_provider_mode == 'openrouter'"
+        openrouter_gate = (
+            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'"
+        )
         cloud_fallback_gate = (
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud' || "
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'cloud-ollama' || "
-            "(needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'automatic')"
+            "needs.validate-provider-mode.outputs.active_provider == 'cloud'"
         )
         local_fallback_gate = (
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local' || "
-            "needs.validate-provider-mode.outputs.normalized_provider_mode == 'local-ollama' || "
-            "(needs.validate-provider-mode.outputs.normalized_provider_mode == '' && inputs.mode == 'manual')"
+            "needs.validate-provider-mode.outputs.active_provider == 'local'"
         )
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
@@ -977,17 +975,25 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("permissions: {}", job)
         self.assertIn("normalized_provider_mode:", job)
         self.assertIn("normalized_model:", job)
+        self.assertIn("active_provider:", job)
+        self.assertIn("PROVIDER_MODE: ${{ inputs.provider_mode }}", job)
         self.assertIn("MODEL: ${{ inputs.model }}", job)
-        self.assertIn("Install ReviewSensei and validate hosted model", job)
-        self.assertNotIn(
-            "deepseek/deepseek-v4.1-flash|anthropic/claude-3.5-sonnet", job
-        )
-        install_pos = job.index("Install ReviewSensei and validate hosted model")
-        reject_pos = job.index("Reject unsupported provider mode")
-        self.assertLess(reject_pos, install_pos)
-        self.assertIn("validate_hosted_workflow_model", job)
-        self.assertIn('"$RUNNER_TEMP/review-sensei-venv/bin/python"', job)
-        self.assertNotIn("PYTHONPATH=src", job)
+        self.assertNotIn("Install ReviewSensei and validate hosted model", job)
+        self.assertNotIn("review-sensei-venv", job)
+        self.assertNotIn("setup-python@", job)
+        self.assertNotIn("validate_hosted_workflow_model", job)
+
+    def test_dogfood_caller_intentionally_omits_model_input(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        dogfood = (
+            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        example = (
+            repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", example)
+        self.assertNotIn("model: ${{ vars.REVIEWSENSEI_MODEL", dogfood)
+        self.assertIn("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE", dogfood)
 
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
         root = Path(__file__).resolve().parents[1]

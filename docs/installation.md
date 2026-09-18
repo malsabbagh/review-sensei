@@ -177,10 +177,11 @@ per backend:
 - **Local Ollama jobs** use `REVIEWSENSEI_LOCAL_MODEL`, then `qwen3.5:4b`.
 - **Cloud Ollama jobs** use `REVIEWSENSEI_CLOUD_MODEL`, then
   `deepseek-v4.1-flash:cloud`.
-- **OpenRouter jobs** use the hosted allowlist default
-  (`deepseek/deepseek-v4.1-flash`); they do not consult
+- **OpenRouter jobs** use `REVIEWSENSEI_MODEL` when set (must be an
+  allowlisted vendor/model slug), otherwise the hosted allowlist default
+  (`deepseek/deepseek-v4.1-flash`). They do not consult
   `REVIEWSENSEI_LOCAL_MODEL`, `REVIEWSENSEI_CLOUD_MODEL`, or
-  `OPENROUTER_MODEL`.
+  `OPENROUTER_MODEL` (CLI-only).
 
 Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL` apply only
 to their respective Ollama jobs. Hosted OpenRouter accepts only the published
