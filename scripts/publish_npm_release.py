@@ -145,6 +145,8 @@ def verify_resumed_bundle(
 
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     integrity_path = bundle_dir / "integrity.jsonl"
+    if not integrity_path.is_file():
+        raise PublishError("release bundle has an invalid package integrity set")
     records = [
         json.loads(line)
         for line in integrity_path.read_text(encoding="utf-8").splitlines()

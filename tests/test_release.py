@@ -479,12 +479,25 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
 
     def test_partial_publish_can_resume_prior_attested_bundle(self):
         self.assertIn("resume_bundle_run_id:", self.workflow)
+        self.assertIn("run-name: publish-npm ${{ inputs.version }}", self.workflow)
         self.assertIn("inputs.resume_bundle_run_id == ''", self.workflow)
         self.assertIn(
             "Download npm release bundle from prior workflow run", self.workflow
         )
         self.assertIn("gh run download", self.workflow)
         self.assertIn("publish_npm_release.py verify-bundle", self.workflow)
+        resume_section = self.workflow.split(
+            "Download npm release bundle from prior workflow run", maxsplit=1
+        )[1].split("Verify downloaded npm tarball checksums", maxsplit=1)[0]
+        self.assertIn("displayTitle", resume_section)
+        self.assertIn('display_title.startswith("publish-npm ")', resume_section)
+        self.assertIn(
+            'display_title != f"publish-npm {version}"',
+            resume_section,
+        )
+        self.assertIn("resume_check_dir", resume_section)
+        self.assertIn('--version "$VERSION"', resume_section)
+        self.assertIn('--expected-source-sha "$bundle_source_sha"', resume_section)
         self.assertIn("release/npm/bundle-metadata.json", self.workflow)
         self.assertIn("actions: read", self.workflow)
         self.assertIn("Check out repository for resumed run validation", self.workflow)
@@ -504,11 +517,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("inputs.resume_bundle_run_id == ''", assemble_if)
         self.assertIn(
-            'if: ${{ inputs.resume_bundle_run_id == \'\' }}',
+            "if: ${{ inputs.resume_bundle_run_id == '' }}",
             self.workflow,
         )
         self.assertIn(
-            'if: ${{ inputs.resume_bundle_run_id != \'\' }}',
+            "if: ${{ inputs.resume_bundle_run_id != '' }}",
             self.workflow,
         )
         verify_section = self.workflow.split(
@@ -519,7 +532,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             verify_section,
         )
         self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
-        self.assertIn('id: resume-bundle', self.workflow)
+        self.assertIn("id: resume-bundle", self.workflow)
 
 
 class ReleaseDocumentationTests(unittest.TestCase):

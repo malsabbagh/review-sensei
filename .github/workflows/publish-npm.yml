@@ -1,5 +1,7 @@
 name: Publish npm packages
 
+run-name: publish-npm ${{ inputs.version }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -149,7 +151,7 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
-    if: ${{ always() && needs.verify-request.result == 'success' && (needs.native-build.result == 'success' || needs.native-build.result == 'skipped') && inputs.resume_bundle_run_id == '' }}
+    if: ${{ always() && needs.verify-request.result == 'success' && needs.native-build.result == 'success' && inputs.resume_bundle_run_id == '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -341,7 +343,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release/npm
-          run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository)"
+          run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository,displayTitle)"
           bundle_source_sha="$(python3 - "$run_json" <<'PY'
           import json
           import os
@@ -350,6 +352,7 @@ jobs:
           run = json.loads(sys.argv[1])
           expected_repo = os.environ["GITHUB_REPOSITORY"]
           expected_branch = os.environ["DEFAULT_BRANCH"]
+          version = os.environ["VERSION"]
           run_id = str(run["databaseId"])
           if run_id != os.environ["RESUME_BUNDLE_RUN_ID"]:
               raise SystemExit("resume_bundle_run_id does not match attested workflow run")
@@ -366,6 +369,12 @@ jobs:
           name = head_repo.get("name")
           if f"{owner}/{name}" != expected_repo:
               raise SystemExit("resume_bundle_run_id must reference this repository")
+          display_title = run.get("displayTitle") or ""
+          if display_title.startswith("publish-npm "):
+              if display_title != f"publish-npm {version}":
+                  raise SystemExit(
+                      "resume_bundle_run_id must reference a publish-npm run for the same version"
+                  )
           head_sha = run.get("headSha")
           if not isinstance(head_sha, str) or not head_sha:
               raise SystemExit("resume_bundle_run_id is missing attested head SHA")
@@ -376,11 +385,21 @@ jobs:
           git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
           git -C resume-source checkout "$bundle_source_sha"
           python resume-source/scripts/check_release_version.py --tag "v$VERSION"
-          echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
+          resume_check_dir="$RUNNER_TEMP/resume-bundle-check"
+          rm -rf "$resume_check_dir"
+          mkdir -p "$resume_check_dir" release/npm
           gh run download "$RESUME_BUNDLE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name review-sensei-npm-release-bundle \
-            --dir release/npm
+            --dir "$resume_check_dir"
+          python resume-source/scripts/publish_npm_release.py verify-bundle \
+            --bundle-dir "$resume_check_dir" \
+            --version "$VERSION" \
+            --expected-source-sha "$bundle_source_sha"
+          shopt -s dotglob
+          mv "$resume_check_dir"/* release/npm/
+          shopt -u dotglob
+          echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify downloaded npm tarball checksums
         shell: bash
