@@ -18,6 +18,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     PLATFORM_PACKAGES,
     PublishError,
     RegistryTransportError,
+    classify_registry_state,
     fetch_registry_package,
     load_integrity_records,
     package_action,
@@ -71,6 +72,134 @@ class PublishNpmReleaseTests(unittest.TestCase):
             with self.assertRaises(RegistryTransportError) as ctx:
                 fetch_registry_package("@reviewsensei/cli", "0.5.0")
         self.assertIn("timed out", str(ctx.exception))
+
+    def _version_document_url(self, package: str, version: str) -> str:
+        from urllib.parse import quote
+
+        return (
+            "https://registry.npmjs.org/"
+            f"{quote(package, safe='')}/{quote(version, safe='')}"
+        )
+
+    def _packument_url(self, package: str) -> str:
+        from urllib.parse import quote
+
+        return f"https://registry.npmjs.org/{quote(package, safe='')}"
+
+    def test_classify_registry_state_retries_via_urlopen(self) -> None:
+        package = "@reviewsensei/cli-linux-x64-gnu"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": package,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            self._packument_url(package): [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+            ],
+        }
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[str(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=3,
+                preflight_404_attempts=3,
+                initial_delay_seconds=2.0,
+                max_delay_seconds=30.0,
+            )
+
+        self.assertEqual(action, "verified")
+        sleep.assert_called_once_with(2.0)
+
+    def test_preflight_marks_propagating_package_verified_via_urlopen(self) -> None:
+        target = "@reviewsensei/cli-darwin-arm64"
+        version = "0.5.0"
+        integrity = f"sha512-{target}"
+        target_version_url = self._version_document_url(target, version)
+        responses: dict[str, list[object]] = {
+            target_version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "name": target,
+                            "version": version,
+                            "dist": {"integrity": integrity},
+                        }
+                    ).encode("utf-8")
+                ),
+            ],
+            self._packument_url(target): [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b"")),
+            ],
+        }
+        for package in ALL_PACKAGES:
+            if package == target:
+                continue
+            version_url = self._version_document_url(package, version)
+            packument_url = self._packument_url(package)
+            responses[version_url] = [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ] * 3
+            responses[packument_url] = [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ] * 3
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            queue = responses[str(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            preflight(
+                self.bundle_dir,
+                version,
+                max_attempts=3,
+                preflight_404_attempts=3,
+                initial_delay_seconds=2.0,
+                max_delay_seconds=30.0,
+            )
+
+        self.assertIn(mock.call(2.0), sleep.mock_calls)
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
+        )
+        actions = {item["name"]: item["action"] for item in state["packages"]}
+        self.assertEqual(actions[target], "verified")
+        self.assertNotEqual(actions[target], "publish")
 
     def test_read_back_retries_http_error_from_fetch(self) -> None:
         responses: list[object] = [
@@ -499,18 +628,43 @@ class PublishNpmReleaseTests(unittest.TestCase):
 
         publish.assert_called_once_with(tarball)
 
-    def test_read_back_maps_url_error(self) -> None:
-        with mock.patch(
-            "scripts.publish_npm_release.fetch_registry_package",
-            side_effect=URLError("temporary failure in name resolution"),
+    def test_read_back_retries_transport_error_via_urlopen(self) -> None:
+        responses: list[object] = [
+            URLError("temporary failure in name resolution"),
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "name": "@reviewsensei/cli",
+                        "version": "0.5.0",
+                        "dist": {"integrity": "sha512-@reviewsensei/cli"},
+                    }
+                ).encode("utf-8")
+            ),
+        ]
+
+        def fake_urlopen(*_args: object, **_kwargs: object) -> io.BytesIO:
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
         ):
-            with self.assertRaisesRegex(PublishError, "temporary failure"):
-                read_back_with_retry(
-                    "@reviewsensei/cli",
-                    "0.5.0",
-                    "sha512-@reviewsensei/cli",
-                    max_attempts=1,
-                )
+            read_back_with_retry(
+                "@reviewsensei/cli",
+                "0.5.0",
+                "sha512-@reviewsensei/cli",
+                max_attempts=2,
+                initial_delay_seconds=2.0,
+                max_delay_seconds=30.0,
+            )
+
+        sleep.assert_called_once_with(2.0)
 
     def test_read_back_fails_when_integrity_mismatches(self) -> None:
         with mock.patch(
