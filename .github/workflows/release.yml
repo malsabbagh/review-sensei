@@ -155,6 +155,8 @@ jobs:
     name: Assemble and validate npm package set
     needs: native-build
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     permissions:
       contents: read
       id-token: write
@@ -252,6 +254,9 @@ jobs:
             release/npm/*.tgz
             release/npm/SHA256SUMS
             release/npm/integrity.jsonl
+      - name: Record attested source commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   publish-npm:
     name: Publish npm packages with Trusted Publishing
@@ -285,81 +290,44 @@ jobs:
         shell: bash
         working-directory: release/npm
         run: sha256sum --check SHA256SUMS
+      - name: Check out publish helper sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.assemble-npm.outputs.source_sha }}
+          fetch-depth: 1
+          path: source
+          persist-credentials: false
+          show-progress: false
+      - name: Assert helper checkout matches attested build source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.assemble-npm.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C source status --porcelain=v1)"
+          test -f source/scripts/publish_npm_release.py
+
+      - name: Verify registry state against attested tarballs
+        shell: bash
+        run: >-
+          python source/scripts/publish_npm_release.py preflight
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+          --version "${GITHUB_REF_NAME#v}"
+
       - name: Publish platform packages first and read back integrity
         shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          for package in \
-            @reviewsensei/cli-darwin-arm64 \
-            @reviewsensei/cli-darwin-x64 \
-            @reviewsensei/cli-linux-arm64-gnu \
-            @reviewsensei/cli-linux-x64-gnu \
-            @reviewsensei/cli-win32-x64; do
-            file=$(python - "$package" "$version" <<'PY'
-          import json
-          import pathlib
-          import sys
-          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
-          matches = [item["file"] for item in records if item.get("name") == sys.argv[1] and item.get("version") == sys.argv[2]]
-          if len(matches) != 1:
-              raise SystemExit("missing unique package tarball")
-          print(matches[0])
-          PY
-            )
-            npm publish --ignore-scripts "release/npm/$file" --access public --provenance
-            remote_version=$(npm view "$package@$version" version)
-            remote_integrity=$(npm view "$package@$version" dist.integrity)
-            local_integrity=$(python - "$file" <<'PY'
-          import json
-          import pathlib
-          import sys
-          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
-              value = json.loads(line)
-              if value["file"] == sys.argv[1]:
-                  print(value["integrity"])
-                  break
-          else:
-              raise SystemExit("integrity record missing")
-          PY
-            )
-            test "$remote_version" = "$version"
-            test "$remote_integrity" = "$local_integrity"
-          done
-      - name: Publish launcher last
+        run: >-
+          python source/scripts/publish_npm_release.py publish-platforms
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+          --version "${GITHUB_REF_NAME#v}"
+
+      - name: Publish launcher last and read back integrity
         shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          file=$(python - "$version" <<'PY'
-          import json
-          import pathlib
-          import sys
-          records = [json.loads(line) for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines()]
-          matches = [item["file"] for item in records if item.get("name") == "@reviewsensei/cli" and item.get("version") == sys.argv[1]]
-          if len(matches) != 1:
-              raise SystemExit("missing unique launcher tarball")
-          print(matches[0])
-          PY
-          )
-          npm publish --ignore-scripts "release/npm/$file" --access public --provenance
-          remote_version=$(npm view "@reviewsensei/cli@$version" version)
-          remote_integrity=$(npm view "@reviewsensei/cli@$version" dist.integrity)
-          local_integrity=$(python - "$file" <<'PY'
-          import json
-          import pathlib
-          import sys
-          for line in pathlib.Path("release/npm/integrity.jsonl").read_text().splitlines():
-              value = json.loads(line)
-              if value["file"] == sys.argv[1]:
-                  print(value["integrity"])
-                  break
-          else:
-              raise SystemExit("integrity record missing")
-          PY
-          )
-          test "$remote_version" = "$version"
-          test "$remote_integrity" = "$local_integrity"
+        run: >-
+          python source/scripts/publish_npm_release.py publish-launcher
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+          --version "${GITHUB_REF_NAME#v}"
 
   publish:
     name: Publish to PyPI with Trusted Publishing
