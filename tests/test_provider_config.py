@@ -94,6 +94,16 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 model="meta-llama/llama-3.1-70b-instruct",
             )
 
+    def test_resolved_openrouter_job_rejects_unallowlisted_caller_model(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewInputError, "not allowlisted for hosted workflows"
+        ):
+            validate_resolved_hosted_job_model(
+                provider_mode="openrouter",
+                workflow_mode="automatic",
+                caller_model="meta-llama/llama-3.1-70b-instruct",
+            )
+
     def test_openrouter_accepts_published_model(self) -> None:
         validate_hosted_workflow_model(
             provider_mode="openrouter",

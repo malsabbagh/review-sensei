@@ -114,6 +114,24 @@ def resolve_hosted_job_model(
     )
 
 
+def _assert_resolved_matches_explicit_hosted_model_intent(
+    *,
+    resolved: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+) -> None:
+    for candidate in (caller_model, reviewsensei_model, backend_model):
+        value = candidate.strip()
+        if not value:
+            continue
+        if resolved.strip() != value:
+            raise ReviewInputError(
+                "explicit hosted model input was overridden by workflow defaults"
+            )
+        return
+
+
 def validate_resolved_hosted_job_model(
     *,
     provider_mode: str,
@@ -135,6 +153,12 @@ def validate_resolved_hosted_job_model(
     )
     if not resolved.strip():
         raise ReviewInputError("hosted job model could not be resolved")
+    _assert_resolved_matches_explicit_hosted_model_intent(
+        resolved=resolved,
+        caller_model=caller_model,
+        reviewsensei_model=reviewsensei_model,
+        backend_model=backend_model,
+    )
     validate_hosted_workflow_model(
         provider_mode=provider_mode,
         workflow_mode=workflow_mode,

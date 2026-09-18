@@ -1007,9 +1007,11 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_DEFAULT: deepseek/deepseek-v4.1-flash
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
@@ -1024,6 +1026,27 @@ jobs:
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
+
+          try:
+              resolved = validate_resolved_hosted_job_model(
+                  provider_mode=os.environ.get("PROVIDER_MODE", "openrouter"),
+                  workflow_mode=os.environ.get("MODE", ""),
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          print(resolved, end="")
+          PY
           unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
@@ -1144,6 +1167,7 @@ jobs:
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1156,11 +1180,33 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+          BACKEND_DEFAULT: deepseek/deepseek-v4.1-flash
         run: |
           if [[ -z "$OPENROUTER_API_KEY" ]]; then
             echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
             exit 1
           fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.errors import ReviewInputError
+          from review_sensei.provider_config import validate_resolved_hosted_job_model
+
+          try:
+              resolved = validate_resolved_hosted_job_model(
+                  provider_mode=os.environ.get("PROVIDER_MODE", "openrouter"),
+                  workflow_mode=os.environ.get("MODE", ""),
+                  caller_model=os.environ.get("CALLER_MODEL", ""),
+                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
+                  backend_model=os.environ.get("BACKEND_MODEL", ""),
+                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
+              )
+          except ReviewInputError as exc:
+              print(f"::error::{exc}", file=sys.stderr)
+              raise SystemExit(1) from exc
+          print(resolved, end="")
+          PY
           unset OPENROUTER_UPSTREAM_PROVIDER
           OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
