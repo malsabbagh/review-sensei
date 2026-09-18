@@ -186,16 +186,19 @@ def classify_registry_state(
         reason: str,
     ) -> str | None:
         nonlocal delay
-        if final_probe in {
-            PackumentProbeState.VERSION_INDEXED,
-            PackumentProbeState.INCONCLUSIVE,
-        }:
-            pass
-        elif (
-            final_probe == PackumentProbeState.PACKUMENT_MISSING and packument_seen
+        if (
+            final_probe == PackumentProbeState.PACKUMENT_MISSING
+            and not packument_seen
+            and (
+                attempt >= max_attempts or visibility_attempts >= preflight_404_attempts
+            )
         ):
-            pass
-        elif attempt >= max_attempts:
+            return "publish"
+        if (
+            final_probe == PackumentProbeState.VERSION_ABSENT
+            and packument_seen
+            and attempt >= max_attempts
+        ):
             return "publish"
         if attempt >= max_attempts:
             raise PublishError(

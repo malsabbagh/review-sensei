@@ -439,6 +439,101 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     max_delay_seconds=1.0,
                 )
 
+    def test_classify_registry_state_publishes_missing_package_when_preflight_exceeds_attempts(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-linux-x64-gnu"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 2,
+            packument_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 4,
+        }
+
+        def fake_urlopen(url: object, **_kwargs: object) -> io.BytesIO:
+            queue = responses[self._registry_url(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=2,
+                preflight_404_attempts=5,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        self.assertEqual(action, "publish")
+
+    def test_classify_registry_state_fails_closed_when_replication_never_resolves(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-darwin-arm64"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        indexed_packument = json.dumps(
+            {
+                "name": package,
+                "versions": {version: {"name": package, "version": version}},
+            }
+        ).encode("utf-8")
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 2,
+            packument_url: [io.BytesIO(indexed_packument) for _ in range(6)],
+        }
+
+        def fake_urlopen(url: object, **_kwargs: object) -> io.BytesIO:
+            queue = responses[self._registry_url(url)]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return io.BytesIO(item.read())
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                PublishError,
+                "registry preflight remained ambiguous after 2 attempts",
+            ):
+                classify_registry_state(
+                    package,
+                    version,
+                    integrity,
+                    max_attempts=2,
+                    preflight_404_attempts=5,
+                    initial_delay_seconds=1.0,
+                    max_delay_seconds=1.0,
+                )
+
     def test_preflight_marks_propagating_package_verified_via_urlopen(self) -> None:
         target = "@reviewsensei/cli-darwin-arm64"
         version = "0.5.0"
@@ -1129,9 +1224,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
                     ).encode("utf-8")
                 ),
             ],
-            target_packument_url: [
-                io.BytesIO(indexed_packument) for _ in range(12)
-            ],
+            target_packument_url: [io.BytesIO(indexed_packument) for _ in range(12)],
         }
         for package in ALL_PACKAGES:
             if package == target:
