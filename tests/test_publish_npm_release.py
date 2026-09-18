@@ -404,13 +404,25 @@ class PublishNpmReleaseTests(unittest.TestCase):
             },
         ]
 
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            if package != target:
+                return {
+                    "name": package,
+                    "version": version,
+                    "dist": {"integrity": records[package]["integrity"]},
+                }
+            item = responses.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return item
+
         with (
             mock.patch(
                 "scripts.publish_npm_release.publish_tarball",
             ) as publish,
             mock.patch(
                 "scripts.publish_npm_release.fetch_registry_package",
-                side_effect=responses,
+                side_effect=fake_fetch,
             ),
             mock.patch("scripts.publish_npm_release.time.sleep"),
         ):
