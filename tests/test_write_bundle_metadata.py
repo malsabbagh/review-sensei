@@ -62,20 +62,26 @@ class WriteBundleMetadataTests(unittest.TestCase):
         from unittest import mock
 
         head_sha = "a" * 40
-        with mock.patch(
-            "scripts.write_bundle_metadata.resolve_git_head_sha",
-            return_value=head_sha,
-        ), mock.patch.dict("os.environ", {"GITHUB_SHA": head_sha}, clear=False):
+        with (
+            mock.patch(
+                "scripts.write_bundle_metadata.resolve_git_head_sha",
+                return_value=head_sha,
+            ),
+            mock.patch.dict("os.environ", {"GITHUB_SHA": head_sha}, clear=False),
+        ):
             self.assertEqual(resolve_executed_source_sha(explicit=None), head_sha)
 
     def test_resolve_executed_source_sha_rejects_mismatch(self) -> None:
         from unittest import mock
 
         head_sha = "a" * 40
-        with mock.patch(
-            "scripts.write_bundle_metadata.resolve_git_head_sha",
-            return_value=head_sha,
-        ), mock.patch.dict("os.environ", {"GITHUB_SHA": head_sha}, clear=False):
+        with (
+            mock.patch(
+                "scripts.write_bundle_metadata.resolve_git_head_sha",
+                return_value=head_sha,
+            ),
+            mock.patch.dict("os.environ", {"GITHUB_SHA": head_sha}, clear=False),
+        ):
             with self.assertRaisesRegex(
                 BundleMetadataError,
                 "does not match the executed commit",
