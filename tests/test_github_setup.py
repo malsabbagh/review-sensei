@@ -397,8 +397,7 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertIsNone(
             _public_workflow_tag_from_job_ref(
-                "malsabbagh/review-sensei/.github/workflows/"
-                "review-sensei-run.yml@v5"
+                "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
             )
         )
 
