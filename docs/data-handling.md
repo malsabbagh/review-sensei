@@ -73,8 +73,11 @@ and emergency revocation.
   inference location (remote for OpenRouter) and credential presence only.
 - `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` means Ollama Cloud only.
   Hosted OpenRouter is selected with `REVIEWSENSEI_PROVIDER_MODE=openrouter` and
-  `REVIEWSENSEI_MODEL`; the generated caller forwards `OPENROUTER_API_KEY` by
-  name and never reads its value during setup.
+  `REVIEWSENSEI_MODEL`; that mode choice is the operator egress acknowledgement.
+  The reusable workflow rejects `allow_unqualified_profile=true`, does not
+  forward `--allow-unqualified-profile`, and only runs allowlisted models. The
+  generated caller forwards `OPENROUTER_API_KEY` by name and never reads its
+  value during setup.
 
 ReviewSensei does not make claims about provider retention, model training,
 subprocessors, residency, or deletion. Review the provider's current terms and

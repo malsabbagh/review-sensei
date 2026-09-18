@@ -1048,7 +1048,10 @@ jobs:
           print(resolved, end="")
           PY
           unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
+            echo '::error::hosted OpenRouter resolution failed' >&2
+            exit 1
+          }
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
           export MODEL OPENROUTER_UPSTREAM_PROVIDER
@@ -1208,7 +1211,10 @@ jobs:
           print(resolved, end="")
           PY
           unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)"
+          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
+            echo '::error::hosted OpenRouter resolution failed' >&2
+            exit 1
+          }
           MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
           OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
           export MODEL OPENROUTER_UPSTREAM_PROVIDER

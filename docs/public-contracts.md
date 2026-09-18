@@ -434,8 +434,11 @@ before release if a caller `with:` key is absent from
 `REVIEWSENSEI_PROVIDER_MODE` defaults to `local` (alias for `local-ollama`).
 Hosted backends are `local-ollama`, `cloud-ollama`, or `openrouter`; `local`
 and `cloud` remain aliases. `REVIEWSENSEI_MODEL` overrides the model for the
-selected backend. OpenRouter requires the customer-owned `OPENROUTER_API_KEY`
-secret; Ollama Cloud requires `OLLAMA_API_KEY`.
+selected backend. Selecting hosted `openrouter` is the operator egress
+acknowledgement; the reusable workflow rejects `allow_unqualified_profile=true`,
+does not forward `--allow-unqualified-profile`, and only runs models on the
+published hosted allowlist. OpenRouter requires the customer-owned
+`OPENROUTER_API_KEY` secret; Ollama Cloud requires `OLLAMA_API_KEY`.
 
 `review-sensei --version` reads package metadata and prints an exact `X.Y.Z`
 version. This is the version recorded by the portable manual GitHub Actions
