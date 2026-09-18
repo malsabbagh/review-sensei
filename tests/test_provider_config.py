@@ -74,6 +74,14 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 model="qwen3.5:4b",
             )
 
+    def test_empty_provider_mode_rejects_cloud_suffix_before_backend(self) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "workflow mode is invalid"):
+            validate_hosted_workflow_model(
+                provider_mode="",
+                workflow_mode="",
+                model="deepseek-v4.1-flash:cloud",
+            )
+
     def test_openrouter_rejects_ollama_cloud_slug(self) -> None:
         with self.assertRaisesRegex(
             ReviewInputError, "must not use ollama cloud suffix"

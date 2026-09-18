@@ -628,6 +628,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
         self.assertIn("--provider openrouter --model", review_step)
+        self.assertIn("VALIDATED_MODEL=", review_step)
+        self.assertIn(
+            "resolved hosted OpenRouter model does not match workflow env",
+            review_step,
+        )
         self.assertIn('review-sensei" resolve-hosted-openrouter both', review_step)
         self.assertNotIn("openrouter model vendor is not allowlisted", review_step)
         self.assertNotIn("OPENROUTER_MODEL:", review_step)
@@ -635,6 +640,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
         self.assertIn("--provider openrouter --model", reply_step)
+        self.assertIn("VALIDATED_MODEL=", reply_step)
+        self.assertIn(
+            "resolved hosted OpenRouter model does not match workflow env",
+            reply_step,
+        )
         self.assertIn('review-sensei" resolve-hosted-openrouter both', reply_step)
         self.assertNotIn("OPENROUTER_MODEL:", reply_step)
         publish_step = _step_block(
