@@ -1526,8 +1526,10 @@ class PublishNpmReleaseTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
 
     def test_load_bundle_metadata_rejects_oversized_file(self) -> None:
-        from scripts.publish_npm_release import BUNDLE_METADATA_MAX_BYTES
-        from scripts.publish_npm_release import load_bundle_metadata
+        from scripts.publish_npm_release import (
+            BUNDLE_METADATA_MAX_BYTES,
+            load_bundle_metadata,
+        )
 
         oversized = b"x" * (BUNDLE_METADATA_MAX_BYTES + 1)
         (self.bundle_dir / "bundle-metadata.json").write_bytes(oversized)
