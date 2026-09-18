@@ -93,7 +93,9 @@ def classify_registry_state(
     return "verified"
 
 
-def write_publish_state(bundle_dir: Path, version: str, packages: list[dict[str, str]]) -> None:
+def write_publish_state(
+    bundle_dir: Path, version: str, packages: list[dict[str, str]]
+) -> None:
     publish_state_path(bundle_dir).write_text(
         json.dumps({"version": version, "packages": packages}, indent=2) + "\n",
         encoding="utf-8",
@@ -107,9 +109,7 @@ def load_publish_state(bundle_dir: Path) -> dict[str, Any]:
 def package_action(bundle_dir: Path, package: str) -> str:
     state = load_publish_state(bundle_dir)
     matches = [
-        item["action"]
-        for item in state["packages"]
-        if item.get("name") == package
+        item["action"] for item in state["packages"] if item.get("name") == package
     ]
     if len(matches) != 1 or matches[0] not in {"publish", "verified"}:
         raise PublishError(f"missing unique package registry state for {package}")
