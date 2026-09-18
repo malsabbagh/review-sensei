@@ -33,6 +33,21 @@ class PublishError(RuntimeError):
     """Raised when npm publication or readback verification fails."""
 
 
+def is_retryable_registry_http_error(code: int) -> bool:
+    return code in {404, 429} or code >= 500
+
+
+def retry_delay_seconds(
+    exc: HTTPError,
+    delay: float,
+    max_delay_seconds: float,
+) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after is not None and retry_after.isdigit():
+        return min(float(retry_after), max_delay_seconds)
+    return min(delay, max_delay_seconds)
+
+
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     integrity_path = bundle_dir / "integrity.jsonl"
     records = [
@@ -106,8 +121,13 @@ def load_publish_state(bundle_dir: Path) -> dict[str, Any]:
     return json.loads(publish_state_path(bundle_dir).read_text(encoding="utf-8"))
 
 
-def package_action(bundle_dir: Path, package: str) -> str:
+def package_action(bundle_dir: Path, package: str, version: str) -> str:
     state = load_publish_state(bundle_dir)
+    if state.get("version") != version:
+        raise PublishError(
+            "publish-state.json version "
+            f"{state.get('version')!r} does not match requested {version!r}"
+        )
     matches = [
         item["action"] for item in state["packages"] if item.get("name") == package
     ]
@@ -146,20 +166,20 @@ def read_back_with_retry(
         try:
             remote = fetch_registry_package(package, version)
         except HTTPError as exc:
-            if exc.code == 404:
-                last_error = (
-                    f"{package}@{version} is not visible on the npm registry yet "
-                    f"(attempt {attempt}/{max_attempts})"
-                )
-                if attempt >= max_attempts:
-                    break
-                print(last_error, file=sys.stderr)
-                time.sleep(delay)
-                delay = min(delay * 1.5, max_delay_seconds)
-                continue
-            raise PublishError(
-                f"registry readback failed for {package}: HTTP {exc.code}"
-            ) from exc
+            if not is_retryable_registry_http_error(exc.code):
+                raise PublishError(
+                    f"registry readback failed for {package}: HTTP {exc.code}"
+                ) from exc
+            last_error = (
+                f"{package}@{version} registry readback not ready yet "
+                f"(HTTP {exc.code}, attempt {attempt}/{max_attempts})"
+            )
+            if attempt >= max_attempts:
+                break
+            print(last_error, file=sys.stderr)
+            time.sleep(retry_delay_seconds(exc, delay, max_delay_seconds))
+            delay = min(delay * 1.5, max_delay_seconds)
+            continue
         except URLError as exc:
             raise PublishError(
                 f"registry readback failed for {package}: {exc.reason}"
@@ -207,7 +227,7 @@ def publish_package(
     initial_delay_seconds: float,
     max_delay_seconds: float,
 ) -> None:
-    action = package_action(bundle_dir, package)
+    action = package_action(bundle_dir, package, version)
     expected_integrity = records[package]["integrity"]
     if action == "verified":
         print(f"Registry already contains the attested bytes for {package}@{version}")

@@ -330,9 +330,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
             )
         self.assertIn("Publish npm packages with Trusted Publishing", self.workflow)
         self.assertIn("environment:\n      name: npm", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py preflight", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py publish-platforms", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py publish-launcher", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py preflight", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py publish-platforms", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py publish-launcher", self.workflow)
 
     def test_workflow_is_tag_only(self):
         self.assertIn('"v*.*.*"', self.workflow)
@@ -374,9 +374,9 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("Verify registry state against attested tarballs", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py preflight", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py publish-platforms", self.workflow)
-        self.assertIn("scripts/publish_npm_release.py publish-launcher", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py preflight", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py publish-platforms", self.workflow)
+        self.assertIn("source/scripts/publish_npm_release.py publish-launcher", self.workflow)
         self.assertNotIn("npm view", self.workflow)
         self.assertLess(
             self.workflow.index("Publish platform packages first"),
