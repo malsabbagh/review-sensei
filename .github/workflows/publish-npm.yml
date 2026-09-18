@@ -281,7 +281,7 @@ jobs:
     # Resume dispatches skip native-build; require that skip explicitly instead of
     # inferring from assemble-npm being skipped for unrelated reasons.
     needs: [verify-request, native-build, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped')) }}
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -401,6 +401,7 @@ jobs:
             --expected-source-sha "$bundle_source_sha"
           (
             cd "$resume_staging"
+            sha256sum --check SHA256SUMS
             while read -r _ _ filename; do
               gh attestation verify "$filename" \
                 --repo "$GITHUB_REPOSITORY" \

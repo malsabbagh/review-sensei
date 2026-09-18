@@ -431,7 +431,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             publish_if_line,
         )
         self.assertIn(
-            "inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped'",
+            "inputs.resume_bundle_run_id != '' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped'",
             publish_if_line,
         )
         self.assertIn("environment:\n      name: npm", self.workflow)
@@ -497,6 +497,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn('display_title.startswith("publish-npm ")', resume_section)
         self.assertIn("resume_staging", resume_section)
+        self.assertIn("sha256sum --check SHA256SUMS", resume_section)
+        self.assertLess(
+            resume_section.index("sha256sum --check SHA256SUMS"),
+            resume_section.index("gh attestation verify"),
+        )
         self.assertIn("gh attestation verify", resume_section)
         self.assertIn('--source-digest "$bundle_source_sha"', resume_section)
         self.assertIn('--source-ref "refs/heads/$DEFAULT_BRANCH"', resume_section)
@@ -519,7 +524,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "needs.native-build.result == 'skipped'",
             publish_section.split("    steps:", maxsplit=1)[0],
         )
-        self.assertNotIn(
+        self.assertIn(
             "needs.assemble-npm.result == 'skipped'",
             publish_section.split("    if:", maxsplit=1)[1].split("\n", maxsplit=1)[0],
         )
