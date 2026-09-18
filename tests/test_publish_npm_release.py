@@ -86,10 +86,14 @@ class PublishNpmReleaseTests(unittest.TestCase):
             encoding="utf-8",
         )
         if metadata is not None:
-            (self.bundle_dir / "bundle-metadata.json").write_text(
+            metadata_path = self.bundle_dir / "bundle-metadata.json"
+            metadata_path.write_text(
                 json.dumps(metadata, indent=2) + "\n",
                 encoding="utf-8",
             )
+            from scripts.write_bundle_metadata import append_sha256sums_entry
+
+            append_sha256sums_entry(self.bundle_dir, metadata_path)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -1608,6 +1612,21 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 self.bundle_dir,
                 "0.5.0",
                 expected_source_sha="A" * 40,
+            )
+
+    def test_verify_resumed_bundle_rejects_metadata_integrity_version_mismatch(
+        self,
+    ) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.6.0", "source_sha": "a" * 40},
+        )
+        with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.6.0",
+                expected_source_sha="a" * 40,
             )
 
     def test_verify_resumed_bundle_requires_integrity_records(self) -> None:

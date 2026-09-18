@@ -179,20 +179,26 @@ def list_sha256sum_subjects(bundle_dir: Path) -> list[str]:
     return [filename for _, filename in iter_sha256sum_entries(bundle_dir)]
 
 
+def _checksum_subject_max_bytes(filename: str) -> int:
+    if filename == BUNDLE_METADATA_FILENAME:
+        return BUNDLE_METADATA_MAX_BYTES
+    return BUNDLE_TARBALL_MAX_BYTES
+
+
 def verify_bundle_checksums(bundle_dir: Path) -> None:
     for digest, filename in iter_sha256sum_entries(bundle_dir):
-        tarball_path = bundle_dir / filename
-        if not tarball_path.is_file():
+        subject_path = bundle_dir / filename
+        if not subject_path.is_file():
             raise PublishError(
-                f"release bundle is missing tarball {filename!r} declared in SHA256SUMS"
+                f"release bundle is missing subject {filename!r} declared in SHA256SUMS"
             )
         actual_digest = _sha256_file(
-            tarball_path,
-            max_bytes=BUNDLE_TARBALL_MAX_BYTES,
+            subject_path,
+            max_bytes=_checksum_subject_max_bytes(filename),
         )
         if actual_digest != digest:
             raise PublishError(
-                f"release bundle tarball {filename!r} does not match SHA256SUMS"
+                f"release bundle subject {filename!r} does not match SHA256SUMS"
             )
 
 
@@ -237,7 +243,7 @@ def verify_resumed_bundle(
             f"{expected_source_sha!r} in {bundle_dir}"
         )
     verify_bundle_checksums(bundle_dir)
-    return load_integrity_records(bundle_dir, version)
+    return load_integrity_records(bundle_dir, metadata["version"])
 
 
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:

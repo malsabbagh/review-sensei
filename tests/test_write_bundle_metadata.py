@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scripts.write_bundle_metadata import (
     BundleMetadataError,
+    SHA256SUMS_FILENAME,
     main,
     normalize_release_version,
     resolve_executed_source_sha,
@@ -21,6 +22,7 @@ class WriteBundleMetadataTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.bundle_dir = Path(self.tempdir.name)
+        (self.bundle_dir / SHA256SUMS_FILENAME).write_text("", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -36,6 +38,8 @@ class WriteBundleMetadataTests(unittest.TestCase):
             metadata,
             {"version": "0.5.0", "source_sha": "a" * 40},
         )
+        sums = (self.bundle_dir / SHA256SUMS_FILENAME).read_text(encoding="utf-8")
+        self.assertIn("bundle-metadata.json", sums)
 
     def test_write_bundle_metadata_from_tag(self) -> None:
         path = write_bundle_metadata(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from scripts.check_release_version import TAG_PATTERN
 
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
+SHA256SUMS_FILENAME = "SHA256SUMS"
 
 
 class BundleMetadataError(ValueError):
@@ -76,6 +78,19 @@ def resolve_executed_source_sha(*, explicit: str | None) -> str:
     return executed_sha
 
 
+def append_sha256sums_entry(bundle_dir: Path, subject: Path) -> None:
+    sums_path = bundle_dir / SHA256SUMS_FILENAME
+    if not sums_path.is_file():
+        raise BundleMetadataError(
+            f"release bundle is missing SHA256SUMS at {sums_path}"
+        )
+    if not subject.is_file():
+        raise BundleMetadataError(f"release bundle subject is missing at {subject}")
+    digest = hashlib.sha256(subject.read_bytes()).hexdigest()
+    with sums_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{digest}  {subject.name}\n")
+
+
 def write_bundle_metadata(
     bundle_dir: Path,
     *,
@@ -88,6 +103,7 @@ def write_bundle_metadata(
     metadata = {"version": normalized_version, "source_sha": normalized_sha}
     path = bundle_dir / BUNDLE_METADATA_FILENAME
     path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    append_sha256sums_entry(bundle_dir, path)
     return path
 
 
