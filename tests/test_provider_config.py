@@ -141,14 +141,16 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
             )
 
     def test_local_ollama_rejects_cloud_suffix(self) -> None:
-        with self.assertRaisesRegex(
-            ReviewInputError, "must not use ollama cloud suffix"
-        ):
-            validate_hosted_workflow_model(
-                provider_mode="local-ollama",
-                workflow_mode="automatic",
-                model="deepseek-v4.1-flash:cloud",
-            )
+        for provider_mode in ("local", "local-ollama"):
+            with self.subTest(provider_mode=provider_mode):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "must not use ollama cloud suffix"
+                ):
+                    validate_hosted_workflow_model(
+                        provider_mode=provider_mode,
+                        workflow_mode="manual",
+                        model="deepseek-v4.1-flash:cloud",
+                    )
 
     def test_cloud_ollama_accepts_cloud_suffix(self) -> None:
         validate_hosted_workflow_model(
