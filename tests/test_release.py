@@ -480,10 +480,12 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
 
     def test_partial_publish_can_resume_prior_attested_bundle(self):
         self.assertIn("resume_bundle_run_id:", self.workflow)
+        self.assertIn("resume_mode=true", self.workflow)
+        self.assertIn("resume_mode=false", self.workflow)
         self.assertIn(
             "run-name: publish-npm ${{ github.event.inputs.version }}", self.workflow
         )
-        self.assertIn("inputs.resume_bundle_run_id == ''", self.workflow)
+        self.assertIn("needs.verify-request.outputs.resume_mode", self.workflow)
         self.assertIn(
             "Download npm release bundle from prior workflow run", self.workflow
         )
@@ -532,7 +534,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         publish_if = publish_section.split("    if:", maxsplit=1)[1].split(
             "\n", maxsplit=1
         )[0]
-        self.assertIn("inputs.resume_bundle_run_id != ''", publish_if)
+        self.assertIn("needs.verify-request.outputs.resume_mode == 'true'", publish_if)
         self.assertIn("needs.assemble-npm.result == 'skipped'", publish_if)
         preflight_section = self.workflow.split(
             "Verify registry state against attested tarballs", maxsplit=1
@@ -552,33 +554,36 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         native_if = next(
             line for line in native_section.splitlines() if line.startswith("    if:")
         )
-        self.assertIn("inputs.resume_bundle_run_id == ''", native_if)
+        self.assertIn("needs.verify-request.outputs.resume_mode != 'true'", native_if)
         assemble_section = self.workflow.split("  assemble-npm:", maxsplit=1)[1].split(
             "  publish-npm:", maxsplit=1
         )[0]
         assemble_if = next(
             line for line in assemble_section.splitlines() if line.startswith("    if:")
         )
-        self.assertIn("inputs.resume_bundle_run_id == ''", assemble_if)
+        self.assertIn("needs.verify-request.outputs.resume_mode != 'true'", assemble_if)
         self.assertIn(
-            "if: ${{ inputs.resume_bundle_run_id == '' }}",
+            "if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}",
             self.workflow,
         )
         self.assertIn(
-            "if: ${{ inputs.resume_bundle_run_id != '' }}",
+            "if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}",
             self.workflow,
         )
         verify_section = self.workflow.split(
             "Verify resumed npm release bundle provenance", maxsplit=1
         )[1].split("Configure bootstrap authentication when present", maxsplit=1)[0]
         self.assertIn(
-            '--expected-source-sha "${{ steps.resume-bundle.outputs.bundle_source_sha }}"',
+            '--expected-source-sha "$bundle_source_sha"',
             verify_section,
         )
         self.assertIn(
             "python resume-source/scripts/publish_npm_release.py verify-bundle",
             verify_section,
         )
+        self.assertIn("list-attestation-subjects", verify_section)
+        self.assertIn("gh attestation verify", verify_section)
+        self.assertIn('--source-digest "$bundle_source_sha"', verify_section)
         self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
         self.assertIn("id: resume-bundle", self.workflow)
 
