@@ -289,7 +289,7 @@ jobs:
   publish-npm:
     name: Publish npm packages
     needs: [verify-request, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && (needs.assemble-npm.result == 'success' || needs.assemble-npm.result == 'skipped') }}
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success') || (inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm

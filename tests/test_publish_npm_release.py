@@ -1466,11 +1466,57 @@ class PublishNpmReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(PublishError, "unexpected fields"):
             load_bundle_metadata(self.bundle_dir)
 
+    def test_load_bundle_metadata_rejects_invalid_source_sha(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "A" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid source_sha"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_load_bundle_metadata_rejects_short_source_sha(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "abc"}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid source_sha"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_verify_resumed_bundle_rejects_noncanonical_expected_sha(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "canonical git commit"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="A" * 40,
+            )
+
+    def test_verify_resumed_bundle_requires_integrity_records(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        (self.bundle_dir / "integrity.jsonl").unlink()
+        with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
+            verify_resumed_bundle(self.bundle_dir, "0.5.0")
+
     def test_load_bundle_metadata_rejects_oversized_file(self) -> None:
         from scripts.publish_npm_release import BUNDLE_METADATA_MAX_BYTES
         from scripts.publish_npm_release import load_bundle_metadata
 
-        (self.bundle_dir / "bundle-metadata.json").write_bytes(b"x" * (BUNDLE_METADATA_MAX_BYTES + 1))
+        oversized = b"x" * (BUNDLE_METADATA_MAX_BYTES + 1)
+        (self.bundle_dir / "bundle-metadata.json").write_bytes(oversized)
         with self.assertRaisesRegex(PublishError, "exceeds size limit"):
             load_bundle_metadata(self.bundle_dir)
 

@@ -425,6 +425,8 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             line for line in publish_section.splitlines() if line.startswith("    if:")
         )
         self.assertIn("inputs.publish", publish_if_line)
+        self.assertIn("inputs.resume_bundle_run_id == '' && needs.assemble-npm.result == 'success'", publish_if_line)
+        self.assertIn("inputs.resume_bundle_run_id != '' && needs.assemble-npm.result == 'skipped'", publish_if_line)
         self.assertIn("environment:\n      name: npm", self.workflow)
         self.assertIn("id-token: write", self.workflow)
         self.assertIn("group: publish-npm-${{ inputs.version }}", self.workflow)

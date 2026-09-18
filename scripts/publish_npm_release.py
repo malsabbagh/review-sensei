@@ -67,6 +67,10 @@ def bundle_metadata_path(bundle_dir: Path) -> Path:
     return bundle_dir / BUNDLE_METADATA_FILENAME
 
 
+def _is_git_sha(value: str) -> bool:
+    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+
+
 def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     path = bundle_metadata_path(bundle_dir)
     if not path.is_file():
@@ -89,6 +93,8 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
         raise PublishError("release bundle metadata is missing version")
     if not isinstance(source_sha, str) or not source_sha:
         raise PublishError("release bundle metadata is missing source_sha")
+    if not _is_git_sha(source_sha):
+        raise PublishError("release bundle metadata has invalid source_sha")
     return {"version": version, "source_sha": source_sha}
 
 
@@ -109,7 +115,9 @@ def verify_resumed_bundle(
     version: str,
     *,
     expected_source_sha: str | None = None,
-) -> None:
+) -> dict[str, dict[str, str]]:
+    if expected_source_sha is not None and not _is_git_sha(expected_source_sha):
+        raise PublishError("expected source SHA is not a canonical git commit")
     metadata = load_bundle_metadata(bundle_dir)
     if metadata is None:
         if expected_source_sha is not None:
@@ -117,19 +125,21 @@ def verify_resumed_bundle(
                 "resumed release bundle is missing bundle-metadata.json; "
                 "only bundles produced after bundle metadata recording can be resumed"
             )
-        verify_bundle_version(bundle_dir, version)
-        return
+        return verify_bundle_version(bundle_dir, version)
     if metadata["version"] != version:
         raise PublishError(
             "release bundle version "
             f"{metadata['version']!r} does not match requested {version!r}"
         )
-    if expected_source_sha is not None and metadata["source_sha"] != expected_source_sha:
+    if (
+        expected_source_sha is not None
+        and metadata["source_sha"] != expected_source_sha
+    ):
         raise PublishError(
             "resumed release bundle source_sha "
             f"{metadata['source_sha']!r} does not match attested run {expected_source_sha!r}"
         )
-    load_integrity_records(bundle_dir, version)
+    return load_integrity_records(bundle_dir, version)
 
 
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
@@ -406,9 +416,8 @@ def classify_registry_state(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}. Resume the failed workflow run or dispatch "
-                "publish-npm.yml with resume_bundle_run_id set to the run that "
-                "produced this bundle instead of rebuilding."
+                f"{package}@{version}. Reuse the previously attested release "
+                "bundle for this version instead of rebuilding."
             )
         return "verified"
 
@@ -518,9 +527,8 @@ def read_back_with_retry(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}. Resume the failed workflow run or dispatch "
-                "publish-npm.yml with resume_bundle_run_id set to the run that "
-                "produced this bundle instead of rebuilding."
+                f"{package}@{version}. Reuse the previously attested release "
+                "bundle for this version instead of rebuilding."
             )
         print(f"Verified registry readback for {package}@{version}")
         return
@@ -624,12 +632,11 @@ def preflight(
     expected_source_sha: str | None = None,
 ) -> None:
     if expected_source_sha is not None:
-        verify_resumed_bundle(
+        records = verify_resumed_bundle(
             bundle_dir,
             version,
             expected_source_sha=expected_source_sha,
         )
-        records = load_integrity_records(bundle_dir, version)
     else:
         records = verify_bundle_version(bundle_dir, version)
     retry_kwargs = {
