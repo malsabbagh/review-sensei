@@ -24,13 +24,13 @@ use full commit SHAs with same-line release comments. The public ReviewSensei
 reusable workflow is the deliberate exception: setup-v4 follows its protected
 `@v4` tag, while the broker verifies the tag's runtime commit. Dependabot updates
 GitHub Actions and pip tooling weekly from the repository root. Workflow
-permissions default to `contents: read`. Because this private repository does
-not have GitHub Code Scanning enabled, CodeQL requests no `security-events:
-write` permission, retains its generated SARIF as a workflow artifact, and
-uses the deterministic local gate instead of attempting an unavailable upload.
+permissions default to `contents: read`. CodeQL requests no `security-events:
+write` permission, retains its generated SARIF as a workflow artifact, and uses
+the deterministic local gate instead of attempting a code-scanning upload.
 
-Linux jobs use GitHub-hosted `ubuntu-latest` and the complete cross-platform
-compatibility matrix remains available.
+Repository CI jobs use GitHub-hosted runners. Linux jobs run on `ubuntu-latest`
+and the compatibility workflow exercises the complete Ubuntu, Windows, and macOS
+matrix on every run.
 
 Pin the direct CI tools in `requirements/ci.txt`. Build an sdist and wheel,
 then install only the wheel into a fresh

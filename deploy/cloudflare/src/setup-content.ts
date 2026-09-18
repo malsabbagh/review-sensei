@@ -737,6 +737,24 @@ function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
 
 const PROVIDER_PARITY_DRAFT_SKIP =
   "      github.event.pull_request.draft != true &&\n";
+const CURRENT_RESOLVE_TRIGGER_RUNS_ON = "    runs-on: ubuntu-latest\n";
+const UBICLOUD_RUNNER_SWITCH_RUNS_ON =
+  "    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}\n";
+
+export function ubicloudRunnerSwitchWorkflowTemplate(
+  publicWorkflowTag: string,
+): string {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  const current = resolveTriggerWorkflowTemplate(tag);
+  const previous = current.replace(
+    CURRENT_RESOLVE_TRIGGER_RUNS_ON,
+    UBICLOUD_RUNNER_SWITCH_RUNS_ON,
+  );
+  if (previous === current) {
+    throw new Error("resolve-trigger runs-on line is missing from the current caller");
+  }
+  return previous;
+}
 
 export function providerParityWorkflowBeforeDraftSkip(
   publicWorkflowTag: string,

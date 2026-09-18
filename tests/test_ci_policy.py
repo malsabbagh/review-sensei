@@ -1269,17 +1269,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn('chmod u=rwx,go=rx "${payloads[0]}"', text)
 
-    def test_active_workflow_jobs_do_not_use_ubicloud_runner_switch(self):
+    def test_active_workflow_jobs_use_recognized_github_hosted_runners(self):
         workflow_root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         workflow_paths = sorted(workflow_root.glob("*.yml"))
+        allowed_runs_on = (
+            re.compile(r"^runs-on: ubuntu-latest$"),
+            re.compile(r"^runs-on: \$\{\{ matrix\.os \}\}$"),
+            re.compile(r"^runs-on: \[self-hosted, linux, x64, ollama\]$"),
+        )
         self.assertTrue(workflow_paths)
         for workflow in workflow_paths:
             with self.subTest(workflow=workflow.name):
-                if workflow.name == "review-sensei-run.yml":
-                    # Public reusable workflow: runner selection is part of the
-                    # public contract (GitHub-hosted cloud/OpenRouter or labelled
-                    # Ollama self-hosted), not repository CI runner policy.
-                    continue
                 lines = workflow.read_text(encoding="utf-8").splitlines()
                 runs_on_lines = [
                     line.strip()
@@ -1296,6 +1296,10 @@ class ActionPinPolicyTests(unittest.TestCase):
                 for line in runs_on_lines:
                     self.assertNotIn("ENABLE_UBICLOUD_HOSTED", line)
                     self.assertNotIn("ubicloud-standard-2", line)
+                    self.assertTrue(
+                        any(pattern.match(line) for pattern in allowed_runs_on),
+                        msg=f"{workflow.name} has unrecognized runner: {line}",
+                    )
 
     def test_package_job_records_digests_and_runs_packaged_dist_safe_tests(self):
         workflow = (

@@ -251,6 +251,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
+                _ubicloud_runner_switch_workflow(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
                 _historical_tagged_v4_workflow(tag_matches[0]),
@@ -715,6 +716,11 @@ jobs:
 
 
 _PROVIDER_PARITY_DRAFT_SKIP = "      github.event.pull_request.draft != true &&\n"
+_CURRENT_RESOLVE_TRIGGER_RUNS_ON = "    runs-on: ubuntu-latest\n"
+_UBICLOUD_RUNNER_SWITCH_RUNS_ON = (
+    "    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && "
+    "'ubicloud-standard-2' || 'ubuntu-latest' }}\n"
+)
 
 
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
@@ -1069,6 +1075,23 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
     """Return the current setup-v4 caller following the public git tag."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
+
+
+def _ubicloud_runner_switch_workflow(public_workflow_tag: str) -> str:
+    """Return the released resolve-trigger caller before Ubicloud removal."""
+
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    current = _resolve_trigger_workflow(tag)
+    previous = current.replace(
+        _CURRENT_RESOLVE_TRIGGER_RUNS_ON,
+        _UBICLOUD_RUNNER_SWITCH_RUNS_ON,
+        1,
+    )
+    if previous == current:
+        raise GitHubSetupError(
+            "resolve-trigger runs-on line is missing from the current caller"
+        )
+    return previous
 
 
 def _provider_parity_workflow_before_draft_skip(public_workflow_tag: str) -> str:

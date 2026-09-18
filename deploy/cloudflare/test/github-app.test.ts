@@ -16,6 +16,7 @@ import {
   buildSetupFiles,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
+  ubicloudRunnerSwitchWorkflowTemplate,
 } from "../src/setup-content";
 
 const SHA = "a".repeat(40);
@@ -536,6 +537,25 @@ describe("setup repository reconciliation", () => {
     fake.files = Object.fromEntries(
       buildTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
     );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates the released resolve-trigger caller with the Ubicloud runner switch", async () => {
+    const fake = new FakeGitHub();
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    files[SETUP_FILE_PATHS[0]] = ubicloudRunnerSwitchWorkflowTemplate(TAG);
+    expect(files[SETUP_FILE_PATHS[0]]).toContain("ENABLE_UBICLOUD_HOSTED");
+    fake.files = files;
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },

@@ -204,6 +204,26 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)
 
+    def test_setup_v4_workflow_templates_match_between_python_and_worker(self):
+        from review_sensei.hosting.github.setup import (
+            _tagged_workflow,
+            _ubicloud_runner_switch_workflow,
+        )
+
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("export function ubicloudRunnerSwitchWorkflowTemplate", ts_source)
+        self.assertEqual(
+            _tagged_workflow("v4"),
+            (
+                ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+            ).read_text(encoding="utf-8"),
+        )
+        released = _ubicloud_runner_switch_workflow("v4")
+        self.assertIn("ENABLE_UBICLOUD_HOSTED", released)
+        self.assertNotEqual(released, _tagged_workflow("v4"))
+
     def test_setup_builders_share_constants_and_variables(self):
         import re
 
