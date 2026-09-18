@@ -359,7 +359,9 @@ jobs:
           if run.get("workflowName") != "Publish npm packages":
               fail("resume_bundle_run_id must reference a publish-npm workflow run")
           if run.get("conclusion") not in {"failure", "cancelled"}:
-              fail("resume_bundle_run_id must reference a failed or cancelled run")
+              fail(
+                  "resume_bundle_run_id must reference a completed failed or cancelled run"
+              )
           if run.get("event") != "workflow_dispatch":
               fail("resume_bundle_run_id must reference a manual publish-npm dispatch")
           if run.get("headBranch") != expected_branch:
@@ -402,13 +404,17 @@ jobs:
           (
             cd "$resume_staging"
             sha256sum --check SHA256SUMS
-            while read -r _ _ filename; do
+            while IFS= read -r filename; do
+              [[ -z "$filename" ]] && continue
               gh attestation verify "$filename" \
                 --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
                 --source-ref "refs/heads/$DEFAULT_BRANCH" \
                 --source-digest "$bundle_source_sha"
-            done < SHA256SUMS
+            done < <(
+              python resume-source/scripts/publish_npm_release.py list-sha256sum-subjects \
+                --bundle-dir "$resume_staging"
+            )
           )
           rm -rf release/npm
           mkdir -p release/npm
@@ -478,6 +484,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           RESUME_SOURCE_SHA: ${{ steps.resume-bundle.outputs.bundle_source_sha }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
         run: |
           set -euo pipefail
           args=(
@@ -485,7 +492,11 @@ jobs:
             --bundle-dir "$GITHUB_WORKSPACE/release/npm"
             --version "$VERSION"
           )
-          if [[ -n "${RESUME_SOURCE_SHA:-}" ]]; then
+          if [[ -n "${RESUME_BUNDLE_RUN_ID}" ]]; then
+            if [[ -z "${RESUME_SOURCE_SHA:-}" ]]; then
+              echo "resume publish requires bundle_source_sha from resume-bundle step" >&2
+              exit 1
+            fi
             args+=(--expected-source-sha "$RESUME_SOURCE_SHA")
           fi
           "${args[@]}"

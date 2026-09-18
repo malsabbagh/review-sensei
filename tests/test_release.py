@@ -502,6 +502,8 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             resume_section.index("sha256sum --check SHA256SUMS"),
             resume_section.index("gh attestation verify"),
         )
+        self.assertIn("list-sha256sum-subjects", resume_section)
+        self.assertNotIn("while read -r _ _ filename", resume_section)
         self.assertIn("gh attestation verify", resume_section)
         self.assertIn('--source-digest "$bundle_source_sha"', resume_section)
         self.assertIn('--source-ref "refs/heads/$DEFAULT_BRANCH"', resume_section)
@@ -509,6 +511,10 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "verify-request did not produce a dispatch source SHA", resume_section
         )
         self.assertIn("DISPATCH_SOURCE_SHA", resume_section)
+        self.assertIn(
+            "resume_bundle_run_id must reference a completed failed or cancelled run",
+            resume_section,
+        )
         self.assertIn(
             "resume_bundle_run_id must reference a run from the dispatch source commit",
             resume_section,
@@ -532,6 +538,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "Verify registry state against attested tarballs", maxsplit=1
         )[1].split("Publish platform packages first", maxsplit=1)[0]
         self.assertIn("--expected-source-sha", preflight_section)
+        self.assertIn("RESUME_BUNDLE_RUN_ID", preflight_section)
+        self.assertIn(
+            "resume publish requires bundle_source_sha from resume-bundle step",
+            preflight_section,
+        )
         self.assertIn("write_bundle_metadata.py", self.workflow)
         self.assertIn("Check out repository for resumed run validation", self.workflow)
         self.assertIn("resume-source", self.workflow)

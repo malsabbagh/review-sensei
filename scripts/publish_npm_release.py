@@ -37,6 +37,7 @@ DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
 BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
 BUNDLE_METADATA_MAX_BYTES = 4096
+BUNDLE_TARBALL_MAX_BYTES = 256 * 1024 * 1024
 
 
 class PublishError(RuntimeError):
@@ -112,25 +113,80 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     return {"version": version, "source_sha": source_sha}
 
 
-def verify_bundle_checksums(bundle_dir: Path) -> None:
+def _is_safe_bundle_member_name(filename: str) -> bool:
+    if not filename or filename in {".", ".."}:
+        return False
+    if filename.startswith("-") or "/" in filename or "\\" in filename:
+        return False
+    return Path(filename).name == filename
+
+
+def _parse_sha256sums_entry(line: str, *, sums_path: Path) -> tuple[str, str]:
+    stripped = line.strip()
+    if not stripped:
+        raise PublishError(f"release bundle has empty SHA256SUMS entry in {sums_path}")
+    parts = stripped.split(None, 1)
+    if len(parts) != 2:
+        raise PublishError(
+            f"release bundle has invalid SHA256SUMS entry in {sums_path}: {line!r}"
+        )
+    digest, filename = parts
+    if len(digest) != 64 or not all(char in "0123456789abcdef" for char in digest):
+        raise PublishError(
+            f"release bundle has invalid SHA256SUMS digest in {sums_path}: {line!r}"
+        )
+    filename = filename.lstrip("*").strip()
+    if not _is_safe_bundle_member_name(filename):
+        raise PublishError(
+            f"release bundle SHA256SUMS entry has unsafe filename in {sums_path}: "
+            f"{filename!r}"
+        )
+    return digest, filename
+
+
+def _sha256_file(path: Path, *, max_bytes: int) -> str:
+    hasher = hashlib.sha256()
+    total = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise PublishError(
+                    f"release bundle tarball {path.name!r} exceeds size limit"
+                )
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def iter_sha256sum_entries(bundle_dir: Path) -> list[tuple[str, str]]:
     sums_path = bundle_dir / "SHA256SUMS"
     if not sums_path.is_file():
         raise PublishError(f"release bundle is missing SHA256SUMS at {sums_path}")
+    entries: list[tuple[str, str]] = []
     for line in sums_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        digest, _, filename = line.partition("  ")
-        filename = filename.strip()
-        if not digest or not filename:
-            raise PublishError(
-                f"release bundle has invalid SHA256SUMS entry in {sums_path}: {line!r}"
-            )
+        entries.append(_parse_sha256sums_entry(line, sums_path=sums_path))
+    if not entries:
+        raise PublishError(f"release bundle SHA256SUMS is empty at {sums_path}")
+    return entries
+
+
+def list_sha256sum_subjects(bundle_dir: Path) -> list[str]:
+    return [filename for _, filename in iter_sha256sum_entries(bundle_dir)]
+
+
+def verify_bundle_checksums(bundle_dir: Path) -> None:
+    for digest, filename in iter_sha256sum_entries(bundle_dir):
         tarball_path = bundle_dir / filename
         if not tarball_path.is_file():
             raise PublishError(
                 f"release bundle is missing tarball {filename!r} declared in SHA256SUMS"
             )
-        actual_digest = hashlib.sha256(tarball_path.read_bytes()).hexdigest()
+        actual_digest = _sha256_file(
+            tarball_path,
+            max_bytes=BUNDLE_TARBALL_MAX_BYTES,
+        )
         if actual_digest != digest:
             raise PublishError(
                 f"release bundle tarball {filename!r} does not match SHA256SUMS"
@@ -748,7 +804,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("preflight", "publish-platforms", "publish-launcher", "verify-bundle"),
+        choices=(
+            "preflight",
+            "publish-platforms",
+            "publish-launcher",
+            "verify-bundle",
+            "list-sha256sum-subjects",
+        ),
     )
     parser.add_argument("--bundle-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
@@ -801,6 +863,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.version,
                 expected_source_sha=args.expected_source_sha,
             )
+        elif args.command == "list-sha256sum-subjects":
+            for filename in list_sha256sum_subjects(bundle_dir):
+                print(filename)
         elif args.command == "preflight":
             preflight(
                 bundle_dir,

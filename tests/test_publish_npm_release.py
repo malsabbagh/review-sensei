@@ -61,6 +61,12 @@ class PublishNpmReleaseTests(unittest.TestCase):
     ) -> None:
         import hashlib
 
+        integrity_path = self.bundle_dir / "integrity.jsonl"
+        if not integrity_path.is_file():
+            raise AssertionError(
+                "integrity.jsonl must exist before writing resume bundle files"
+            )
+
         sums_lines: list[str] = []
         for line in (
             (self.bundle_dir / "integrity.jsonl")
@@ -1456,6 +1462,62 @@ class PublishNpmReleaseTests(unittest.TestCase):
             verify_resumed_bundle(
                 self.bundle_dir,
                 "0.5.0",
+                expected_source_sha="a" * 40,
+            )
+
+    def test_verify_bundle_checksums_rejects_unsafe_filename(self) -> None:
+        from scripts.publish_npm_release import verify_bundle_checksums
+
+        self._write_resume_bundle_files()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{'a' * 64}  ../escape.tgz\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "unsafe filename"):
+            verify_bundle_checksums(self.bundle_dir)
+
+    def test_verify_bundle_checksums_rejects_oversized_tarball(self) -> None:
+        import hashlib
+
+        from scripts import publish_npm_release as module
+        from scripts.publish_npm_release import verify_bundle_checksums
+
+        self._write_resume_bundle_files()
+        tarball = next(self.bundle_dir.glob("*.tgz"))
+        content = b"x" * 32
+        tarball.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{digest}  {tarball.name}\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(module, "BUNDLE_TARBALL_MAX_BYTES", 16):
+            with self.assertRaisesRegex(PublishError, "exceeds size limit"):
+                verify_bundle_checksums(self.bundle_dir)
+
+    def test_list_sha256sum_subjects_rejects_unsafe_filename(self) -> None:
+        from scripts.publish_npm_release import list_sha256sum_subjects
+
+        self._write_resume_bundle_files()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{'a' * 64}  ../escape.tgz\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "unsafe filename"):
+            list_sha256sum_subjects(self.bundle_dir)
+
+    def test_preflight_resume_requires_bundle_metadata(self) -> None:
+        from scripts.publish_npm_release import preflight
+
+        self._write_resume_bundle_files()
+        with self.assertRaisesRegex(PublishError, "missing bundle-metadata"):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=1,
+                preflight_404_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
                 expected_source_sha="a" * 40,
             )
 
