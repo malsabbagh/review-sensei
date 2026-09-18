@@ -22,19 +22,15 @@ entries across Ubuntu, Windows, and macOS; dedicated quality, schema, package,
 and CodeQL jobs; and a stable `Required checks` aggregate. Third-party Actions
 use full commit SHAs with same-line release comments. The public ReviewSensei
 reusable workflow is the deliberate exception: setup-v4 follows its protected
-`@v4` tag, while the broker verifies the tag's runtime commit. Dependabot updates
+`@v5` tag, while the broker verifies the tag's runtime commit. Dependabot updates
 GitHub Actions and pip tooling weekly from the repository root. Workflow
-permissions default to `contents: read`. Because this private repository does
-not have GitHub Code Scanning enabled, CodeQL requests no `security-events:
-write` permission, retains its generated SARIF as a workflow artifact, and
-uses the deterministic local gate instead of attempting an unavailable upload.
+permissions default to `contents: read`. CodeQL requests no `security-events:
+write` permission, retains its generated SARIF as a workflow artifact, and uses
+the deterministic local gate instead of attempting a code-scanning upload.
 
-The repository variable `ENABLE_UBICLOUD_HOSTED` controls runner selection. When
-it is `true`, all Linux jobs use the `ubicloud-standard-2` runner and the
-compatibility matrix includes only its Ubuntu entries; Windows and macOS lanes
-are skipped before runner allocation because Ubicloud does not provide those
-hosts. When the variable is unset or false, Linux jobs use GitHub-hosted
-`ubuntu-latest` and the complete cross-platform matrix remains available.
+Repository CI jobs use GitHub-hosted runners. Linux jobs run on `ubuntu-latest`
+and the compatibility workflow exercises the complete Ubuntu, Windows, and macOS
+matrix on every run.
 
 Pin the direct CI tools in `requirements/ci.txt`. Build an sdist and wheel,
 then install only the wheel into a fresh
@@ -96,20 +92,19 @@ No package release or deployment is part of this rollout.
 
 ## Follow-up
 
-When fallback mode is enabled, read back hosted Windows/macOS and Python
-3.12–3.14 results, the CodeQL SARIF artifact, and the `Required checks` ruleset
-after publication; keep the existing issue #7 ADR 0007 unchanged.
+Read back hosted Windows/macOS and Python 3.12–3.14 results, the CodeQL SARIF
+artifact, and the `Required checks` ruleset after publication; keep the
+existing issue #7 ADR 0007 unchanged.
 
 ## Consequences
 
 Contributors get reproducible local commands and a branch-coverage floor, while
-the stable aggregate gives branch protection one durable contract. In Ubicloud
-mode, Linux compatibility and the quality gates run on the same hosted runner;
-Windows/macOS behavior is intentionally deferred until fallback mode is
-enabled. CodeQL artifact review and ruleset enforcement still require hosted
-evidence; local gates do not substitute for those checks. GitHub Code Scanning
-upload remains a documented follow-up once the repository is eligible for that
-feature.
+the stable aggregate gives branch protection one durable contract. The
+compatibility workflow exercises Ubuntu, Windows, and macOS on every run; there
+is no alternate runner-selection mode. CodeQL artifact review and ruleset
+enforcement still require hosted evidence; local gates do not substitute for
+those checks. GitHub Code Scanning upload remains a documented follow-up once
+the repository is eligible for that feature.
 
 ## Amendment (2026-09-16) — public repository findings gate
 
@@ -120,3 +115,11 @@ upload as enforcement (`upload: never`); the deterministic SARIF gate and the
 Worker and npm launcher sources are included alongside Python. Stale "private
 repository" wording in the Decision section is historical; do not infer
 reduced public-repo permissions from it.
+
+## Amendment (2026-09-18) — remove optional runner switch
+
+The optional `ENABLE_UBICLOUD_HOSTED` repository variable and alternate Linux
+runner selector are removed. Repository CI jobs now use GitHub-hosted runners
+and the complete cross-platform compatibility matrix is the only supported lane.
+Historical Decision text that described an alternate Linux-only runner mode is
+superseded by this amendment.

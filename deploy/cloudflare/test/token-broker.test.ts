@@ -9,7 +9,7 @@ import { TokenBroker } from "../src/token-broker";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
-const TAG = "v4";
+const TAG = "v5";
 
 function claims(overrides: Record<string, unknown> = {}) {
   return {
@@ -40,7 +40,10 @@ function claims(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function harness(ledgerState: "accepted" | "replay" | "rate_limited" = "accepted") {
+function harness(
+  ledgerState: "accepted" | "replay" | "rate_limited" = "accepted",
+  publicWorkflowTag: string = TAG,
+) {
   const ledgerFetch = vi.fn(async (_url: string, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as { action?: string };
     const state = request.action === "admit" ? "accepted" : ledgerState;
@@ -49,7 +52,7 @@ function harness(ledgerState: "accepted" | "replay" | "rate_limited" = "accepted
     });
   });
   const env = {
-    PUBLIC_WORKFLOW_TAG: TAG,
+    PUBLIC_WORKFLOW_TAG: publicWorkflowTag,
     BROKER_LEDGER: {
       idFromName: vi.fn(() => ({ name: "broker" })),
       get: vi.fn(() => ({ fetch: ledgerFetch })),
@@ -131,12 +134,46 @@ describe("token broker authorization", () => {
     },
   );
 
-  it("resolves the configured tag before authorizing the runtime SHA", async () => {
+  it("resolves the observed public tag before authorizing the runtime SHA", async () => {
     const { broker, github } = harness();
     await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
       capability: "review_publish",
     });
     expect(github.publicWorkflowRuntimeShas).toHaveBeenCalledWith(TAG);
+  });
+
+  it.each([
+    ["v4", "v5"],
+    ["v5", "v4"],
+  ])(
+    "accepts migration tag %s while PUBLIC_WORKFLOW_TAG is %s",
+    async (configuredTag, observedTag) => {
+      oidc.verify.mockResolvedValue(
+        claims({
+          job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${observedTag}`,
+        }),
+      );
+      const { broker, github } = harness("accepted", configuredTag);
+      await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
+        capability: "review_publish",
+      });
+      expect(github.publicWorkflowRuntimeShas).toHaveBeenCalledWith(observedTag);
+    },
+  );
+
+  it("rejects public workflow tags outside the migration window", async () => {
+    oidc.verify.mockResolvedValue(
+      claims({
+        job_workflow_ref:
+          "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v3",
+      }),
+    );
+    const { broker, github } = harness();
+    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
+      "broker_workflow_rejected",
+    );
+    expect(github.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
   it("does not resolve the public tag for an invalid OIDC assertion", async () => {

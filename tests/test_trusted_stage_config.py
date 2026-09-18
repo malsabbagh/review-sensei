@@ -198,20 +198,20 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         callers = {
             "repo": REPO_CALLER.read_text(encoding="utf-8"),
             "example": EXAMPLE_CALLER.read_text(encoding="utf-8"),
-            "generated": _tagged_workflow("v4"),
+            "generated": _tagged_workflow("v5"),
             "generated-stable": _tagged_workflow("stable"),
             "historical-parity": _provider_parity_workflow("v4"),
         }
         self.assertEqual(callers["example"], callers["generated"])
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             callers["repo"],
         )
-        self.assertNotIn("model:", callers["repo"])
+        self.assertIn("model:", callers["repo"])
         self.assertIn("model:", callers["example"])
         repo_passed = caller_reusable_with_keys(callers["repo"])
         example_passed = caller_reusable_with_keys(callers["example"])
-        self.assertNotIn("model", repo_passed)
+        self.assertIn("model", repo_passed)
         self.assertIn("model", example_passed)
         self.assertLessEqual(repo_passed, runner_inputs)
         self.assertLessEqual(example_passed, runner_inputs)

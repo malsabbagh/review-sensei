@@ -99,18 +99,20 @@ Before the first production deploy, replace the workflow placeholder in
 `wrangler.jsonc` (or set equivalent dashboard variables):
 
 ```text
-PUBLIC_WORKFLOW_TAG=v4
+PUBLIC_WORKFLOW_TAG=v5
 ```
 
-`PUBLIC_WORKFLOW_TAG` is the v4 update channel. During setup the Worker
+`PUBLIC_WORKFLOW_TAG` is the v5 update channel. During setup the Worker
 resolves the tag through GitHub's public Git ref advertisement before writing
 generated callers; it retains the REST ref lookup as a fallback. This avoids
 GitHub's low anonymous REST quota while preserving the tag-to-commit check.
-The OIDC broker resolves the same tag at capability exchange time and requires
-the runtime workflow SHA to match that resolution. Moving the tag is therefore
-an operator-controlled release action; protect the tag and publish the
-reviewed snapshot before moving it. A Worker deploy does not create or move
-the public tag.
+The OIDC broker resolves the observed public tag from the OIDC
+`job_workflow_ref` at capability exchange time and requires the runtime workflow
+SHA to match that resolution. During channel migrations the broker accepts both
+`v4` and `v5` while `PUBLIC_WORKFLOW_TAG` remains the write channel for new
+setup output. Moving the tag is therefore an operator-controlled release
+action; protect the tag and publish the reviewed snapshot before moving it. A
+Worker deploy does not create or move the public tag.
 
 After deployment, set the GitHub App webhook URL to:
 
@@ -179,7 +181,7 @@ default branch, bounded to 128 KiB each. An older ReviewSensei setup (including
 the original unmarked workflow/configuration) causes the existing setup branch
 to be refreshed and a migration PR to be opened. A current setup is a no-op.
 The v4 caller follows `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
-at the configured `PUBLIC_WORKFLOW_TAG` (default `v4`); invalid values or an
+at the configured `PUBLIC_WORKFLOW_TAG` (default `v5`); invalid values or an
 unavailable tag fail closed before any setup write.
 If a known path contains custom content, a malformed marker, or a future setup
 version, the Worker skips it without overwriting the file and reports the

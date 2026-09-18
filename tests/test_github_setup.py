@@ -16,12 +16,18 @@ from review_sensei.hosting.github import (
     VerifiedDelivery,
 )
 from review_sensei.hosting.github.setup import (
+    BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CONFIG_PATH,
+    RELEASED_RUNNER_SWITCH_V4_SHA256,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
+    _broker_accepted_public_workflow_tags,
     _historical_provider_parity_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
+    _public_workflow_tag_from_job_ref,
+    _released_runner_switch_v4_workflow,
+    _tagged_workflow,
 )
 
 BASE_SHA = "b" * 40
@@ -254,7 +260,7 @@ class SetupPlanTests(unittest.TestCase):
         ]
         self.assertIn("# ReviewSensei setup version: 4", workflow)
         self.assertIn(
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v4",
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             workflow,
         )
         self.assertIn(
@@ -336,7 +342,7 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             dynamic.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_build_plan_uses_the_supplied_tag(self):
@@ -365,7 +371,7 @@ class SetupPlanTests(unittest.TestCase):
                 / "examples/github-actions/review-sensei-review.yml"
             )
             .read_text(encoding="utf-8")
-            .replace("@v4", "@stable"),
+            .replace("@v5", "@stable"),
         )
         self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
         self.assertEqual(
@@ -377,6 +383,23 @@ class SetupPlanTests(unittest.TestCase):
         for tag in ("", "refs/tags/v4", "v4..next", "v4.", "v4.lock", "v4\n"):
             with self.subTest(tag=tag), self.assertRaises(GitHubSetupError):
                 SetupPlanBuilder(public_workflow_tag=tag)
+
+    def test_broker_accepts_v4_and_v5_during_channel_migration(self):
+        self.assertEqual(BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS, ("v4", "v5"))
+        self.assertEqual(_broker_accepted_public_workflow_tags("v4"), ("v4", "v5"))
+        self.assertEqual(_broker_accepted_public_workflow_tags("v5"), ("v5", "v4"))
+        self.assertEqual(
+            _public_workflow_tag_from_job_ref(
+                "malsabbagh/review-sensei/.github/workflows/"
+                "review-sensei-run.yml@refs/tags/v5"
+            ),
+            "v5",
+        )
+        self.assertIsNone(
+            _public_workflow_tag_from_job_ref(
+                "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
+            )
+        )
 
     def test_builder_rejects_sha_configuration_for_current_v4(self):
         with self.assertRaises(GitHubSetupError):
@@ -628,7 +651,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_stale_v4_setup_following_another_tag_is_migrated(self):
@@ -649,7 +672,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v4",
+            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
         )
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
@@ -702,6 +725,35 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "skipped_unknown_setup")
         self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_released_runner_switch_v4_caller_is_migrated(self):
+        released = self.historical_fixture(
+            "released-v4-resolve-trigger-runner-switch.yml"
+        )
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+        )
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = released
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        migrated = next(
+            file.content for file in branch_request[6] if file.path == WORKFLOW_PATH
+        )
+        self.assertEqual(migrated, _tagged_workflow("v5"))
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), released)
 
     def test_released_provider_parity_v4_caller_without_resolve_trigger_is_migrated(
         self,
@@ -780,7 +832,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         transport = FileTransport(
             files={
                 ".github/workflows/review-sensei-review.yml": workflow.replace(
-                    "@v4", "@v4.lock"
+                    "@v5", "@v5.lock"
                 )
             }
         )
@@ -1339,7 +1391,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 installation_token="ghs_opaque",
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
-                public_workflow_tag="v4",
+                public_workflow_tag="v5",
             )
         )
         self.assertIn("/compare/", calls[1][1])
@@ -1364,7 +1416,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 installation_token="ghs_opaque",
                 branch="review-sensei/setup",
                 base_sha=BASE_SHA,
-                public_workflow_tag="v4",
+                public_workflow_tag="v5",
             )
         )
         self.assertEqual(len(calls), 1)

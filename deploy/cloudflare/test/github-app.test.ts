@@ -16,10 +16,11 @@ import {
   buildSetupFiles,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
+  releasedRunnerSwitchV4WorkflowTemplate,
 } from "../src/setup-content";
 
 const SHA = "a".repeat(40);
-const TAG = "v4";
+const TAG = "v5";
 const BASE_SHA = "b".repeat(40);
 const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}`;
 const ALL_PERMISSIONS = {
@@ -547,6 +548,29 @@ describe("setup repository reconciliation", () => {
     ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
+  it("migrates the released resolve-trigger caller with the runner switch", async () => {
+    const fake = new FakeGitHub();
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    files[SETUP_FILE_PATHS[0]] = historicalFixture(
+      "released-v4-resolve-trigger-runner-switch.yml",
+    );
+    expect(files[SETUP_FILE_PATHS[0]]).toBe(
+      releasedRunnerSwitchV4WorkflowTemplate("v4"),
+    );
+    fake.files = files;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
   it("migrates the released provider-parity v4 caller without resolve-trigger", async () => {
     const fake = new FakeGitHub();
     const files = Object.fromEntries(
@@ -676,7 +700,7 @@ describe("setup repository reconciliation", () => {
       "name: Customer-owned workflow\n",
       "# ReviewSensei setup version: not-a-number\nname: ReviewSensei review\n",
       "# ReviewSensei setup version: 99\nname: ReviewSensei review\n",
-      buildSetupFiles(TAG)[0].content.replaceAll(`@${TAG}`, "@v4.lock"),
+      buildSetupFiles(TAG)[0].content.replaceAll(`@${TAG}`, "@v5.lock"),
     ]) {
       const fake = new FakeGitHub();
       fake.files[".github/workflows/review-sensei-review.yml"] = content;

@@ -55,7 +55,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             config["vars"],
             {
-                "PUBLIC_WORKFLOW_TAG": "v4",
+                "PUBLIC_WORKFLOW_TAG": "v5",
             },
         )
 
@@ -204,6 +204,60 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)
 
+    def test_released_runner_switch_v4_fixture_copies_share_canonical_digest(self):
+        import hashlib
+
+        from review_sensei.hosting.github.setup import (
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+            _released_runner_switch_v4_caller_bytes,
+            _released_runner_switch_v4_workflow,
+            _tagged_workflow,
+        )
+
+        canonical = (
+            ROOT
+            / "tests"
+            / "fixtures"
+            / "setup-legacy"
+            / "released-v4-resolve-trigger-runner-switch.yml"
+        ).read_text(encoding="utf-8")
+        copies = {
+            "python-package": (
+                ROOT
+                / "src"
+                / "review_sensei"
+                / "hosting"
+                / "github"
+                / "fixtures"
+                / "released-v4-resolve-trigger-runner-switch.yml"
+            ).read_text(encoding="utf-8"),
+            "worker-bundle-source": (
+                CLOUDFLARE
+                / "fixtures"
+                / "released-v4-resolve-trigger-runner-switch.yml"
+            ).read_text(encoding="utf-8"),
+        }
+        self.assertEqual(
+            hashlib.sha256(canonical.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+        )
+        for name, content in copies.items():
+            with self.subTest(copy=name):
+                self.assertEqual(content, canonical)
+        self.assertEqual(_released_runner_switch_v4_caller_bytes(), canonical)
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), canonical)
+        self.assertEqual(
+            _tagged_workflow("v5"),
+            (
+                ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+            ).read_text(encoding="utf-8"),
+        )
+        ts_source = (
+            CLOUDFLARE / "src" / "released-runner-switch-v4-caller.ts"
+        ).read_text(encoding="utf-8")
+        self.assertIn("releasedRunnerSwitchV4CallerFixture", ts_source)
+        self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
+
     def test_setup_builders_share_constants_and_variables(self):
         import re
 
@@ -286,7 +340,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotRegex(example, r"(?m)^concurrency:")
         self.assertNotIn("group:", example)
         self.assertIn(
-            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             example,
         )
         self.assertIn("not a hosted review engine", readme)

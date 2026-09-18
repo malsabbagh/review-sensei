@@ -95,7 +95,7 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')))
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read
@@ -307,7 +307,7 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')))
-    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}

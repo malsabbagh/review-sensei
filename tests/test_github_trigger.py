@@ -234,7 +234,7 @@ class InlineCallerResolverTests(unittest.TestCase):
     def test_generated_callers_embed_the_same_inline_resolver(self):
         repo = REPO_CALLER.read_text(encoding="utf-8")
         example = EXAMPLE_CALLER.read_text(encoding="utf-8")
-        generated = _tagged_workflow("v4")
+        generated = _tagged_workflow("v5")
         self.assertEqual(inline_resolver_script(repo), inline_resolver_script(example))
         self.assertEqual(
             inline_resolver_script(repo), inline_resolver_script(generated)

@@ -1,12 +1,21 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  RELEASED_RUNNER_SWITCH_V4_SHA256,
+  releasedRunnerSwitchV4CallerBytes,
+} from "../src/released-runner-switch-v4-caller";
+import {
+  BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
   DEFAULT_PUBLIC_WORKFLOW_TAG,
   SETUP_VARIABLES,
   SETUP_VERSION,
+  brokerAcceptedPublicWorkflowTags,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  publicWorkflowTagFromJobRef,
+  releasedRunnerSwitchV4WorkflowTemplate,
   validatePublicWorkflowTag,
   validatePublicWorkflowSha,
 } from "../src/setup-content";
@@ -26,7 +35,26 @@ describe("setup-v4 public boundary", () => {
     expect(() => validatePublicWorkflowTag("v4.")).toThrow();
     expect(() => validatePublicWorkflowTag("v4.lock")).toThrow();
     expect(() => validatePublicWorkflowTag("v4\n")).toThrow();
-    expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v4");
+    expect(validatePublicWorkflowTag(DEFAULT_PUBLIC_WORKFLOW_TAG)).toBe("v5");
+  });
+
+  it("accepts both migration tags in the broker policy helper", () => {
+    expect(BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS).toEqual(["v4", "v5"]);
+    expect(brokerAcceptedPublicWorkflowTags("v4")).toEqual(["v4", "v5"]);
+    expect(brokerAcceptedPublicWorkflowTags("v5")).toEqual(["v5", "v4"]);
+  });
+
+  it("parses the public workflow tag from OIDC job refs", () => {
+    expect(
+      publicWorkflowTagFromJobRef(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+      ),
+    ).toBe("v5");
+    expect(
+      publicWorkflowTagFromJobRef(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+      ),
+    ).toBeNull();
   });
 
   it("generates fork-safe callers at the supplied public workflow tag", () => {
@@ -61,14 +89,39 @@ describe("setup-v4 public boundary", () => {
   });
 
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
-    const workflow = buildTaggedV4SetupFiles("v4")[0].content;
+    const workflow = buildTaggedV4SetupFiles("v5")[0].content;
     expect(workflow).toContain(
-      "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+      "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
     );
     expect(workflow).not.toMatch(/^\s*group:.*head_sha/m);
     expect(workflow).not.toContain("source_comment_id || head_sha");
     expect(workflow).not.toContain("head_sha || head_ref || run_id");
     expect(workflow).not.toContain("head_sha || github.run_id");
+  });
+
+  it("loads the released runner-switch caller through the shipping module", () => {
+    const caller = releasedRunnerSwitchV4CallerBytes();
+    expect(
+      createHash("sha256").update(caller).digest("hex"),
+    ).toBe(RELEASED_RUNNER_SWITCH_V4_SHA256);
+    expect(releasedRunnerSwitchV4WorkflowTemplate("v4")).toBe(caller);
+    expect(releasedRunnerSwitchV4WorkflowTemplate("stable")).toBe(
+      caller.replaceAll(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@stable",
+      ),
+    );
+  });
+
+  it("matches the canonical repository fixture bytes", () => {
+    const canonical = readFileSync(
+      new URL(
+        "../../../tests/fixtures/setup-legacy/released-v4-resolve-trigger-runner-switch.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(releasedRunnerSwitchV4CallerBytes()).toBe(canonical);
   });
 
   it("generates one provider-neutral reusable job with the supplied tag", () => {
@@ -101,7 +154,7 @@ describe("setup-v4 public boundary", () => {
       readFileSync(
         new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
         "utf8",
-      ).replace("@v4", `@${tag}`),
+      ).replace("@v5", `@${tag}`),
     );
   });
 });

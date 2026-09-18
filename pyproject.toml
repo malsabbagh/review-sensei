@@ -51,6 +51,7 @@ review_sensei = [
   "default_stages/*.json",
   "schemas/*.json",
 ]
+"review_sensei.hosting.github.fixtures" = ["*.yml"]
 
 [tool.ruff]
 target-version = "py311"

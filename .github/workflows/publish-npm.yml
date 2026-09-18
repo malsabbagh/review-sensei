@@ -29,7 +29,7 @@ concurrency:
 jobs:
   verify-request:
     name: Verify public npm release request
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
@@ -79,7 +79,7 @@ jobs:
             os: ubuntu-latest
           - target: win32-x64
             os: windows-latest
-    runs-on: ${{ (matrix.os == 'ubuntu-latest' && vars.ENABLE_UBICLOUD_HOSTED == 'true') && 'ubicloud-standard-2' || matrix.os }}
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -133,7 +133,7 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write

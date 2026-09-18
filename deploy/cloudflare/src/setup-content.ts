@@ -7,6 +7,11 @@
  * to the workflow; this module never handles its value.
  */
 
+import {
+  RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
+  releasedRunnerSwitchV4CallerBytes,
+} from "./released-runner-switch-v4-caller";
+
 const GITHUB_EXPRESSION = "@@";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
 const PUBLIC_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -30,7 +35,14 @@ const LEGACY_V3_UNINSTALL_BODY =
 
 export const SETUP_VERSION = 4;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
-export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v4";
+export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v5";
+export const PUBLIC_REPOSITORY = "malsabbagh/review-sensei";
+export const PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
+/** Public workflow tags the OIDC broker still accepts during channel migrations. */
+export const BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS: readonly string[] = [
+  "v4",
+  "v5",
+];
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
@@ -94,6 +106,35 @@ export function validatePublicWorkflowTag(value: string): string {
     throw new Error("PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag");
   }
   return value;
+}
+
+/** Return the configured channel plus any in-flight migration tags. */
+export function brokerAcceptedPublicWorkflowTags(
+  configuredTag: string,
+): readonly string[] {
+  const configured = validatePublicWorkflowTag(configuredTag);
+  const accepted = new Set<string>([configured, ...BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS]);
+  for (const tag of BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS) {
+    validatePublicWorkflowTag(tag);
+  }
+  return [...accepted];
+}
+
+/** Parse the public reusable-workflow tag from an OIDC `job_workflow_ref`. */
+export function publicWorkflowTagFromJobRef(jobWorkflowRef: string): string | null {
+  const prefix = `${PUBLIC_REPOSITORY}/${PUBLIC_WORKFLOW_PATH}@refs/tags/`;
+  if (
+    typeof jobWorkflowRef !== "string" ||
+    !jobWorkflowRef.startsWith(prefix) ||
+    jobWorkflowRef.length <= prefix.length
+  ) {
+    return null;
+  }
+  try {
+    return validatePublicWorkflowTag(jobWorkflowRef.slice(prefix.length));
+  } catch {
+    return null;
+  }
 }
 
 function workflowTemplate(publicWorkflowRef: string): string {
@@ -478,7 +519,7 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')))
-    runs-on: @@{{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
@@ -737,6 +778,21 @@ function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
 
 const PROVIDER_PARITY_DRAFT_SKIP =
   "      github.event.pull_request.draft != true &&\n";
+
+/** Byte-exact released setup-v4 caller retained for managed migration. */
+export function releasedRunnerSwitchV4WorkflowTemplate(
+  publicWorkflowTag: string,
+): string {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  const caller = releasedRunnerSwitchV4CallerBytes();
+  if (tag === "v4") {
+    return caller;
+  }
+  return caller.replaceAll(
+    RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
+    `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
+  );
+}
 
 export function providerParityWorkflowBeforeDraftSkip(
   publicWorkflowTag: string,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import hashlib
 import json
 import re
@@ -72,7 +73,16 @@ PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v4 update channel. The Worker validates the
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
-DEFAULT_PUBLIC_WORKFLOW_TAG = "v4"
+DEFAULT_PUBLIC_WORKFLOW_TAG = "v5"
+BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS = ("v4", "v5")
+PUBLIC_REPOSITORY = "malsabbagh/review-sensei"
+PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
+RELEASED_RUNNER_SWITCH_V4_SHA256 = (
+    "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
+)
+_RELEASED_RUNNER_SWITCH_V4_TAG_MARKER = (
+    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
+)
 # Retained for exact setup-v3 and SHA-pinned setup-v4 migration recognition.
 DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
 SETUP_VERSION_PATTERN = re.compile(
@@ -251,6 +261,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
+                _released_runner_switch_v4_workflow(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
                 _historical_tagged_v4_workflow(tag_matches[0]),
@@ -365,6 +376,29 @@ def _validate_public_workflow_sha(value: str) -> str:
             "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters"
         )
     return value
+
+
+def _broker_accepted_public_workflow_tags(configured_tag: str) -> tuple[str, ...]:
+    """Return the configured channel plus in-flight migration tags."""
+
+    configured = _validate_public_workflow_tag(configured_tag)
+    accepted = dict.fromkeys(
+        (configured, *BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS),
+        None,
+    )
+    for tag in BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS:
+        _validate_public_workflow_tag(tag)
+    return tuple(accepted)
+
+
+def _public_workflow_tag_from_job_ref(job_workflow_ref: str) -> str | None:
+    prefix = f"{PUBLIC_REPOSITORY}/{PUBLIC_WORKFLOW_PATH}@refs/tags/"
+    if not job_workflow_ref.startswith(prefix) or len(job_workflow_ref) <= len(prefix):
+        return None
+    try:
+        return _validate_public_workflow_tag(job_workflow_ref[len(prefix) :])
+    except GitHubSetupError:
+        return None
 
 
 def _validate_public_workflow_tag(value: str) -> str:
@@ -717,6 +751,25 @@ jobs:
 _PROVIDER_PARITY_DRAFT_SKIP = "      github.event.pull_request.draft != true &&\n"
 
 
+@functools.lru_cache(maxsize=1)
+def _released_runner_switch_v4_caller_bytes() -> str:
+    """Return the byte-exact released setup-v4 caller before runner-switch removal."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("released-v4-resolve-trigger-runner-switch.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != RELEASED_RUNNER_SWITCH_V4_SHA256:
+        raise GitHubSetupError(
+            "released runner-switch v4 caller fixture digest mismatch"
+        )
+    return content
+
+
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
     """Return the current setup-v4 caller with trusted trigger resolution."""
 
@@ -818,7 +871,7 @@ jobs:
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot')))
-    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
@@ -1069,6 +1122,19 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
     """Return the current setup-v4 caller following the public git tag."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
+
+
+def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
+    """Return the released setup-v4 caller retained for managed migration."""
+
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    caller = _released_runner_switch_v4_caller_bytes()
+    if tag == "v4":
+        return caller
+    return caller.replace(
+        _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
+    )
 
 
 def _provider_parity_workflow_before_draft_skip(public_workflow_tag: str) -> str:
