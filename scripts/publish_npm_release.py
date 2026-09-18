@@ -68,7 +68,9 @@ def bundle_metadata_path(bundle_dir: Path) -> Path:
 
 
 def _is_git_sha(value: str) -> bool:
-    return len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+    return len(value) == 40 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
@@ -99,9 +101,7 @@ def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
     return {"version": version, "source_sha": source_sha}
 
 
-def verify_bundle_version(
-    bundle_dir: Path, version: str
-) -> dict[str, dict[str, str]]:
+def verify_bundle_version(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     metadata = load_bundle_metadata(bundle_dir)
     if metadata is not None and metadata["version"] != version:
         raise PublishError(
