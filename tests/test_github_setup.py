@@ -270,16 +270,11 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", workflow)
-        self.assertNotIn(
-            "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow
-        )
-        self.assertNotIn(
-            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
-            workflow,
-        )
-        self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", workflow)
+        self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
         config = dict((f.path, f.content) for f in plan.files)[CONFIG_PATH]
-        self.assertIn("provider_profile: ''", config)
+        self.assertIn("model: ''", config)
         self.assertIn("id-token: write", workflow)
         self.assertIn("pull-requests: write", workflow)
         self.assertIn("issues: write", workflow)
@@ -312,14 +307,14 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
             (
                 Path(__file__).parent.parent
-                / ".github/workflows/review-sensei-review.yml"
+                / "examples/github-actions/review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
         config = dict((f.path, f.content) for f in plan.files)[
             ".github/review-sensei/config.yml"
         ]
         self.assertIn("qwen3.5:4b", config)
-        self.assertIn("deepseek-v4-flash:cloud", config)
+        self.assertIn("deepseek-v4.1-flash:cloud", config)
         uninstall = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-uninstall.yml"
         ]

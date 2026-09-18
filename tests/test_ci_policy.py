@@ -8,6 +8,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from review_sensei.errors import ReviewInputError
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -309,7 +311,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
-        self.assertNotIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", text)
         self.assertNotIn(
             "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
         )
@@ -513,24 +516,28 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("AUTO_APPROVE", text)
         self.assertIn("--enable-auto-approve", text)
         self.assertIn("--no-auto-approve", text)
-        self.assertIn("inputs.provider_mode == 'cloud'", text)
-        self.assertIn("inputs.provider_mode == 'local'", text)
-        self.assertIn("inputs.provider_mode == 'cloud'", text)
-        self.assertIn("inputs.provider_profile == ''", text)
-        self.assertIn("inputs.provider_profile == 'openrouter-sonnet'", text)
-        self.assertIn("inputs.provider_profile == 'openrouter-gpt'", text)
         self.assertIn(
-            "OPENROUTER_API_KEY is required for OpenRouter provider profile", text
-        )
-        self.assertIn(
-            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)', text
-        )
-        self.assertIn('if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', text)
-        self.assertIn("profile_args+=(--allow-unqualified-profile)", text)
-        self.assertIn(
-            "allow_unqualified_profile:\n        required: false\n        default: 'false'",
+            "needs.validate-provider-mode.outputs.active_provider == 'cloud'",
             text,
         )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.active_provider == 'local'",
+            text,
+        )
+        self.assertIn(
+            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'",
+            text,
+        )
+        self.assertIn("resolved_provider_mode=cloud-ollama", text)
+        self.assertIn("resolved_provider_mode=local-ollama", text)
+        self.assertIn(
+            'echo "normalized_provider_mode=$resolved_provider_mode"',
+            text,
+        )
+        self.assertIn("OPENROUTER_API_KEY is required for OpenRouter mode", text)
+        self.assertIn("--provider openrouter --model", text)
+        self.assertIn("provider_profile is unused", text)
+        self.assertIn("allow_unqualified_profile is unused", text)
         self.assertIn("validate-provider-mode:", text)
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
@@ -538,7 +545,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(text.count("needs: validate-provider-mode"), 2)
         self.assertIn('case "$PROVIDER_MODE" in', text)
-        self.assertIn('case "$PROVIDER_PROFILE" in', text)
+        self.assertIn(
+            '""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;',
+            text,
+        )
         self.assertEqual(text.count("github reply \\\n"), 3)
         self.assertEqual(text.count("github review \\\n"), 3)
         self.assertEqual(text.count("--outcome outcome.json"), 3)
@@ -569,7 +579,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             repo_root / ".github" / "workflows" / "review-sensei-run.yml"
         ).read_text(encoding="utf-8")
         caller_template = (
-            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+            repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
         setup_plan = SetupPlanBuilder().build("owner/repo")
         generated_caller = next(
@@ -579,63 +589,32 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(generated_caller, caller_template)
         self.assertIn(
-            "does not enable hosted OpenRouter on setup-v4 callers yet", setup_plan.body
-        )
-        self.assertIn("follow-up #112", setup_plan.body)
-
-        # Caller wiring for provider_profile is deferred until the v4 tag moves;
-        # until then the reusable workflow default keeps OpenRouter off the path.
-        self.assertIn(
             "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
             generated_caller,
         )
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", generated_caller)
         self.assertNotIn("provider_profile:", generated_caller)
-        self.assertIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
-        self.assertIn(
-            "provider_profile:\n        required: false\n        default: ''",
-            reusable,
-        )
+        self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
+        self.assertNotIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
+        setup_body = SetupPlanBuilder().build("owner/repo").body
+        self.assertIn("REVIEWSENSEI_PROVIDER_PROFILE", setup_body)
+        self.assertIn("delete that deprecated repository variable", setup_body)
+        self.assertIn("provider_profile:", reusable)
+        self.assertIn("provider_profile is unused", reusable)
 
         openrouter_gate = (
-            "inputs.provider_mode == 'cloud' && "
-            "inputs.allow_unqualified_profile == 'true' && "
-            "(inputs.provider_profile == 'openrouter-sonnet' || "
-            "inputs.provider_profile == 'openrouter-gpt')"
+            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'"
         )
         cloud_fallback_gate = (
-            "inputs.provider_profile == '' && "
-            "(inputs.provider_mode == 'cloud' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'automatic'))"
+            "needs.validate-provider-mode.outputs.active_provider == 'cloud'"
         )
         local_fallback_gate = (
-            "inputs.provider_profile == '' && "
-            "(inputs.provider_mode == 'local' || "
-            "(inputs.provider_mode == '' && inputs.mode == 'manual'))"
+            "needs.validate-provider-mode.outputs.active_provider == 'local'"
         )
         self.assertIn(openrouter_gate, reusable)
         self.assertIn(cloud_fallback_gate, reusable)
         self.assertIn(local_fallback_gate, reusable)
-        self.assertIn(
-            "provider_profile requires provider_mode=cloud",
-            reusable,
-        )
-        self.assertIn(
-            "provider_profile requires allow_unqualified_profile=true",
-            reusable,
-        )
-        self.assertIn(
-            "provider_profile is unsupported; use openrouter-sonnet or openrouter-gpt.",
-            reusable,
-        )
-        self.assertNotIn("allow_unqualified_profile:", generated_caller)
         self.assertIn("exempt from the repository ENABLE_UBICLOUD_HOSTED", reusable)
-
-        deferral = (
-            "does not enable hosted OpenRouter on setup-v4 callers yet: the generated "
-            "caller forwards provider_profile, allow_unqualified_profile, and "
-            "OPENROUTER_API_KEY only after follow-up #112"
-        )
-        self.assertIn(deferral, setup_plan.body)
 
         self.assertIn("repository id must be a positive decimal integer", reusable)
         openrouter_job = _job_section(reusable, "openrouter")
@@ -648,24 +627,26 @@ class ActionPinPolicyTests(unittest.TestCase):
             openrouter_job,
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
+        self.assertIn("--provider openrouter --model", review_step)
+        self.assertIn("VALIDATED_MODEL=", review_step)
         self.assertIn(
-            'profile_args=(--profile "$PROVIDER_PROFILE" --provider openrouter)',
+            "resolved hosted OpenRouter model does not match workflow env",
             review_step,
         )
-        self.assertIn(
-            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', review_step
-        )
-        self.assertNotIn("--allow-unqualified-profile \\\n", review_step)
+        self.assertIn('review-sensei" resolve-hosted-openrouter both', review_step)
+        self.assertNotIn("openrouter model vendor is not allowlisted", review_step)
+        self.assertNotIn("OPENROUTER_MODEL:", review_step)
         reply_step = _step_block(
             openrouter_job, "Generate and publish OpenRouter mention reply"
         )
+        self.assertIn("--provider openrouter --model", reply_step)
+        self.assertIn("VALIDATED_MODEL=", reply_step)
         self.assertIn(
-            'if [[ "$ALLOW_UNQUALIFIED_PROFILE" == "true" ]]; then', reply_step
-        )
-        self.assertNotIn(
-            '--allow-unqualified-profile \\\n            --repository "$REPOSITORY"',
+            "resolved hosted OpenRouter model does not match workflow env",
             reply_step,
         )
+        self.assertIn('review-sensei" resolve-hosted-openrouter both', reply_step)
+        self.assertNotIn("OPENROUTER_MODEL:", reply_step)
         publish_step = _step_block(
             openrouter_job, "Publish or promote validated review through the broker"
         )
@@ -941,6 +922,100 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('"--" not in value', workflow_text)
         self.assertIn('not value.endswith("-")', workflow_text)
 
+    def test_validate_provider_mode_rejects_cross_backend_model_slugs(self):
+        from review_sensei.provider_config import validate_hosted_workflow_model
+
+        with self.assertRaisesRegex(
+            ReviewInputError, "must not use vendor/model openrouter slug"
+        ):
+            validate_hosted_workflow_model(
+                provider_mode="cloud-ollama",
+                workflow_mode="automatic",
+                model="deepseek/deepseek-v4.1-flash",
+            )
+
+    def test_provider_jobs_gate_on_normalized_provider_mode(self):
+        workflow_text = _reusable_workflow_text()
+        for job_name in ("cloud", "local", "openrouter"):
+            job = _job_section(workflow_text, job_name)
+            self.assertIn(
+                "needs.validate-provider-mode.outputs.normalized_provider_mode",
+                job,
+            )
+        cloud_if = (
+            _job_section(workflow_text, "cloud").split("if:", 1)[1].split("\n", 1)[0]
+        )
+        self.assertNotIn("inputs.provider_mode == 'cloud'", cloud_if)
+
+    def test_provider_jobs_use_backend_specific_model_fallbacks(self):
+        workflow_text = _reusable_workflow_text()
+        shared_prefix = (
+            "needs.validate-provider-mode.outputs.normalized_model || "
+            "vars.REVIEWSENSEI_MODEL || "
+        )
+        cloud_model = (
+            shared_prefix
+            + "vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud'"
+        )
+        local_model = shared_prefix + "vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b'"
+        self.assertGreaterEqual(
+            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {cloud_model} }}}}"), 2
+        )
+        self.assertGreaterEqual(
+            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {local_model} }}}}"), 2
+        )
+        self.assertGreaterEqual(
+            workflow_text.count(
+                "HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}"
+            ),
+            6,
+        )
+
+    def test_provider_jobs_validate_resolved_hosted_job_model(self):
+        workflow_text = _reusable_workflow_text()
+        self.assertGreaterEqual(
+            workflow_text.count("validate_resolved_hosted_job_model"), 4
+        )
+        self.assertGreaterEqual(
+            workflow_text.count('review-sensei" resolve-hosted-openrouter both'),
+            2,
+        )
+        self.assertIn(
+            "resolved hosted model does not match workflow env",
+            workflow_text,
+        )
+        self.assertNotIn(
+            "resolved OpenRouter model does not match workflow env",
+            workflow_text,
+        )
+
+    def test_validate_provider_mode_job_validates_model_input(self):
+        workflow_text = _reusable_workflow_text()
+        job = _job_section(workflow_text, "validate-provider-mode")
+        self.assertNotIn("actions/checkout@", job)
+        self.assertIn("permissions: {}", job)
+        self.assertIn("normalized_provider_mode:", job)
+        self.assertIn("normalized_model:", job)
+        self.assertIn("active_provider:", job)
+        self.assertIn("PROVIDER_MODE: ${{ inputs.provider_mode }}", job)
+        self.assertIn("MODEL: ${{ inputs.model }}", job)
+        self.assertNotIn("Install ReviewSensei and validate hosted model", job)
+        self.assertNotIn("review-sensei-venv", job)
+        self.assertNotIn("setup-python@", job)
+        self.assertNotIn("validate_hosted_workflow_model", job)
+
+    def test_dogfood_caller_intentionally_omits_model_input(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        dogfood = (
+            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        example = (
+            repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", example)
+        self.assertNotIn("model: ${{ vars.REVIEWSENSEI_MODEL", dogfood)
+        self.assertIn("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE", dogfood)
+
     def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
         root = Path(__file__).resolve().parents[1]
         workflow_text = (
@@ -1066,6 +1141,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
             3,
         )
+        self.assertNotIn("Install ReviewSensei and validate hosted model", text)
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
             3,
@@ -1088,6 +1164,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("refusing the GitHub fallback", text)
         self.assertIn("must run from a public git tag", text)
         self.assertIn("@refs/tags/[A-Za-z0-9]", text)
+        self.assertNotIn("dogfood_ref", text)
+        self.assertNotIn("refs/pull/", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
         self.assertNotIn(
             "git ls-remote https://github.com/malsabbagh/review-sensei.git", text

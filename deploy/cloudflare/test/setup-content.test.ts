@@ -43,14 +43,12 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain("head.repo.full_name == github.repository");
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
-    expect(workflow).not.toContain(
+    expect(workflow).toContain(
       "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}",
     );
-    expect(workflow).not.toContain(
-      "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}",
-    );
+    expect(workflow).toContain("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}");
     expect(SETUP_VARIABLES).toContainEqual(
-      expect.objectContaining({ name: "REVIEWSENSEI_PROVIDER_PROFILE", value: "" }),
+      expect.objectContaining({ name: "REVIEWSENSEI_MODEL", value: "" }),
     );
     expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
     expect(workflow).toContain("enable_auto_approve");
@@ -95,7 +93,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("default: main");
     expect(buildTaggedV4SetupFiles(tag)[2].content).not.toContain("auto_approve");
     expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("learning_proposals: false");
-    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("provider_profile: ''");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("model: ''");
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
       "learning_proposals",
     );

@@ -68,7 +68,7 @@ Ollama Cloud is explicit opt-in:
 ```bash
 export OLLAMA_API_KEY="your-key"
 export REVIEWSENSEI_PROVIDER_MODE="cloud"
-export REVIEWSENSEI_CLOUD_MODEL="deepseek-v4-flash:cloud"
+export REVIEWSENSEI_CLOUD_MODEL="deepseek-v4.1-flash:cloud"
 unset OLLAMA_BASE_URL OLLAMA_MODEL
 ```
 

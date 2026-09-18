@@ -431,16 +431,33 @@ exist on the public reusable runner they reference. Compatibility tests fail
 before release if a caller `with:` key is absent from
 `review-sensei-run.yml` `workflow_call.inputs`.
 
-`REVIEWSENSEI_PROVIDER_MODE` defaults to `local`. The default local model is
-`qwen3.5:4b`; setting the mode to `cloud` selects
-`deepseek-v4-flash:cloud` and requires `OLLAMA_API_KEY`. OpenRouter is explicit
-opt-in through `REVIEWSENSEI_PROVIDER_PROFILE` (`openrouter-sonnet` or
-`openrouter-gpt`) and the customer-owned `OPENROUTER_API_KEY` secret; empty
-profile values preserve the Ollama local/cloud contract.
+`REVIEWSENSEI_PROVIDER_MODE` defaults to `local` (alias for `local-ollama`).
+Hosted backends are `local-ollama`, `cloud-ollama`, or `openrouter`; `local`
+and `cloud` remain aliases. `REVIEWSENSEI_MODEL` overrides the model for the
+selected backend. Selecting hosted `openrouter` is the operator egress
+acknowledgement; the reusable workflow rejects `allow_unqualified_profile=true`,
+does not forward `--allow-unqualified-profile`, and only runs models on the
+published hosted allowlist. OpenRouter requires the customer-owned
+`OPENROUTER_API_KEY` secret; Ollama Cloud requires `OLLAMA_API_KEY`.
 
 `review-sensei --version` reads package metadata and prints an exact `X.Y.Z`
 version. This is the version recorded by the portable manual GitHub Actions
 workflow before a review runs.
+
+The command also supports workflow helper subcommands for hosted runs:
+
+```bash
+review-sensei resolve-hosted-openrouter both
+```
+
+`resolve-hosted-openrouter` accepts `model`, `upstream`, or `both`. It reads
+hosted workflow environment variables (`MODE`, `CALLER_MODEL`,
+`HOSTED_REVIEWSENSEI_MODEL`, optional `BACKEND_MODEL`/`BACKEND_DEFAULT`, and
+`OPENROUTER_UPSTREAM_PROVIDER`), validates the model against the published
+hosted OpenRouter allowlist, and prints the resolved value to stdout. The
+`both` action emits `model<TAB>upstream` with no trailing newline; the reusable
+workflow depends on that exact tab-separated format when deriving
+`OPENROUTER_UPSTREAM_PROVIDER`.
 
 The command also supports a `prepare-diff` subcommand for portable diff
 preparation in consumer repositories:

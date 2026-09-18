@@ -2,10 +2,11 @@
 setup_version: 4
 provider: ollama
 provider_mode: cloud
+model: ''
 base_url: http://127.0.0.1:11434/api
 cloud_base_url: https://ollama.com/api
 local_model: qwen3.5:4b
-cloud_model: deepseek-v4-flash:cloud
+cloud_model: deepseek-v4.1-flash:cloud
 version: 0.1.1
 auto_review: true
 github_writes: true

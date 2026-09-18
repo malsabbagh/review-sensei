@@ -379,7 +379,7 @@ class DiagnosticProbeTests(unittest.TestCase):
     def test_remote_endpoint_stays_unknown_without_egress_authorization(self):
         endpoint, model = probe_provider_endpoint(
             base_url="https://ollama.com/api",
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4.1-flash:cloud",
             opener=_opener_for({}),
             allow_remote=False,
         )

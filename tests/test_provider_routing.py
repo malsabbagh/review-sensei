@@ -308,8 +308,8 @@ class ProviderRoutingTests(unittest.TestCase):
         self.assertNotIn("--profile", workflow[cloud_start:openrouter_start])
         self.assertNotIn("--profile", workflow[local_start:])
         openrouter = workflow[openrouter_start:local_start]
-        self.assertIn("--profile", openrouter)
-        self.assertIn("--provider openrouter", openrouter)
+        self.assertNotIn("--profile", openrouter)
+        self.assertIn("--provider openrouter --model", openrouter)
         self.assertNotIn("--profile", example)
 
 

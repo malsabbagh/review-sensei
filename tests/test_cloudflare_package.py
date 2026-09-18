@@ -101,8 +101,8 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
         self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
         self.assertIn("secrets.OLLAMA_API_KEY", source)
-        self.assertNotIn("secrets.OPENROUTER_API_KEY", source)
-        self.assertIn("REVIEWSENSEI_PROVIDER_PROFILE", source)
+        self.assertIn("secrets.OPENROUTER_API_KEY", source)
+        self.assertIn("REVIEWSENSEI_MODEL", source)
         self.assertIn("github.event.comment.author_association == 'OWNER'", source)
         self.assertIn("github.event.comment.user.type != 'Bot'", source)
         self.assertIn(
@@ -117,10 +117,141 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_LOCAL_MODEL", source)
         self.assertIn("REVIEWSENSEI_CLOUD_MODEL", source)
         self.assertIn("qwen3.5:4b", source)
-        self.assertIn("deepseek-v4-flash:cloud", source)
+        self.assertIn("deepseek-v4.1-flash:cloud", source)
         self.assertIn("review-sensei-uninstall.yml", source)
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)
+        self.assertIn(
+            'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
+        )
+
+    def test_v4_config_matches_ts_builder_bytes(self):
+        from review_sensei.hosting.github.setup import (
+            CURRENT_PACKAGE_VERSION,
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            _v4_config_file,
+        )
+
+        expected_ts = (
+            "# ReviewSensei setup version: 4\n"
+            "setup_version: 4\n"
+            "provider: ollama\n"
+            "provider_mode: local\n"
+            "model: ''\n"
+            "base_url: http://127.0.0.1:11434/api\n"
+            "cloud_base_url: https://ollama.com/api\n"
+            f"local_model: {DEFAULT_LOCAL_MODEL}\n"
+            f"cloud_model: {DEFAULT_CLOUD_MODEL}\n"
+            f"version: {CURRENT_PACKAGE_VERSION}\n"
+            "auto_review: false\n"
+            "learning_proposals: false\n"
+            "github_writes: false\n"
+            "learning_prs: false\n"
+            "mention_replies: false\n"
+            "upload_artifacts: false\n"
+            "stages_dir: ''\n"
+            "categories_dir: ''\n"
+        )
+        self.assertEqual(_v4_config_file(), expected_ts)
+
+    def test_v4_config_core_fields_match_ts_builder(self):
+        from review_sensei.hosting.github.setup import (
+            CURRENT_PACKAGE_VERSION,
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            _v4_config_file,
+        )
+
+        def parse_fields(content: str) -> dict[str, str]:
+            fields: dict[str, str] = {}
+            for line in content.splitlines():
+                if not line or line.startswith("#"):
+                    continue
+                key, _, value = line.partition(":")
+                fields[key.strip()] = value.strip()
+            return fields
+
+        py_fields = parse_fields(_v4_config_file())
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            py_fields,
+            {
+                "setup_version": "4",
+                "provider": "ollama",
+                "provider_mode": "local",
+                "model": "''",
+                "base_url": "http://127.0.0.1:11434/api",
+                "cloud_base_url": "https://ollama.com/api",
+                "local_model": DEFAULT_LOCAL_MODEL,
+                "cloud_model": DEFAULT_CLOUD_MODEL,
+                "version": CURRENT_PACKAGE_VERSION,
+                "auto_review": "false",
+                "learning_proposals": "false",
+                "github_writes": "false",
+                "learning_prs": "false",
+                "mention_replies": "false",
+                "upload_artifacts": "false",
+                "stages_dir": "''",
+                "categories_dir": "''",
+            },
+        )
+        self.assertIn("provider_mode: local", ts_source)
+        self.assertIn("model: ''", ts_source)
+        self.assertIn("local_model: ${DEFAULT_LOCAL_MODEL}", ts_source)
+        self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
+        self.assertIn("learning_proposals: false", ts_source)
+
+    def test_setup_builders_share_constants_and_variables(self):
+        import re
+
+        from review_sensei.hosting.github.setup import (
+            DEFAULT_CLOUD_MODEL,
+            DEFAULT_LOCAL_MODEL,
+            DEFAULT_OPENROUTER_MODEL,
+            DEFAULT_PROVIDER_MODE,
+            SETUP_VARIABLES,
+            SetupPlanBuilder,
+        )
+
+        ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        for const_name, value in (
+            ("DEFAULT_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
+            ("DEFAULT_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
+            ("DEFAULT_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
+            ("DEFAULT_OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
+        ):
+            self.assertIn(f'{const_name} = "{value}"', ts_source)
+        ts_constants = {
+            "DEFAULT_PROVIDER_MODE": DEFAULT_PROVIDER_MODE,
+            "DEFAULT_LOCAL_MODEL": DEFAULT_LOCAL_MODEL,
+            "DEFAULT_CLOUD_MODEL": DEFAULT_CLOUD_MODEL,
+            "DEFAULT_OPENROUTER_MODEL": DEFAULT_OPENROUTER_MODEL,
+        }
+        block_match = re.search(
+            r"export const SETUP_VARIABLES.*?=\s*\[(.*?)\];",
+            ts_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block_match)
+        ts_variables: list[tuple[str, str]] = []
+        for match in re.finditer(
+            r'\{\s*name:\s*"([^"]+)"\s*,\s*value:\s*(?:"([^"]*)"|([A-Z][A-Z0-9_]*))\s*\}',
+            block_match.group(1),
+        ):
+            name, literal, const_ref = match.groups()
+            value = literal if literal is not None else ts_constants[const_ref]
+            ts_variables.append((name, value))
+        self.assertEqual(ts_variables, list(SETUP_VARIABLES))
+        py_workflow = SetupPlanBuilder().build("owner/repo").files[0].content
+        example = (
+            ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(py_workflow, example)
 
     def test_user_guidance_describes_setup_v4_publication_contract(self):
         readme = (ROOT / "README.md").read_text()

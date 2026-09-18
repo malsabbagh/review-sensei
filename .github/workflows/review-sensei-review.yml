@@ -337,3 +337,4 @@ jobs:
       upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

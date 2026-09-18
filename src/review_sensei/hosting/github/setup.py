@@ -46,10 +46,11 @@ UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
 DEFAULT_PROVIDER_MODE = "local"
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
-DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
+DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud"
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 SETUP_VARIABLES = (
     ("REVIEWSENSEI_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
-    ("REVIEWSENSEI_PROVIDER_PROFILE", ""),
+    ("REVIEWSENSEI_MODEL", ""),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.1.1"),
@@ -682,6 +683,7 @@ jobs:
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
@@ -708,6 +710,7 @@ jobs:
       upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
@@ -1031,6 +1034,7 @@ jobs:
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
@@ -1057,6 +1061,7 @@ jobs:
       upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
@@ -1119,7 +1124,7 @@ provider_mode: local
 base_url: http://127.0.0.1:11434/api
 cloud_base_url: https://ollama.com/api
 local_model: qwen3.5:4b
-cloud_model: deepseek-v4-flash:cloud
+cloud_model: deepseek-v4.1-flash:cloud
 version: 0.1.0
 auto_review: false
 github_writes: false
@@ -1133,23 +1138,24 @@ def _v4_config_file() -> str:
     """Return the current setup-v4 configuration."""
 
     return (
-        _historical_v4_config_file()
-        .replace("version: 0.1.0\n", f"version: {CURRENT_PACKAGE_VERSION}\n", 1)
-        .replace(
-            "auto_review: false\n",
-            "auto_review: false\nlearning_proposals: false\n",
-            1,
-        )
-        .replace(
-            "upload_artifacts: false\n",
-            "upload_artifacts: false\nstages_dir: ''\ncategories_dir: ''\n",
-            1,
-        )
-        .replace(
-            "provider_mode: local\n",
-            "provider_mode: local\nprovider_profile: ''\n",
-            1,
-        )
+        "# ReviewSensei setup version: 4\n"
+        "setup_version: 4\n"
+        "provider: ollama\n"
+        "provider_mode: local\n"
+        "model: ''\n"
+        "base_url: http://127.0.0.1:11434/api\n"
+        "cloud_base_url: https://ollama.com/api\n"
+        f"local_model: {DEFAULT_LOCAL_MODEL}\n"
+        f"cloud_model: {DEFAULT_CLOUD_MODEL}\n"
+        f"version: {CURRENT_PACKAGE_VERSION}\n"
+        "auto_review: false\n"
+        "learning_proposals: false\n"
+        "github_writes: false\n"
+        "learning_prs: false\n"
+        "mention_replies: false\n"
+        "upload_artifacts: false\n"
+        "stages_dir: ''\n"
+        "categories_dir: ''\n"
     )
 
 
@@ -1243,20 +1249,23 @@ def _setup_pull_request_body() -> str:
         "tag, with opt-in provider defaults and a "
         "manual uninstall-cleanup workflow. The installation bootstrap also "
         "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
-        "REVIEWSENSEI_PROVIDER_PROFILE (empty), REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), "
-        "and REVIEWSENSEI_CLOUD_MODEL (deepseek-v4-flash:cloud), an exact package "
+        "REVIEWSENSEI_MODEL (empty; provider-specific defaults apply), "
+        "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
+        "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4.1-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
         "values. Change the opt-in variables explicitly to enable publication. "
         "The selected provider mode applies to automatic/manual reviews and "
-        "authorized mention conversations; cloud uses GitHub-hosted compute and "
-        "local uses the labelled self-hosted runner. "
-        "Cloud mode reads the existing customer-owned OLLAMA_API_KEY secret by "
-        "name only; OpenRouter profiles read OPENROUTER_API_KEY the same way once "
-        "hosted OpenRouter is live. Setting REVIEWSENSEI_PROVIDER_PROFILE alone "
-        "does not enable hosted OpenRouter on setup-v4 callers yet: the generated "
-        "caller forwards provider_profile, allow_unqualified_profile, and "
-        "OPENROUTER_API_KEY only after follow-up #112 lands once the public v4 tag "
-        "includes this reusable-workflow contract. "
+        "authorized mention conversations: local-ollama uses the labelled "
+        "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, and "
+        "openrouter uses GitHub-hosted OpenRouter with REVIEWSENSEI_MODEL. "
+        "If you previously used REVIEWSENSEI_PROVIDER_PROFILE for OpenRouter, "
+        "delete that deprecated repository variable (Settings → Secrets and "
+        "variables → Actions → Variables) and set "
+        "REVIEWSENSEI_PROVIDER_MODE=openrouter with an allowlisted "
+        "REVIEWSENSEI_MODEL instead; leaving provider_profile non-empty or "
+        "forwarding it to the reusable workflow now fails closed. "
+        "Cloud mode reads OLLAMA_API_KEY by name only; OpenRouter reads "
+        "OPENROUTER_API_KEY the same way. "
         "The App never creates or reads secret values. The uninstall "
         "workflow creates a reviewable PR to remove these generated scripts; it does "
         "not delete learnings or secrets. No private keys, installation tokens, or "

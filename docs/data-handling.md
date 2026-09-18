@@ -68,12 +68,14 @@ and emergency revocation.
 - Named profiles (`openrouter-sonnet`, `openrouter-gpt`) embed an immutable
   `OpenRouterRoutingPolicy` (upstream provider slug, no fallbacks, deny data
   collection, ZDR). Unprofiled `--provider openrouter` uses
-  `OPENROUTER_UPSTREAM_PROVIDER` (default `anthropic`) for the routing policy.
+  `OPENROUTER_UPSTREAM_PROVIDER` (default `deepseek`) for the routing policy.
 - `doctor` and `plan` report execution location (local CLI process) versus
   inference location (remote for OpenRouter) and credential presence only.
-- `REVIEWSENSEI_PROVIDER_MODE=cloud` continues to mean Ollama Cloud only; it
-  does not select OpenRouter. Hosted workflows select OpenRouter only when
-  `REVIEWSENSEI_PROVIDER_PROFILE` is set to a supported OpenRouter profile; the
+- `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` means Ollama Cloud only.
+  Hosted OpenRouter is selected with `REVIEWSENSEI_PROVIDER_MODE=openrouter` and
+  `REVIEWSENSEI_MODEL`; that mode choice is the operator egress acknowledgement.
+  The reusable workflow rejects `allow_unqualified_profile=true`, does not
+  forward `--allow-unqualified-profile`, and only runs allowlisted models. The
   generated caller forwards `OPENROUTER_API_KEY` by name and never reads its
   value during setup.
 
@@ -103,7 +105,7 @@ Provider data egress is explicit. The workflow defaults to the
 `http://127.0.0.1:11434/api` with no API key. If an operator sets that variable
 to `cloud`, review and conversation steps send their bounded diff, selected
 context, and authorized thread context to Ollama Cloud
-using `deepseek-v4-flash:cloud` by default and requires `OLLAMA_API_KEY` from
+using `deepseek-v4.1-flash:cloud` by default and requires `OLLAMA_API_KEY` from
 secrets. The workflow does not accept an arbitrary provider URL input, so a
 dispatch-supplied URL cannot redirect the provider credential. Installed
 workflows do not pass `--profile` and do not send `OPENAI_API_KEY`.

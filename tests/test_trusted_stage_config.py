@@ -114,7 +114,10 @@ def caller_reusable_with_keys(text: str) -> set[str]:
     lines = text.splitlines()
     index = 0
     while index < len(lines):
-        if "review-sensei-run.yml@" not in lines[index]:
+        if (
+            "review-sensei-run.yml@" not in lines[index]
+            and "./.github/workflows/review-sensei-run.yml" not in lines[index]
+        ):
             index += 1
             continue
         index += 1
@@ -199,8 +202,19 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "generated-stable": _tagged_workflow("stable"),
             "historical-parity": _provider_parity_workflow("v4"),
         }
-        self.assertEqual(callers["repo"], callers["example"])
-        self.assertEqual(callers["repo"], callers["generated"])
+        self.assertEqual(callers["example"], callers["generated"])
+        self.assertIn(
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4",
+            callers["repo"],
+        )
+        self.assertNotIn("model:", callers["repo"])
+        self.assertIn("model:", callers["example"])
+        repo_passed = caller_reusable_with_keys(callers["repo"])
+        example_passed = caller_reusable_with_keys(callers["example"])
+        self.assertNotIn("model", repo_passed)
+        self.assertIn("model", example_passed)
+        self.assertLessEqual(repo_passed, runner_inputs)
+        self.assertLessEqual(example_passed, runner_inputs)
         self.assertNotEqual(callers["generated"], callers["historical-parity"])
         for name, text in callers.items():
             with self.subTest(caller=name):

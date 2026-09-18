@@ -33,7 +33,8 @@ export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v4";
 export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
-export const DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud";
+export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
+export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash";
 
 export interface SetupFile {
   path: string;
@@ -53,7 +54,7 @@ export const SETUP_FILE_PATHS: readonly string[] = [
 
 export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_PROVIDER_MODE", value: DEFAULT_PROVIDER_MODE },
-  { name: "REVIEWSENSEI_PROVIDER_PROFILE", value: "" },
+  { name: "REVIEWSENSEI_MODEL", value: "" },
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
   { name: "REVIEWSENSEI_VERSION", value: "0.1.1" },
@@ -345,6 +346,7 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
@@ -371,6 +373,7 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 `
     .replaceAll("__PUBLIC_WORKFLOW_TAG__", tag)
     .replaceAll(GITHUB_EXPRESSION, "$");
@@ -691,6 +694,7 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
+      model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ needs.resolve-trigger.outputs.operation }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
@@ -717,6 +721,7 @@ jobs:
       upload_artifacts: @@{{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
 `
     .replaceAll("__PUBLIC_WORKFLOW_TAG__", tag)
     .replaceAll(GITHUB_EXPRESSION, "$");
@@ -856,7 +861,7 @@ function configFile(
     `setup_version: ${version}\n` +
     "provider: ollama\n" +
     "provider_mode: local\n" +
-    "provider_profile: ''\n" +
+    "model: ''\n" +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
@@ -868,7 +873,9 @@ function configFile(
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +
-    "upload_artifacts: false\n"
+    "upload_artifacts: false\n" +
+    "stages_dir: ''\n" +
+    "categories_dir: ''\n"
   );
 }
 
@@ -992,6 +999,10 @@ export const SETUP_PULL_REQUEST_BODY =
   "Cloud operations use GitHub-hosted compute and local operations use the labelled " +
   "self-hosted runner; both support reviews and authorized conversations. All write and artifact " +
   "switches default to false. Cloud mode passes the existing customer-owned " +
-  "OLLAMA_API_KEY secret by name only; the App never creates or reads its value. " +
+  "OLLAMA_API_KEY and OPENROUTER_API_KEY secrets by name only; the App never creates or reads their values. " +
+  "If you previously used REVIEWSENSEI_PROVIDER_PROFILE for OpenRouter, delete that deprecated repository variable " +
+  "(Settings → Secrets and variables → Actions → Variables) and set " +
+  "REVIEWSENSEI_PROVIDER_MODE=openrouter with an allowlisted REVIEWSENSEI_MODEL instead; leaving provider_profile " +
+  "non-empty or forwarding it to the reusable workflow now fails closed. " +
   "Migration changes only these generated paths through a reviewable PR and " +
   "never overwrites custom or future setup files.";

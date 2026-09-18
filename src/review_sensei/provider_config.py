@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,16 +14,231 @@ from .providers.openrouter import (
     is_allowlisted_openrouter_endpoint,
 )
 from .providers.profiles import ProviderProfile, get_provider_profile
+from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
 DEFAULT_LOCAL_MODEL = "qwen3.5:4b"
-DEFAULT_CLOUD_MODEL = "deepseek-v4-flash:cloud"
+DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud"
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/api"
 DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
-DEFAULT_OPENROUTER_UPSTREAM = "anthropic"
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+HOSTED_OPENROUTER_DEFAULTS = frozenset(
+    {
+        (DEFAULT_OPENROUTER_MODEL, DEFAULT_OPENROUTER_UPSTREAM),
+        ("anthropic/claude-3.5-sonnet", "anthropic"),
+        ("openai/gpt-4o-mini", "openai"),
+    }
+)
+_OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
+_OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+
+
+def published_hosted_openrouter_models() -> frozenset[str]:
+    """Return OpenRouter model slugs approved for hosted workflow defaults."""
+
+    return frozenset(model for model, _ in HOSTED_OPENROUTER_DEFAULTS)
+
+
+def hosted_openrouter_upstream(
+    model: str,
+    *,
+    configured_upstream: str | None = None,
+) -> str:
+    """Return upstream provider for a hosted OpenRouter model slug."""
+
+    value = model.strip() or DEFAULT_OPENROUTER_MODEL
+    upstream: str | None = None
+    for hosted_model, hosted_upstream in HOSTED_OPENROUTER_DEFAULTS:
+        if hosted_model == value:
+            upstream = hosted_upstream
+            break
+    if upstream is None:
+        raise ReviewInputError(
+            "openrouter model is not allowlisted for hosted workflows"
+        )
+    if configured_upstream is not None:
+        configured = configured_upstream.strip()
+        if configured and configured != upstream:
+            raise ReviewInputError(
+                "OPENROUTER_UPSTREAM_PROVIDER does not match hosted model"
+            )
+        if configured:
+            return configured
+    return upstream
+
+
+def resolve_hosted_workflow_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    model: str,
+) -> str:
+    """Return the hosted workflow model slug used for validation."""
+
+    value = model.strip()
+    if value:
+        return value
+    if _effective_hosted_backend(provider_mode, workflow_mode) == "openrouter":
+        return DEFAULT_OPENROUTER_MODEL
+    return ""
+
+
+def resolve_hosted_job_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+    backend_default: str = "",
+) -> str:
+    """Return the model a hosted provider job resolves from its fallback chain."""
+
+    _effective_hosted_backend(provider_mode, workflow_mode)
+    for candidate in (caller_model, reviewsensei_model, backend_model):
+        value = candidate.strip()
+        if value:
+            return value
+    default = backend_default.strip()
+    if default:
+        return default
+    return resolve_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model="",
+    )
+
+
+def _assert_resolved_matches_explicit_hosted_model_intent(
+    *,
+    resolved: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+) -> None:
+    for candidate in (caller_model, reviewsensei_model, backend_model):
+        value = candidate.strip()
+        if not value:
+            continue
+        if resolved.strip() != value:
+            raise ReviewInputError(
+                "explicit hosted model input was overridden by workflow defaults"
+            )
+        return
+
+
+def validate_resolved_hosted_job_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    caller_model: str = "",
+    reviewsensei_model: str = "",
+    backend_model: str = "",
+    backend_default: str = "",
+) -> str:
+    """Validate the resolved hosted job model for the selected backend."""
+
+    resolved = resolve_hosted_job_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        caller_model=caller_model,
+        reviewsensei_model=reviewsensei_model,
+        backend_model=backend_model,
+        backend_default=backend_default,
+    )
+    if not resolved.strip():
+        raise ReviewInputError("hosted job model could not be resolved")
+    _assert_resolved_matches_explicit_hosted_model_intent(
+        resolved=resolved,
+        caller_model=caller_model,
+        reviewsensei_model=reviewsensei_model,
+        backend_model=backend_model,
+    )
+    validate_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model=resolved,
+    )
+    return resolved
+
+
+def validate_hosted_workflow_model(
+    *,
+    provider_mode: str,
+    workflow_mode: str,
+    model: str,
+) -> None:
+    """Validate a hosted workflow model string for the selected backend."""
+
+    _effective_hosted_backend(provider_mode, workflow_mode)
+    value = resolve_hosted_workflow_model(
+        provider_mode=provider_mode,
+        workflow_mode=workflow_mode,
+        model=model,
+    )
+    if not value:
+        return
+    validate_bounded_text(
+        value,
+        DEFAULT_REVIEW_LIMITS.max_model_bytes,
+        label="model",
+        allow_empty=False,
+    )
+    if value.startswith("-"):
+        raise ReviewInputError("model must not start with '-'")
+    backend = _effective_hosted_backend(provider_mode, workflow_mode)
+    if backend == "openrouter":
+        if ":cloud" in value:
+            raise ReviewInputError("openrouter model must not use ollama cloud suffix")
+        if not _OPENROUTER_MODEL_PATTERN.fullmatch(value):
+            raise ReviewInputError("openrouter model must be vendor/model slug")
+        if value not in published_hosted_openrouter_models():
+            raise ReviewInputError(
+                "openrouter model is not allowlisted for hosted workflows; "
+                "hosted runs do not forward --allow-unqualified-profile"
+            )
+        return
+    if "/" in value:
+        raise ReviewInputError("ollama model must not use vendor/model openrouter slug")
+    if ":cloud" in value and not _hosted_ollama_allows_cloud_suffix(
+        provider_mode, workflow_mode
+    ):
+        raise ReviewInputError("ollama local model must not use ollama cloud suffix")
+    if not _OLLAMA_MODEL_PATTERN.fullmatch(value):
+        raise ReviewInputError("ollama model slug is invalid")
+
+
+def _hosted_ollama_allows_cloud_suffix(provider_mode: str, workflow_mode: str) -> bool:
+    mode = provider_mode.strip().lower()
+    if mode in {"cloud", "cloud-ollama"}:
+        return True
+    if mode in {"local", "local-ollama"}:
+        return False
+    if mode == "":
+        wf = workflow_mode.strip().lower()
+        if wf not in {"automatic", "manual"}:
+            return False
+        return wf != "manual"
+    return False
+
+
+def _effective_hosted_backend(provider_mode: str, workflow_mode: str) -> str:
+    mode = provider_mode.strip().lower()
+    if mode == "openrouter":
+        return "openrouter"
+    if mode in {"local", "local-ollama", "cloud", "cloud-ollama"}:
+        return "ollama"
+    if mode != "":
+        raise ReviewInputError("provider mode is unsupported")
+    wf = workflow_mode.strip().lower()
+    if wf not in {"automatic", "manual"}:
+        raise ReviewInputError("workflow mode is invalid")
+    return "ollama"
 
 
 def _positive_env_float(value: str, *, source: str) -> float:
@@ -231,10 +447,17 @@ def resolve_effective_provider_configuration(
 __all__ = [
     "DEFAULT_OPENROUTER_MODEL",
     "DEFAULT_OPENROUTER_UPSTREAM",
+    "HOSTED_OPENROUTER_DEFAULTS",
+    "hosted_openrouter_upstream",
     "openrouter_policy_from_env",
     "openrouter_timeout_default",
     "openrouter_upstream_default",
     "provider_mode_default",
+    "published_hosted_openrouter_models",
     "resolve_effective_provider_configuration",
+    "resolve_hosted_job_model",
+    "resolve_hosted_workflow_model",
+    "validate_hosted_workflow_model",
+    "validate_resolved_hosted_job_model",
     "validate_profile_provider_match",
 ]
