@@ -575,6 +575,10 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             '--expected-source-sha "${{ steps.resume-bundle.outputs.bundle_source_sha }}"',
             verify_section,
         )
+        self.assertIn(
+            "python resume-source/scripts/publish_npm_release.py verify-bundle",
+            verify_section,
+        )
         self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
         self.assertIn("id: resume-bundle", self.workflow)
 
