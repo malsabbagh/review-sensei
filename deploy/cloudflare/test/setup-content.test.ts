@@ -150,6 +150,10 @@ describe("setup-v4 public boundary", () => {
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
       "learning_proposals",
     );
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("version: 0.5.0");
+    expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).toContain(
+      "version: 0.1.0",
+    );
     expect(workflow).toBe(
       readFileSync(
         new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
