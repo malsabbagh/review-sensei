@@ -380,6 +380,8 @@ jobs:
           head_sha = run.get("headSha")
           if not isinstance(head_sha, str) or not head_sha:
               fail("resume_bundle_run_id is missing attested head SHA")
+          # Resume requires the failed run and this dispatch to target the same
+          # default-branch commit; see docs/releasing.md.
           if head_sha != os.environ["DISPATCH_SOURCE_SHA"]:
               fail(
                   "resume_bundle_run_id must reference a run from the dispatch source commit"

@@ -183,7 +183,7 @@ def list_attestation_subjects(bundle_dir: Path) -> list[str]:
     return [
         filename
         for filename in list_sha256sum_subjects(bundle_dir)
-        if filename.endswith(".tgz")
+        if filename.endswith(".tgz") or filename == BUNDLE_METADATA_FILENAME
     ]
 
 
