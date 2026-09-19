@@ -49,7 +49,7 @@ session ledger:
   echoed as trusted finding state.
 - `detect_no_progress` treats a repeated non-empty blocking identity set
   or A→B→A oscillation as no-progress. Empty current sets are progress.
-  C5 accepts this as trusted caller-supplied state; the GitHub publication
+  C5 accepts the attestation as caller-supplied state; the GitHub publication
   adapter does not persist prior finding identities or infer no-progress on
   its own in this slice.
 - `legacy` is unchanged. Without a ledger, operator modes cannot enforce
