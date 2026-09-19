@@ -57,17 +57,7 @@ _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
 LOAD_STATUSES = frozenset(
-    {
-        "ok",
-        "missing",
-        "expired",
-        "integrity-failed",
-        "conflict",
-        "migrated",
-        # Diagnostics normalize malformed caller-supplied records to this
-        # explicit token before deriving an untrusted verification scope.
-        "invalid",
-    }
+    {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
 )
 
 

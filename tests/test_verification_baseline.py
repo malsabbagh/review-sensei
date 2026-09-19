@@ -241,6 +241,35 @@ class BaselinePlanTests(unittest.TestCase):
         self.assertEqual(scope.coverage_mode, "fallback-full")
         self.assertFalse(scope.late_admission_required)
 
+    def test_legacy_result_with_explicit_reviewed_scope_is_compatible(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment(), coverage=None),
+            cache_key=_key(),
+            policy=policy,
+            reviewed_paths=("src/app.py",),
+        )
+        self.assertTrue(baseline.complete)
+        self.assertTrue(baseline.coverage_complete)
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        self.assertEqual(scope.status, "verify")
+        self.assertEqual(scope.coverage_mode, "incremental")
+
+    def test_baseline_required_scope_reports_changed_paths(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=None,
+            changed_paths=("src/app.py", "src/helper.py"),
+        )
+        self.assertEqual(scope.status, "baseline-required")
+        self.assertEqual(scope.changed_paths, ("src/app.py", "src/helper.py"))
+
     def test_rebase_invalidates_baseline(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         baseline = baseline_from_review(
@@ -1062,7 +1091,7 @@ class DiagnosticVerificationTests(unittest.TestCase):
             _normalize_session_record({"status": "future-status"}),
             {"status": "invalid"},
         )
-        self.assertIn("invalid", LOAD_STATUSES)
+        self.assertNotIn("invalid", LOAD_STATUSES)
 
 
 class BaselineAdmissionTests(unittest.TestCase):

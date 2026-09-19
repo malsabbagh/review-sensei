@@ -51,6 +51,9 @@ Later findings are classified before C2 admission:
 - Unattributed target-branch issues stay `pre-existing`.
 - Ambiguous identity matches require human adjudication with an explicit
   `human-adjudication` late reason; every late classification carries a reason.
+- Evidence confirmations are keyed by the stored concern digest. A baseline
+  finding without that stable digest cannot be auto-confirmed; callers must
+  provide an explicit evidence-backed candidate instead.
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation

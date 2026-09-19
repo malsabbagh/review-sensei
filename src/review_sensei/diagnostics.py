@@ -48,6 +48,9 @@ DOCTOR_OK = 0
 DOCTOR_ACTION_REQUIRED = 2
 DOCTOR_UNKNOWN = 3
 SCHEMA_VERSION = "v1"
+# Diagnostic-only token; it is never a persisted SessionRecord or a
+# SessionLoadResult status.
+INVALID_SESSION_STATUS = "invalid"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_REPOSITORY_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
@@ -168,7 +171,7 @@ def _normalize_session_record(
     if status is None:
         normalized["status"] = "missing"
     elif not isinstance(status, str) or status not in LOAD_STATUSES:
-        normalized["status"] = "invalid"
+        normalized["status"] = INVALID_SESSION_STATUS
     return normalized
 
 

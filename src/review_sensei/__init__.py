@@ -8,6 +8,7 @@ from .baseline import (
     baseline_from_review,
     classify_later_finding,
     classify_omitted_finding,
+    match_baseline_finding,
     plan_verification_scope,
     preview_verification_scope,
 )
@@ -209,6 +210,7 @@ __all__ = [
     "baseline_from_review",
     "classify_later_finding",
     "classify_omitted_finding",
+    "match_baseline_finding",
     "plan_verification_scope",
     "preview_verification_scope",
     "SessionIdentity",

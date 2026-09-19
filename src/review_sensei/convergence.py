@@ -888,9 +888,9 @@ def admit_review_result(
         )
     if verification_scope is not None:
         from .baseline import (
-            _match_baseline_finding,
             candidate_from_later_finding,
             classify_later_finding,
+            match_baseline_finding,
         )
 
         if baseline is None:  # pragma: no cover - guarded above
@@ -914,7 +914,7 @@ def admit_review_result(
                 changed_lines=changed_lines,
                 deleted_lines=deleted_lines,
             )
-            matched = _match_baseline_finding(comment, baseline)
+            matched = match_baseline_finding(comment, baseline)
             evidence_criterion = (
                 confirmed_criterion_by_concern.get(matched.concern)
                 if matched is not None and matched.concern is not None

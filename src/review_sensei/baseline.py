@@ -96,6 +96,8 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
+# The verification-scope schema mirrors these bounds; update its parity test
+# whenever the shared metadata budget changes.
 
 
 def _require_bool(value: object, *, label: str) -> None:
@@ -320,6 +322,10 @@ def baseline_from_review(
         reviewed = _bounded_paths(paths, label="reviewed")
     else:
         reviewed = _bounded_paths(reviewed_paths, label="reviewed")
+    # An explicit reviewed-path set is the caller's coverage attestation for
+    # legacy results that predate the coverage manifest. It is therefore
+    # compatible for incremental planning even though no manifest exists.
+    coverage_complete = coverage_complete or reviewed_paths is not None
     # A legacy result without a coverage manifest is only a baseline when the
     # caller supplies the reviewed scope explicitly.  Finding paths alone do
     # not prove that the rest of the change was enumerated and reviewed.
@@ -771,7 +777,7 @@ class LaterFindingClassification:
         return value
 
 
-def _match_baseline_finding(
+def match_baseline_finding(
     comment: ReviewComment, baseline: ReviewBaseline
 ) -> BaselineFinding | None:
     lifecycle = finding_lifecycle_for_comment(comment)
@@ -801,6 +807,14 @@ def _match_baseline_finding(
         if len(path_kind_matches) == 1:
             return path_kind_matches[0]
     return None
+
+
+def _match_baseline_finding(
+    comment: ReviewComment, baseline: ReviewBaseline
+) -> BaselineFinding | None:
+    """Compatibility wrapper for the former private matcher name."""
+
+    return match_baseline_finding(comment, baseline)
 
 
 def _shares_lineage_identity(comment: ReviewComment, finding: BaselineFinding) -> bool:
@@ -939,7 +953,7 @@ def classify_later_finding(
             lineage_reason="ambiguous-identity",
             attribution="unattributed",
         )
-    matched = _match_baseline_finding(comment, baseline)
+    matched = match_baseline_finding(comment, baseline)
     if matched is not None:
         same = matched.fingerprint == lifecycle.fingerprint
         if evidence_confirmed:
@@ -1160,6 +1174,7 @@ __all__ = [
     "classify_later_finding",
     "classify_omitted_finding",
     "evaluate_baseline_compatibility",
+    "match_baseline_finding",
     "plan_verification_scope",
     "preview_verification_scope",
     "resolution_criterion_digest",
