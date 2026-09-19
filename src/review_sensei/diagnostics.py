@@ -357,8 +357,10 @@ def run_doctor(
 
     ``review_mode`` reports the issue #136 review-convergence policy.  When
     omitted, doctor reads ``REVIEWSENSEI_REVIEW_MODE`` and defaults to
-    ``legacy``.  The resolved policy is display-only in this slice and does not
-    change publication or ``REVIEWSENSEI_AUTO_APPROVE``.
+    ``legacy``.  ``legacy`` stays display-only and keeps ADR 0032 publication.
+    Operator modes report ``enforcement=publication`` because C2 applies the
+    blocker-admission evaluator before GitHub review events.  The setting does
+    not change ``REVIEWSENSEI_AUTO_APPROVE`` default-on semantics.
     """
 
     checks: list[DiagnosticCheck] = []

@@ -2,8 +2,9 @@
 
 Status: Proposed
 Date: 2026-09-19
+Last amended: 2026-09-19
 GitHub Issue: #136
-Pull Request: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
+Pull Request: [#138](https://github.com/malsabbagh/review-sensei/pull/138)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -21,9 +22,12 @@ publication: a model proposal is not a trusted merge gate. In-memory review
 context (ADR 0042) and in-run budgets (ADR 0043) also do not define a
 PR-wide round budget across fresh Actions jobs.
 
-This record is slice **C1** of #136: the versioned policy contract, pure
-evaluators, and doctor/plan display. It does not change GitHub publication,
-approval finalization, or `REVIEWSENSEI_AUTO_APPROVE` default-on semantics.
+C1 added the versioned policy contract, pure evaluators, and doctor/plan
+display. This amendment is slice **C2**: sit `evaluate_blocker_admission`
+between candidate findings and publication while preserving proposed versus
+effective classification. It does not change `REVIEWSENSEI_AUTO_APPROVE`
+default-on semantics, completeness/coverage gates (#114), or OpenRouter
+qualification (#115).
 
 ## Decision
 
@@ -56,8 +60,67 @@ without inventing a proven blocker.
 
 `advisory` uses the same admission rules but sets
 `automatic_github_review_events=false` and `inline_advisory_threads=false`.
+That withholds `APPROVE` and `REQUEST_CHANGES`. Advisory still posts a
+`COMMENT` review whose body carries the folded observations; it does not
+suppress the review POST entirely, because the summary would otherwise
+have no GitHub vehicle.
 `strict` remains bounded and additionally lets a named mandatory rule qualify
 independently of high/critical severity when the other gates pass.
+
+C2 derives `BlockerCandidate` facts from structured comment and verification
+fields (`derive_blocker_candidate`) and writes `effective_blocking` /
+`needs_human` onto each finding (`admit_review_result`) before a publisher
+formats comments or chooses a GitHub review event. Free-form `defect_kind`
+is never treated as a specific-violation, named-mandatory-rule, or
+required-contract signal. Required contracts are the closed allowlist
+`required-contract`, `api-contract`, and `compatibility-contract`, but
+callers must pass `has_required_contract=` to opt into that gate; C2
+derivation does not sniff `defect_kind` for those strings. C2 derivation
+never infers `has_specific_violation` or `named_mandatory_rule` from
+free-form `defect_kind`. Callers pass `has_specific_violation=` or
+`named_mandatory_rule=` (or an explicit `BlockerCandidate`) to opt into
+those gates. Derived facts bind `path` / `line` / `side` so a misaligned
+candidate fails closed instead of admitting the wrong finding. A required
+contract remains a violation source, not a substitute for high/critical
+impact. Confirmed
+evidence verification (#114) validates snapshot locations; it does not mint
+a failure condition or actionable remedy. Confirmed findings are rendered
+from `CandidateFinding` (claim, trigger, evidence, free-text severity
+rationale). That type has no `blocking`, `severity`, `defect_kind`,
+`fix_effort`, or `category`, so derived confirmed facts stay fail-closed.
+Operator-mode admission of a confirmed finding requires caller-supplied
+`blocker_candidates` or `input_blocker_candidates`; snapshot confirmation
+alone does not admit a blocker. Operator-mode policies always use
+`enforcement=publication` even when constructed as
+`ReviewConvergencePolicy(mode="merge-focused")`; `display-only` remains
+the `legacy` default. Operator-mode admission otherwise stays
+fail-closed unless the caller supplies explicit `BlockerCandidate` facts.
+`blocker_candidates` must match published comments;
+`input_blocker_candidates` must match input candidates. Attribution uses
+the comment side: `RIGHT` against new-file changed lines, `LEFT` against
+old-file deleted lines. The model `blocking` field
+remains the proposal. `ReviewComment.blocks_approval` uses the admitted
+effective value when present. `effective_blocking` and `needs_human` are
+runtime-only: they are omitted from `to_dict` / `from_dict` and the closed
+v1 `review-comment` / `review-result` schemas. Reconstructing a result from
+JSON drops them; `blocks_approval` then falls back to the model proposal.
+Publication markers and `REQUEST_CHANGES` follow effective blocking.
+`ReviewPublisher.publish` intersects caller `auto_approve` with
+`automatic_github_review_events`. The conjunction can only withhold
+`REQUEST_CHANGES` and the APPROVE finalizer; it cannot upgrade an explicit
+`auto_approve=False`, including when `REVIEWSENSEI_REVIEW_MODE` is an
+operator mode. An omitted `convergence_policy` stays on compatible `legacy`
+and does not read the ambient environment; the CLI resolves
+`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling a fresh
+review. Recovery artifacts serialize `ReviewResult` without admission
+fields. `--recover-from` therefore uses compatible `legacy` unless the
+caller passes an explicit operator `--review-mode`, which is refused.
+Ambient `REVIEWSENSEI_REVIEW_MODE` cannot break recovery. Human
+adjudication withholds `APPROVE` through
+`evaluate_auto_approval` without inventing a proven blocker. Advisory
+observations in operator modes are folded into the review summary so required
+conversation resolution cannot turn optional notes into mechanical blockers.
+`legacy` enforcement stays `display-only` and keeps ADR 0032/0035 events.
 
 Round admission counts completed logical reviews, not provider calls, commits,
 or retries. Same-head duplicates, publication recovery, and transport or
@@ -66,10 +129,7 @@ approval. No-progress and exhausted failed-attempt budgets hand off even when
 the current invocation is a duplicate, recovery, or retry. The cap never
 creates approval eligibility; a last allowed round may approve only when
 independent gates already pass. Incomplete coverage or an unreviewed later
-head cannot approve.
-
-C1 enforcement is `display-only`. Doctor and plan report the resolved policy
-and digest. Publication continues to use ADR 0032/0035 until C2.
+head cannot approve. Round enforcement in hosts remains C5.
 
 Pilot defaults (`verification_rounds=2`, `failed_attempts=6`) are tunable
 design hypotheses, not industry standards, and must be validated before any
@@ -84,15 +144,18 @@ In scope:
 - Decision-table tests for modes, severity/evidence/scope reasons, round
   counting, handoff, and legacy compatibility.
 - Doctor/plan display and `--review-mode` / `REVIEWSENSEI_REVIEW_MODE`.
+- C2 derivation and admission between findings and publication, including
+  GitHub event tests for model `blocking=true/false` conflicts.
 
 Out of scope:
 
-- Wiring the evaluator into publication or approval (C2).
 - Durable session ledgers (C3), baseline-aware verification (C4), automation
   admission in hosts (C5), maintainer commands (C6), and evaluation rollout
   (C7).
 - Changing `REVIEWSENSEI_AUTO_APPROVE`, GitHub permissions, branch protection,
   or website/OpenRouter epics.
+- Recreating completeness, coverage, or OpenRouter qualification gates from
+  #114/#115.
 
 ## Consequences
 
@@ -101,14 +164,14 @@ Positive:
 - Existing installations keep current classification and unbounded autonomous
   rounds until they opt in.
 - Merge-blocker correctness is a trusted policy, not a prompt or a model flag.
-- Doctor and plan make the future contract visible without changing GitHub
-  events.
+- Operator modes can demote an explicit model blocker and promote a
+  well-supported finding the model marked optional, with both values visible.
 
 Tradeoffs:
 
-- C1 cannot yet stop publication loops; that requires C2–C5.
-- Structured candidate facts are an explicit C2 derivation contract. Garbage
-  facts still yield garbage decisions.
+- C2 cannot yet bound PR-wide rounds; that requires C3–C5.
+- Conservative derivation from structured fields fail-closes missing evidence.
+  Garbage facts still yield garbage decisions.
 - Two verification rounds remain a hypothesis until C7 evidence exists.
 
 ## Alternatives considered
@@ -133,22 +196,27 @@ current installations. Default remains `legacy` until an explicit migration.
 Rejected because issue #136 requires trusted policy between proposals and
 effective publication decisions.
 
+### Overwrite `ReviewComment.blocking` with the evaluator result
+
+Rejected because C2 must preserve proposed versus effective classification.
+
 ## Validation
 
-Run evaluator decision-table tests, schema golden/negative fixtures, doctor and
-plan display tests, and the existing publication/approval suite to prove those
-paths are unchanged. Ordinary CI stays offline and credential-free.
+Run evaluator decision-table tests, derivation/admission tests, schema
+golden/negative fixtures, doctor and plan display tests, and the publication
+suite including real GitHub event assertions for model `blocking` conflicts.
+Ordinary CI stays offline and credential-free.
 
 ## Rollout and rollback
 
-Rollout is a reviewed package that adds display-only configuration. Operators
-may set `REVIEWSENSEI_REVIEW_MODE` for doctor/plan inspection; publication is
-unchanged. Rollback by reverting the package. No persisted review data or
-GitHub thread mutation requires migration.
+Rollout is a reviewed package. Existing installations remain on `legacy`.
+Operators opt into `advisory`, `merge-focused`, or `strict` via
+`REVIEWSENSEI_REVIEW_MODE` or `--review-mode`. Rollback by reverting the
+package or returning the mode to `legacy`. No persisted review data or GitHub
+thread mutation requires migration.
 
 ## Follow-up work
 
-- C2: sit the evaluator between candidate findings and publication.
 - C3: durable session ledger for PR-wide counters.
 - C4–C7 as specified in issue #136.
 - Coordinate with #114/#115 for the actual approval boundary; do not duplicate
@@ -157,7 +225,7 @@ GitHub thread mutation requires migration.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
+- Pull request: [#138](https://github.com/malsabbagh/review-sensei/pull/138) (C2); C1: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
 - Related: [ADR 0032](0032-blocking-finding-classification-for-approvals.md),
   [ADR 0035](0035-request-changes-for-blocking-findings.md),
   [ADR 0039](0039-verify-candidate-findings-before-publication.md),

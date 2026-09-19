@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Added the issue #136 C2 effective blocker-admission path: operator
+  `advisory` / `merge-focused` / `strict` modes derive structured candidate
+  facts, run the C1 evaluator before GitHub publication, preserve proposed vs
+  effective classification, fold advisory observations into the review
+  summary, and withhold `APPROVE` for human adjudication. Confirmed
+  verification proves evidence locations only; it does not invent a failure
+  condition or promote `blocking=false` findings. Published
+  `blocker_candidates` and input `input_blocker_candidates` are distinct
+  bases. Attribution uses each comment's side against new-file or old-file
+  line maps. Admitted `effective_blocking` / `needs_human` stay runtime-only
+  and are omitted from the v1 comment schema. Intersecting `auto_approve`
+  with `automatic_github_review_events` can only withhold GitHub events.
+  Named mandatory rules, specific violations, and required contracts are
+  explicit; free-form `defect_kind` is not a qualifier. Operator-mode
+  policies always use publication enforcement. Leftover blocker facts
+  under display-only enforcement fail closed. Confirmed findings require
+  caller-supplied blocker facts to admit. Derived facts bind comment
+  identity.
+  Omitted publication policy stays `legacy`. `--recover-from` uses
+  `legacy` unless an explicit operator `--review-mode` is passed.
+  Ambient `REVIEWSENSEI_REVIEW_MODE` cannot break recovery. Operator-mode
+  recovery of a serialized result still fails closed when that flag is
+  set. Advisory still posts a `COMMENT` review for folded observations.
+  `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
+
 - Added the issue #136 C1 review-convergence policy contract: versioned
   `legacy` / `advisory` / `merge-focused` / `strict` modes, deterministic
   blocker-admission and round-handoff evaluators, and doctor/plan display via

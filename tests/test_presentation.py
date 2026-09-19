@@ -38,6 +38,20 @@ class ReviewPresentationTests(unittest.TestCase):
             "[💬 Non-blocking]\n\nConsider extracting this.",
         )
 
+    def test_inline_comment_preserves_proposed_when_effective_differs(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="Handle the missing return value.",
+            blocking=True,
+            effective_blocking=False,
+        )
+        self.assertEqual(
+            format_review_comment(comment),
+            "[💬 Non-blocking] [Proposed: Blocking]\n\n"
+            "Handle the missing return value.",
+        )
+
     def test_inline_comment_marks_unflagged_severe_findings_as_blocking(self):
         comment = ReviewComment(
             path="src/app.py",

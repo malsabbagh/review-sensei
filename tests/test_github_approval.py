@@ -124,6 +124,34 @@ class AutoApprovalPolicyTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertEqual(decision.blockers, ("blocking-findings-open",))
 
+    def test_human_adjudication_findings_prevent_approval(self):
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="Needs a human.",
+                    blocking=True,
+                    effective_blocking=False,
+                    needs_human=True,
+                ),
+            ),
+            provider="fixture",
+            review_status="complete",
+            coverage=complete_coverage(),
+        )
+
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=result,
+            has_open_review_threads=False,
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("human-adjudication-open",))
+
     def test_unclassified_severe_findings_prevent_approval(self):
         for severity in ("critical", "high"):
             with self.subTest(severity=severity):

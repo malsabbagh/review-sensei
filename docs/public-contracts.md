@@ -63,7 +63,7 @@ containing `/v1/`.
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |
-| `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and display-only enforcement |
+| `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and enforcement (`display-only` or `publication`) |
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
 | `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
@@ -172,6 +172,8 @@ These imports are public and stable within a major version:
 - `review_sensei.RoundAdmissionDecision`
 - `review_sensei.resolve_review_convergence_policy`
 - `review_sensei.evaluate_blocker_admission`
+- `review_sensei.derive_blocker_candidate`
+- `review_sensei.admit_review_result`
 - `review_sensei.evaluate_round_admission`
 - `review_sensei.plan_change`
 - `review_sensei.verify_candidate`
@@ -210,8 +212,9 @@ These imports are public and stable within a major version:
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
-validate against the review-convergence schemas. Those evaluators are not
-publication gates yet; GitHub review events still follow ADR 0032/0035.
+validate against the review-convergence schemas. Operator modes apply
+`admit_review_result` before GitHub publication; `legacy` keeps ADR 0032/0035
+events. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -528,8 +531,9 @@ review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `--base-sha` and `--head-sha` record snapshot identity when supplied.
 Doctor and plan also report the resolved review-convergence policy
 (`legacy` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
-That contract is display-only in this release: it does not change GitHub
-publication or `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).
+`legacy` remains compatible with ADR 0032/0035 publication.
+Operator modes apply `evaluate_blocker_admission` before GitHub review events
+and do not change `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).
 `doctor --network` performs read-only GET probes and never mints a token or
 sends a generation request.
 

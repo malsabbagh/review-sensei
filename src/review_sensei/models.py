@@ -525,7 +525,14 @@ COMMENT_SIDES = frozenset({"LEFT", "RIGHT", "FILE"})
 
 @dataclass(frozen=True)
 class ReviewComment:
-    """A proposed review finding bound to a left, right, or file location."""
+    """A proposed review finding bound to a left, right, or file location.
+
+    ``effective_blocking`` and ``needs_human`` are C2 runtime-only admission
+    fields. They are omitted from ``to_dict`` / ``ReviewResult.from_dict`` and
+    from the closed v1 ``review-comment`` / ``review-result`` schemas.
+    Reconstructing a result from JSON drops them; ``blocks_approval`` then
+    falls back to the model proposal or legacy severity rule.
+    """
 
     path: str
     line: int | None
@@ -538,16 +545,20 @@ class ReviewComment:
     defect_kind: str | None = None
     evidence_id: str | None = None
     side: str = "RIGHT"
+    effective_blocking: bool | None = None
+    needs_human: bool = False
 
     @property
     def blocks_approval(self) -> bool:
         """Return the effective merge-impact classification for this finding.
 
-        An explicit classification is authoritative. The legacy fallback only
-        treats the canonical severe labels as blocking, preserving free-form
-        severity compatibility for callers that do not emit ``blocking``.
+        Trusted C2 admission sets ``effective_blocking`` and is authoritative.
+        Until then an explicit model ``blocking`` value wins, and the legacy
+        fallback only treats canonical severe labels as blocking.
         """
 
+        if self.effective_blocking is not None:
+            return self.effective_blocking
         if self.blocking is not None:
             return self.blocking
         return self.severity is not None and self.severity.lower() in {
@@ -602,8 +613,20 @@ class ReviewComment:
                     )
         if self.blocking is not None and not isinstance(self.blocking, bool):
             raise ReviewInputError("comment blocking must be a boolean")
+        if self.effective_blocking is not None and not isinstance(
+            self.effective_blocking, bool
+        ):
+            raise ReviewInputError("comment effective_blocking must be a boolean")
+        if not isinstance(self.needs_human, bool):
+            raise ReviewInputError("comment needs_human must be a boolean")
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the publisher-facing v1 comment.
+
+        Runtime admission state is intentionally omitted so the closed v1
+        schema stays valid and trusted evaluator output is not persisted.
+        """
+
         value: dict[str, object] = {
             "path": self.path,
             "body": self.body,
@@ -939,6 +962,8 @@ class ReviewResult:
                 raise ReviewInputError(
                     f"review result comment {index} evidence_id must be a string"
                 )
+            # effective_blocking / needs_human are runtime-only and must not
+            # be restored from a v1 document.
             comment_values.append(
                 ReviewComment(
                     path=path,

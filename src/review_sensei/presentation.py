@@ -71,9 +71,23 @@ def format_review_comment(comment: ReviewComment) -> str:
     """Render a validated comment with any available classification labels."""
 
     labels: list[str] = []
-    if comment.blocking is not None or comment.blocks_approval:
+    if (
+        comment.blocking is not None
+        or comment.effective_blocking is not None
+        or comment.blocks_approval
+        or comment.needs_human
+    ):
         label = "Blocking" if comment.blocks_approval else "Non-blocking"
         labels.append(f"{_BLOCKING_ICONS[comment.blocks_approval]} {label}")
+        if (
+            comment.blocking is not None
+            and comment.effective_blocking is not None
+            and comment.blocking != comment.effective_blocking
+        ):
+            proposed = "Blocking" if comment.blocking else "Non-blocking"
+            labels.append(f"Proposed: {proposed}")
+        if comment.needs_human:
+            labels.append("Needs human")
     if comment.severity is not None:
         labels.append(
             f"{_metadata_icon(_SEVERITY_ICONS, comment.severity)} "
@@ -121,6 +135,8 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
         or comment.fix_effort is not None
         or comment.category is not None
         or comment.blocking is not None
+        or comment.effective_blocking is not None
+        or comment.needs_human
         for comment in comments
     ):
         return summary
@@ -141,7 +157,12 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
     blocking_counts: Counter[str] = Counter(
         "Blocking" if comment.blocks_approval else "Non-blocking"
         for comment in comments
-        if comment.blocking is not None or comment.blocks_approval
+        if (
+            comment.blocking is not None
+            or comment.effective_blocking is not None
+            or comment.blocks_approval
+            or comment.needs_human
+        )
     )
 
     lines = ["Review classification:"]

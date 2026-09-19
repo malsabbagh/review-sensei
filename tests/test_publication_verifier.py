@@ -2,8 +2,13 @@ import hashlib
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 from review_sensei.context import ContextSnapshot, SourceContextCoverage
+from review_sensei.convergence import (
+    ReviewConvergencePolicy,
+    derive_blocker_candidate,
+)
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import evaluate_auto_approval
 from review_sensei.models import ReviewComment, ReviewResult
@@ -44,6 +49,26 @@ def candidate(
         (EvidenceReference(path, line, snapshot_sha, excerpt),),
         "The request fails instead of returning a defined empty result.",
         assumptions,
+    )
+
+
+def admitting_blocker_facts():
+    comment = ReviewComment(
+        path="src/app.py",
+        line=2,
+        body="finding",
+        blocking=False,
+        severity="high",
+        defect_kind="authz-failure",
+        fix_effort="small",
+    )
+    return derive_blocker_candidate(
+        comment,
+        on_changed_path=True,
+        evidence_locations_validated=True,
+        has_failure_condition=True,
+        has_actionable_remedy=True,
+        has_specific_violation=True,
     )
 
 
@@ -355,6 +380,232 @@ class PublishableReviewTests(unittest.TestCase):
             (finding,), self.snapshot, snapshot_sha256=self.snapshot_sha
         )
         self.assertEqual(results[0].disposition, "confirmed")
+
+    def test_confirmed_verification_does_not_promote_proposed_non_blocking(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        proposed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        with patch(
+            "review_sensei.verifier._candidate_to_comment",
+            return_value=proposed,
+        ):
+            prepared = prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                changed_lines={"src/app.py": frozenset({2})},
+                convergence_policy=policy,
+            )
+        finding = prepared.result.comments[0]
+        self.assertFalse(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertTrue(finding.needs_human)
+        self.assertFalse(finding.blocks_approval)
+
+    def test_confirmed_explicit_facts_can_still_admit_a_blocker(self) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        proposed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            proposed,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+            blocker_candidates=(facts,),
+        )
+        finding = prepared.result.comments[0]
+        self.assertTrue(finding.effective_blocking)
+        self.assertTrue(finding.blocks_approval)
+
+    def test_confirmed_pre_verification_facts_survive_dropped_candidates(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        rejected = candidate(
+            snapshot_sha=self.snapshot_sha,
+            claim="This line logs credentials.",
+            excerpt="api_key = os.environ['SECRET']",
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha), rejected),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+            input_blocker_candidates=(
+                admitting_blocker_facts(),
+                admitting_blocker_facts(),
+            ),
+        )
+        self.assertEqual(len(prepared.result.comments), 1)
+        self.assertEqual(prepared.verifications[1].disposition, "rejected")
+        finding = prepared.result.comments[0]
+        self.assertTrue(finding.effective_blocking)
+        self.assertTrue(finding.blocks_approval)
+
+    def test_confirmed_post_verification_facts_match_published_comments(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        rejected = candidate(
+            snapshot_sha=self.snapshot_sha,
+            claim="This line logs credentials.",
+            excerpt="api_key = os.environ['SECRET']",
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha), rejected),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+            blocker_candidates=(admitting_blocker_facts(),),
+        )
+        self.assertEqual(len(prepared.result.comments), 1)
+        self.assertTrue(prepared.result.comments[0].effective_blocking)
+
+    def test_confirmed_misaligned_facts_fail_closed(self) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "align"):
+            prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                changed_lines={"src/app.py": frozenset({2})},
+                convergence_policy=policy,
+                blocker_candidates=(
+                    admitting_blocker_facts(),
+                    admitting_blocker_facts(),
+                    admitting_blocker_facts(),
+                ),
+            )
+
+    def test_confirmed_cannot_supply_both_blocker_fact_bases(self) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = admitting_blocker_facts()
+        with self.assertRaisesRegex(ReviewInputError, "one blocker candidate basis"):
+            prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                changed_lines={"src/app.py": frozenset({2})},
+                convergence_policy=policy,
+                blocker_candidates=(facts,),
+                input_blocker_candidates=(facts,),
+            )
+
+    def test_confirmed_derived_facts_do_not_admit_without_caller_candidates(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+        )
+        finding = prepared.result.comments[0]
+        self.assertIsNone(finding.blocking)
+        self.assertIsNone(finding.severity)
+        self.assertFalse(finding.effective_blocking)
+        self.assertFalse(finding.needs_human)
+        self.assertFalse(finding.blocks_approval)
+
+    def test_legacy_rejects_blocker_candidates_without_publication_enforcement(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "publication enforcement"):
+            prepare_publishable_review(
+                self.result,
+                evidence_policy="legacy",
+                blocker_candidates=(admitting_blocker_facts(),),
+            )
 
     def test_unsupported_policy_fails_closed(self) -> None:
         with self.assertRaises(ReviewInputError):

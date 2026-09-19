@@ -25,6 +25,13 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
+from .convergence import (
+    BlockerCandidate,
+    ReviewConvergencePolicy,
+    admit_review_result,
+    comment_targets_pr_change,
+    derive_blocker_candidate,
+)
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
 from .presentation import escape_markdown_label
@@ -474,6 +481,16 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
 
 
 def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
+    """Render a confirmed candidate as a comment without minting classification.
+
+    ``CandidateFinding`` has claim, trigger, evidence, and a free-text
+    severity rationale. It has no ``blocking``, ``severity``,
+    ``defect_kind``, ``fix_effort``, or ``category``. Operator-mode
+    admission of a confirmed finding therefore requires caller-supplied
+    ``blocker_candidates`` / ``input_blocker_candidates``; derived facts
+    stay fail-closed.
+    """
+
     # Anchor the finding at the first evidence reference on impacted_path when
     # present; otherwise fall back to the primary reference. Publishers may
     # still reject the location against the diff if it is outside hunks.
@@ -535,10 +552,92 @@ def _downgrade_incomplete_status(status: str) -> str:
 
 def _comment_in_changed_lines(
     comment: ReviewComment,
-    changed_lines: Mapping[str, frozenset[int]],
+    changed_lines: Mapping[str, frozenset[int]] | None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
 ) -> bool:
-    allowed = changed_lines.get(comment.path)
-    return bool(allowed and comment.line in allowed)
+    return comment_targets_pr_change(
+        comment,
+        changed_lines=changed_lines,
+        deleted_lines=deleted_lines,
+    )
+
+
+def _blocker_candidate_from_verification(
+    comment: ReviewComment,
+    verification: VerificationResult,
+    *,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
+) -> BlockerCandidate:
+    """Map trusted verification facts without minting a failure condition.
+
+    Snapshot confirmation proves evidence locations. Confirmed comments
+    rendered from ``CandidateFinding`` do not carry ``blocking``,
+    ``severity``, ``defect_kind``, ``fix_effort``, or ``category``, so
+    derived facts stay fail-closed unless the caller supplies
+    ``blocker_candidates`` or ``input_blocker_candidates``. Trigger text
+    is not a trusted failure condition or remedy. Attribution is
+    ``pr-change`` only when the finding targets a changed line on its
+    declared side.
+    """
+
+    return derive_blocker_candidate(
+        comment,
+        on_changed_path=_comment_in_changed_lines(
+            comment, changed_lines, deleted_lines
+        ),
+        evidence_locations_validated=verification.evidence_valid,
+    )
+
+
+def _align_confirmed_blocker_candidates(
+    *,
+    blocker_candidates: Sequence[BlockerCandidate] | None,
+    input_blocker_candidates: Sequence[BlockerCandidate] | None,
+    input_count: int,
+    published_indices: Sequence[int],
+    derived: Sequence[BlockerCandidate],
+) -> Sequence[BlockerCandidate]:
+    """Align caller facts with an explicit pre- or post-verification basis.
+
+    ``blocker_candidates`` must match published comments.
+    ``input_blocker_candidates`` must match input candidates and is then
+    sliced to published indices. Passing both fails closed.
+    """
+
+    if blocker_candidates is not None and input_blocker_candidates is not None:
+        raise ReviewInputError("specify only one blocker candidate basis")
+    published_count = len(published_indices)
+    if input_blocker_candidates is not None:
+        if len(input_blocker_candidates) != input_count:
+            raise ReviewInputError(
+                "input blocker candidates must align with input candidates"
+            )
+        return tuple(input_blocker_candidates[index] for index in published_indices)
+    if blocker_candidates is not None:
+        if len(blocker_candidates) != published_count:
+            raise ReviewInputError("blocker candidates must align with review comments")
+        return blocker_candidates
+    return derived
+
+
+def _with_admission(
+    result: ReviewResult,
+    *,
+    convergence_policy: ReviewConvergencePolicy | None,
+    blocker_candidates: Sequence[BlockerCandidate] | None,
+    changed_lines: Mapping[str, frozenset[int]] | None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
+    derived: Sequence[BlockerCandidate] | None = None,
+) -> ReviewResult:
+    policy = convergence_policy or ReviewConvergencePolicy()
+    return admit_review_result(
+        result,
+        policy,
+        candidates=blocker_candidates if blocker_candidates is not None else derived,
+        changed_lines=changed_lines,
+        deleted_lines=deleted_lines,
+    )
 
 
 def prepare_publishable_review(
@@ -550,11 +649,18 @@ def prepare_publishable_review(
     evidence_policy: str = "legacy",
     limits: ReviewLimits | None = None,
     changed_lines: Mapping[str, frozenset[int]] | None = None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
+    convergence_policy: ReviewConvergencePolicy | None = None,
+    blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
 ) -> PublishableReview:
     """Gate findings before publication using the configured evidence policy.
 
     ``legacy`` is the compatible single-pass mode: existing comments publish
-    unchanged and are identified by ``evidence_policy="legacy"``. ``confirmed``
+    unchanged and are identified by ``evidence_policy="legacy"``. Operator
+    modes may still admit those comments when ``blocker_candidates`` are
+    supplied; ``input_blocker_candidates`` and leftover facts under
+    display-only enforcement fail closed. ``confirmed``
     publishes only candidates whose evidence exists in the exact reviewed
     snapshot and, when ``changed_lines`` is supplied, targets a changed diff
     hunk. Legacy single-pass comments are dropped once candidate verification
@@ -562,7 +668,10 @@ def prepare_publishable_review(
     Rejected, duplicate, malformed, insufficient-evidence, and out-of-diff
     candidates never become findings, and incomplete coverage cannot be a clean
     review. A confirmed review with no legacy comments, no candidates, and no
-    rejections remains ``complete``.
+    rejections remains ``complete``. Operator review-convergence modes then
+    apply trusted blocker admission before a publisher emits events.
+    ``blocker_candidates`` must match published comments;
+    ``input_blocker_candidates`` must match input candidates.
     """
 
     if not isinstance(result, ReviewResult):
@@ -570,9 +679,23 @@ def prepare_publishable_review(
     if evidence_policy not in EVIDENCE_POLICIES:
         raise ReviewInputError("evidence policy is unsupported")
     if evidence_policy == "legacy":
+        if input_blocker_candidates is not None:
+            raise ReviewInputError(
+                "input blocker candidates require confirmed evidence policy"
+            )
+        policy = convergence_policy or ReviewConvergencePolicy()
+        if blocker_candidates is not None and policy.enforcement != "publication":
+            raise ReviewInputError("blocker candidates require publication enforcement")
         # Rebuild only when upstream tagged a non-legacy policy on the result.
         if result.evidence_policy != "legacy":
             result = replace(result, evidence_policy="legacy")
+        result = _with_admission(
+            result,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            changed_lines=changed_lines,
+            deleted_lines=deleted_lines,
+        )
         return PublishableReview(result, (), "legacy", 0)
 
     if candidates is None:
@@ -591,16 +714,20 @@ def prepare_publishable_review(
         limits=review_limits,
     )
     published: list[ReviewComment] = []
+    published_indices: list[int] = []
+    derived_facts: list[BlockerCandidate] = []
     final_verifications: list[VerificationResult] = []
     unpublished_candidates = 0
-    for candidate, verification in zip(candidates, verifications, strict=True):
+    for index, (candidate, verification) in enumerate(
+        zip(candidates, verifications, strict=True)
+    ):
         if verification.disposition != "confirmed":
             final_verifications.append(verification)
             unpublished_candidates += 1
             continue
         comment = _candidate_to_comment(candidate)
         if changed_lines is not None and not _comment_in_changed_lines(
-            comment, changed_lines
+            comment, changed_lines, deleted_lines
         ):
             final_verifications.append(
                 VerificationResult(
@@ -613,6 +740,15 @@ def prepare_publishable_review(
             unpublished_candidates += 1
             continue
         published.append(comment)
+        published_indices.append(index)
+        derived_facts.append(
+            _blocker_candidate_from_verification(
+                comment,
+                verification,
+                changed_lines=changed_lines,
+                deleted_lines=deleted_lines,
+            )
+        )
         final_verifications.append(verification)
     dropped_legacy = len(result.comments) if candidates else 0
     unpublished = unpublished_candidates + dropped_legacy
@@ -636,6 +772,19 @@ def prepare_publishable_review(
         limits=review_limits,
         source_context_coverage=result.source_context_coverage,
         evidence_policy="confirmed",
+    )
+    prepared = _with_admission(
+        prepared,
+        convergence_policy=convergence_policy,
+        blocker_candidates=_align_confirmed_blocker_candidates(
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
+            input_count=len(candidates),
+            published_indices=published_indices,
+            derived=tuple(derived_facts),
+        ),
+        changed_lines=changed_lines,
+        deleted_lines=deleted_lines,
     )
     return PublishableReview(
         prepared, tuple(final_verifications), "confirmed", unpublished

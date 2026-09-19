@@ -74,8 +74,8 @@ diff changed paths --> active lens selection
 
 ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
 ReviewService.run ----> ResourceBudget admission ----> RunOutcome
-ReviewConvergencePolicy ----> evaluate_blocker_admission / evaluate_round_admission
-                               (doctor/plan display; not a publication gate yet)
+ReviewConvergencePolicy ----> evaluate_blocker_admission / admit_review_result
+                               (legacy: ADR 0032 events; operator modes: publication)
 ```
 
 `ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets

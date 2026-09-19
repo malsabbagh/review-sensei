@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from ...convergence import BlockerCandidate, ReviewConvergencePolicy
 from ...conversation import ConversationService
 from ...errors import ReviewInputError
 from ...models import ReviewResult
@@ -71,6 +72,9 @@ class GitHubApplication:
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
         evidence_policy: str = "legacy",
+        convergence_policy: ReviewConvergencePolicy | None = None,
+        blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -112,6 +116,9 @@ class GitHubApplication:
             snapshot=snapshot,
             snapshot_sha256=snapshot_sha256,
             evidence_policy=evidence_policy,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
         )
 
     def recover_review(
@@ -129,6 +136,7 @@ class GitHubApplication:
         diff: str,
         app_slug: str,
         now=None,
+        convergence_policy: ReviewConvergencePolicy | None = None,
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
@@ -147,6 +155,17 @@ class GitHubApplication:
                 "recovery artifact result is incomplete",
                 diagnostic="recovery_artifact_incomplete",
             )
+        if convergence_policy is not None and not isinstance(
+            convergence_policy, ReviewConvergencePolicy
+        ):
+            raise GitHubPublicationError("review convergence policy is invalid")
+        if (
+            convergence_policy is not None
+            and convergence_policy.enforcement == "publication"
+        ):
+            raise GitHubPublicationError(
+                "operator-mode recovery cannot re-admit a serialized result"
+            )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",
@@ -163,6 +182,7 @@ class GitHubApplication:
             diff=diff,
             app_slug=app_slug,
             auto_approve=options.auto_approve,
+            convergence_policy=convergence_policy,
         )
 
     def publish_learning(

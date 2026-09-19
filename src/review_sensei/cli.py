@@ -826,7 +826,8 @@ def _doctor_parser() -> argparse.ArgumentParser:
         "--review-mode",
         help=(
             "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Display-only until publication wiring."
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission at publication; legacy keeps ADR 0032 events."
         ),
     )
     parser.add_argument(
@@ -858,7 +859,8 @@ def _plan_parser() -> argparse.ArgumentParser:
         "--review-mode",
         help=(
             "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Display-only until publication wiring."
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission at publication; legacy keeps ADR 0032 events."
         ),
     )
     parser.add_argument("--base-sha")
@@ -1127,7 +1129,7 @@ def _github_parser() -> argparse.ArgumentParser:
     publication_source.add_argument(
         "--recover-from",
         type=Path,
-        help="Publish a retained recovery artifact without invoking a model",
+        help="Publish a retained recovery artifact without invoking a model. Ambient REVIEWSENSEI_REVIEW_MODE does not apply; an explicit operator --review-mode is refused because serialized results drop admission state.",
     )
     review.add_argument(
         "--allow-write",
@@ -1156,6 +1158,15 @@ def _github_parser() -> argparse.ArgumentParser:
         "--enable-learning-prs",
         action="store_true",
         help="Opt into deterministic draft learning-PR publication.",
+    )
+    review.add_argument(
+        "--review-mode",
+        help=(
+            "Review-convergence mode: legacy (default), advisory, "
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission before GitHub review events. Recovery artifacts cannot "
+            "be republished under operator modes."
+        ),
     )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
@@ -1233,6 +1244,12 @@ def _github_parser() -> argparse.ArgumentParser:
 
 
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
+    from .convergence import (
+        OPERATOR_REVIEW_MODES,
+        ReviewConvergencePolicy,
+        resolve_review_convergence_policy,
+        resolve_review_mode,
+    )
     from .hosting.github import (
         BrokerClient,
         ConversationPublisher,
@@ -1286,6 +1303,19 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
+        explicit_mode = getattr(args, "review_mode", None)
+        if args.recover_from:
+            if (
+                explicit_mode is not None
+                and resolve_review_mode(explicit_mode) in OPERATOR_REVIEW_MODES
+            ):
+                convergence_policy = resolve_review_convergence_policy(
+                    mode=explicit_mode
+                )
+            else:
+                convergence_policy = ReviewConvergencePolicy()
+        else:
+            convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
@@ -1310,6 +1340,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     artifact=artifact,
                     diff=diff,
                     app_slug=args.app_slug,
+                    convergence_policy=convergence_policy,
                 )
             except (GitHubPublicationTransientError, GitHubPublicationError) as exc:
                 diagnostic = (
@@ -1375,6 +1406,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 result=result,
                 diff=diff,
                 app_slug=args.app_slug,
+                convergence_policy=convergence_policy,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
