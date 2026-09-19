@@ -1120,6 +1120,9 @@ class ReviewPublisher:
             convergence_policy = resolve_review_convergence_policy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")
+        # Operator modes may only withhold GitHub review events. The
+        # conjunction cannot promote auto_approve=False to REQUEST_CHANGES
+        # or APPROVE, including when REVIEWSENSEI_REVIEW_MODE is merge-focused.
         auto_approve = (
             auto_approve and convergence_policy.automatic_github_review_events
         )

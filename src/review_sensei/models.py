@@ -525,7 +525,14 @@ COMMENT_SIDES = frozenset({"LEFT", "RIGHT", "FILE"})
 
 @dataclass(frozen=True)
 class ReviewComment:
-    """A proposed review finding bound to a left, right, or file location."""
+    """A proposed review finding bound to a left, right, or file location.
+
+    ``effective_blocking`` and ``needs_human`` are C2 runtime-only admission
+    fields. They are omitted from ``to_dict`` / ``ReviewResult.from_dict`` and
+    from the closed v1 ``review-comment`` / ``review-result`` schemas.
+    Reconstructing a result from JSON drops them; ``blocks_approval`` then
+    falls back to the model proposal or legacy severity rule.
+    """
 
     path: str
     line: int | None
@@ -614,6 +621,12 @@ class ReviewComment:
             raise ReviewInputError("comment needs_human must be a boolean")
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the publisher-facing v1 comment.
+
+        Runtime admission state is intentionally omitted so the closed v1
+        schema stays valid and trusted evaluator output is not persisted.
+        """
+
         value: dict[str, object] = {
             "path": self.path,
             "body": self.body,
@@ -949,6 +962,8 @@ class ReviewResult:
                 raise ReviewInputError(
                     f"review result comment {index} evidence_id must be a string"
                 )
+            # effective_blocking / needs_human are runtime-only and must not
+            # be restored from a v1 document.
             comment_values.append(
                 ReviewComment(
                     path=path,

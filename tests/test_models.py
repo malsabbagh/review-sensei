@@ -12,6 +12,7 @@ from review_sensei.models import (
     ReviewRequest,
     ReviewResult,
 )
+from review_sensei.schemas import validate_public_document
 from review_sensei.validation import ReviewLimits
 
 
@@ -124,6 +125,35 @@ class ModelTests(unittest.TestCase):
                 effective_blocking=True,
             ).blocks_approval
         )
+
+    def test_review_comment_omits_runtime_admission_fields_from_dict(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=1,
+            body="finding",
+            blocking=True,
+            effective_blocking=False,
+            needs_human=True,
+        )
+        payload = comment.to_dict()
+        self.assertNotIn("effective_blocking", payload)
+        self.assertNotIn("needs_human", payload)
+        validate_public_document(payload, "review-comment")
+        restored = ReviewResult.from_dict(
+            {
+                "summary": "Review complete.",
+                "comments": [payload],
+                "provider": "fake",
+            }
+        ).comments[0]
+        self.assertIsNone(restored.effective_blocking)
+        self.assertFalse(restored.needs_human)
+        self.assertTrue(restored.blocking)
+        injected = dict(payload)
+        injected["effective_blocking"] = True
+        injected["needs_human"] = True
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(injected, "review-comment")
 
     def test_review_result_allows_an_unclassified_comment(self):
         result = ReviewResult.from_dict(

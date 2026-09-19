@@ -75,8 +75,16 @@ unless the caller supplies explicit `BlockerCandidate` facts.
 the comment side: `RIGHT` against new-file changed lines, `LEFT` against
 old-file deleted lines. The model `blocking` field
 remains the proposal. `ReviewComment.blocks_approval` uses the admitted
-effective value when present. Publication markers and `REQUEST_CHANGES` follow
-effective blocking. Human adjudication withholds `APPROVE` through
+effective value when present. `effective_blocking` and `needs_human` are
+runtime-only: they are omitted from `to_dict` / `from_dict` and the closed
+v1 `review-comment` / `review-result` schemas. Reconstructing a result from
+JSON drops them; `blocks_approval` then falls back to the model proposal.
+Publication markers and `REQUEST_CHANGES` follow effective blocking.
+`ReviewPublisher.publish` intersects caller `auto_approve` with
+`automatic_github_review_events`. The conjunction can only withhold
+`REQUEST_CHANGES` and the APPROVE finalizer; it cannot upgrade an explicit
+`auto_approve=False`, including when `REVIEWSENSEI_REVIEW_MODE` is an
+operator mode. Human adjudication withholds `APPROVE` through
 `evaluate_auto_approval` without inventing a proven blocker. Advisory
 observations in operator modes are folded into the review summary so required
 conversation resolution cannot turn optional notes into mechanical blockers.

@@ -11,7 +11,10 @@
   condition or promote `blocking=false` findings. Published
   `blocker_candidates` and input `input_blocker_candidates` are distinct
   bases. Attribution uses each comment's side against new-file or old-file
-  line maps. `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
+  line maps. Admitted `effective_blocking` / `needs_human` stay runtime-only
+  and are omitted from the v1 comment schema. Intersecting `auto_approve`
+  with `automatic_github_review_events` can only withhold GitHub events.
+  `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned
   `legacy` / `advisory` / `merge-focused` / `strict` modes, deterministic

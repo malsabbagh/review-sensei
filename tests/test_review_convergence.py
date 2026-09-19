@@ -882,6 +882,41 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertTrue(finding.effective_blocking)
         self.assertTrue(finding.blocks_approval)
 
+    def test_admitted_result_omits_runtime_fields_from_public_document(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        admitted = admit_review_result(result, policy, candidates=(facts,))
+        payload = admitted.to_dict()
+        validate_public_document(payload, "review-result")
+        serialized = payload["comments"][0]
+        self.assertIsInstance(serialized, dict)
+        self.assertNotIn("effective_blocking", serialized)
+        self.assertNotIn("needs_human", serialized)
+        restored = ReviewResult.from_dict(payload)
+        self.assertIsNone(restored.comments[0].effective_blocking)
+        self.assertFalse(restored.comments[0].needs_human)
+        self.assertFalse(restored.comments[0].blocking)
+
     def test_misaligned_candidates_fail_closed(self):
         result = ReviewResult(
             summary="Summary.",
