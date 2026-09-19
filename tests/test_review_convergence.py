@@ -16,6 +16,7 @@ from review_sensei import (
     evaluate_round_admission,
     resolve_review_convergence_policy,
 )
+from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.convergence import (
     PREFERENCE_CATEGORIES,
     REQUIRED_CONTRACT_KINDS,
@@ -25,6 +26,7 @@ from review_sensei.convergence import (
     resolve_review_mode,
 )
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
+from review_sensei.disposition import FindingDisposition
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.schemas import validate_public_document
@@ -915,6 +917,44 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertTrue(finding.blocking)
         self.assertFalse(finding.effective_blocking)
         self.assertFalse(finding.blocks_approval)
+
+    def test_persisted_head_bound_disposition_is_applied_during_admission(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=True,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+        disposition = FindingDisposition(
+            fingerprint=fingerprint,
+            action="accept-risk",
+            reason="accepted launch exception",
+            actor="alice",
+            head_sha="a" * 40,
+        )
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            ReviewConvergencePolicy(mode="merge-focused"),
+            changed_lines={"src/app.py": frozenset({2})},
+            authorized_dispositions=(disposition,),
+            current_head_sha="a" * 40,
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertFalse(admitted.comments[0].needs_human)
+
+        stale = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            ReviewConvergencePolicy(mode="merge-focused"),
+            changed_lines={"src/app.py": frozenset({2})},
+            authorized_dispositions=(disposition,),
+            current_head_sha="b" * 40,
+        )
+        self.assertFalse(stale.comments[0].effective_blocking)
+        self.assertTrue(stale.comments[0].needs_human)
 
     def test_merge_focused_demotes_model_blocker_without_evidence(self):
         comment = ReviewComment(

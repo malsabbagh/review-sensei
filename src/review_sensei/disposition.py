@@ -37,7 +37,10 @@ FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
 MAX_ACTOR_BYTES = 256
-_SENSEI = re.compile(r"(?<![\w@])@sensei(?=\s+)")
+# A command mention must start at the beginning of a line or after whitespace.
+# This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
+# text such as ``!@sensei`` and ``(@sensei``.
+_SENSEI = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
 _CONTINUE_ROUNDS = re.compile(
     r"^review\s+continue(?:\s+--rounds\s+(0|1))?\s*$", re.IGNORECASE
 )
@@ -211,8 +214,19 @@ class FindingDisposition:
             "expires_at": self.expires_at,
         }
 
-    def honors(self, fingerprint: str, *, now: datetime | None = None) -> bool:
+    def honors(
+        self,
+        fingerprint: str,
+        *,
+        head_sha: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
         if self.fingerprint != fingerprint:
+            return False
+        # A disposition recorded for one reviewed head must never silently
+        # carry forward to a different head. A missing current head is also
+        # fail-closed when the disposition is explicitly head-bound.
+        if self.head_sha is not None and self.head_sha != head_sha:
             return False
         if self.expires_at is None:
             return True
@@ -368,9 +382,12 @@ def disposition_honors_fingerprint(
     dispositions: Sequence[FindingDisposition],
     fingerprint: str,
     *,
+    head_sha: str | None = None,
     now: datetime | None = None,
 ) -> bool:
-    return any(item.honors(fingerprint, now=now) for item in dispositions)
+    return any(
+        item.honors(fingerprint, head_sha=head_sha, now=now) for item in dispositions
+    )
 
 
 def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...]:

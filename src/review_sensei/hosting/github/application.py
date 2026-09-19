@@ -177,6 +177,12 @@ class GitHubApplication:
                         f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                     )
                 raise
+        authorized_dispositions: tuple[object, ...] = ()
+        if ledger is not None:
+            from ...disposition import session_dispositions
+
+            if prepared is not None:
+                authorized_dispositions = session_dispositions(prepared.record)
         try:
             publication = self.reviewer.publish(
                 token=token,
@@ -197,6 +203,7 @@ class GitHubApplication:
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
+                authorized_dispositions=authorized_dispositions,
             )
         except BaseException as publication_error:
             if ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:

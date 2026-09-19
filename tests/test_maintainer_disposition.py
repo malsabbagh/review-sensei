@@ -106,6 +106,8 @@ class MaintainerCommandParseTests(unittest.TestCase):
             "@sensei!review pause",
             "@sensei-review pause",
             "@senseis review pause",
+            "!@sensei review pause",
+            "(@sensei review pause",
         ):
             with self.subTest(body=body):
                 self.assertIsNone(parse_maintainer_command(body, actor="alice"))
@@ -140,6 +142,18 @@ class MaintainerCommandParseTests(unittest.TestCase):
                 reason="",
                 actor="alice",
             )
+
+    def test_head_bound_disposition_does_not_carry_to_another_head(self):
+        disposition = FindingDisposition(
+            fingerprint="abcd1234abcd1234",
+            action="dismiss",
+            reason="accepted",
+            actor="alice",
+            head_sha="a" * 40,
+        )
+        self.assertTrue(disposition.honors("abcd1234abcd1234", head_sha="a" * 40))
+        self.assertFalse(disposition.honors("abcd1234abcd1234", head_sha="b" * 40))
+        self.assertFalse(disposition.honors("abcd1234abcd1234"))
 
 
 class SessionCommandTests(unittest.TestCase):
