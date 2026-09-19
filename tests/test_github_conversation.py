@@ -202,6 +202,78 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(len(prepared.context.messages), 2)
         self.assertEqual(len(calls), 6)
 
+    def test_prepare_issue_context_prioritizes_current_head_finding_hunks(self):
+        updated = "2026-08-19T00:00:00Z"
+        head = "b" * 40
+        source = {
+            "id": 10,
+            "issue_url": ISSUE_URL,
+            "body": "@sensei verify the remaining finding",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "OWNER",
+            "updated_at": updated,
+            "created_at": updated,
+        }
+        target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        current_finding = {
+            "id": 11,
+            "body": "Current exact-head finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "created_at": updated,
+            "commit_id": head,
+            "path": "src/target.py",
+            "line": 42,
+            "diff_hunk": target_hunk,
+        }
+        stale_finding = {
+            "id": 12,
+            "body": "Stale finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "created_at": updated,
+            "commit_id": "c" * 40,
+            "path": "src/stale.py",
+            "line": 7,
+            "diff_hunk": "@@ -1 +1 @@\n-old-stale\n+new-stale",
+        }
+        responses = [
+            json_response(source),
+            json_response(pr_payload(head)),
+            json_response([source]),
+            json_response([current_finding, stale_finding]),
+            json_response(
+                [
+                    {
+                        "filename": "docs/large.md",
+                        "patch": "x" * (13 * 1024),
+                    },
+                    {
+                        "filename": "src/target.py",
+                        "patch": "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return",
+                    },
+                ]
+            ),
+            json_response({"message": "not found"}, 404),
+        ]
+        http, calls = make_http(responses)
+
+        prepared = ConversationPublisher(http=http).prepare_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at=updated,
+            expected_head_sha=head,
+            app_slug="review-sensei[bot]",
+            source_kind="issue",
+        )
+
+        self.assertIsInstance(prepared, PreparedConversation)
+        self.assertTrue(prepared.context.diff_context.startswith("path=src/target.py"))
+        self.assertIn("path=src/target.py", prepared.context.diff_context)
+        self.assertIn(target_hunk, prepared.context.diff_context)
+        self.assertNotIn("new-stale", prepared.context.diff_context)
+        self.assertEqual(len(calls), 6)
+
     def test_prepare_inline_child_resolves_and_validates_root(self):
         updated = "2026-08-19T00:00:00Z"
         head = "b" * 40
