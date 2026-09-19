@@ -85,9 +85,10 @@ In scope:
 
 - Baseline and verification-scope types, closed v1 schemas, classification
   and lineage evaluators, and IncrementalReviewPlan construction. A complete
-  baseline must also carry an explicit reviewed-path set or complete coverage;
-  a legacy result with findings but no coverage stays incomplete, and a clean
-  result with neither cannot establish a baseline.
+  baseline must carry complete coverage; caller-supplied reviewed paths may
+  constrain a fallback scope but do not establish a legacy baseline. A result
+  with no coverage stays incomplete, and a clean result with neither cannot
+  establish a baseline.
 - Decision tests for cross-file effects, omission, deduplication, rebase,
   and model/policy invalidation.
 - Doctor/plan display and admission wiring.

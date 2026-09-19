@@ -325,17 +325,10 @@ def baseline_from_review(
         reviewed = _bounded_paths(paths, label="reviewed")
     else:
         reviewed = _bounded_paths(reviewed_paths, label="reviewed")
-    # An explicit reviewed-path set is the caller's coverage attestation for
-    # legacy results that predate the coverage manifest. It is therefore
-    # compatible for incremental planning even though no manifest exists.
-    coverage_complete = coverage_complete or reviewed_paths is not None
-    # A legacy result without a coverage manifest is only a baseline when the
-    # caller supplies the reviewed scope explicitly.  Finding paths alone do
-    # not prove that the rest of the change was enumerated and reviewed.
-    complete = result.review_status == "complete" and (
-        (result.coverage is not None and coverage_complete)
-        or reviewed_paths is not None
-    )
+    # A legacy result without a coverage manifest is never a complete
+    # baseline. Caller-supplied reviewed paths constrain the fallback scope,
+    # but do not prove that the rest of the change was enumerated and reviewed.
+    complete = result.review_status == "complete" and coverage_complete
     if complete and not reviewed:
         raise ReviewInputError(
             "complete baseline requires reviewed paths or complete coverage"
@@ -570,10 +563,16 @@ def preview_verification_scope(
         )
     # A preview has no baseline cache key to compare with the current head.
     # It may describe the operator's next step, but it must never authorize
-    # late admission solely from a session counter.
+    # late admission solely from a session counter. The counter still tells
+    # the display whether the next planned round is initial or verification.
+    preview_round = (
+        "verification"
+        if completed_initial_reviews is not None and completed_initial_reviews >= 1
+        else "initial"
+    )
     return _scope(
         status="baseline-required",
-        round_kind="initial",
+        round_kind=preview_round,
         late_admission_required=False,
         coverage_mode="full",
         invalidation_reason="missing-baseline",
@@ -824,7 +823,7 @@ def _baseline_match_candidates(
         if len(path_kind_matches) == 1:
             return path_kind_matches[0], False
         if len(path_kind_matches) > 1:
-            return None, False
+            return None, True
     return None, False
 
 
@@ -893,9 +892,6 @@ def _causal_parent(
                 and _shares_lineage_identity(comment, finding)
             ):
                 return finding, "fix-introduced-on-changed-path"
-        for finding in baseline.findings:
-            if finding.path in changed and _shares_lineage_identity(comment, finding):
-                return finding, "fix-introduced-on-changed-path"
     if comment.path in related:
         for finding in baseline.findings:
             if (
@@ -903,11 +899,6 @@ def _causal_parent(
                 and (finding.path in changed or finding.path in related)
                 and _shares_lineage_identity(comment, finding)
             ):
-                return finding, "fix-introduced-on-related-path"
-        for finding in baseline.findings:
-            if (
-                finding.path in changed or finding.path in related
-            ) and _shares_lineage_identity(comment, finding):
                 return finding, "fix-introduced-on-related-path"
     return None, "none"
 
