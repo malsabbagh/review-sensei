@@ -13,6 +13,7 @@ const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
   review_publish: { "pull_requests": "write" },
+  review_status: { "pull_requests": "read" },
   inline_reply: { "pull_requests": "write" },
   issue_reply: { "pull_requests": "write" },
   learning_write: { contents: "write", "pull_requests": "write" },

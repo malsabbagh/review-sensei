@@ -66,6 +66,23 @@
       "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
     },
     "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "operator_paused": {"type": "boolean"}
+    "operator_paused": {"type": "boolean"},
+    "dispositions": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint", "action", "reason", "actor", "head_sha", "expires_at"],
+        "properties": {
+          "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{16,64}$"},
+          "action": {"enum": ["dismiss", "defer", "accept-risk"]},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+          "actor": {"type": "string", "minLength": 1, "maxLength": 256},
+          "head_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40,64}$"},
+          "expires_at": {"type": ["string", "null"], "format": "date-time"}
+        }
+      }
+    }
   }
 }

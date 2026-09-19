@@ -136,6 +136,18 @@ class BrokerClientTests(unittest.TestCase):
             {"oidc_token": "oidc.token", "capability": "review_publish"},
         )
 
+    def test_exchange_accepts_read_only_status_capability(self):
+        client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
+        self.assertEqual(
+            client.exchange("oidc.token", capability="review_status"),
+            "ghs_capability",
+        )
+        body = json.loads(calls[0][3].decode("utf-8"))
+        self.assertEqual(
+            body,
+            {"oidc_token": "oidc.token", "capability": "review_status"},
+        )
+
     def test_exchange_rejects_arbitrary_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
         with self.assertRaises(GitHubBrokerClientError):

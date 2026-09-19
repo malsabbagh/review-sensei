@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from ...errors import ReviewInputError
 from ...session import (
@@ -354,10 +354,10 @@ class GitHubIssueCommentSessionLedger:
             )
         return verified_record
 
-    def _replace(
+    def replace(
         self,
         identity: SessionIdentity,
-        mutate,
+        mutate: Callable[[SessionRecord], SessionRecord],
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
@@ -421,6 +421,17 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session comment update lost")
         return readback
 
+    # Kept as a compatibility shim for older in-process callers. New code
+    # must use the public CAS seam above.
+    def _replace(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        return self.replace(identity, mutate, now=now)
+
     def reserve(
         self,
         identity: SessionIdentity,
@@ -430,7 +441,7 @@ class GitHubIssueCommentSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_reserved(
                 record,
@@ -450,7 +461,7 @@ class GitHubIssueCommentSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_commit(
                 record,
@@ -469,7 +480,7 @@ class GitHubIssueCommentSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_abort(
                 record,

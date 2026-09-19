@@ -176,6 +176,7 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | Capability | GitHub installation permission |
 | --- | --- |
 | `review_publish` | `pull_requests: write` |
+| `review_status` | `pull_requests: read` |
 | `inline_reply` | `pull_requests: write` |
 | `issue_reply` | `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |

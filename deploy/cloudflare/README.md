@@ -229,7 +229,8 @@ name only; the App never creates, retrieves, logs, persists, or reveals that
 secret value.
 
 The isolated `POST /github/token` route accepts a bounded OIDC exchange for
-`review_publish`, `inline_reply`, `issue_reply`, or `learning_write`. It
+`review_publish`, `review_status`, `inline_reply`, `issue_reply`, or
+`learning_write`. It
 resolves the configured workflow tag, verifies its tag ref and runtime SHA,
 and checks repository identity; it rejects
 forks and unsupported runner environments/events, resolves the installation server-side,
@@ -259,7 +260,7 @@ exactly match the requested map plus GitHub's mandatory `metadata: read`;
 responses that omit metadata fail closed. `review_publish` alone may also
 receive an unrequested `contents: read` because GitHub can return it to allow
 repository-data access while publishing a review. The broker never requests
-that permission, and `inline_reply`, `issue_reply`, and `learning_write`
+that permission, and `review_status`, `inline_reply`, `issue_reply`, and `learning_write`
 reject it if it is returned. This is a narrow compatibility exception, not an
 additional capability grant. GitHub's `variables` and `actions_variables`
 spellings represent the same requested Variables scope. The setup-token request

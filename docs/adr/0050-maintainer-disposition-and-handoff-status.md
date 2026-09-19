@@ -34,8 +34,9 @@ Support these comment commands, case-sensitive `@sensei` gate:
 
 Unauthorized actors, bots, and the App itself are ignored. Dismiss,
 defer, and accept-risk require a reason and bind to a finding
-fingerprint plus optional head SHA. A recorded disposition is a human
-decision (`honored-disposition`), never an independently verified fix.
+fingerprint plus optional head SHA. The bounded disposition object is persisted
+on the C3 session record. A recorded disposition is a human decision
+(`honored-disposition`), never an independently verified fix.
 Accepted exceptions do not waive coverage, current-head identity, model
 qualification, or other repository rules.
 
@@ -47,7 +48,9 @@ C5 `handoff` publication now projects to run outcome `action_required`,
 which is a failing CLI/check status. `skipped_policy` remains for
 disabled writes, forks, and other non-handoff skips. With GitHub writes
 disabled, `GitHubApplication.apply_maintainer_command` returns
-`writes_disabled` without exchanging a broker capability.
+`writes_disabled` for mutating commands without exchanging a broker capability.
+Status uses the read-only `review_status` capability for a hosted ledger and
+does not create a missing session comment.
 
 Exact-head binding uses the command's optional head SHA against the
 current pull-request head at trigger time. Advisory mode still does not

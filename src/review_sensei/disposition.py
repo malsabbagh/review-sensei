@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Sequence, cast
 
 from .errors import ReviewInputError
 from .session import (
@@ -35,7 +35,7 @@ MAINTAINER_ACTIONS = frozenset(
 FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
-_SENSEI = re.compile(r"(?:^|\s)@sensei\s+")
+_SENSEI = re.compile(r"(?<![\w@])@sensei(?=\s+)")
 _CONTINUE_ROUNDS = re.compile(
     r"^review\s+continue(?:\s+--rounds\s+(0|1))?\s*$", re.IGNORECASE
 )
@@ -76,7 +76,7 @@ def authorized_maintainer(
 
     if not isinstance(login, str) or not login.strip():
         return False
-    if login == app_slug:
+    if login.casefold() == app_slug.casefold():
         return False
     if isinstance(user_type, str) and user_type.lower() == "bot":
         return False
@@ -212,11 +212,17 @@ def apply_session_command(
     *,
     now: datetime | None = None,
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
-    """Mutate pause/continuation on the C3 ledger. Finding actions do not."""
+    """Mutate pause/continuation and persist finding decisions on the ledger."""
 
     loaded = ledger.load(identity, now=now)
     if loaded.status in {"missing", "expired"} or loaded.record is None:
-        record = ledger.initialize(identity, now=now)
+        # Status is a read-only command: do not create a hosted issue comment
+        # merely to report that no durable session exists.
+        record = (
+            SessionRecord.create(identity, now=now)
+            if command.action == "status"
+            else ledger.initialize(identity, now=now)
+        )
     elif loaded.status in {"ok", "migrated"}:
         record = loaded.record
     else:
@@ -259,6 +265,7 @@ def apply_session_command(
         actor=command.actor,
         head_sha=command.head_sha,
     )
+    record = _append_disposition(ledger, identity, record, disposition, now=now)
     return record, MaintainerCommandResult(
         action=command.action,
         applied=True,
@@ -283,20 +290,40 @@ def _set_operator_paused(
         generation=record.generation + 1,
         operator_paused=paused,
     )
-    replace = getattr(ledger, "_replace", None)
-    if callable(replace):
+    replace = getattr(ledger, "replace", None)
+    if not callable(replace):
+        raise ReviewInputError("session ledger does not support CAS mutation")
 
-        def mutate(current: SessionRecord) -> SessionRecord:
-            if current.generation != record.generation:
-                raise ReviewInputError("session generation conflict")
-            return updated
-
-        return replace(identity, mutate, now=now)
-    write = getattr(ledger, "_write", None)
-    if callable(write):
-        write(identity, updated)
+    def mutate(current: SessionRecord) -> SessionRecord:
+        if current.generation != record.generation:
+            raise ReviewInputError("session generation conflict")
         return updated
-    return updated
+
+    return replace(identity, mutate, now=now)
+
+
+def _append_disposition(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    disposition: FindingDisposition,
+    *,
+    now: datetime | None,
+) -> SessionRecord:
+    replace = getattr(ledger, "replace", None)
+    if not callable(replace):
+        raise ReviewInputError("session ledger does not support CAS mutation")
+
+    def mutate(current: SessionRecord) -> SessionRecord:
+        if current.generation != record.generation:
+            raise ReviewInputError("session generation conflict")
+        return current.evolve(
+            now=now,
+            generation=current.generation + 1,
+            dispositions=(*current.dispositions, disposition.to_dict()),
+        )
+
+    return replace(identity, mutate, now=now)
 
 
 def disposition_honors_fingerprint(
@@ -306,6 +333,24 @@ def disposition_honors_fingerprint(
     now: datetime | None = None,
 ) -> bool:
     return any(item.honors(fingerprint, now=now) for item in dispositions)
+
+
+def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...]:
+    """Decode the bounded dispositions persisted on one session record."""
+
+    if not isinstance(record, SessionRecord):
+        raise ReviewInputError("session record is invalid")
+    return tuple(
+        FindingDisposition(
+            fingerprint=cast(str, item["fingerprint"]),
+            action=cast(str, item["action"]),
+            reason=cast(str, item["reason"]),
+            actor=cast(str, item["actor"]),
+            head_sha=cast(str | None, item["head_sha"]),
+            expires_at=cast(str | None, item["expires_at"]),
+        )
+        for item in record.dispositions
+    )
 
 
 def render_convergence_summary(
@@ -345,4 +390,5 @@ __all__ = [
     "disposition_honors_fingerprint",
     "parse_maintainer_command",
     "render_convergence_summary",
+    "session_dispositions",
 ]

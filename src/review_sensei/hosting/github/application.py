@@ -286,25 +286,33 @@ class GitHubApplication:
                 operator_paused=False,
                 summary="unauthorized",
             )
-        if not options.github_writes:
-            return MaintainerCommandResult(
-                action=command.action,
-                applied=False,
-                operator_paused=False,
-                summary="writes_disabled",
-            )
-        token = self.broker.exchange(
-            oidc_token or self.broker.request_oidc_token(),
-            capability="review_publish",
-        )
-        ledger = self._session_ledger_for_token(token, options=options)
-        if ledger is None:
-            raise GitHubPublicationError("maintainer commands require a session ledger")
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
             repository_id=repository_id,
         )
+        # A local status read is already bounded by the injected ledger and
+        # does not need a broker capability or a GitHub write opt-in. Hosted
+        # ledgers still exchange below because the issue comment must be read
+        # through the broker-owned installation token.
+        ledger = self.session_ledger if command.action == "status" else None
+        if ledger is None:
+            if command.action != "status" and not options.github_writes:
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="writes_disabled",
+                )
+            token = self.broker.exchange(
+                oidc_token or self.broker.request_oidc_token(),
+                capability=(
+                    "review_status" if command.action == "status" else "review_publish"
+                ),
+            )
+            ledger = self._session_ledger_for_token(token, options=options)
+        if ledger is None:
+            raise GitHubPublicationError("maintainer commands require a session ledger")
         _record, result = apply_session_command(ledger, identity, command)
         return result
 

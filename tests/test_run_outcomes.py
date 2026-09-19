@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import tempfile
@@ -346,6 +347,11 @@ class RunOutcomeWiringTests(unittest.TestCase):
             self.assertIn("outcome_status=provider_failed", output_text)
             self.assertIn("outcome_diagnostic=secret_redacted", output_text)
             self.assertNotIn(CANARY, outcome_path.read_text(encoding="utf-8"))
+
+    def test_action_required_emits_maintainer_attention_annotation(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            emit_host_outcome(RunOutcome("action_required", diagnostic="paused"))
+        self.assertIn("ReviewSensei maintainer attention required", stderr.getvalue())
 
     def test_ineligible_plan_emits_skipped_policy(self):
         plan = plan_review_execution(

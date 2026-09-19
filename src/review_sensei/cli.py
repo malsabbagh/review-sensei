@@ -1298,7 +1298,10 @@ def _github_parser() -> argparse.ArgumentParser:
     command.add_argument(
         "--allow-write",
         action="store_true",
-        help="Required only when exchanging GitHub write capabilities.",
+        help=(
+            "Required only when exchanging a GitHub capability; local session "
+            "ledger commands, including status/pause/continue, do not require it."
+        ),
     )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
