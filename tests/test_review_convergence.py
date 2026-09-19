@@ -97,6 +97,15 @@ class PolicyContractTests(unittest.TestCase):
         self.assertFalse(policy.automatic_github_review_events)
         self.assertFalse(policy.inline_advisory_threads)
         self.assertEqual(policy.compatibility, "explicit-opt-in")
+        self.assertEqual(policy.enforcement, "publication")
+
+    def test_operator_mode_constructor_uses_publication_enforcement(self):
+        for mode in ("advisory", "merge-focused", "strict"):
+            with self.subTest(mode=mode):
+                policy = ReviewConvergencePolicy(mode=mode)
+                self.assertEqual(policy.enforcement, "publication")
+                coerced = ReviewConvergencePolicy(mode=mode, enforcement="display-only")
+                self.assertEqual(coerced.enforcement, "publication")
 
     def test_policy_rejects_unknown_fields_and_digest_mismatch(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -789,6 +798,25 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertIs(admitted, result)
         self.assertTrue(admitted.comments[0].blocks_approval)
         self.assertIsNone(admitted.comments[0].effective_blocking)
+
+    def test_operator_mode_without_explicit_enforcement_still_admits(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=True,
+            severity="medium",
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        admitted = admit_review_result(
+            result, ReviewConvergencePolicy(mode="merge-focused")
+        )
+        finding = admitted.comments[0]
+        self.assertTrue(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertFalse(finding.blocks_approval)
 
     def test_merge_focused_demotes_model_blocker_without_evidence(self):
         comment = ReviewComment(

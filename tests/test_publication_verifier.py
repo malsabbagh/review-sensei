@@ -572,6 +572,31 @@ class PublishableReviewTests(unittest.TestCase):
                 input_blocker_candidates=(facts,),
             )
 
+    def test_confirmed_derived_facts_do_not_admit_without_caller_candidates(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+        )
+        finding = prepared.result.comments[0]
+        self.assertIsNone(finding.blocking)
+        self.assertIsNone(finding.severity)
+        self.assertFalse(finding.effective_blocking)
+        self.assertFalse(finding.needs_human)
+        self.assertFalse(finding.blocks_approval)
+
     def test_unsupported_policy_fails_closed(self) -> None:
         with self.assertRaises(ReviewInputError):
             prepare_publishable_review(self.result, evidence_policy="best-effort")

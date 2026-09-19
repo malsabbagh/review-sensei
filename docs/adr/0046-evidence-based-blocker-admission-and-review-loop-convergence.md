@@ -80,7 +80,16 @@ candidate fails closed instead of admitting the wrong finding. A required
 contract remains a violation source, not a substitute for high/critical
 impact. Confirmed
 evidence verification (#114) validates snapshot locations; it does not mint
-a failure condition or actionable remedy. Operator-mode admission stays
+a failure condition or actionable remedy. Confirmed findings are rendered
+from `CandidateFinding` (claim, trigger, evidence, free-text severity
+rationale). That type has no `blocking`, `severity`, `defect_kind`,
+`fix_effort`, or `category`, so derived confirmed facts stay fail-closed.
+Operator-mode admission of a confirmed finding requires caller-supplied
+`blocker_candidates` or `input_blocker_candidates`; snapshot confirmation
+alone does not admit a blocker. Operator-mode policies always use
+`enforcement=publication` even when constructed as
+`ReviewConvergencePolicy(mode="merge-focused")`; `display-only` remains
+the `legacy` default. Operator-mode admission otherwise stays
 fail-closed unless the caller supplies explicit `BlockerCandidate` facts.
 `blocker_candidates` must match published comments;
 `input_blocker_candidates` must match input candidates. Attribution uses

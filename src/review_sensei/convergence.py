@@ -215,6 +215,8 @@ class ReviewConvergencePolicy:
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", normalize_review_mode(self.mode))
         _token(self.enforcement, allowed=ENFORCEMENT_MODES, label="enforcement")
+        if self.mode in OPERATOR_REVIEW_MODES and self.enforcement != "publication":
+            object.__setattr__(self, "enforcement", "publication")
         _require_bounded_int(
             self.max_completed_initial_reviews,
             label="max_completed_initial_reviews",
@@ -807,7 +809,12 @@ def admit_review_result(
     changed_lines: Mapping[str, frozenset[int]] | None = None,
     deleted_lines: Mapping[str, frozenset[int]] | None = None,
 ) -> ReviewResult:
-    """Apply trusted blocker admission to each finding before publication."""
+    """Apply trusted blocker admission to each finding before publication.
+
+    Operator modes always carry ``enforcement="publication"`` (the dataclass
+    coerces that invariant), so admission runs. ``legacy`` stays
+    ``display-only`` and returns the result unchanged.
+    """
 
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("review result is invalid")

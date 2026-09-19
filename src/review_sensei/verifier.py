@@ -481,6 +481,16 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
 
 
 def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
+    """Render a confirmed candidate as a comment without minting classification.
+
+    ``CandidateFinding`` has claim, trigger, evidence, and a free-text
+    severity rationale. It has no ``blocking``, ``severity``,
+    ``defect_kind``, ``fix_effort``, or ``category``. Operator-mode
+    admission of a confirmed finding therefore requires caller-supplied
+    ``blocker_candidates`` / ``input_blocker_candidates``; derived facts
+    stay fail-closed.
+    """
+
     # Anchor the finding at the first evidence reference on impacted_path when
     # present; otherwise fall back to the primary reference. Publishers may
     # still reject the location against the diff if it is outside hunks.
@@ -561,11 +571,14 @@ def _blocker_candidate_from_verification(
 ) -> BlockerCandidate:
     """Map trusted verification facts without minting a failure condition.
 
-    Snapshot confirmation proves evidence locations. Trigger text is not a
-    trusted failure condition or remedy, so those gates stay fail-closed
-    unless the comment already carries structured fields such as
-    ``fix_effort``. Attribution is ``pr-change`` only when the finding
-    targets a changed line on its declared side.
+    Snapshot confirmation proves evidence locations. Confirmed comments
+    rendered from ``CandidateFinding`` do not carry ``blocking``,
+    ``severity``, ``defect_kind``, ``fix_effort``, or ``category``, so
+    derived facts stay fail-closed unless the caller supplies
+    ``blocker_candidates`` or ``input_blocker_candidates``. Trigger text
+    is not a trusted failure condition or remedy. Attribution is
+    ``pr-change`` only when the finding targets a changed line on its
+    declared side.
     """
 
     return derive_blocker_candidate(
