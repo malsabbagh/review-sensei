@@ -647,6 +647,23 @@ class ConversationPublisher:
         paths: list[str] = []
         file_patches: list[tuple[str, str]] = []
         used = 0
+
+        def append_part(part: str) -> str | None:
+            nonlocal used
+            separator_bytes = 1 if parts else 0
+            remaining = MAX_CONTEXT_DIFF_BYTES - used - separator_bytes
+            if remaining < 1:
+                return None
+            bounded = _bounded_text(part, remaining)
+            if bounded is None:
+                return None
+            bounded_bytes = len(bounded.encode("utf-8"))
+            if bounded_bytes > remaining:
+                return None
+            parts.append(bounded)
+            used += separator_bytes + bounded_bytes
+            return bounded
+
         for item in files:
             if not isinstance(item, dict):
                 continue
@@ -660,7 +677,7 @@ class ConversationPublisher:
                 continue
             file_patches.append((filename, patch))
 
-        priority_paths: set[str] = set()
+        emitted_priority_hunks: dict[str, set[str]] = {}
         seen_priority: set[tuple[str, str]] = set()
         for filename, diff_hunk in priority_hunks:
             validate_repository_path(filename, label="conversation diff path")
@@ -670,29 +687,22 @@ class ConversationPublisher:
             if priority in seen_priority:
                 continue
             seen_priority.add(priority)
-            priority_paths.add(filename)
             part = f"path={filename}\n{diff_hunk}"
-            remaining = MAX_CONTEXT_DIFF_BYTES - used
-            if remaining < 1:
-                break
-            bounded = _bounded_text(part, remaining)
+            bounded = append_part(part)
             if bounded is None:
-                continue
-            parts.append(bounded)
-            used += len(bounded.encode("utf-8")) + 1
+                break
+            if bounded == part:
+                emitted_priority_hunks.setdefault(filename, set()).add(diff_hunk)
 
         for filename, patch in file_patches:
-            if filename in priority_paths:
+            remaining_patch = patch
+            for diff_hunk in emitted_priority_hunks.get(filename, set()):
+                remaining_patch = remaining_patch.replace(diff_hunk, "", 1)
+            if not remaining_patch.strip():
                 continue
-            part = f"path={filename}\n{patch}"
-            remaining = MAX_CONTEXT_DIFF_BYTES - used
-            if remaining < 1:
+            part = f"path={filename}\n{remaining_patch}"
+            if append_part(part) is None:
                 break
-            bounded = _bounded_text(part, remaining)
-            if bounded is None:
-                continue
-            parts.append(bounded)
-            used += len(bounded.encode("utf-8")) + 1
         return ("\n".join(parts) or None), tuple(dict.fromkeys(paths))
 
     @classmethod
@@ -705,15 +715,18 @@ class ConversationPublisher:
     ) -> tuple[tuple[str, str], ...]:
         """Return newest current-head App hunks for issue-level context first."""
 
-        current = [
-            item
-            for item in comments
-            if cls._is_current_app_finding(
-                item,
-                app_slug=app_slug,
-                head_sha=head_sha,
-            )
-        ][-20:]
+        current = sorted(
+            (
+                item
+                for item in comments
+                if cls._is_current_app_finding(
+                    item,
+                    app_slug=app_slug,
+                    head_sha=head_sha,
+                )
+            ),
+            key=cls._comment_created_at,
+        )[-20:]
         hunks: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for item in reversed(current):
@@ -730,6 +743,11 @@ class ConversationPublisher:
             seen.add(value)
             hunks.append(value)
         return tuple(hunks)
+
+    @staticmethod
+    def _comment_created_at(item: dict[str, Any]) -> str:
+        created_at = item.get("created_at")
+        return created_at if isinstance(created_at, str) else ""
 
     @staticmethod
     def _is_current_app_finding(

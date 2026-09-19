@@ -12,6 +12,7 @@ from review_sensei.hosting.github import (
 )
 from review_sensei.hosting.github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
+    MAX_CONTEXT_DIFF_BYTES,
     PreparedConversation,
     authorized_human_comment,
     has_standalone_sensei_mention,
@@ -273,6 +274,105 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIn(target_hunk, prepared.context.diff_context)
         self.assertNotIn("new-stale", prepared.context.diff_context)
         self.assertEqual(len(calls), 6)
+
+    def test_issue_diff_context_keeps_uncovered_hunks_and_deduplicates_priority(self):
+        target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        helper_hunk = "@@ -100,1 +100,2 @@\n+helper\n+return helper()"
+        http, calls = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/target.py",
+                            "patch": f"{target_hunk}\n{helper_hunk}",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        diff_context, changed_paths = (
+            ConversationPublisher(http=http)._load_diff_context(
+                token="token",
+                repository="owner/repo",
+                pull_request=1,
+                source={},
+                source_kind="issue",
+                priority_hunks=[
+                    ("src/target.py", target_hunk),
+                    ("src/target.py", target_hunk),
+                ],
+            )
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertEqual(diff_context.count(target_hunk), 1)
+        self.assertIn(helper_hunk, diff_context)
+        self.assertEqual(changed_paths, ("src/target.py",))
+        self.assertEqual(len(calls), 1)
+
+    def test_issue_diff_context_does_not_exceed_budget_for_oversized_priority_hunk(
+        self,
+    ):
+        http, _ = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/target.py",
+                            "patch": "@@ -1 +1 @@\n-old\n+new",
+                        },
+                        {
+                            "filename": "src/other.py",
+                            "patch": "@@ -1 +1 @@\n-old\n+new",
+                        },
+                    ]
+                )
+            ]
+        )
+        oversized_hunk = "@@ -1 +1 @@\n" + "x" * (MAX_CONTEXT_DIFF_BYTES * 2)
+
+        diff_context, _ = ConversationPublisher(http=http)._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+            priority_hunks=[("src/target.py", oversized_hunk)],
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertLessEqual(len(diff_context.encode("utf-8")), MAX_CONTEXT_DIFF_BYTES)
+        self.assertTrue(diff_context.startswith("path=src/target.py"))
+        self.assertNotIn("path=src/other.py", diff_context)
+
+    def test_prioritized_finding_hunks_sort_current_comments_by_created_at(self):
+        head = "b" * 40
+        comments = [
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:02:00Z",
+                "path": "src/newer.py",
+                "diff_hunk": "@@ -2 +2 @@\n+newer",
+            },
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:01:00Z",
+                "path": "src/older.py",
+                "diff_hunk": "@@ -1 +1 @@\n+older",
+            },
+        ]
+
+        hunks = ConversationPublisher._prioritized_finding_hunks(
+            comments=comments,
+            app_slug="review-sensei[bot]",
+            head_sha=head,
+        )
+
+        self.assertEqual(hunks[0][0], "src/newer.py")
+        self.assertEqual(hunks[1][0], "src/older.py")
 
     def test_prepare_inline_child_resolves_and_validates_root(self):
         updated = "2026-08-19T00:00:00Z"
