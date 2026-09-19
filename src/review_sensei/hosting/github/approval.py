@@ -53,6 +53,8 @@ def evaluate_auto_approval(
         blockers.append("app-authored-pull-request")
     if isinstance(result, ReviewResult) and has_blocking_findings(result):
         blockers.append("blocking-findings-open")
+    if isinstance(result, ReviewResult) and has_human_adjudication_findings(result):
+        blockers.append("human-adjudication-open")
     if has_open_review_threads is None:
         blockers.append("review-threads-incomplete")
     elif has_open_review_threads is True:
@@ -88,8 +90,15 @@ def has_blocking_findings(result: ReviewResult) -> bool:
     return any(comment.blocks_approval for comment in result.comments)
 
 
+def has_human_adjudication_findings(result: ReviewResult) -> bool:
+    """Whether a validated result still needs a human merge decision."""
+
+    return any(comment.needs_human for comment in result.comments)
+
+
 __all__ = [
     "AutoApprovalDecision",
     "evaluate_auto_approval",
     "has_blocking_findings",
+    "has_human_adjudication_findings",
 ]

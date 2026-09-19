@@ -9,6 +9,8 @@ from review_sensei import (
     ReviewConvergencePolicy,
     RoundAdmissionDecision,
     RoundSessionState,
+    admit_review_result,
+    derive_blocker_candidate,
     evaluate_blocker_admission,
     evaluate_round_admission,
     resolve_review_convergence_policy,
@@ -20,6 +22,7 @@ from review_sensei.convergence import (
 )
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.schemas import validate_public_document
 
 DIFF = """diff --git a/src/app.py b/src/app.py
@@ -77,6 +80,14 @@ class PolicyContractTests(unittest.TestCase):
         validate_public_document(document, "review-convergence-policy")
         restored = policy_from_mapping(document)
         self.assertEqual(restored.digest(), policy.digest())
+
+    def test_operator_modes_resolve_publication_enforcement(self):
+        policy = resolve_review_convergence_policy(mode="merge-focused")
+        self.assertEqual(policy.enforcement, "publication")
+        self.assertFalse(policy.inline_advisory_threads)
+        advisory = resolve_review_convergence_policy(mode="advisory")
+        self.assertEqual(advisory.enforcement, "publication")
+        self.assertFalse(advisory.automatic_github_review_events)
 
     def test_advisory_disables_github_review_events_and_inline_threads(self):
         policy = ReviewConvergencePolicy(mode="advisory")
@@ -694,6 +705,7 @@ class DoctorPlanDisplayTests(unittest.TestCase):
     def test_doctor_reports_opt_in_mode_and_invalid_mode(self):
         doctor = run_doctor(review_mode="merge-focused")
         self.assertEqual(doctor["review_convergence"]["mode"], "merge-focused")
+        self.assertEqual(doctor["review_convergence"]["enforcement"], "publication")
         self.assertFalse(doctor["review_convergence"]["inline_advisory_threads"])
         invalid = run_doctor(review_mode="soft")
         check = next(
@@ -709,10 +721,105 @@ class DoctorPlanDisplayTests(unittest.TestCase):
             build_plan(review_mode="soft")
 
     def test_public_exports_are_importable(self):
-        self.assertIs(BlockerAdmissionDecision, BlockerAdmissionDecision)
-        self.assertIs(RoundSessionState, RoundSessionState)
+        import review_sensei
+
+        self.assertIs(review_sensei.BlockerAdmissionDecision, BlockerAdmissionDecision)
+        self.assertIs(review_sensei.admit_review_result, admit_review_result)
         policy = resolve_review_convergence_policy(mode="strict")
         self.assertEqual(policy.mode, "strict")
+        self.assertEqual(policy.enforcement, "publication")
+
+
+class FindingAdmissionTests(unittest.TestCase):
+    def test_legacy_result_is_not_rewritten(self):
+        comment = ReviewComment(
+            path="src/app.py", line=2, body="finding", blocking=True, severity="low"
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        admitted = admit_review_result(result, ReviewConvergencePolicy())
+        self.assertIs(admitted, result)
+        self.assertTrue(admitted.comments[0].blocks_approval)
+        self.assertIsNone(admitted.comments[0].effective_blocking)
+
+    def test_merge_focused_demotes_model_blocker_without_evidence(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=True,
+            severity="medium",
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = admit_review_result(result, policy)
+        finding = admitted.comments[0]
+        self.assertTrue(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertFalse(finding.blocks_approval)
+        self.assertFalse(finding.needs_human)
+
+    def test_merge_focused_high_impact_without_evidence_needs_human(self):
+        comment = ReviewComment(
+            path="src/app.py", line=2, body="finding", blocking=True, severity="high"
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = admit_review_result(result, policy)
+        finding = admitted.comments[0]
+        self.assertTrue(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertTrue(finding.needs_human)
+
+    def test_explicit_facts_can_admit_despite_proposed_non_blocking(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        admitted = admit_review_result(result, policy, candidates=(facts,))
+        finding = admitted.comments[0]
+        self.assertFalse(finding.blocking)
+        self.assertTrue(finding.effective_blocking)
+        self.assertTrue(finding.blocks_approval)
+
+    def test_misaligned_candidates_fail_closed(self):
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(ReviewComment(path="src/app.py", line=2, body="finding"),),
+            provider="fixture",
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "align"):
+            admit_review_result(result, policy, candidates=())
 
 
 if __name__ == "__main__":

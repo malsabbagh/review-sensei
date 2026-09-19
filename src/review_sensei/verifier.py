@@ -25,6 +25,13 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
+from .convergence import (
+    BlockerCandidate,
+    ReviewConvergencePolicy,
+    admit_review_result,
+    derive_blocker_candidate,
+    resolve_review_convergence_policy,
+)
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
 from .presentation import escape_markdown_label
@@ -541,6 +548,23 @@ def _comment_in_changed_lines(
     return bool(allowed and comment.line in allowed)
 
 
+def _with_admission(
+    result: ReviewResult,
+    *,
+    convergence_policy: ReviewConvergencePolicy | None,
+    blocker_candidates: Sequence[BlockerCandidate] | None,
+    changed_lines: Mapping[str, frozenset[int]] | None,
+    derived: Sequence[BlockerCandidate] | None = None,
+) -> ReviewResult:
+    policy = convergence_policy or resolve_review_convergence_policy()
+    return admit_review_result(
+        result,
+        policy,
+        candidates=blocker_candidates if blocker_candidates is not None else derived,
+        changed_lines=changed_lines,
+    )
+
+
 def prepare_publishable_review(
     result: ReviewResult,
     *,
@@ -550,6 +574,8 @@ def prepare_publishable_review(
     evidence_policy: str = "legacy",
     limits: ReviewLimits | None = None,
     changed_lines: Mapping[str, frozenset[int]] | None = None,
+    convergence_policy: ReviewConvergencePolicy | None = None,
+    blocker_candidates: Sequence[BlockerCandidate] | None = None,
 ) -> PublishableReview:
     """Gate findings before publication using the configured evidence policy.
 
@@ -562,7 +588,8 @@ def prepare_publishable_review(
     Rejected, duplicate, malformed, insufficient-evidence, and out-of-diff
     candidates never become findings, and incomplete coverage cannot be a clean
     review. A confirmed review with no legacy comments, no candidates, and no
-    rejections remains ``complete``.
+    rejections remains ``complete``. Operator review-convergence modes then
+    apply trusted blocker admission before a publisher emits events.
     """
 
     if not isinstance(result, ReviewResult):
@@ -573,6 +600,12 @@ def prepare_publishable_review(
         # Rebuild only when upstream tagged a non-legacy policy on the result.
         if result.evidence_policy != "legacy":
             result = replace(result, evidence_policy="legacy")
+        result = _with_admission(
+            result,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            changed_lines=changed_lines,
+        )
         return PublishableReview(result, (), "legacy", 0)
 
     if candidates is None:
@@ -591,6 +624,7 @@ def prepare_publishable_review(
         limits=review_limits,
     )
     published: list[ReviewComment] = []
+    derived_facts: list[BlockerCandidate] = []
     final_verifications: list[VerificationResult] = []
     unpublished_candidates = 0
     for candidate, verification in zip(candidates, verifications, strict=True):
@@ -613,6 +647,15 @@ def prepare_publishable_review(
             unpublished_candidates += 1
             continue
         published.append(comment)
+        derived_facts.append(
+            derive_blocker_candidate(
+                comment,
+                on_changed_path=True,
+                evidence_locations_validated=verification.evidence_valid,
+                has_failure_condition=True,
+                has_actionable_remedy=verification.actionable,
+            )
+        )
         final_verifications.append(verification)
     dropped_legacy = len(result.comments) if candidates else 0
     unpublished = unpublished_candidates + dropped_legacy
@@ -636,6 +679,13 @@ def prepare_publishable_review(
         limits=review_limits,
         source_context_coverage=result.source_context_coverage,
         evidence_policy="confirmed",
+    )
+    prepared = _with_admission(
+        prepared,
+        convergence_policy=convergence_policy,
+        blocker_candidates=blocker_candidates,
+        changed_lines=changed_lines,
+        derived=tuple(derived_facts),
     )
     return PublishableReview(
         prepared, tuple(final_verifications), "confirmed", unpublished

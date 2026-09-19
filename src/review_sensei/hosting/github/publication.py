@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ...context import finding_lifecycle_for_comment
+from ...convergence import (
+    BlockerCandidate,
+    ReviewConvergencePolicy,
+    resolve_review_convergence_policy,
+)
 from ...coverage import CoverageManifest
 from ...diff import DiffAnalysis, analyze_diff
 from ...errors import ReviewInputError
@@ -122,12 +127,20 @@ def format_coverage_digest(coverage: CoverageManifest) -> str:
     return f"Coverage: {', '.join(parts)}. Enumeration {enumeration}."
 
 
-def format_unanchored_findings(comments: tuple[ReviewComment, ...]) -> str:
-    lines = ["## Findings without a publishable inline location"]
+def format_unanchored_findings(
+    comments: tuple[ReviewComment, ...],
+    *,
+    heading: str = "## Findings without a publishable inline location",
+) -> str:
+    lines = [heading]
     for comment in comments:
         path = escape_markdown_label(comment.path)
-        body = escape_markdown_label(comment.body)
-        lines.append(f"- `{path}`: {body}")
+        rendered = format_review_comment(comment)
+        if "\n\n" in rendered:
+            labels, body = rendered.split("\n\n", 1)
+            lines.append(f"- `{path}`: {labels} {escape_markdown_label(body)}")
+        else:
+            lines.append(f"- `{path}`: {escape_markdown_label(comment.body)}")
     return "\n".join(lines)
 
 
@@ -305,10 +318,15 @@ def changes_requested_review_body(*, excerpts: tuple[str, ...], marker: str) -> 
 
 
 def finding_review_event(
-    *, auto_approve: bool, result: ReviewResult
+    *,
+    auto_approve: bool,
+    result: ReviewResult,
+    policy: ReviewConvergencePolicy | None = None,
 ) -> tuple[str, str]:
     """Return the GitHub review event and state for one finding publication."""
 
+    if policy is not None and not policy.automatic_github_review_events:
+        return "COMMENT", "COMMENTED"
     if auto_approve and has_blocking_findings(result):
         return "REQUEST_CHANGES", "CHANGES_REQUESTED"
     return "COMMENT", "COMMENTED"
@@ -1075,6 +1093,8 @@ class ReviewPublisher:
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
         evidence_policy: str = "legacy",
+        convergence_policy: ReviewConvergencePolicy | None = None,
+        blocker_candidates: Sequence[BlockerCandidate] | None = None,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -1095,6 +1115,13 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        if convergence_policy is None:
+            convergence_policy = resolve_review_convergence_policy()
+        elif not isinstance(convergence_policy, ReviewConvergencePolicy):
+            raise GitHubPublicationError("review convergence policy is invalid")
+        auto_approve = (
+            auto_approve and convergence_policy.automatic_github_review_events
+        )
         try:
             analysis = analyze_diff(diff)
         except ReviewInputError as exc:
@@ -1107,6 +1134,8 @@ class ReviewPublisher:
                 snapshot_sha256=snapshot_sha256,
                 evidence_policy=evidence_policy,
                 changed_lines=analysis.changed_lines,
+                convergence_policy=convergence_policy,
+                blocker_candidates=blocker_candidates,
             )
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc
@@ -1233,6 +1262,18 @@ class ReviewPublisher:
                 prepared_comments.append(
                     (comment, lifecycle.fingerprint, comment_body, anchor)
                 )
+            advisory_folded: list[ReviewComment] = []
+            if not convergence_policy.inline_advisory_threads:
+                kept_inline: list[tuple[ReviewComment, str, str, str]] = []
+                for entry in prepared_comments:
+                    if (
+                        convergence_policy.automatic_github_review_events
+                        and entry[0].blocks_approval
+                    ):
+                        kept_inline.append(entry)
+                    else:
+                        advisory_folded.append(entry[0])
+                prepared_comments = kept_inline
             # GitHub rejects batch review comments with subject_type=file on
             # REQUEST_CHANGES reviews (HTTP 422). Retain them in the summary
             # instead; COMMENT reviews may still publish file-level threads.
@@ -1250,6 +1291,16 @@ class ReviewPublisher:
             if unanchored:
                 summary = (
                     f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
+                )
+            if advisory_folded:
+                heading = (
+                    "## Review observations"
+                    if not convergence_policy.automatic_github_review_events
+                    else "## Advisory observations"
+                )
+                summary = (
+                    f"{summary}\n\n"
+                    f"{format_unanchored_findings(tuple(advisory_folded), heading=heading)}"
                 )
             validate_bounded_text(
                 summary,
@@ -1305,7 +1356,9 @@ class ReviewPublisher:
         # REQUEST_CHANGES when a later execution still sees unresolved
         # blocking ReviewSensei roots.
         event, published_state = finding_review_event(
-            auto_approve=auto_approve, result=result
+            auto_approve=auto_approve,
+            result=result,
+            policy=convergence_policy,
         )
         if (
             auto_approve

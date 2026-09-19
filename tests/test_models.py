@@ -106,6 +106,24 @@ class ModelTests(unittest.TestCase):
                 path="src/app.py", line=1, body="legacy", severity="warning"
             ).blocks_approval
         )
+        self.assertFalse(
+            ReviewComment(
+                path="src/app.py",
+                line=1,
+                body="proposed blocker",
+                blocking=True,
+                effective_blocking=False,
+            ).blocks_approval
+        )
+        self.assertTrue(
+            ReviewComment(
+                path="src/app.py",
+                line=1,
+                body="admitted blocker",
+                blocking=False,
+                effective_blocking=True,
+            ).blocks_approval
+        )
 
     def test_review_result_allows_an_unclassified_comment(self):
         result = ReviewResult.from_dict(

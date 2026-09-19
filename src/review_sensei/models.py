@@ -538,16 +538,20 @@ class ReviewComment:
     defect_kind: str | None = None
     evidence_id: str | None = None
     side: str = "RIGHT"
+    effective_blocking: bool | None = None
+    needs_human: bool = False
 
     @property
     def blocks_approval(self) -> bool:
         """Return the effective merge-impact classification for this finding.
 
-        An explicit classification is authoritative. The legacy fallback only
-        treats the canonical severe labels as blocking, preserving free-form
-        severity compatibility for callers that do not emit ``blocking``.
+        Trusted C2 admission sets ``effective_blocking`` and is authoritative.
+        Until then an explicit model ``blocking`` value wins, and the legacy
+        fallback only treats canonical severe labels as blocking.
         """
 
+        if self.effective_blocking is not None:
+            return self.effective_blocking
         if self.blocking is not None:
             return self.blocking
         return self.severity is not None and self.severity.lower() in {
@@ -602,6 +606,12 @@ class ReviewComment:
                     )
         if self.blocking is not None and not isinstance(self.blocking, bool):
             raise ReviewInputError("comment blocking must be a boolean")
+        if self.effective_blocking is not None and not isinstance(
+            self.effective_blocking, bool
+        ):
+            raise ReviewInputError("comment effective_blocking must be a boolean")
+        if not isinstance(self.needs_human, bool):
+            raise ReviewInputError("comment needs_human must be a boolean")
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {

@@ -173,6 +173,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.app_slug, "reviewsensei[bot]")
         self.assertTrue(args.enable_auto_approve)
 
+    def test_github_parser_accepts_review_mode(self):
+        args = _github_parser().parse_args(
+            [
+                "review",
+                "--result",
+                "result.json",
+                "--diff",
+                "diff.patch",
+                "--repository",
+                "owner/repo",
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "2",
+                "--head-sha",
+                "a" * 40,
+                "--review-mode",
+                "merge-focused",
+            ]
+        )
+        self.assertEqual(args.review_mode, "merge-focused")
+
     def test_github_parser_allows_disabling_default_auto_approval(self):
         args = _github_parser().parse_args(
             [

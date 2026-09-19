@@ -2,12 +2,14 @@
 
 Issue #136 C1 defines a versioned trusted-configuration contract for review
 modes, blocker admission, round counting, and human handoff.  These helpers
-compute decisions from structured facts.  They do not publish GitHub events,
-mutate findings, or change ``REVIEWSENSEI_AUTO_APPROVE`` behavior.
+compute decisions from structured facts.  They do not parse free-text or
+trust a model ``blocking`` boolean as authority outside ``legacy``.
 
-C2 is the slice that may sit this evaluator between candidate findings and
-publication.  Until then doctor and plan display the resolved policy as
-``enforcement=display-only``.
+C2 sits ``evaluate_blocker_admission`` between candidate findings and
+publication.  ``legacy`` keeps ADR 0032/0035 events.  Operator modes apply
+the evaluator before GitHub review events and comment rendering.
+``REVIEWSENSEI_AUTO_APPROVE`` default-on semantics are unchanged; advisory
+mode additionally withholds automatic GitHub review events.
 """
 
 from __future__ import annotations
@@ -15,10 +17,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
-from typing import Mapping
+from dataclasses import dataclass, replace
+from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
+from .models import ReviewComment, ReviewResult
 from .schemas import validate_public_document
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -292,15 +295,24 @@ class ReviewConvergencePolicy:
         )
 
 
+def publication_enforcement_for_mode(mode: str) -> str:
+    """Return C2 enforcement for a resolved review mode."""
+
+    return "display-only" if mode == "legacy" else "publication"
+
+
 def resolve_review_convergence_policy(
     *,
     mode: str | None = None,
-    enforcement: str = "display-only",
+    enforcement: str | None = None,
 ) -> ReviewConvergencePolicy:
-    """Resolve the trusted review-convergence policy for doctor/plan."""
+    """Resolve the trusted review-convergence policy for doctor, plan, and publication."""
 
+    resolved_mode = resolve_review_mode(mode)
+    if enforcement is None:
+        enforcement = publication_enforcement_for_mode(resolved_mode)
     return ReviewConvergencePolicy(
-        mode=resolve_review_mode(mode),
+        mode=resolved_mode,
         enforcement=enforcement,
     )
 
@@ -309,8 +321,8 @@ def resolve_review_convergence_policy(
 class BlockerCandidate:
     """Structured facts for deterministic blocker admission.
 
-    C2 is responsible for deriving these facts from candidate findings and
-    evidence.  The evaluator never parses free-text or trusts a model boolean.
+    C2 derives these facts from structured comment and verification fields.
+    The evaluator never parses free-text or trusts a model boolean.
     """
 
     proposed_blocking: bool | None = None
@@ -643,6 +655,111 @@ def evaluate_blocker_admission(
     )
 
 
+REQUIRED_CONTRACT_KINDS = frozenset(
+    {"required-contract", "api-contract", "compatibility-contract"}
+)
+PREFERENCE_CATEGORIES = frozenset({"style", "nit", "preference"})
+_UNKNOWN_DEFECT_KIND = "unknown"
+
+
+def derive_blocker_candidate(
+    comment: ReviewComment,
+    *,
+    on_changed_path: bool = False,
+    evidence_locations_validated: bool = False,
+    has_failure_condition: bool = False,
+    has_independent_artifact: bool = False,
+    has_actionable_remedy: bool | None = None,
+    evidence_is_json_or_line_validity_only: bool = False,
+    evidence_is_model_confidence_or_agreement_only: bool = False,
+    is_duplicate: bool = False,
+    has_authorized_disposition: bool = False,
+    has_contradictory_evidence: bool = False,
+    is_late_relative_to_baseline: bool = False,
+    late_reason: str | None = None,
+) -> BlockerCandidate:
+    """Map structured finding fields to admission facts without parsing bodies."""
+
+    if not isinstance(comment, ReviewComment):
+        raise ReviewInputError("blocker comment is invalid")
+    defect = (comment.defect_kind or "").strip()
+    named = defect if defect and defect.casefold() != _UNKNOWN_DEFECT_KIND else None
+    if has_actionable_remedy is None:
+        effort = (comment.fix_effort or "").strip().casefold()
+        has_actionable_remedy = bool(effort) and effort != "unknown"
+    category = (comment.category or "").strip().casefold()
+    preference = category in PREFERENCE_CATEGORIES or (
+        comment.blocking is False and named is None
+    )
+    high_impact = _material_severity(comment.severity)
+    evidence_ok = has_independent_artifact or (
+        evidence_locations_validated and has_failure_condition
+    )
+    weakly = high_impact and not evidence_ok
+    return BlockerCandidate(
+        proposed_blocking=comment.blocking,
+        severity=comment.severity,
+        has_specific_violation=named is not None,
+        has_required_contract=named is not None
+        and named.casefold() in REQUIRED_CONTRACT_KINDS,
+        named_mandatory_rule=named,
+        has_actionable_remedy=has_actionable_remedy,
+        evidence_locations_validated=evidence_locations_validated,
+        has_failure_condition=has_failure_condition,
+        has_independent_artifact=has_independent_artifact,
+        evidence_is_json_or_line_validity_only=evidence_is_json_or_line_validity_only,
+        evidence_is_model_confidence_or_agreement_only=(
+            evidence_is_model_confidence_or_agreement_only
+        ),
+        attribution="pr-change" if on_changed_path else "unattributed",
+        is_duplicate=is_duplicate,
+        has_authorized_disposition=has_authorized_disposition,
+        has_contradictory_evidence=has_contradictory_evidence,
+        is_preference_or_optional=preference,
+        is_late_relative_to_baseline=is_late_relative_to_baseline,
+        late_reason=late_reason,
+        high_impact_weakly_supported=weakly,
+    )
+
+
+def admit_review_result(
+    result: ReviewResult,
+    policy: ReviewConvergencePolicy,
+    *,
+    candidates: Sequence[BlockerCandidate] | None = None,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
+) -> ReviewResult:
+    """Apply trusted blocker admission to each finding before publication."""
+
+    if not isinstance(result, ReviewResult):
+        raise ReviewInputError("review result is invalid")
+    if not isinstance(policy, ReviewConvergencePolicy):
+        raise ReviewInputError("review convergence policy is invalid")
+    if policy.enforcement != "publication":
+        return result
+    if candidates is not None and len(candidates) != len(result.comments):
+        raise ReviewInputError("blocker candidates must align with review comments")
+    admitted: list[ReviewComment] = []
+    for index, comment in enumerate(result.comments):
+        if candidates is not None:
+            candidate = candidates[index]
+        else:
+            on_changed = False
+            if changed_lines is not None:
+                allowed = changed_lines.get(comment.path)
+                on_changed = bool(allowed and comment.line in allowed)
+            candidate = derive_blocker_candidate(comment, on_changed_path=on_changed)
+        decision = evaluate_blocker_admission(candidate, policy)
+        admitted.append(
+            replace(
+                comment,
+                effective_blocking=decision.effective_blocking,
+                needs_human=decision.needs_human,
+            )
+        )
+    return replace(result, comments=tuple(admitted))
+
+
 @dataclass(frozen=True)
 class RoundSessionState:
     """PR-wide counters and flags for round admission.  No raw source."""
@@ -964,10 +1081,13 @@ __all__ = [
     "ReviewConvergencePolicy",
     "RoundAdmissionDecision",
     "RoundSessionState",
+    "admit_review_result",
+    "derive_blocker_candidate",
     "evaluate_blocker_admission",
     "evaluate_round_admission",
     "normalize_review_mode",
     "policy_from_mapping",
+    "publication_enforcement_for_mode",
     "resolve_review_convergence_policy",
     "resolve_review_mode",
 ]

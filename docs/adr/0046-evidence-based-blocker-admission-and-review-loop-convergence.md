@@ -2,6 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
+Last amended: 2026-09-19
 GitHub Issue: #136
 Pull Request: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
 Owners/Reviewers: Maintainers
@@ -21,9 +22,12 @@ publication: a model proposal is not a trusted merge gate. In-memory review
 context (ADR 0042) and in-run budgets (ADR 0043) also do not define a
 PR-wide round budget across fresh Actions jobs.
 
-This record is slice **C1** of #136: the versioned policy contract, pure
-evaluators, and doctor/plan display. It does not change GitHub publication,
-approval finalization, or `REVIEWSENSEI_AUTO_APPROVE` default-on semantics.
+C1 added the versioned policy contract, pure evaluators, and doctor/plan
+display. This amendment is slice **C2**: sit `evaluate_blocker_admission`
+between candidate findings and publication while preserving proposed versus
+effective classification. It does not change `REVIEWSENSEI_AUTO_APPROVE`
+default-on semantics, completeness/coverage gates (#114), or OpenRouter
+qualification (#115).
 
 ## Decision
 
@@ -59,6 +63,18 @@ without inventing a proven blocker.
 `strict` remains bounded and additionally lets a named mandatory rule qualify
 independently of high/critical severity when the other gates pass.
 
+C2 derives `BlockerCandidate` facts from structured comment and verification
+fields (`derive_blocker_candidate`) and writes `effective_blocking` /
+`needs_human` onto each finding (`admit_review_result`) before a publisher
+formats comments or chooses a GitHub review event. The model `blocking` field
+remains the proposal. `ReviewComment.blocks_approval` uses the admitted
+effective value when present. Publication markers and `REQUEST_CHANGES` follow
+effective blocking. Human adjudication withholds `APPROVE` through
+`evaluate_auto_approval` without inventing a proven blocker. Advisory
+observations in operator modes are folded into the review summary so required
+conversation resolution cannot turn optional notes into mechanical blockers.
+`legacy` enforcement stays `display-only` and keeps ADR 0032/0035 events.
+
 Round admission counts completed logical reviews, not provider calls, commits,
 or retries. Same-head duplicates, publication recovery, and transport or
 structural retries do not consume the completed-round budget and cannot emit
@@ -66,10 +82,7 @@ approval. No-progress and exhausted failed-attempt budgets hand off even when
 the current invocation is a duplicate, recovery, or retry. The cap never
 creates approval eligibility; a last allowed round may approve only when
 independent gates already pass. Incomplete coverage or an unreviewed later
-head cannot approve.
-
-C1 enforcement is `display-only`. Doctor and plan report the resolved policy
-and digest. Publication continues to use ADR 0032/0035 until C2.
+head cannot approve. Round enforcement in hosts remains C5.
 
 Pilot defaults (`verification_rounds=2`, `failed_attempts=6`) are tunable
 design hypotheses, not industry standards, and must be validated before any
@@ -84,15 +97,18 @@ In scope:
 - Decision-table tests for modes, severity/evidence/scope reasons, round
   counting, handoff, and legacy compatibility.
 - Doctor/plan display and `--review-mode` / `REVIEWSENSEI_REVIEW_MODE`.
+- C2 derivation and admission between findings and publication, including
+  GitHub event tests for model `blocking=true/false` conflicts.
 
 Out of scope:
 
-- Wiring the evaluator into publication or approval (C2).
 - Durable session ledgers (C3), baseline-aware verification (C4), automation
   admission in hosts (C5), maintainer commands (C6), and evaluation rollout
   (C7).
 - Changing `REVIEWSENSEI_AUTO_APPROVE`, GitHub permissions, branch protection,
   or website/OpenRouter epics.
+- Recreating completeness, coverage, or OpenRouter qualification gates from
+  #114/#115.
 
 ## Consequences
 
@@ -101,14 +117,14 @@ Positive:
 - Existing installations keep current classification and unbounded autonomous
   rounds until they opt in.
 - Merge-blocker correctness is a trusted policy, not a prompt or a model flag.
-- Doctor and plan make the future contract visible without changing GitHub
-  events.
+- Operator modes can demote an explicit model blocker and promote a
+  well-supported finding the model marked optional, with both values visible.
 
 Tradeoffs:
 
-- C1 cannot yet stop publication loops; that requires C2–C5.
-- Structured candidate facts are an explicit C2 derivation contract. Garbage
-  facts still yield garbage decisions.
+- C2 cannot yet bound PR-wide rounds; that requires C3–C5.
+- Conservative derivation from structured fields fail-closes missing evidence.
+  Garbage facts still yield garbage decisions.
 - Two verification rounds remain a hypothesis until C7 evidence exists.
 
 ## Alternatives considered
@@ -133,22 +149,27 @@ current installations. Default remains `legacy` until an explicit migration.
 Rejected because issue #136 requires trusted policy between proposals and
 effective publication decisions.
 
+### Overwrite `ReviewComment.blocking` with the evaluator result
+
+Rejected because C2 must preserve proposed versus effective classification.
+
 ## Validation
 
-Run evaluator decision-table tests, schema golden/negative fixtures, doctor and
-plan display tests, and the existing publication/approval suite to prove those
-paths are unchanged. Ordinary CI stays offline and credential-free.
+Run evaluator decision-table tests, derivation/admission tests, schema
+golden/negative fixtures, doctor and plan display tests, and the publication
+suite including real GitHub event assertions for model `blocking` conflicts.
+Ordinary CI stays offline and credential-free.
 
 ## Rollout and rollback
 
-Rollout is a reviewed package that adds display-only configuration. Operators
-may set `REVIEWSENSEI_REVIEW_MODE` for doctor/plan inspection; publication is
-unchanged. Rollback by reverting the package. No persisted review data or
-GitHub thread mutation requires migration.
+Rollout is a reviewed package. Existing installations remain on `legacy`.
+Operators opt into `advisory`, `merge-focused`, or `strict` via
+`REVIEWSENSEI_REVIEW_MODE` or `--review-mode`. Rollback by reverting the
+package or returning the mode to `legacy`. No persisted review data or GitHub
+thread mutation requires migration.
 
 ## Follow-up work
 
-- C2: sit the evaluator between candidate findings and publication.
 - C3: durable session ledger for PR-wide counters.
 - C4–C7 as specified in issue #136.
 - Coordinate with #114/#115 for the actual approval boundary; do not duplicate

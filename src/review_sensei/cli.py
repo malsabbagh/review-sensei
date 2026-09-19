@@ -826,7 +826,8 @@ def _doctor_parser() -> argparse.ArgumentParser:
         "--review-mode",
         help=(
             "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Display-only until publication wiring."
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission at publication; legacy keeps ADR 0032 events."
         ),
     )
     parser.add_argument(
@@ -858,7 +859,8 @@ def _plan_parser() -> argparse.ArgumentParser:
         "--review-mode",
         help=(
             "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Display-only until publication wiring."
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission at publication; legacy keeps ADR 0032 events."
         ),
     )
     parser.add_argument("--base-sha")
@@ -1157,6 +1159,14 @@ def _github_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Opt into deterministic draft learning-PR publication.",
     )
+    review.add_argument(
+        "--review-mode",
+        help=(
+            "Review-convergence mode: legacy (default), advisory, "
+            "merge-focused, or strict. Operator modes apply trusted blocker "
+            "admission before GitHub review events."
+        ),
+    )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
@@ -1233,6 +1243,7 @@ def _github_parser() -> argparse.ArgumentParser:
 
 
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
+    from .convergence import resolve_review_convergence_policy
     from .hosting.github import (
         BrokerClient,
         ConversationPublisher,
@@ -1286,6 +1297,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
+        convergence_policy = resolve_review_convergence_policy(mode=args.review_mode)
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
@@ -1310,6 +1322,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     artifact=artifact,
                     diff=diff,
                     app_slug=args.app_slug,
+                    convergence_policy=convergence_policy,
                 )
             except (GitHubPublicationTransientError, GitHubPublicationError) as exc:
                 diagnostic = (
@@ -1375,6 +1388,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 result=result,
                 diff=diff,
                 app_slug=args.app_slug,
+                convergence_policy=convergence_policy,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(

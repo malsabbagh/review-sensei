@@ -54,7 +54,7 @@ Process: `docs/process/adr-process.md`
 | [0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36 | Machine-readable outcomes, hard admission budgets, publication-only recovery |
 | [0044](0044-bounded-large-change-coverage-and-deletion-aware-findings.md) | Proposed | Bounded large-change coverage, deletion-aware locations, and opt-in chunk orchestration | #39 | Per-request limits stay; total-work budgets and explicit coverage outcomes are added. |
 | [0045](0045-openrouter-trusted-configuration.md) | Proposed | OpenRouter trusted configuration, CLI profiles, and zero-write diagnostics | #97 | `--provider openrouter`, named profiles, doctor/plan policy summary; workflow wiring in #98 |
-| [0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 | C1: versioned modes, pure evaluators, doctor/plan display; publication unchanged |
+| [0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 | C1 contract plus C2 publication wiring; `legacy` unchanged |
 
 ## Policy
 
