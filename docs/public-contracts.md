@@ -67,6 +67,8 @@ containing `/v1/`.
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
 | `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
 | `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, and expiry |
+| `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
+| `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -223,7 +225,9 @@ against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
 validate against the review-convergence schemas. `SessionRecord.to_dict()`
 validates against `session-record.schema.json`. Operator modes apply
 `admit_review_result` before GitHub publication; `legacy` keeps ADR 0032/0035
-events. C3 persists PR-wide counters without refusing publication. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
+events. C3 persists PR-wide counters without refusing publication. C4 plans
+verification from a complete compatible baseline and classifies later
+findings before C2 admission. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -544,7 +548,10 @@ Doctor and plan also report the resolved review-convergence policy
 When `--session-ledger` or `REVIEWSENSEI_SESSION_LEDGER` is set with a
 repository and pull-request identity, they also report the C3 session
 counters or an explicit missing/expired/tampered status. Doctor and plan
-never write the ledger.
+never write the ledger. Operator modes also report C4 verification scope:
+`legacy` stays unscoped; after a completed initial review the next pass is
+`verification` over existing concerns plus changed and related paths, and
+late blockers need `new-regression` or `substantiated-missed-defect`.
 `legacy` remains compatible with ADR 0032/0035 publication.
 Operator modes apply `evaluate_blocker_admission` before GitHub review events
 and do not change `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).

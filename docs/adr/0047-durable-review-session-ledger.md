@@ -116,7 +116,8 @@ or files are inert counters.
 
 ## Follow-up work
 
-- C4–C7 as specified in issue #136.
+- C4: baseline-aware verification (this ADR).
+- C5–C7 as specified in issue #136.
 - C5 consumes this ledger to refuse/handoff autonomous rounds.
 
 ## Links

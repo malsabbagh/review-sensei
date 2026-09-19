@@ -56,6 +56,7 @@ Process: `docs/process/adr-process.md`
 | [0045](0045-openrouter-trusted-configuration.md) | Proposed | OpenRouter trusted configuration, CLI profiles, and zero-write diagnostics | #97 | `--provider openrouter`, named profiles, doctor/plan policy summary; workflow wiring in #98 |
 | [0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 | C1 contract plus C2 publication wiring; `legacy` unchanged |
 | [0047](0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 | Local and GitHub-backed adapters; CAS/expiry; no publication refusal |
+| [0048](0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification scope and late-finding classification | #136 | Reuses ADR 0042 plans and related paths; omission is not a fix |
 
 ## Policy
 

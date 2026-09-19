@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .baseline import VerificationScope, preview_verification_scope
 from .convergence import (
     ReviewConvergencePolicy,
     evaluate_round_admission,
@@ -143,6 +144,36 @@ def _plan_session_record(
     if check is None:
         return None
     return payload
+
+
+def _verification_scope_from_session(
+    *,
+    policy: ReviewConvergencePolicy | None,
+    session_record: dict[str, object] | None,
+    changed_paths: tuple[str, ...] = (),
+) -> VerificationScope | None:
+    if policy is None:
+        return None
+    completed: int | None = None
+    session_status: str | None = None
+    if session_record is not None:
+        status = session_record.get("status")
+        session_status = status if isinstance(status, str) else "invalid"
+        if session_status == "ok":
+            initial = session_record.get("completed_initial_reviews", 0)
+            completed = (
+                initial
+                if isinstance(initial, int) and not isinstance(initial, bool)
+                else 0
+            )
+        elif session_status == "missing":
+            completed = 0
+    return preview_verification_scope(
+        policy=policy,
+        completed_initial_reviews=completed,
+        session_status=session_status,
+        changed_paths=changed_paths,
+    )
 
 
 def _bounded_stage_names(values: Iterable[str]) -> tuple[str, ...]:
@@ -452,6 +483,9 @@ def run_doctor(
     ``session_ledger`` reports the issue #136 C3 durable session record when a
     local ledger path is supplied or ``REVIEWSENSEI_SESSION_LEDGER`` is set.
     Missing, expired, or tampered state is explicit. Doctor never writes.
+    Operator modes also report C4 verification scope. ``legacy`` stays
+    unscoped. After a completed initial review the next pass is verification
+    over existing concerns plus changed and related paths.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -545,6 +579,25 @@ def run_doctor(
     )
     if session_check is not None:
         checks.append(session_check)
+    verification_scope = None
+    if review_convergence is not None:
+        verification_scope = _verification_scope_from_session(
+            policy=review_convergence,
+            session_record=session_record,
+        )
+        if verification_scope is not None:
+            check_status = (
+                "action" if verification_scope.status == "ledger-untrusted" else "pass"
+            )
+            detail = (
+                f"status={verification_scope.status} "
+                f"round={verification_scope.round_kind} "
+                "late_admission="
+                f"{verification_scope.late_admission_required}"
+            )
+            if verification_scope.invalidation_reason is not None:
+                detail = f"{detail} reason={verification_scope.invalidation_reason}"
+            checks.append(DiagnosticCheck("verification-scope", check_status, detail))
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -706,6 +759,8 @@ def run_doctor(
         report["review_convergence"] = review_convergence.to_dict()
     if session_record is not None:
         report["session_record"] = session_record
+    if verification_scope is not None:
+        report["verification"] = verification_scope.to_dict()
     return report
 
 
@@ -753,11 +808,13 @@ def build_plan(
 
     if diff is None:
         diff_summary: dict[str, Any] = {"supplied": False, "status": "unknown"}
+        changed_paths: tuple[str, ...] = ()
     elif not isinstance(diff, str):
         raise ReviewInputError("diff must be a string")
     else:
         # Plan readiness uses the same bounded diff analysis path as review.
         analysis = analyze_diff(diff, limits=DEFAULT_REVIEW_LIMITS)
+        changed_paths = analysis.changed_paths
         diff_summary = {
             "supplied": True,
             "status": "ready",
@@ -832,6 +889,13 @@ def build_plan(
     )
     if session_record is not None:
         document["session_record"] = session_record
+    verification_scope = _verification_scope_from_session(
+        policy=resolve_review_convergence_policy(mode=review_mode),
+        session_record=session_record,
+        changed_paths=changed_paths,
+    )
+    if verification_scope is not None:
+        document["verification"] = verification_scope.to_dict()
     return document
 
 
@@ -899,6 +963,15 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
             f"initial={session_record.get('completed_initial_reviews', 0)} "
             f"verification={session_record.get('completed_verification_rounds', 0)} "
             f"failed_attempts={session_record.get('failed_attempts', 0)}"
+        )
+    verification = document.get("verification")
+    if isinstance(verification, dict) and verification.get("status"):
+        lines.append(
+            "verification: "
+            f"status={verification.get('status')} "
+            f"round={verification.get('round_kind')} "
+            f"late_admission={verification.get('late_admission_required')} "
+            f"paths={len(verification.get('reviewed_paths') or ())}"
         )
     identity = document.get("identity")
     if isinstance(identity, dict):

@@ -78,6 +78,8 @@ ReviewConvergencePolicy ----> evaluate_blocker_admission / admit_review_result
                                (legacy: ADR 0032 events; operator modes: publication)
 SessionLedger --------------> local JSON / GitHub issue-comment adapters
                                (C3 counters; C5 will enforce)
+ReviewBaseline -------------> IncrementalReviewPlan + late classification
+                               (C4 verification scope; C2 admits)
 ```
 
 `ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets

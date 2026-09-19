@@ -8,6 +8,7 @@ those per-request limits or silently truncating work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Sequence
 
 from .coverage import (
     COVERAGE_OUTCOMES,
@@ -159,6 +160,28 @@ def _related_paths(path: str, changed: tuple[str, ...]) -> tuple[str, ...]:
             related.append(candidate)
         if len(related) >= MAX_RELATED_PATHS:
             break
+    return tuple(related)
+
+
+def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    """Return bounded same-directory siblings among the changed paths.
+
+    Issue #136 C4 reuses this directory relationship as cross-file impact
+    when a caller has not supplied symbol-aware related paths from #40.
+    """
+
+    if isinstance(changed_paths, (str, bytes)):
+        raise ReviewInputError("changed paths must be a sequence of paths")
+    changed = tuple(changed_paths)
+    related: list[str] = []
+    for path in changed:
+        if not isinstance(path, str) or not path:
+            raise ReviewInputError("changed path must be a non-empty string")
+        for candidate in _related_paths(path, changed):
+            if candidate not in related:
+                related.append(candidate)
+            if len(related) >= MAX_RELATED_PATHS:
+                return tuple(related)
     return tuple(related)
 
 
@@ -616,4 +639,5 @@ __all__ = [
     "is_generated_path",
     "merge_chunk_coverage",
     "plan_change",
+    "related_paths_for_change",
 ]

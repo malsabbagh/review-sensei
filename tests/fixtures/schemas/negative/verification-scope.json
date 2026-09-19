@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "status": "verify",
+  "round_kind": "verification",
+  "late_admission_required": true,
+  "coverage_mode": "incremental",
+  "invalidation_reason": null,
+  "reviewed_paths": ["src/app.py"],
+  "related_paths": [],
+  "changed_paths": ["src/app.py"],
+  "existing_concerns": 1,
+  "source_patch": "not-allowed"
+}
