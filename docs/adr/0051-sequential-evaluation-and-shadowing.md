@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-09-19
 Last amended: 2026-09-19
 GitHub Issue: #136
-Pull Request: pending
+Pull Request: [#143](https://github.com/malsabbagh/review-sensei/pull/143)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -109,7 +109,7 @@ returning to `legacy`; unresolved findings are not discarded.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: pending
+- Pull request: [#143](https://github.com/malsabbagh/review-sensei/pull/143)
 - Related: [ADR 0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md),
   [ADR 0049](0049-automation-admission-and-handoff.md),
   [ADR 0050](0050-maintainer-disposition-and-handoff-status.md)
