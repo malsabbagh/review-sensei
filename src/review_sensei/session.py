@@ -87,6 +87,11 @@ def _require_bool(value: object, *, label: str) -> None:
         raise ReviewInputError(f"{label} must be a boolean")
 
 
+def _operator_paused(value: object) -> bool:
+    _require_bool(value, label="operator_paused")
+    return bool(value)
+
+
 def _require_bounded_int(
     value: object, *, label: str, minimum: int, maximum: int
 ) -> int:
@@ -236,6 +241,7 @@ class SessionRecord:
     updated_at: str
     expires_at: str
     record_sha256: str
+    operator_paused: bool = False
 
     def __post_init__(self) -> None:
         SessionIdentity(
@@ -293,15 +299,23 @@ class SessionRecord:
             raise ReviewInputError("session expires_at must be after created_at")
         if expires - created > MAX_SESSION_TTL:
             raise ReviewInputError("session ttl exceeds the configured bound")
+        _require_bool(self.operator_paused, label="operator_paused")
         digest = self._payload_digest()
         if self.record_sha256 != digest:
-            raise ReviewInputError("session record integrity check failed")
+            legacy = _digest_payload(self._legacy_payload())
+            if self.operator_paused or self.record_sha256 != legacy:
+                raise ReviewInputError("session record integrity check failed")
 
     def _payload_digest(self) -> str:
         payload = self._payload()
         return _digest_payload(payload)
 
     def _payload(self) -> dict[str, object]:
+        payload = self._legacy_payload()
+        payload["operator_paused"] = self.operator_paused
+        return payload
+
+    def _legacy_payload(self) -> dict[str, object]:
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "repository": self.repository,
@@ -336,6 +350,7 @@ class SessionRecord:
         created_at: str,
         updated_at: str,
         expires_at: str,
+        operator_paused: bool = False,
     ) -> "SessionRecord":
         payload = {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -352,6 +367,7 @@ class SessionRecord:
             "created_at": created_at,
             "updated_at": updated_at,
             "expires_at": expires_at,
+            "operator_paused": operator_paused,
         }
         return cls(
             repository=repository,
@@ -368,6 +384,7 @@ class SessionRecord:
             updated_at=updated_at,
             expires_at=expires_at,
             record_sha256=_digest_payload(payload),
+            operator_paused=operator_paused,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -459,6 +476,7 @@ class SessionRecord:
             updated_at=str(value.get("updated_at", "")),
             expires_at=str(value.get("expires_at", "")),
             record_sha256=str(value.get("record_sha256", "")),
+            operator_paused=_operator_paused(value.get("operator_paused", False)),
         )
         validate_public_document(record.to_dict(), "session-record")
         return record
@@ -507,6 +525,7 @@ class SessionRecord:
             created_at=created_stamp,
             updated_at=created_stamp,
             expires_at=_format_datetime(expires),
+            operator_paused=False,
         )
 
     def evolve(
@@ -520,6 +539,7 @@ class SessionRecord:
         reservation_id: str | None | object = ...,
         reserved_slot: str | None | object = ...,
         last_committed_reservation_id: str | None | object = ...,
+        operator_paused: bool | None = None,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -558,6 +578,11 @@ class SessionRecord:
             created_at=self.created_at,
             updated_at=updated,
             expires_at=self.expires_at,
+            operator_paused=(
+                self.operator_paused
+                if operator_paused is None
+                else operator_paused
+            ),
         )
 
 
@@ -711,7 +736,9 @@ def mutate_commit(
         reservation_id=None,
         reserved_slot=None,
         last_committed_reservation_id=reservation_id,
-        **increments,
+        completed_initial_reviews=increments.get("completed_initial_reviews"),
+        completed_verification_rounds=increments.get("completed_verification_rounds"),
+        failed_attempts=increments.get("failed_attempts"),
     )
 
 
@@ -780,6 +807,8 @@ def prepare_session_round(
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     flags = dict(state_flags)
+    if record.operator_paused:
+        flags.setdefault("paused", True)
     held = record.reservation_id
     if held is not None:
         flags.setdefault("paused", True)

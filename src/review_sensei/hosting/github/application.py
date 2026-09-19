@@ -242,6 +242,72 @@ class GitHubApplication:
             )
         return publication
 
+    def apply_maintainer_command(
+        self,
+        *,
+        options: GitHubWriteOptions,
+        oidc_token: str | None,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        body: str,
+        actor_login: str,
+        actor_type: str = "User",
+        association: str,
+        app_slug: str,
+    ):
+        """Apply an authenticated maintainer command. Never exchanges when writes are off."""
+
+        from ...disposition import (
+            MaintainerCommandResult,
+            apply_session_command,
+            authorized_maintainer,
+            parse_maintainer_command,
+        )
+
+        command = parse_maintainer_command(body, actor=actor_login, head_sha=head_sha)
+        if command is None:
+            return MaintainerCommandResult(
+                action="status",
+                applied=False,
+                operator_paused=False,
+                summary="not-a-command",
+            )
+        if not authorized_maintainer(
+            login=actor_login,
+            user_type=actor_type,
+            association=association,
+            app_slug=app_slug,
+        ):
+            return MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=False,
+                summary="unauthorized",
+            )
+        if not options.github_writes:
+            return MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=False,
+                summary="writes_disabled",
+            )
+        token = self.broker.exchange(
+            oidc_token or self.broker.request_oidc_token(),
+            capability="review_publish",
+        )
+        ledger = self._session_ledger_for_token(token, options=options)
+        if ledger is None:
+            raise GitHubPublicationError("maintainer commands require a session ledger")
+        identity = SessionIdentity(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+        )
+        _record, result = apply_session_command(ledger, identity, command)
+        return result
+
     def _session_ledger_for_token(
         self,
         token: str,

@@ -423,7 +423,7 @@ _PUBLICATION_TO_RUN_STATUS = {
     "skipped_app_authored": "skipped_policy",
     "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
-    "handoff": "skipped_policy",
+    "handoff": "action_required",
 }
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
