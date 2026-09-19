@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added the issue #136 C4 baseline-aware verification planner: a complete
+  compatible review becomes the last-assessed baseline. Later operator
+  passes reuse ADR 0042 incremental plans and bounded related paths to
+  cover existing concerns plus changed and impacted code. Late blockers
+  require `new-regression` or `substantiated-missed-defect` and may record
+  causal lineage. Omission is not a fix. Rebase, model, and policy changes
+  invalidate the baseline. Doctor/plan display the scope. `legacy` and
+  `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
+
 - Added the issue #136 C3 durable session ledger: local filesystem and
   GitHub issue-comment adapters store bounded PR-wide round counters with
   integrity digests, CAS generation, reservation/commit/abort, expiry, and

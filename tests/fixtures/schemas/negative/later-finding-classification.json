@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "classification": "new-regression",
+  "is_late_relative_to_baseline": true,
+  "late_reason": "new-regression",
+  "is_duplicate": false,
+  "causal_parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "lineage_reason": "fix-introduced-on-related-path",
+  "attribution": "fix-regression",
+  "source_patch": "not-allowed"
+}

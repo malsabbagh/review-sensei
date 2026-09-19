@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/verification-scope.schema.json",
+  "title": "ReviewSensei verification scope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "round_kind",
+    "late_admission_required",
+    "coverage_mode",
+    "invalidation_reason",
+    "reviewed_paths",
+    "related_paths",
+    "changed_paths",
+    "existing_concerns"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "status": {
+      "type": "string",
+      "enum": [
+        "legacy-unscoped",
+        "baseline-required",
+        "incomplete-baseline",
+        "incompatible",
+        "verify",
+        "ledger-untrusted"
+      ]
+    },
+    "round_kind": {
+      "type": "string",
+      "enum": ["none", "initial", "verification"]
+    },
+    "late_admission_required": { "type": "boolean" },
+    "coverage_mode": {
+      "type": "string",
+      "enum": ["full", "incremental", "fallback-full", "unscoped"]
+    },
+    "invalidation_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        "rebase-or-base-change",
+        "model-change",
+        "engine-change",
+        "profile-change",
+        "policy-change",
+        "prompt-or-stage-digest-change",
+        "context-digest-change",
+        "learning-digest-change",
+        "incomplete-baseline",
+        "missing-baseline",
+        "coverage-incomplete",
+        "ledger-untrusted",
+        null
+      ]
+    },
+    "reviewed_paths": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "related_paths": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "changed_paths": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "existing_concerns": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1024
+    }
+  }
+}

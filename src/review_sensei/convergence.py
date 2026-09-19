@@ -18,11 +18,15 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, replace
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from .errors import ReviewInputError
 from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
+
+if TYPE_CHECKING:
+    from .baseline import ReviewBaseline
+    from .context import ReviewContextCacheKey
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 REVIEW_MODE_ENV = "REVIEWSENSEI_REVIEW_MODE"
@@ -808,12 +812,19 @@ def admit_review_result(
     candidates: Sequence[BlockerCandidate] | None = None,
     changed_lines: Mapping[str, frozenset[int]] | None = None,
     deleted_lines: Mapping[str, frozenset[int]] | None = None,
+    baseline: ReviewBaseline | None = None,
+    changed_paths: Sequence[str] | None = None,
+    related_paths: Sequence[str] = (),
+    current_key: ReviewContextCacheKey | None = None,
+    evidence_confirmed_concerns: Sequence[str] = (),
 ) -> ReviewResult:
     """Apply trusted blocker admission to each finding before publication.
 
     Operator modes always carry ``enforcement="publication"`` (the dataclass
     coerces that invariant), so admission runs. ``legacy`` stays
-    ``display-only`` and returns the result unchanged.
+    ``display-only`` and returns the result unchanged. An optional C4
+    ``baseline`` classifies later findings before the evaluator runs.
+    Caller-supplied ``candidates`` keep explicit late-admission facts.
     """
 
     if not isinstance(result, ReviewResult):
@@ -824,11 +835,66 @@ def admit_review_result(
         return result
     if candidates is not None and len(candidates) != len(result.comments):
         raise ReviewInputError("blocker candidates must align with review comments")
+    verification_scope = None
+    verification_changed: tuple[str, ...] = ()
+    if candidates is None and baseline is not None:
+        from .baseline import ReviewBaseline, plan_verification_scope
+        from .context import ReviewContextCacheKey
+
+        if not isinstance(baseline, ReviewBaseline):
+            raise ReviewInputError("review baseline is invalid")
+        if current_key is not None and not isinstance(
+            current_key, ReviewContextCacheKey
+        ):
+            raise ReviewInputError("current review cache key is invalid")
+        if changed_paths is not None:
+            verification_changed = tuple(changed_paths)
+        elif changed_lines is not None:
+            verification_changed = tuple(changed_lines)
+        verification_scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=verification_changed,
+            related_paths=None if not related_paths else related_paths,
+            confirmed_concerns=evidence_confirmed_concerns,
+        )
     admitted: list[ReviewComment] = []
     for index, comment in enumerate(result.comments):
         if candidates is not None:
             candidate = candidates[index]
             _require_candidate_matches_comment(candidate, comment)
+        elif verification_scope is not None:
+            from .baseline import candidate_from_later_finding, classify_later_finding
+            from .context import finding_lifecycle_for_comment
+
+            if baseline is None:
+                raise ReviewInputError("review baseline is invalid")
+            on_changed_path = comment_targets_pr_change(
+                comment,
+                changed_lines=changed_lines,
+                deleted_lines=deleted_lines,
+            )
+            lifecycle = finding_lifecycle_for_comment(comment)
+            classification = classify_later_finding(
+                comment,
+                baseline=baseline,
+                scope=verification_scope,
+                changed_paths=verification_changed,
+                related_paths=verification_scope.related_paths,
+                evidence_confirmed=bool(
+                    lifecycle.concern
+                    and lifecycle.concern in set(evidence_confirmed_concerns)
+                ),
+                on_changed_path=on_changed_path,
+                is_preference_or_optional=(comment.category or "").strip().casefold()
+                in PREFERENCE_CATEGORIES,
+            )
+            candidate = candidate_from_later_finding(
+                comment,
+                classification,
+                on_changed_path=on_changed_path,
+            )
         else:
             candidate = derive_blocker_candidate(
                 comment,

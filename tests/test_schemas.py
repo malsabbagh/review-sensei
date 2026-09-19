@@ -39,6 +39,8 @@ SCHEMA_NAMES = (
     "blocker-admission",
     "review-round-decision",
     "session-record",
+    "verification-scope",
+    "later-finding-classification",
 )
 
 
