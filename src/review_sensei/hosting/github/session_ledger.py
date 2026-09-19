@@ -4,6 +4,12 @@ Stores one bounded session record as an App-authored issue comment on the
 source pull request. Discovery is fail-closed: multiple markers, truncated
 pagination, or a marker/body digest mismatch do not initialize a second
 session. This adapter never migrates legacy documents and never rehashes.
+
+GitHub issue-comment updates do not expose a conditional generation or ETag
+precondition through this adapter. Mutations therefore use a bounded
+pre-discovery check plus a post-update readback: they are best-effort against
+cross-process writers, not a strict distributed lock. Callers that require a
+no-lost-update guarantee must serialize writers for an identity.
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ SESSION_MARKER_RE = re.compile(
     r"digest=(?P<digest>[a-f0-9]{64}) -->$"
 )
 _JSON_FENCE_RE = re.compile(
-    r"```json\n(?P<body>\{.*\})\n```(?=\n|$)",
+    r"```json\n(?P<body>\{.*\})\n```$",
     re.DOTALL,
 )
 _SESSION_INTRO = "ReviewSensei session ledger (round counters only; no source)."
@@ -105,7 +111,11 @@ def parse_session_comment(
             SessionLoadReason.CONFLICT, "session comment marker is ambiguous"
         )
     marker = matches[0]
-    fenced = _JSON_FENCE_RE.search(body)
+    prefix = body[: marker.start()].rstrip()
+    fence_start = prefix.rfind("```json\n")
+    fenced = (
+        _JSON_FENCE_RE.fullmatch(prefix[fence_start:]) if fence_start >= 0 else None
+    )
     if fenced is None:
         raise SessionLoadError(
             SessionLoadReason.INTEGRITY_FAILED, "session comment JSON is missing"
@@ -145,7 +155,13 @@ def parse_session_comment(
 
 
 class GitHubIssueCommentSessionLedger:
-    """GitHub-backed session ledger using one issue comment per pull request."""
+    """GitHub-backed session ledger using one issue comment per pull request.
+
+    The GitHub REST API path used here has no conditional PATCH primitive, so
+    generation checks are advisory across independent writers. A deployment
+    that needs strict compare-and-swap semantics must serialize mutations
+    outside this adapter.
+    """
 
     def __init__(
         self,
@@ -383,7 +399,19 @@ class GitHubIssueCommentSessionLedger:
             or verified.record_sha256 != updated.record_sha256
         ):
             raise ReviewInputError("session comment update lost")
-        return verified
+        # A successful PATCH response proves only what GitHub returned for
+        # that request. Re-read the marker so a concurrent writer that landed
+        # immediately after the PATCH is surfaced instead of being silently
+        # treated as our committed generation.
+        readback_id, readback = self._discover(identity, now=now)
+        if (
+            readback_id != comment_id
+            or readback is None
+            or readback.record_sha256 != updated.record_sha256
+            or readback.generation != updated.generation
+        ):
+            raise ReviewInputError("session comment update lost")
+        return readback
 
     def reserve(
         self,

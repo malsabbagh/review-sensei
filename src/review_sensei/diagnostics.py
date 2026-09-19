@@ -902,14 +902,17 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
             f"failed_attempts={review_convergence.get('max_failed_attempts')}"
         )
     session_record = document.get("session_record")
-    if isinstance(session_record, dict) and session_record.get("status"):
-        lines.append(
-            "session_ledger: "
-            f"status={session_record.get('status')} "
-            f"initial={session_record.get('completed_initial_reviews', 0)} "
-            f"verification={session_record.get('completed_verification_rounds', 0)} "
-            f"failed_attempts={session_record.get('failed_attempts', 0)}"
-        )
+    if isinstance(session_record, dict):
+        status = session_record.get("status")
+        if status:
+            detail = f"status={status}"
+            if status == "ok":
+                detail += (
+                    f" initial={session_record.get('completed_initial_reviews', 0)}"
+                    f" verification={session_record.get('completed_verification_rounds', 0)}"
+                    f" failed_attempts={session_record.get('failed_attempts', 0)}"
+                )
+            lines.append(f"session_ledger: {detail}")
     identity = document.get("identity")
     if isinstance(identity, dict):
         if identity.get("base_sha") or identity.get("head_sha"):

@@ -39,8 +39,11 @@ limit is an integrity failure, not a sizing expansion.
 
 `LocalSessionLedger` is a single-writer adapter per repository/pull-request
 identity. Its atomic replacement protects individual files but does not claim
-inter-process locking; concurrent hosted jobs use the GitHub-backed adapter's
-CAS path instead.
+inter-process locking. The GitHub-backed adapter performs bounded
+pre-discovery checks and post-update readbacks, but GitHub issue-comment PATCH
+does not expose a conditional generation or ETag precondition here. Its
+cross-process protection is therefore best-effort; deployments requiring a
+strict no-lost-update guarantee must serialize writers for an identity.
 
 Session identity is the ADR 0042 pair `repository` + `pull_request`. Optional
 `repository_id` binds GitHub comments. Head SHA, model, and policy digests are
@@ -52,7 +55,9 @@ output. Default TTL is 30 days; the maximum is 90 days. Missing, expired,
 tampered, or conflicting state is explicit. GitHub discovery that is truncated
 or finds two markers fails closed.
 
-Mutations are compare-and-swap on `generation`. `reserve` holds
+Local and in-memory mutations are compare-and-swap on `generation`; GitHub
+mutations use the same generation metadata with the best-effort hosted checks
+described above. `reserve` holds
 `initial` / `verification` / `failed-attempt`. `commit` applies the increment
 and is idempotent for the same `reservation_id`. `abort` drops an uncommitted
 hold. Local files migrate `schema_version=0.1` documents that use
@@ -100,7 +105,11 @@ Tradeoffs:
 
 - A GitHub comment can be deleted. C3 reports missing rather than inventing
   counters.
-- Concurrent jobs lose a CAS race instead of double-counting.
+- Local and in-memory concurrent jobs lose a CAS race instead of
+  double-counting. GitHub issue-comment updates have no conditional PATCH
+  primitive, so independent hosted writers must be serialized when a strict
+  no-lost-update guarantee is required; the adapter's post-update readback
+  catches many races but cannot make the remote PATCH atomic.
 - GitHub initialization posts once and then rediscoveries the bounded marker.
   If a torn or concurrent create leaves multiple session comments, discovery
   returns `conflict` and initialization does not overwrite either comment. An
@@ -118,8 +127,9 @@ Tradeoffs:
   rejected.
 - GitHub discovery accepts only terminal, bot-authored session markers. When
   an App slug is available it must match the comment author, and each mutation
-  re-discovers the marker immediately before its update to reject a stale
-  generation.
+  re-discovers the marker immediately before its update and after its update;
+  these checks reject observable stale generations but do not replace a
+  serialized writer or a remote conditional update.
 
 ## Alternatives considered
 

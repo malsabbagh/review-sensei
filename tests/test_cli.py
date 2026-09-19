@@ -1817,6 +1817,8 @@ class DoctorPlanCliTests(unittest.TestCase):
                 "owner/repo",
                 "--pull-request",
                 "3",
+                "--session-ledger",
+                "ledger",
                 "--title",
                 "Preview",
                 "--stage",
@@ -1835,6 +1837,7 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(args.diff, Path("review.patch"))
         self.assertEqual(args.repository, "owner/repo")
         self.assertEqual(args.pull_request, 3)
+        self.assertEqual(args.session_ledger, Path("ledger"))
         self.assertEqual(args.stage, ["review"])
         self.assertEqual(args.base_sha, "a" * 40)
         self.assertEqual(args.head_sha, "b" * 40)

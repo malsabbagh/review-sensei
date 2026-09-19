@@ -125,6 +125,10 @@ class GitHubApplication:
         )
         prepared = None
         if ledger is not None:
+            if not isinstance(head_sha, str) or not head_sha.strip():
+                raise GitHubPublicationError(
+                    "session ledger requires a non-empty head_sha"
+                )
             reservation_id = session_reservation_id(
                 repository=repository,
                 pull_request=pull_request,
@@ -143,14 +147,11 @@ class GitHubApplication:
                     ledger, identity, reservation_id
                 )
                 if cleanup_error is not None:
-                    if isinstance(preparation_error, (KeyboardInterrupt, SystemExit)):
-                        preparation_error.add_note(
-                            "session reservation cleanup failed: "
-                            f"{type(cleanup_error).__name__}: "
-                            f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                        )
-                        raise
-                    raise cleanup_error from preparation_error
+                    preparation_error.add_note(
+                        "session reservation cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
                 raise
         try:
             publication = self.reviewer.publish(
@@ -222,7 +223,14 @@ class GitHubApplication:
         identity: SessionIdentity,
         reservation_id: str,
     ) -> BaseException | None:
-        """Best-effort cleanup when preparation fails after reserving."""
+        """Best-effort cleanup when preparation fails after reserving.
+
+        The helper revalidates ownership immediately before aborting. A full
+        reload is intentional because preparation may fail after a remote
+        reserve response has been applied; if another writer advanced the
+        generation, abort returns a diagnostic and the caller preserves the
+        original preparation error rather than masking it.
+        """
 
         try:
             loaded = ledger.load(identity)

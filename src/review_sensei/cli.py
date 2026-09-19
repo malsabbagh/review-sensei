@@ -855,8 +855,15 @@ def _plan_parser() -> argparse.ArgumentParser:
         description="Preview a review execution plan without provider or GitHub calls.",
     )
     parser.add_argument("--diff", type=Path)
-    parser.add_argument("--repository")
-    parser.add_argument("--pull-request", type=int)
+    parser.add_argument(
+        "--repository",
+        help="PR repository identity used when displaying --session-ledger",
+    )
+    parser.add_argument(
+        "--pull-request",
+        type=int,
+        help="PR number used when displaying --session-ledger",
+    )
     parser.add_argument("--title")
     parser.add_argument("--stage", action="append", default=[])
     parser.add_argument("--profile")

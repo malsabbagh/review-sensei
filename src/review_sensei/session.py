@@ -51,7 +51,7 @@ MAX_GENERATION = 2_147_483_647
 RESERVATION_SLOTS = frozenset({"initial", "verification", "failed-attempt"})
 _RESERVATION_ID_RE = re.compile(r"^[a-f0-9]{8,64}$")
 _REPOSITORY_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"
 )
 _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
@@ -1069,11 +1069,13 @@ class LocalSessionLedger:
         )
         installed = False
         temporary_removed = False
+        handle_closed = False
         try:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
             handle.close()
+            handle_closed = True
             if exclusive:
                 # Link a fully fsynced temporary file into place without
                 # replacing an existing destination. This is the filesystem
@@ -1092,7 +1094,11 @@ class LocalSessionLedger:
                 finally:
                     os.close(directory_fd)
         except OSError as exc:
-            handle.close()
+            if not handle_closed:
+                try:
+                    handle.close()
+                except (OSError, ValueError):
+                    pass
             if not installed and not temporary_removed:
                 try:
                     os.unlink(handle.name)
@@ -1303,9 +1309,10 @@ def resolve_local_session_ledger(
     """Return a local ledger from ``--session-ledger`` or the ambient env.
 
     Callers with a trusted checkout boundary may pass ``trusted_root`` to
-    contain the resolved ledger directory. Without that boundary the operator
-    owns the explicitly supplied location, but traversal and Windows namespace
-    paths are rejected and relative paths are canonicalized once.
+    contain the resolved ledger directory. ``~`` and shell-style environment
+    variables are expanded before validation. Without that boundary the
+    operator owns the explicitly supplied location, but traversal and Windows
+    namespace paths are rejected and relative paths are canonicalized once.
     """
 
     raw = path if path is not None else os.getenv(SESSION_LEDGER_ENV)
@@ -1316,6 +1323,7 @@ def resolve_local_session_ledger(
     raw_text = os.fspath(raw)
     if not isinstance(raw_text, str) or "\x00" in raw_text:
         raise ReviewInputError("session ledger path is invalid")
+    raw_text = os.path.expandvars(os.path.expanduser(raw_text))
     if os.name == "nt":
         windows_path = raw_text.replace("/", "\\")
         if windows_path.startswith(("\\\\", "\\\\?\\", "\\\\.\\", "\\??\\")):
@@ -1323,7 +1331,7 @@ def resolve_local_session_ledger(
         if ntpath.splitdrive(windows_path)[0] and not ntpath.isabs(windows_path):
             raise ReviewInputError("session ledger path is invalid")
     try:
-        root = Path(raw)
+        root = Path(raw_text)
         if ".." in root.parts:
             raise ReviewInputError("session ledger path traversal is not allowed")
         root = root.resolve()

@@ -10,9 +10,10 @@ from unittest.mock import patch
 
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosting.github import (
     GitHubApplication,
+    GitHubHttp,
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
 )
@@ -40,9 +41,9 @@ from review_sensei.session import (
 )
 
 try:
-    from fake_github_http import json_response, make_http
+    from fake_github_http import FakeHTTPResponse, json_response, make_http
 except ImportError:
-    from tests.fake_github_http import json_response, make_http
+    from tests.fake_github_http import FakeHTTPResponse, json_response, make_http
 
 
 FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
@@ -63,6 +64,18 @@ class SessionRecordTests(unittest.TestCase):
     def test_identity_rejects_head_as_session_key(self):
         with self.assertRaisesRegex(ReviewInputError, "repository"):
             SessionIdentity("owner/repo@deadbeef", 136)
+
+    def test_identity_rejects_gitHub_invalid_component_edges(self):
+        for repository in (
+            "owner/.repo",
+            "owner/repo-.",
+            "-owner/repo",
+            f"{'o' * 40}/repo",
+            f"owner/{'r' * 101}",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaisesRegex(ReviewInputError, "repository"):
+                    SessionIdentity(repository, 136)
 
     def test_ttl_bound(self):
         with self.assertRaisesRegex(ReviewInputError, "ttl"):
@@ -191,6 +204,18 @@ class LocalSessionLedgerTests(unittest.TestCase):
     def test_invalid_ledger_path_is_sanitized(self):
         with self.assertRaisesRegex(ReviewInputError, "path is invalid"):
             resolve_local_session_ledger("bad\x00path")
+
+    def test_ledger_path_expands_home_and_environment(self):
+        with tempfile.TemporaryDirectory() as raw:
+            with patch.dict(os.environ, {"HOME": raw, "RS_LEDGER_DIR": raw}):
+                self.assertEqual(
+                    resolve_local_session_ledger("~/ledger").root,
+                    (Path(raw) / "ledger").resolve(),
+                )
+                self.assertEqual(
+                    resolve_local_session_ledger("$RS_LEDGER_DIR/ledger").root,
+                    (Path(raw) / "ledger").resolve(),
+                )
 
     def test_ledger_path_can_be_contained_by_a_trusted_root(self):
         with tempfile.TemporaryDirectory() as trusted_raw:
@@ -460,6 +485,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 json_response([{"id": 7, "body": body}]),
                 json_response([{"id": 7, "body": body}]),
                 json_response({"id": 7, "body": reserved_body}),
+                json_response([{"id": 7, "body": reserved_body}]),
             ]
         )
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
@@ -527,6 +553,39 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 expected_generation=0,
                 now=FIXED_NOW,
             )
+
+    def test_update_reads_back_the_generation_after_patch(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        reserved = record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="abcd1234",
+            reserved_slot="initial",
+        )
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"id": 7, "body": reserved_body}),
+                json_response([{"id": 7, "body": reserved_body}]),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        updated = ledger.reserve(
+            IDENTITY,
+            slot="initial",
+            reservation_id="abcd1234",
+            expected_generation=0,
+            now=FIXED_NOW,
+        )
+        self.assertEqual(updated, reserved)
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+        )
 
     def test_update_rejects_a_competing_generation_before_patch(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -608,6 +667,12 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         quoted = f"{body}\nQuoted after marker"
         self.assertIsNone(parse_session_comment(quoted, identity=IDENTITY))
 
+    def test_parser_uses_the_final_json_fence_before_the_marker(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        quoted = f'```json\n{{"unrelated":true}}\n```\n\n{body}'
+        self.assertEqual(parse_session_comment(quoted, identity=IDENTITY), record)
+
     def test_multiple_markers_fail_closed(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         body = render_session_comment(repository_id=99, pull_request=136, record=record)
@@ -664,6 +729,126 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
 
 class GitHubApplicationSessionTests(unittest.TestCase):
+    def test_github_session_ledger_requires_a_head_sha(self):
+        class Broker:
+            def exchange(self, token, *, capability=None):
+                return "capability-token"
+
+        application = GitHubApplication(
+            broker=Broker(),
+            http=object(),
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+            session_ledger=object(),
+        )
+        with self.assertRaisesRegex(ReviewSenseiError, "head_sha"):
+            application.publish_review(
+                options=GitHubWriteOptions(
+                    auto_review=True,
+                    github_writes=True,
+                    github_session_ledger=True,
+                ),
+                oidc_token="oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="",
+                base_branch="main",
+                base_sha="b" * 40,
+                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                diff="diff",
+                app_slug="reviewsensei[bot]",
+            )
+
+    def test_github_session_ledger_writes_through_application(self):
+        from review_sensei.hosting.github import PublicationResult
+
+        class Broker:
+            def exchange(self, token, *, capability=None):
+                return "capability-token"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                return PublicationResult(status="published", review_id=7)
+
+        head_sha = "a" * 40
+        state = {"get_count": 0, "body": None}
+        calls = []
+
+        def opener(request, timeout):
+            del timeout
+            calls.append((request.method, request.full_url, request.data))
+            if request.method == "GET":
+                state["get_count"] += 1
+                value = (
+                    []
+                    if state["get_count"] <= 2
+                    else [
+                        {
+                            "id": 7,
+                            "body": state["body"],
+                            "user": {
+                                "login": "reviewsensei[bot]",
+                                "type": "Bot",
+                            },
+                        }
+                    ]
+                )
+                status = 200
+            else:
+                payload = json.loads(request.data.decode("utf-8"))
+                state["body"] = payload["body"]
+                value = {"id": 7, "body": state["body"]}
+                status = 201 if request.method == "POST" else 200
+            return FakeHTTPResponse(json.dumps(value).encode("utf-8"), status=status)
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        application = GitHubApplication(
+            broker=Broker(),
+            http=http,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+        )
+        publication = application.publish_review(
+            options=GitHubWriteOptions(
+                auto_review=True,
+                github_writes=True,
+                github_session_ledger=True,
+            ),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=99,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head_sha,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+            diff="diff",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertEqual(publication.status, "published")
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            [
+                "GET",
+                "GET",
+                "POST",
+                "GET",
+                "GET",
+                "GET",
+                "PATCH",
+                "GET",
+                "GET",
+                "GET",
+                "GET",
+                "PATCH",
+                "GET",
+            ],
+        )
+
     def test_preparation_failure_releases_a_reservation(self):
         class Broker:
             def request_oidc_token(self):
@@ -712,6 +897,48 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 )
         loaded = ledger.load(IDENTITY)
         self.assertIsNone(loaded.record.reservation_id)
+
+    def test_preparation_cleanup_failure_does_not_mask_original_error(self):
+        class Broker:
+            def exchange(self, token, *, capability=None):
+                return "capability-token"
+
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+            session_ledger=InMemorySessionLedger(),
+        )
+        with (
+            patch(
+                "review_sensei.hosting.github.application.prepare_session_round",
+                side_effect=RuntimeError("preparation failed"),
+            ),
+            patch.object(
+                GitHubApplication,
+                "_abort_held_session_reservation",
+                return_value=ValueError("cleanup failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "preparation failed") as caught:
+                application.publish_review(
+                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="a" * 40,
+                    base_branch="main",
+                    base_sha="b" * 40,
+                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                    diff="diff",
+                    app_slug="reviewsensei[bot]",
+                )
+        self.assertTrue(
+            any("cleanup failed" in note for note in caught.exception.__notes__)
+        )
 
     def test_publisher_base_exception_releases_a_reservation(self):
         class Broker:
@@ -795,6 +1022,13 @@ class GitHubApplicationSessionTests(unittest.TestCase):
 
 
 class DiagnosticSessionTests(unittest.TestCase):
+    def test_diagnostic_does_not_print_counters_for_unavailable_session(self):
+        from review_sensei.diagnostics import render_diagnostic
+
+        rendered = render_diagnostic({"session_record": {"status": "integrity-failed"}})
+        self.assertIn("session_ledger: status=integrity-failed", rendered)
+        self.assertNotIn("initial=0", rendered)
+
     def test_doctor_and_plan_display_local_session(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
