@@ -278,13 +278,17 @@ class ConversationPublisherTests(unittest.TestCase):
     def test_issue_diff_context_keeps_uncovered_hunks_and_deduplicates_priority(self):
         target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
         helper_hunk = "@@ -100,1 +100,2 @@\n+helper\n+return helper()"
+        target_patch = (
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after"
+        )
         http, calls = make_http(
             [
                 json_response(
                     [
                         {
                             "filename": "src/target.py",
-                            "patch": f"{target_hunk}\n{helper_hunk}",
+                            "patch": f"{target_patch}\n{helper_hunk}",
                         }
                     ]
                 )
@@ -308,10 +312,11 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIsNotNone(diff_context)
         self.assertEqual(diff_context.count(target_hunk), 1)
         self.assertIn(helper_hunk, diff_context)
+        self.assertNotIn("context-before", diff_context)
         self.assertEqual(changed_paths, ("src/target.py",))
         self.assertEqual(len(calls), 1)
 
-    def test_issue_diff_context_does_not_exceed_budget_for_oversized_priority_hunk(
+    def test_oversized_priority_hunk_does_not_starve_later_context(
         self,
     ):
         http, _ = make_http(
@@ -331,6 +336,7 @@ class ConversationPublisherTests(unittest.TestCase):
             ]
         )
         oversized_hunk = "@@ -1 +1 @@\n" + "x" * (MAX_CONTEXT_DIFF_BYTES * 2)
+        target_hunk = "@@ -1 +1 @@\n-old\n+new"
 
         diff_context, _ = ConversationPublisher(http=http)._load_diff_context(
             token="token",
@@ -338,13 +344,17 @@ class ConversationPublisherTests(unittest.TestCase):
             pull_request=1,
             source={},
             source_kind="issue",
-            priority_hunks=[("src/target.py", oversized_hunk)],
+            priority_hunks=[
+                ("src/oversized.py", oversized_hunk),
+                ("src/target.py", target_hunk),
+            ],
         )
 
         self.assertIsNotNone(diff_context)
         self.assertLessEqual(len(diff_context.encode("utf-8")), MAX_CONTEXT_DIFF_BYTES)
         self.assertTrue(diff_context.startswith("path=src/target.py"))
-        self.assertNotIn("path=src/other.py", diff_context)
+        self.assertIn("path=src/other.py", diff_context)
+        self.assertNotIn("path=src/oversized.py", diff_context)
 
     def test_prioritized_finding_hunks_sort_current_comments_by_created_at(self):
         head = "b" * 40

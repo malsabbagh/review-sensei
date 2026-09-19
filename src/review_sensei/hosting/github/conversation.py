@@ -50,6 +50,10 @@ MAX_REVIEW_THREAD_PAGES = 10
 MENTION_PATTERN = re.compile(r"(?i)(?:^|\s)@sensei(?:$|\s|[.,!?])")
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
+DIFF_HUNK_HEADER = re.compile(
+    r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
+)
 MARKER_PREFIX = "<!-- reviewsensei:reply:v1"
 
 _REVIEW_THREADS_FOR_RESOLUTION_QUERY = """
@@ -106,6 +110,72 @@ def _bounded_text(value: object, maximum: int) -> str | None:
         except UnicodeDecodeError:
             clipped = clipped[:-1]
     return suffix.decode("ascii").lstrip()
+
+
+def _parse_diff_hunk_range(value: str) -> tuple[int, int, int, int] | None:
+    first_line = value.splitlines()[0] if value else ""
+    match = DIFF_HUNK_HEADER.match(first_line)
+    if match is None:
+        return None
+    return (
+        int(match.group("old_start")),
+        int(match.group("old_count") or "1"),
+        int(match.group("new_start")),
+        int(match.group("new_count") or "1"),
+    )
+
+
+def _diff_ranges_overlap(
+    left_start: int,
+    left_count: int,
+    right_start: int,
+    right_count: int,
+) -> bool:
+    left_end = left_start + max(left_count, 1)
+    right_end = right_start + max(right_count, 1)
+    return left_start < right_end and right_start < left_end
+
+
+def _diff_hunks_overlap(
+    left: tuple[int, int, int, int], right: tuple[int, int, int, int]
+) -> bool:
+    return _diff_ranges_overlap(left[0], left[1], right[0], right[1]) or (
+        _diff_ranges_overlap(left[2], left[3], right[2], right[3])
+    )
+
+
+def _remove_emitted_priority_hunks(patch: str, emitted: set[str]) -> str:
+    priority_ranges = [
+        parsed
+        for hunk in emitted
+        if (parsed := _parse_diff_hunk_range(hunk)) is not None
+    ]
+    if not priority_ranges:
+        return patch
+    lines = patch.splitlines(keepends=True)
+    patch_hunks: list[tuple[int, tuple[int, int, int, int]]] = []
+    for index, line in enumerate(lines):
+        parsed = _parse_diff_hunk_range(line)
+        if parsed is not None:
+            patch_hunks.append((index, parsed))
+    if not patch_hunks:
+        return patch
+    kept = lines[: patch_hunks[0][0]]
+    removed = False
+    for position, (start, patch_range) in enumerate(patch_hunks):
+        end = (
+            patch_hunks[position + 1][0]
+            if position + 1 < len(patch_hunks)
+            else len(lines)
+        )
+        if any(
+            _diff_hunks_overlap(patch_range, priority)
+            for priority in priority_ranges
+        ):
+            removed = True
+            continue
+        kept.extend(lines[start:end])
+    return "".join(kept) if removed else patch
 
 
 def has_standalone_sensei_mention(body: object) -> bool:
@@ -648,21 +718,25 @@ class ConversationPublisher:
         file_patches: list[tuple[str, str]] = []
         used = 0
 
-        def append_part(part: str) -> str | None:
+        def append_part(
+            part: str, *, allow_truncation: bool
+        ) -> tuple[str | None, bool]:
             nonlocal used
             separator_bytes = 1 if parts else 0
             remaining = MAX_CONTEXT_DIFF_BYTES - used - separator_bytes
             if remaining < 1:
-                return None
+                return None, True
+            if not allow_truncation and len(part.encode("utf-8")) > remaining:
+                return None, False
             bounded = _bounded_text(part, remaining)
             if bounded is None:
-                return None
+                return None, False
             bounded_bytes = len(bounded.encode("utf-8"))
             if bounded_bytes > remaining:
-                return None
+                return None, False
             parts.append(bounded)
             used += separator_bytes + bounded_bytes
-            return bounded
+            return bounded, False
 
         for item in files:
             if not isinstance(item, dict):
@@ -688,20 +762,23 @@ class ConversationPublisher:
                 continue
             seen_priority.add(priority)
             part = f"path={filename}\n{diff_hunk}"
-            bounded = append_part(part)
-            if bounded is None:
+            bounded, budget_exhausted = append_part(part, allow_truncation=False)
+            if budget_exhausted:
                 break
+            if bounded is None:
+                continue
             if bounded == part:
                 emitted_priority_hunks.setdefault(filename, set()).add(diff_hunk)
 
         for filename, patch in file_patches:
-            remaining_patch = patch
-            for diff_hunk in emitted_priority_hunks.get(filename, set()):
-                remaining_patch = remaining_patch.replace(diff_hunk, "", 1)
+            remaining_patch = _remove_emitted_priority_hunks(
+                patch, emitted_priority_hunks.get(filename, set())
+            )
             if not remaining_patch.strip():
                 continue
             part = f"path={filename}\n{remaining_patch}"
-            if append_part(part) is None:
+            _, budget_exhausted = append_part(part, allow_truncation=True)
+            if budget_exhausted:
                 break
         return ("\n".join(parts) or None), tuple(dict.fromkeys(paths))
 
