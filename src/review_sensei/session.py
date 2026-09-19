@@ -22,7 +22,7 @@ import ntpath
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -98,6 +98,7 @@ MAX_DISPOSITION_ACTOR_BYTES = 256
 _DISPOSITION_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
 _DISPOSITION_HEAD_RE = re.compile(r"^[a-f0-9]{40,64}$")
 _DISPOSITION_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
+_DIGEST_SHAPES = frozenset({"current", "operator-paused", "legacy"})
 
 
 def _stored_dispositions(
@@ -247,6 +248,7 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
         "created_at": created_at,
         "updated_at": value.get("updated_at", value.get("created_at")),
         "expires_at": value.get("expires_at"),
+        "operator_paused": False,
         "dispositions": value.get("dispositions", []),
     }
     forbidden = set(value) - {
@@ -317,6 +319,9 @@ class SessionRecord:
     record_sha256: str
     operator_paused: bool = False
     dispositions: tuple[Mapping[str, object], ...] = ()
+    # The shape is selected only while loading an existing untrusted document.
+    # Newly constructed or evolved records always use the current payload.
+    _digest_shape: str = field(default="current", repr=False, compare=False)
 
     def __post_init__(self) -> None:
         SessionIdentity(
@@ -377,17 +382,21 @@ class SessionRecord:
         _require_bool(self.operator_paused, label="operator_paused")
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
-        digest = self._payload_digest()
-        if self.record_sha256 != digest:
-            accepted_legacy_digests = {
-                _digest_payload(self._legacy_payload()),
-            }
-            if not self.dispositions:
-                accepted_legacy_digests.add(
-                    _digest_payload(self._payload_without_dispositions())
-                )
-            if self.record_sha256 not in accepted_legacy_digests:
-                raise ReviewInputError("session record integrity check failed")
+        if self._digest_shape not in _DIGEST_SHAPES:
+            raise ReviewInputError("session record digest shape is invalid")
+        if self._digest_shape == "legacy" and (
+            self.operator_paused or self.dispositions
+        ):
+            raise ReviewInputError("legacy session record has C6 fields")
+        if self._digest_shape == "operator-paused" and self.dispositions:
+            raise ReviewInputError("operator-paused session record has dispositions")
+        expected_payload = {
+            "current": self._payload,
+            "operator-paused": self._payload_without_dispositions,
+            "legacy": self._legacy_payload,
+        }[self._digest_shape]()
+        if self.record_sha256 != _digest_payload(expected_payload):
+            raise ReviewInputError("session record integrity check failed")
 
     def _payload_digest(self) -> str:
         payload = self._payload()
@@ -481,7 +490,11 @@ class SessionRecord:
         )
 
     def to_dict(self) -> dict[str, object]:
-        payload = self._payload()
+        payload = {
+            "current": self._payload,
+            "operator-paused": self._payload_without_dispositions,
+            "legacy": self._legacy_payload,
+        }[self._digest_shape]()
         payload["record_sha256"] = self.record_sha256
         return payload
 
@@ -520,6 +533,19 @@ class SessionRecord:
     def from_dict(cls, value: Mapping[str, object]) -> "SessionRecord":
         if not isinstance(value, Mapping):
             raise ReviewInputError("session record is invalid")
+        has_operator_paused = "operator_paused" in value
+        has_dispositions = "dispositions" in value
+        if has_dispositions and not has_operator_paused:
+            raise ReviewInputError(
+                "session record dispositions require operator_paused"
+            )
+        digest_shape = (
+            "current"
+            if has_dispositions
+            else "operator-paused"
+            if has_operator_paused
+            else "legacy"
+        )
         record = cls(
             repository=str(value.get("repository", "")),
             pull_request=_require_bounded_int(
@@ -571,6 +597,7 @@ class SessionRecord:
             record_sha256=str(value.get("record_sha256", "")),
             operator_paused=_operator_paused(value.get("operator_paused", False)),
             dispositions=_stored_dispositions(value.get("dispositions", [])),
+            _digest_shape=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
         return record

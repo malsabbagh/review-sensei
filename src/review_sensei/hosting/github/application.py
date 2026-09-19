@@ -304,6 +304,10 @@ class GitHubApplication:
                     operator_paused=False,
                     summary="writes_disabled",
                 )
+            if command.action == "status" and oidc_token is None:
+                raise GitHubPublicationError(
+                    "hosted maintainer status requires a caller-supplied OIDC token"
+                )
             token = self.broker.exchange(
                 oidc_token or self.broker.request_oidc_token(),
                 capability=(

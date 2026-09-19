@@ -177,7 +177,7 @@ class FindingDisposition:
             raise ReviewInputError("disposition fingerprint is invalid")
         if self.action not in FINDING_ACTIONS:
             raise ReviewInputError("disposition action is unsupported")
-            _require_reason(self.reason)
+        _require_reason(self.reason)
         if (
             not isinstance(self.actor, str)
             or not self.actor.strip()
@@ -313,11 +313,6 @@ def _set_operator_paused(
 ) -> SessionRecord:
     if bool(getattr(record, "operator_paused", False)) == paused:
         return record
-    updated = record.evolve(
-        now=now,
-        generation=record.generation + 1,
-        operator_paused=paused,
-    )
     replace = getattr(ledger, "replace", None)
     if not callable(replace):
         raise ReviewInputError("session ledger does not support CAS mutation")
@@ -325,7 +320,11 @@ def _set_operator_paused(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return updated
+        return current.evolve(
+            now=now,
+            generation=current.generation + 1,
+            operator_paused=paused,
+        )
 
     return replace(identity, mutate, now=now)
 

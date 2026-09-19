@@ -18,6 +18,7 @@ from review_sensei.disposition import (
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
+from review_sensei.hosting.github.errors import GitHubPublicationError
 from review_sensei.hosting.github.trigger import resolve_issue_comment
 from review_sensei.session import (
     InMemorySessionLedger,
@@ -129,6 +130,15 @@ class MaintainerCommandParseTests(unittest.TestCase):
                 reason="accepted",
                 actor="alice",
                 head_sha="not-a-sha",
+            )
+
+    def test_finding_disposition_requires_a_bounded_printable_reason(self):
+        with self.assertRaisesRegex(ReviewInputError, "reason"):
+            FindingDisposition(
+                fingerprint="abcd1234abcd1234",
+                action="dismiss",
+                reason="",
+                actor="alice",
             )
 
 
@@ -357,6 +367,51 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(result.action, "status")
         self.assertEqual(application.broker.exchanges, ["review_status"])
 
+    def test_hosted_status_requires_caller_oidc_token(self):
+        class Broker:
+            def __init__(self):
+                self.exchanges = []
+                self.oidc_requests = 0
+
+            def request_oidc_token(self):
+                self.oidc_requests += 1
+                return "minted-oidc"
+
+            def exchange(self, token, *, capability=None):
+                self.exchanges.append(capability)
+                return "token"
+
+        broker = Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        with patch.object(
+            application,
+            "_session_ledger_for_token",
+            return_value=InMemorySessionLedger(),
+        ):
+            with self.assertRaisesRegex(GitHubPublicationError, "caller-supplied"):
+                application.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=False, github_session_ledger=True
+                    ),
+                    oidc_token=None,
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="b" * 40,
+                    body="@sensei review status",
+                    actor_login="alice",
+                    association="MEMBER",
+                    app_slug="reviewsensei[bot]",
+                )
+        self.assertEqual(broker.exchanges, [])
+        self.assertEqual(broker.oidc_requests, 0)
+
 
 class SummaryTests(unittest.TestCase):
     def test_handoff_summary_asks_for_human_review(self):
@@ -375,7 +430,7 @@ class SummaryTests(unittest.TestCase):
 
 
 class CliCommandTests(unittest.TestCase):
-    def test_github_command_pauses_local_ledger_without_writes_flag(self):
+    def test_github_command_requires_write_opt_in_for_local_mutation(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             status = main(
@@ -392,6 +447,7 @@ class CliCommandTests(unittest.TestCase):
                     "owner/repo",
                     "--pull-request",
                     "136",
+                    "--allow-write",
                     "--session-ledger",
                     str(root),
                 ]
@@ -400,6 +456,28 @@ class CliCommandTests(unittest.TestCase):
             loaded = LocalSessionLedger(root).load(SessionIdentity("owner/repo", 136))
             self.assertEqual(loaded.status, "ok")
             self.assertTrue(loaded.record.operator_paused)
+
+    def test_github_command_status_remains_read_only_without_write_opt_in(self):
+        with tempfile.TemporaryDirectory() as raw:
+            status = main(
+                [
+                    "github",
+                    "command",
+                    "--comment-body",
+                    "@sensei review status",
+                    "--actor",
+                    "alice",
+                    "--association",
+                    "MEMBER",
+                    "--repository",
+                    "owner/repo",
+                    "--pull-request",
+                    "136",
+                    "--session-ledger",
+                    raw,
+                ]
+            )
+            self.assertEqual(status, 0)
 
 
 if __name__ == "__main__":

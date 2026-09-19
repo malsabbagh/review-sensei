@@ -1299,8 +1299,8 @@ def _github_parser() -> argparse.ArgumentParser:
         "--allow-write",
         action="store_true",
         help=(
-            "Required only when exchanging a GitHub capability; local session "
-            "ledger commands, including status/pause/continue, do not require it."
+            "Required for mutating session commands and when exchanging a "
+            "GitHub capability; read-only status does not require it."
         ),
     )
 
@@ -1425,6 +1425,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             app_slug=args.app_slug,
         ):
             raise ReviewInputError("maintainer command is unauthorized")
+        if parsed.action != "status" and not args.allow_write:
+            raise ReviewInputError("github writes require --allow-write")
         ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
         if ledger is None:
             raise ReviewInputError("maintainer commands require a session ledger")
