@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import quote
 
 from ...errors import LearningLoadError, ReviewInputError
@@ -50,6 +50,10 @@ MAX_REVIEW_THREAD_PAGES = 10
 MENTION_PATTERN = re.compile(r"(?i)(?:^|\s)@sensei(?:$|\s|[.,!?])")
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
+DIFF_HUNK_HEADER = re.compile(
+    r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
+)
 MARKER_PREFIX = "<!-- reviewsensei:reply:v1"
 
 _REVIEW_THREADS_FOR_RESOLUTION_QUERY = """
@@ -93,12 +97,22 @@ def _digest(value: str) -> str:
 
 
 def _bounded_text(value: object, maximum: int) -> str | None:
+    """Return non-empty text whose UTF-8 encoding is at most ``maximum`` bytes."""
+
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.encode("utf-8", errors="strict")
     if len(raw) <= maximum:
         return value
     suffix = b"\n[truncated]"
+    if maximum <= len(suffix):
+        clipped = raw[:maximum]
+        while clipped:
+            try:
+                return clipped.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                clipped = clipped[:-1]
+        return None
     clipped = raw[: maximum - len(suffix)]
     while clipped:
         try:
@@ -106,6 +120,82 @@ def _bounded_text(value: object, maximum: int) -> str | None:
         except UnicodeDecodeError:
             clipped = clipped[:-1]
     return suffix.decode("ascii").lstrip()
+
+
+def _parse_diff_hunk_header(value: str) -> tuple[int, int, int, int] | None:
+    """Parse the unified-diff header from a hunk block or header line."""
+
+    first_line = value.splitlines()[0] if value else ""
+    match = DIFF_HUNK_HEADER.match(first_line)
+    if match is None:
+        return None
+    return (
+        int(match.group("old_start")),
+        int(match.group("old_count") or "1"),
+        int(match.group("new_start")),
+        int(match.group("new_count") or "1"),
+    )
+
+
+def _diff_ranges_overlap(
+    left_start: int,
+    left_count: int,
+    right_start: int,
+    right_count: int,
+) -> bool:
+    left_end = left_start + max(left_count, 1)
+    right_end = right_start + max(right_count, 1)
+    return left_start < right_end and right_start < left_end
+
+
+def _diff_hunks_overlap(
+    left: tuple[int, int, int, int], right: tuple[int, int, int, int]
+) -> bool:
+    return _diff_ranges_overlap(left[0], left[1], right[0], right[1]) or (
+        _diff_ranges_overlap(left[2], left[3], right[2], right[3])
+    )
+
+
+def _remove_emitted_priority_hunks(
+    patch: str, emitted: set[str], *, filename: str
+) -> str:
+    priority_ranges = [
+        parsed
+        for hunk in emitted
+        if (parsed := _parse_diff_hunk_header(hunk)) is not None
+    ]
+    if not priority_ranges:
+        return patch
+    lines = patch.splitlines(keepends=True)
+    patch_hunks: list[tuple[int, tuple[int, int, int, int]]] = []
+    for index, line in enumerate(lines):
+        parsed = _parse_diff_hunk_header(line)
+        if parsed is not None:
+            patch_hunks.append((index, parsed))
+    if not patch_hunks:
+        return patch
+    preamble = lines[: patch_hunks[0][0]]
+    kept_hunks: list[list[str]] = []
+    removed = False
+    for position, (start, patch_range) in enumerate(patch_hunks):
+        end = (
+            patch_hunks[position + 1][0]
+            if position + 1 < len(patch_hunks)
+            else len(lines)
+        )
+        if any(
+            _diff_hunks_overlap(patch_range, priority) for priority in priority_ranges
+        ):
+            removed = True
+            continue
+        kept_hunks.append(lines[start:end])
+    if not removed:
+        return patch
+    if not kept_hunks:
+        return ""
+    if not preamble:
+        preamble = [f"--- a/{filename}\n", f"+++ b/{filename}\n"]
+    return "".join(preamble + [line for hunk in kept_hunks for line in hunk])
 
 
 def has_standalone_sensei_mention(body: object) -> bool:
@@ -452,17 +542,27 @@ class ConversationPublisher:
                     source_kind="inline",
                 )
             )
+            prior_findings = self._prior_findings(
+                comments=review_comments,
+                app_slug=app_slug,
+                head_sha=head_sha,
+            )
+            priority_hunks = (
+                self._prioritized_finding_hunks(
+                    comments=review_comments,
+                    app_slug=app_slug,
+                    head_sha=head_sha,
+                )
+                if source_kind == "issue"
+                else ()
+            )
             diff_context, changed_paths = self._load_diff_context(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 source=source,
                 source_kind=source_kind,
-            )
-            prior_findings = self._prior_findings(
-                comments=review_comments,
-                app_slug=app_slug,
-                head_sha=head_sha,
+                priority_hunks=priority_hunks,
             )
             base_sha = base.get("sha")
             if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
@@ -612,6 +712,7 @@ class ConversationPublisher:
         pull_request: int,
         source: dict[str, Any],
         source_kind: str,
+        priority_hunks: Sequence[tuple[str, str]] = (),
     ) -> tuple[str | None, tuple[str, ...]]:
         source_path = source.get("path")
         source_hunk = source.get("diff_hunk")
@@ -634,7 +735,29 @@ class ConversationPublisher:
             raise GitHubConversationError("conversation diff lookup failed") from exc
         parts: list[str] = []
         paths: list[str] = []
+        file_patches: list[tuple[str, str]] = []
         used = 0
+
+        def append_part(
+            part: str, *, allow_truncation: bool
+        ) -> tuple[str | None, bool]:
+            nonlocal used
+            separator_bytes = 1 if parts else 0
+            remaining = MAX_CONTEXT_DIFF_BYTES - used - separator_bytes
+            if remaining < 1:
+                return None, True
+            if not allow_truncation and len(part.encode("utf-8")) > remaining:
+                return None, False
+            bounded = _bounded_text(part, remaining)
+            if bounded is None:
+                return None, False
+            bounded_bytes = len(bounded.encode("utf-8"))
+            if bounded_bytes > remaining:
+                return None, False
+            parts.append(bounded)
+            used += separator_bytes + bounded_bytes
+            return bounded, False
+
         for item in files:
             if not isinstance(item, dict):
                 continue
@@ -646,16 +769,101 @@ class ConversationPublisher:
             paths.append(filename)
             if not isinstance(patch, str) or not patch.strip():
                 continue
-            part = f"path={filename}\n{patch}"
-            remaining = MAX_CONTEXT_DIFF_BYTES - used
-            if remaining < 1:
+            file_patches.append((filename, patch))
+
+        emitted_priority_hunks: dict[str, set[str]] = {}
+        seen_priority: set[tuple[str, str]] = set()
+        for filename, diff_hunk in priority_hunks:
+            try:
+                validate_repository_path(filename, label="conversation diff path")
+            except ReviewInputError:
+                continue
+            if not isinstance(diff_hunk, str) or not diff_hunk.strip():
+                continue
+            priority = (filename, diff_hunk)
+            if priority in seen_priority:
+                continue
+            seen_priority.add(priority)
+            part = f"path={filename}\n{diff_hunk}"
+            bounded, budget_exhausted = append_part(part, allow_truncation=False)
+            if budget_exhausted:
                 break
-            bounded = _bounded_text(part, remaining)
             if bounded is None:
                 continue
-            parts.append(bounded)
-            used += len(bounded.encode("utf-8")) + 1
+            if bounded == part:
+                emitted_priority_hunks.setdefault(filename, set()).add(diff_hunk)
+
+        for filename, patch in file_patches:
+            remaining_patch = _remove_emitted_priority_hunks(
+                patch,
+                emitted_priority_hunks.get(filename, set()),
+                filename=filename,
+            )
+            if not remaining_patch.strip():
+                continue
+            part = f"path={filename}\n{remaining_patch}"
+            _, budget_exhausted = append_part(part, allow_truncation=True)
+            if budget_exhausted:
+                break
         return ("\n".join(parts) or None), tuple(dict.fromkeys(paths))
+
+    @classmethod
+    def _prioritized_finding_hunks(
+        cls,
+        *,
+        comments: list[dict[str, Any]],
+        app_slug: str,
+        head_sha: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return newest current-head App hunks for issue-level context first."""
+
+        current = sorted(
+            (
+                item
+                for item in comments
+                if cls._is_current_app_finding(
+                    item,
+                    app_slug=app_slug,
+                    head_sha=head_sha,
+                )
+            ),
+            key=cls._comment_created_at,
+        )[-20:]
+        hunks: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in reversed(current):
+            path = item.get("path")
+            diff_hunk = item.get("diff_hunk")
+            if not isinstance(path, str) or not path:
+                continue
+            try:
+                validate_repository_path(path, label="conversation finding path")
+            except ReviewInputError:
+                continue
+            if not isinstance(diff_hunk, str) or not diff_hunk.strip():
+                continue
+            value = (path, diff_hunk)
+            if value in seen:
+                continue
+            seen.add(value)
+            hunks.append(value)
+        return tuple(hunks)
+
+    @staticmethod
+    def _comment_created_at(item: dict[str, Any]) -> str:
+        created_at = item.get("created_at")
+        return created_at if isinstance(created_at, str) else ""
+
+    @staticmethod
+    def _is_current_app_finding(
+        item: dict[str, Any], *, app_slug: str, head_sha: str
+    ) -> bool:
+        user = item.get("user")
+        return (
+            isinstance(user, dict)
+            and user.get("login") == app_slug
+            and item.get("commit_id") == head_sha
+        )
 
     @staticmethod
     def _prior_findings(
@@ -666,11 +874,10 @@ class ConversationPublisher:
     ) -> tuple[ConversationFinding, ...]:
         findings: list[ConversationFinding] = []
         for item in comments:
-            user = item.get("user")
-            if (
-                not isinstance(user, dict)
-                or user.get("login") != app_slug
-                or item.get("commit_id") != head_sha
+            if not ConversationPublisher._is_current_app_finding(
+                item,
+                app_slug=app_slug,
+                head_sha=head_sha,
             ):
                 continue
             body = _bounded_text(item.get("body"), MAX_CONTEXT_FINDING_BYTES)

@@ -12,7 +12,10 @@ from review_sensei.hosting.github import (
 )
 from review_sensei.hosting.github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
+    MAX_CONTEXT_DIFF_BYTES,
     PreparedConversation,
+    _bounded_text,
+    _remove_emitted_priority_hunks,
     authorized_human_comment,
     has_standalone_sensei_mention,
     reply_marker,
@@ -201,6 +204,290 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(prepared.source_kind, "issue")
         self.assertEqual(len(prepared.context.messages), 2)
         self.assertEqual(len(calls), 6)
+
+    def test_prepare_issue_context_prioritizes_current_head_finding_hunks(self):
+        updated = "2026-08-19T00:00:00Z"
+        head = "b" * 40
+        source = {
+            "id": 10,
+            "issue_url": ISSUE_URL,
+            "body": "@sensei verify the remaining finding",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "OWNER",
+            "updated_at": updated,
+            "created_at": updated,
+        }
+        target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        current_finding = {
+            "id": 11,
+            "body": "Current exact-head finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "created_at": updated,
+            "commit_id": head,
+            "path": "src/target.py",
+            "line": 42,
+            "diff_hunk": target_hunk,
+        }
+        stale_finding = {
+            "id": 12,
+            "body": "Stale finding",
+            "user": {"login": "review-sensei[bot]", "type": "Bot"},
+            "created_at": updated,
+            "commit_id": "c" * 40,
+            "path": "src/stale.py",
+            "line": 7,
+            "diff_hunk": "@@ -1 +1 @@\n-old-stale\n+new-stale",
+        }
+        responses = [
+            json_response(source),
+            json_response(pr_payload(head)),
+            json_response([source]),
+            json_response([current_finding, stale_finding]),
+            json_response(
+                [
+                    {
+                        "filename": "docs/large.md",
+                        "patch": "x" * (13 * 1024),
+                    },
+                    {
+                        "filename": "src/target.py",
+                        "patch": "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return",
+                    },
+                ]
+            ),
+            json_response({"message": "not found"}, 404),
+        ]
+        http, calls = make_http(responses)
+
+        prepared = ConversationPublisher(http=http).prepare_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at=updated,
+            expected_head_sha=head,
+            app_slug="review-sensei[bot]",
+            source_kind="issue",
+        )
+
+        self.assertIsInstance(prepared, PreparedConversation)
+        self.assertTrue(prepared.context.diff_context.startswith("path=src/target.py"))
+        self.assertIn("path=src/target.py", prepared.context.diff_context)
+        self.assertIn(target_hunk, prepared.context.diff_context)
+        self.assertNotIn("new-stale", prepared.context.diff_context)
+        self.assertEqual(len(calls), 6)
+
+    def test_issue_diff_context_keeps_uncovered_hunks_and_deduplicates_priority(self):
+        target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        helper_hunk = "@@ -100,1 +100,2 @@\n+helper\n+return helper()"
+        target_patch = (
+            "diff --git a/src/target.py b/src/target.py\n"
+            "index abc..def 100644\n"
+            "--- a/src/target.py\n+++ b/src/target.py\n"
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after"
+        )
+        http, calls = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/target.py",
+                            "patch": f"{target_patch}\n{helper_hunk}",
+                        }
+                    ]
+                )
+            ]
+        )
+
+        diff_context, changed_paths = ConversationPublisher(
+            http=http
+        )._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+            priority_hunks=[
+                ("src/target.py", target_hunk),
+                ("src/target.py", target_hunk),
+            ],
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertEqual(diff_context.count(target_hunk), 1)
+        self.assertIn(helper_hunk, diff_context)
+        self.assertNotIn("context-before", diff_context)
+        self.assertIn("--- a/src/target.py", diff_context)
+        self.assertIn("+++ b/src/target.py", diff_context)
+        self.assertEqual(changed_paths, ("src/target.py",))
+        self.assertEqual(len(calls), 1)
+
+    def test_remove_emitted_priority_hunks_keeps_preamble_and_disjoint_hunks(self):
+        priority_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        patch = (
+            "diff --git a/src/target.py b/src/target.py\n"
+            "index abc..def 100644\n"
+            "--- a/src/target.py\n+++ b/src/target.py\n"
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after\n"
+            "@@ -100,1 +100,2 @@\n+helper\n+return helper()\n"
+        )
+
+        residual = _remove_emitted_priority_hunks(
+            patch,
+            {priority_hunk},
+            filename="src/target.py",
+        )
+
+        self.assertTrue(residual.startswith("diff --git a/src/target.py"))
+        self.assertIn("--- a/src/target.py", residual)
+        self.assertIn("@@ -100,1 +100,2 @@", residual)
+        self.assertNotIn("context-before", residual)
+
+    def test_remove_emitted_priority_hunks_reconstructs_headers_without_preamble(self):
+        priority_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        patch = (
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after\n"
+            "@@ -100,1 +100,2 @@\n+helper\n+return helper()\n"
+        )
+
+        residual = _remove_emitted_priority_hunks(
+            patch,
+            {priority_hunk},
+            filename="src/target.py",
+        )
+
+        self.assertTrue(residual.startswith("--- a/src/target.py\n+++ b/src/target.py"))
+        self.assertIn("@@ -100,1 +100,2 @@", residual)
+        self.assertNotIn("context-before", residual)
+
+    def test_bounded_text_never_exceeds_small_byte_budget(self):
+        for maximum in range(1, len(b"\n[truncated]")):
+            bounded = _bounded_text("é" * 100, maximum)
+            self.assertTrue(bounded is None or len(bounded.encode("utf-8")) <= maximum)
+
+    def test_general_diff_truncation_stays_within_byte_budget(self):
+        http, _ = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/large.py",
+                            "patch": "@@ -1 +1 @@\n" + "é" * MAX_CONTEXT_DIFF_BYTES,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        diff_context, _ = ConversationPublisher(http=http)._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertLessEqual(len(diff_context.encode("utf-8")), MAX_CONTEXT_DIFF_BYTES)
+        self.assertIn("[truncated]", diff_context)
+
+    def test_oversized_priority_hunk_does_not_starve_later_context(
+        self,
+    ):
+        http, _ = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/target.py",
+                            "patch": "@@ -1 +1 @@\n-old\n+new",
+                        },
+                        {
+                            "filename": "src/other.py",
+                            "patch": "@@ -1 +1 @@\n-old\n+new",
+                        },
+                    ]
+                )
+            ]
+        )
+        oversized_hunk = "@@ -1 +1 @@\n" + "x" * (MAX_CONTEXT_DIFF_BYTES * 2)
+        target_hunk = "@@ -1 +1 @@\n-old\n+new"
+
+        diff_context, _ = ConversationPublisher(http=http)._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+            priority_hunks=[
+                ("src/oversized.py", oversized_hunk),
+                ("src/target.py", target_hunk),
+            ],
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertLessEqual(len(diff_context.encode("utf-8")), MAX_CONTEXT_DIFF_BYTES)
+        self.assertTrue(diff_context.startswith("path=src/target.py"))
+        self.assertIn("path=src/other.py", diff_context)
+        self.assertNotIn("path=src/oversized.py", diff_context)
+
+    def test_prioritized_finding_hunks_sort_current_comments_by_created_at(self):
+        head = "b" * 40
+        comments = [
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:02:00Z",
+                "path": "src/newer.py",
+                "diff_hunk": "@@ -2 +2 @@\n+newer",
+            },
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:01:00Z",
+                "path": "src/older.py",
+                "diff_hunk": "@@ -1 +1 @@\n+older",
+            },
+        ]
+
+        hunks = ConversationPublisher._prioritized_finding_hunks(
+            comments=comments,
+            app_slug="review-sensei[bot]",
+            head_sha=head,
+        )
+
+        self.assertEqual(hunks[0][0], "src/newer.py")
+        self.assertEqual(hunks[1][0], "src/older.py")
+
+    def test_prioritized_finding_hunks_skip_invalid_paths(self):
+        head = "b" * 40
+        comments = [
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:02:00Z",
+                "path": "../invalid.py",
+                "diff_hunk": "@@ -1 +1 @@\n+invalid",
+            },
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:01:00Z",
+                "path": "src/valid.py",
+                "diff_hunk": "@@ -1 +1 @@\n+valid",
+            },
+        ]
+
+        hunks = ConversationPublisher._prioritized_finding_hunks(
+            comments=comments,
+            app_slug="review-sensei[bot]",
+            head_sha=head,
+        )
+
+        self.assertEqual(hunks, (("src/valid.py", "@@ -1 +1 @@\n+valid"),))
 
     def test_prepare_inline_child_resolves_and_validates_root(self):
         updated = "2026-08-19T00:00:00Z"
