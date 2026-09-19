@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-09-19
 GitHub Issue: #136
-Pull Request: draft PR to be linked
+Pull Request: [#139](https://github.com/malsabbagh/review-sensei/pull/139)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -122,7 +122,7 @@ or files are inert counters.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: draft PR to be linked
+- Pull request: [#139](https://github.com/malsabbagh/review-sensei/pull/139)
 - Related: [ADR 0042](0042-incremental-reviews-and-finding-lifecycle.md),
   [ADR 0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md),
   [ADR 0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md)
