@@ -885,16 +885,25 @@ def admit_review_result(
                 deleted_lines=deleted_lines,
             )
             lifecycle = finding_lifecycle_for_comment(comment)
+            confirmed_concerns = set(evidence_confirmed_concerns)
+            evidence_criterion = next(
+                (
+                    finding.resolution_criterion
+                    for finding in baseline.findings
+                    if finding.concern is not None
+                    and finding.concern == lifecycle.concern
+                    and finding.concern in confirmed_concerns
+                ),
+                None,
+            )
             classification = classify_later_finding(
                 comment,
                 baseline=baseline,
                 scope=verification_scope,
                 changed_paths=verification_changed,
                 related_paths=verification_scope.related_paths,
-                evidence_confirmed=bool(
-                    lifecycle.concern
-                    and lifecycle.concern in set(evidence_confirmed_concerns)
-                ),
+                evidence_confirmed=evidence_criterion is not None,
+                evidence_criterion=evidence_criterion,
                 on_changed_path=on_changed_path,
                 is_preference_or_optional=(comment.category or "").strip().casefold()
                 in PREFERENCE_CATEGORIES,

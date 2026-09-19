@@ -167,10 +167,18 @@ def _verification_scope_from_session(
     completed: int | None = None
     session_status: str | None = None
     if session_record is not None:
-        status = session_record.get("status")
-        session_status = (
-            status if isinstance(status, str) and status in LOAD_STATUSES else "invalid"
-        )
+        if "status" not in session_record:
+            # A partial record has no trustworthy counter, but it is not an
+            # integrity failure.  Treat it like an uninitialized ledger so
+            # preview remains a safe baseline-required display.
+            session_status = "missing"
+        else:
+            status = session_record.get("status")
+            session_status = (
+                status
+                if isinstance(status, str) and status in LOAD_STATUSES
+                else "invalid"
+            )
         if session_status == "ok":
             initial = session_record.get("completed_initial_reviews", 0)
             completed = (

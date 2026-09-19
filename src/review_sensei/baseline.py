@@ -95,6 +95,7 @@ LINEAGE_REASONS = frozenset(
     }
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
+MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
 
 
 def _require_bool(value: object, *, label: str) -> None:
@@ -320,6 +321,10 @@ def baseline_from_review(
         reviewed = _bounded_paths(paths, label="reviewed")
     else:
         reviewed = _bounded_paths(reviewed_paths, label="reviewed")
+    if complete and not reviewed:
+        raise ReviewInputError(
+            "complete baseline requires reviewed paths or complete coverage"
+        )
     return ReviewBaseline(
         cache_key=cache_key,
         policy_digest=policy.digest(),
@@ -430,6 +435,7 @@ class VerificationScope:
             isinstance(self.existing_concerns, bool)
             or not isinstance(self.existing_concerns, int)
             or self.existing_concerns < 0
+            or self.existing_concerns > MAX_VERIFICATION_CONCERNS
         ):
             raise ReviewInputError("existing_concerns is invalid")
         if self.incremental is not None and not isinstance(
@@ -511,7 +517,13 @@ def preview_verification_scope(
     changed_paths: Sequence[str] = (),
     related_paths: Sequence[str] | None = None,
 ) -> VerificationScope:
-    """Doctor/plan preview when a full ``ReviewBaseline`` is not available."""
+    """Display a safe preview when a full ``ReviewBaseline`` is unavailable.
+
+    A session counter alone cannot prove that the stored baseline is compatible
+    with the current head and policy.  Consequently this preview never returns
+    ``verify``; only :func:`plan_verification_scope`, with an actual compatible
+    baseline, can authorize late admission.
+    """
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
@@ -551,13 +563,16 @@ def preview_verification_scope(
             related_paths=related,
             changed_paths=changed,
         )
-    reviewed = _unique_paths(changed, related)
+    # A preview has no baseline cache key to compare with the current head.
+    # It may describe the operator's next step, but it must never authorize
+    # late admission solely from a session counter.
     return _scope(
-        status="verify",
-        round_kind="verification",
-        late_admission_required=True,
-        coverage_mode="incremental",
-        reviewed_paths=reviewed,
+        status="baseline-required",
+        round_kind="initial",
+        late_admission_required=False,
+        coverage_mode="full",
+        invalidation_reason="missing-baseline",
+        reviewed_paths=changed,
         related_paths=related,
         changed_paths=changed,
     )
@@ -578,16 +593,16 @@ def plan_verification_scope(
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
     changed = _bounded_paths(changed_paths, label="changed")
-    extra_related = (
-        _bounded_related_paths(related_paths_for_change(changed), label="related")
-        if related_paths is None
-        else _bounded_related_paths(related_paths, label="related")
+    raw_extra_related = (
+        related_paths_for_change(changed) if related_paths is None else related_paths
     )
     if policy.mode not in OPERATOR_REVIEW_MODES:
+        extra_related = _bounded_related_paths(raw_extra_related, label="related")
         return preview_verification_scope(
             policy=policy, changed_paths=changed, related_paths=extra_related
         )
     if baseline is None:
+        extra_related = _bounded_related_paths(raw_extra_related, label="related")
         return _scope(
             status="baseline-required",
             round_kind="initial",
@@ -603,7 +618,6 @@ def plan_verification_scope(
     reason = evaluate_baseline_compatibility(
         baseline, current_key=current_key, policy=policy
     )
-    related = _merge_related_paths(baseline.related_paths, extra_related)
     existing_paths = tuple(
         finding.path for finding in baseline.findings if finding.path is not None
     )
@@ -617,6 +631,12 @@ def plan_verification_scope(
             }
             else "incompatible"
         )
+        # Validate path syntax and the general metadata bound, but do not
+        # refuse an already-invalidated baseline merely because its optional
+        # related context exceeds the incremental related-path cap.  This
+        # branch is an explicit fallback-full scope, so that context is not
+        # trusted for late admission.
+        _bounded_paths(raw_extra_related, label="related")
         return _scope(
             status=status,
             round_kind="initial",
@@ -624,10 +644,12 @@ def plan_verification_scope(
             coverage_mode="fallback-full",
             invalidation_reason=reason,
             reviewed_paths=changed,
-            related_paths=related,
+            related_paths=(),
             changed_paths=changed,
             existing_concerns=len(baseline.findings),
         )
+    extra_related = _bounded_related_paths(raw_extra_related, label="related")
+    related = _merge_related_paths(baseline.related_paths, extra_related)
     reviewed = _unique_paths(existing_paths, baseline.reviewed_paths, changed, related)
     confirmed = tuple(
         _require_sha256(item, label="confirmed concern") for item in confirmed_concerns
@@ -757,6 +779,30 @@ def _shares_lineage_identity(comment: ReviewComment, finding: BaselineFinding) -
     )
 
 
+def _require_evidence_criterion(
+    finding: BaselineFinding,
+    *,
+    evidence_confirmed: bool,
+    evidence_criterion: str | None,
+) -> None:
+    """Require independent confirmation to bind to the stored criterion."""
+
+    _require_bool(evidence_confirmed, label="evidence_confirmed")
+    if not evidence_confirmed:
+        if evidence_criterion is not None:
+            raise ReviewInputError(
+                "evidence_criterion requires evidence_confirmed=True"
+            )
+        return
+    if evidence_criterion is None:
+        raise ReviewInputError(
+            "evidence_confirmed requires the original resolution criterion"
+        )
+    _require_sha256(evidence_criterion, label="evidence criterion")
+    if evidence_criterion != finding.resolution_criterion:
+        raise ReviewInputError("evidence criterion does not match the baseline")
+
+
 def _causal_parent(
     comment: ReviewComment,
     *,
@@ -801,6 +847,7 @@ def classify_later_finding(
     changed_paths: Sequence[str] = (),
     related_paths: Sequence[str] = (),
     evidence_confirmed: bool = False,
+    evidence_criterion: str | None = None,
     on_changed_path: bool = False,
     is_preference_or_optional: bool = False,
     has_contradictory_evidence: bool = False,
@@ -813,8 +860,18 @@ def classify_later_finding(
         raise ReviewInputError("review baseline is invalid")
     if not isinstance(scope, VerificationScope):
         raise ReviewInputError("verification scope is invalid")
+    _require_bool(evidence_confirmed, label="evidence_confirmed")
     lifecycle = finding_lifecycle_for_comment(comment)
     if scope.status != "verify":
+        if scope.status in {"incompatible", "incomplete-baseline"}:
+            return LaterFindingClassification(
+                fingerprint=lifecycle.fingerprint,
+                classification="substantiated-missed-defect",
+                is_late_relative_to_baseline=True,
+                is_duplicate=False,
+                late_reason="substantiated-missed-defect",
+                attribution="pr-change" if on_changed_path else "unattributed",
+            )
         return LaterFindingClassification(
             fingerprint=lifecycle.fingerprint,
             classification="new-on-initial-pass",
@@ -840,7 +897,12 @@ def classify_later_finding(
     matched = _match_baseline_finding(comment, baseline)
     if matched is not None:
         same = matched.fingerprint == lifecycle.fingerprint
-        if evidence_confirmed and matched.concern is not None:
+        if evidence_confirmed:
+            _require_evidence_criterion(
+                matched,
+                evidence_confirmed=evidence_confirmed,
+                evidence_criterion=evidence_criterion,
+            )
             return LaterFindingClassification(
                 fingerprint=lifecycle.fingerprint,
                 classification="verified-fixed",
@@ -916,12 +978,11 @@ def classify_later_finding(
     if on_changed_path:
         return LaterFindingClassification(
             fingerprint=lifecycle.fingerprint,
-            classification="new-regression",
+            classification="needs-human",
             is_late_relative_to_baseline=True,
             is_duplicate=False,
-            late_reason="new-regression",
-            lineage_reason=lineage if parent is not None else "none",
-            attribution="fix-regression" if parent is not None else "pr-change",
+            lineage_reason="none",
+            attribution="pr-change",
         )
     return LaterFindingClassification(
         fingerprint=lifecycle.fingerprint,
@@ -939,6 +1000,7 @@ def classify_omitted_finding(
     *,
     scope: VerificationScope,
     evidence_confirmed: bool = False,
+    evidence_criterion: str | None = None,
     path_reviewed: bool = True,
 ) -> LaterFindingClassification:
     """Omission on a later pass is never proof the original concern is fixed."""
@@ -947,7 +1009,13 @@ def classify_omitted_finding(
         raise ReviewInputError("baseline finding is invalid")
     if not isinstance(scope, VerificationScope):
         raise ReviewInputError("verification scope is invalid")
-    if evidence_confirmed and finding.concern is not None:
+    _require_bool(evidence_confirmed, label="evidence_confirmed")
+    if evidence_confirmed:
+        _require_evidence_criterion(
+            finding,
+            evidence_confirmed=evidence_confirmed,
+            evidence_criterion=evidence_criterion,
+        )
         return LaterFindingClassification(
             fingerprint=finding.fingerprint,
             classification="verified-fixed",
@@ -1016,6 +1084,7 @@ __all__ = [
     "INVALIDATION_REASONS",
     "LaterFindingClassification",
     "LINEAGE_REASONS",
+    "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "ReviewBaseline",
     "SCOPE_STATUSES",

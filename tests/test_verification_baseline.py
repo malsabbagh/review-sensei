@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei.baseline import (
+    MAX_VERIFICATION_CONCERNS,
+    BaselineFinding,
     LaterFindingClassification,
+    ReviewBaseline,
     VerificationScope,
     baseline_from_review,
     candidate_from_later_finding,
@@ -128,15 +131,17 @@ class PreviewScopeTests(unittest.TestCase):
         self.assertEqual(scope.round_kind, "initial")
         self.assertIn("src/helper.py", scope.related_paths)
 
-    def test_operator_with_completed_initial_is_verification(self) -> None:
+    def test_operator_with_completed_initial_still_requires_compatible_baseline(
+        self,
+    ) -> None:
         scope = preview_verification_scope(
             policy=ReviewConvergencePolicy(mode="merge-focused"),
             completed_initial_reviews=1,
             session_status="ok",
             changed_paths=("src/app.py",),
         )
-        self.assertEqual(scope.status, "verify")
-        self.assertTrue(scope.late_admission_required)
+        self.assertEqual(scope.status, "baseline-required")
+        self.assertFalse(scope.late_admission_required)
 
     def test_tampered_ledger_is_untrusted(self) -> None:
         scope = preview_verification_scope(
@@ -211,6 +216,23 @@ class BaselinePlanTests(unittest.TestCase):
         )
         self.assertEqual(scope.status, "incompatible")
         self.assertEqual(scope.invalidation_reason, "rebase-or-base-change")
+
+    def test_invalidated_baseline_ignores_related_overflow(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(base_sha=SHA_D, head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+            related_paths=tuple(
+                f"src/related-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
+            ),
+        )
+        self.assertEqual(scope.status, "incompatible")
+        self.assertEqual(scope.related_paths, ())
 
     def test_model_change_invalidates_baseline(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -368,6 +390,19 @@ class BaselinePlanTests(unittest.TestCase):
                 coverage_mode="full",
                 reviewed_paths=("src/duplicate.py",) * (MAX_CACHE_METADATA_ITEMS + 1),
             )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="baseline-required",
+                round_kind="initial",
+                late_admission_required=False,
+                coverage_mode="full",
+                existing_concerns=MAX_VERIFICATION_CONCERNS + 1,
+            )
+
+    def test_complete_clean_baseline_requires_reviewed_scope(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        with self.assertRaises(ReviewInputError):
+            baseline_from_review(_result(), cache_key=_key(), policy=policy)
 
 
 class LaterFindingTests(unittest.TestCase):
@@ -435,11 +470,54 @@ class LaterFindingTests(unittest.TestCase):
         omitted = classify_omitted_finding(finding, scope=scope)
         self.assertEqual(omitted.classification, "omitted-uncertain")
         confirmed = classify_omitted_finding(
-            finding, scope=scope, evidence_confirmed=True
+            finding,
+            scope=scope,
+            evidence_confirmed=True,
+            evidence_criterion=finding.resolution_criterion,
         )
         self.assertEqual(confirmed.classification, "verified-fixed")
+        with self.assertRaises(ReviewInputError):
+            classify_omitted_finding(
+                finding,
+                scope=scope,
+                evidence_confirmed=True,
+                evidence_criterion=DIGEST_A,
+            )
         unread = classify_omitted_finding(finding, scope=scope, path_reviewed=False)
         self.assertEqual(unread.classification, "continuing-concern")
+
+    def test_criterion_evidence_verifies_identity_without_concern_digest(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=_key(),
+            policy_digest=policy.digest(),
+            complete=True,
+            findings=(
+                BaselineFinding(
+                    fingerprint=DIGEST_A,
+                    resolution_criterion=DIGEST_B,
+                    concern=None,
+                    path="src/app.py",
+                    symbol="run",
+                    defect_kind="authz",
+                ),
+            ),
+            reviewed_paths=("src/app.py",),
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        classification = classify_later_finding(
+            _comment(),
+            baseline=baseline,
+            scope=scope,
+            evidence_confirmed=True,
+            evidence_criterion=DIGEST_B,
+        )
+        self.assertEqual(classification.classification, "verified-fixed")
 
     def test_cross_file_regression_records_causal_parent(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -531,10 +609,54 @@ class LaterFindingTests(unittest.TestCase):
             changed_paths=("src/app.py",),
             on_changed_path=True,
         )
-        self.assertEqual(classification.classification, "new-regression")
+        self.assertEqual(classification.classification, "needs-human")
         self.assertIsNone(classification.causal_parent)
         self.assertEqual(classification.lineage_reason, "none")
         self.assertEqual(classification.attribution, "pr-change")
+
+    def test_clean_baseline_path_is_a_missed_defect(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(),
+            cache_key=_key(),
+            policy=policy,
+            reviewed_paths=("src/app.py",),
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/other.py",),
+        )
+        classification = classify_later_finding(
+            _comment(path="src/app.py", symbol="new", defect_kind="injection"),
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/other.py",),
+        )
+        self.assertEqual(classification.classification, "substantiated-missed-defect")
+        self.assertEqual(classification.late_reason, "substantiated-missed-defect")
+
+    def test_invalidated_scope_keeps_late_reason(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(base_sha=SHA_D, head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        classification = classify_later_finding(
+            _comment(body="new after rebase"),
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/app.py",),
+            on_changed_path=True,
+        )
+        self.assertEqual(classification.classification, "substantiated-missed-defect")
+        self.assertEqual(classification.late_reason, "substantiated-missed-defect")
 
     def test_optional_on_already_reviewed_code_is_not_a_blocker(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -692,8 +814,16 @@ class DiagnosticVerificationTests(unittest.TestCase):
                 review_mode="merge-focused",
                 session_ledger=root,
             )
-            self.assertEqual(plan["verification"]["status"], "verify")
-            self.assertTrue(plan["verification"]["late_admission_required"])
+            self.assertEqual(plan["verification"]["status"], "baseline-required")
+            self.assertFalse(plan["verification"]["late_admission_required"])
+
+    def test_missing_session_status_is_baseline_required(self) -> None:
+        scope = _verification_scope_from_session(
+            policy=ReviewConvergencePolicy(mode="merge-focused"),
+            session_record={"completed_initial_reviews": 1},
+        )
+        assert scope is not None
+        self.assertEqual(scope.status, "baseline-required")
 
 
 class BaselineAdmissionTests(unittest.TestCase):

@@ -37,8 +37,9 @@ Later findings are classified before C2 admission:
   reworded concern, not a new blocker.
 - Distinct defect kinds on one symbol stay distinct.
 - A fix is `verified-fixed` only against the original resolution criterion
-  with independent confirmed evidence. Omission, a missing line, or a
-  resolved UI thread is `omitted-uncertain`.
+  with independent confirmed evidence. The confirmation token must equal the
+  stored criterion digest; a bare boolean is rejected. Omission, a missing
+  line, or a resolved UI thread is `omitted-uncertain`.
 - A new material defect on a changed or related path may be
   `new-regression` with a causal parent fingerprint when a baseline blocker
   sits on that change.
@@ -52,22 +53,30 @@ Later findings are classified before C2 admission:
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
-falls back to a full bounded review and does not treat the new pass as late
-relative to untrusted evidence. Round counters are not reset here (C3/C5).
-`legacy` stays unscoped. Publication is not refused (C5).
+falls back to a full bounded review. Its baseline-derived classifier carries
+an explicit `substantiated-missed-defect` late reason so C2 cannot silently
+admit an invalidated pass as an initial review; that path remains fail-closed
+for evidence and still requires the normal human/evidence gates. Round
+counters are not reset here (C3/C5). `legacy` stays unscoped. Publication is
+not refused (C5).
 
-Doctor and plan display the verification scope. `admit_review_result` applies
-the classification when a baseline is supplied and candidates are not. That
-baseline-derived path remains fail-closed for C2 evidence; callers with
-trusted evidence must supply explicit blocker candidates, which take
-precedence over derived baseline candidates.
+Doctor and plan display the verification scope. A preview based only on the
+session counter never reports `verify`, because it cannot prove baseline
+compatibility; only a complete compatible `ReviewBaseline` can authorize
+late admission. `admit_review_result` applies the classification when a
+baseline is supplied and candidates are not. That baseline-derived path
+remains fail-closed for C2 evidence; callers with trusted evidence must supply
+explicit blocker candidates, which take precedence over derived baseline
+candidates.
 
 ## Scope
 
 In scope:
 
 - Baseline and verification-scope types, closed v1 schemas, classification
-  and lineage evaluators, and IncrementalReviewPlan construction.
+  and lineage evaluators, and IncrementalReviewPlan construction. A complete
+  baseline must also carry an explicit reviewed-path set or complete coverage;
+  a clean result with neither cannot establish a baseline.
 - Decision tests for cross-file effects, omission, deduplication, rebase,
   and model/policy invalidation.
 - Doctor/plan display and admission wiring.
