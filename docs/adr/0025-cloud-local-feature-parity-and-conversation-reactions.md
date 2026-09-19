@@ -62,7 +62,10 @@ Each new standalone, case-insensitive `@sensei` mention by an OWNER, MEMBER, or
 COLLABORATOR is a new conversation turn. Inline replies retain their resolved
 root thread; PR-level comments use the bounded PR conversation. Both include
 the current exact head, bounded diff context, prior App findings, trusted-base
-learnings, and at most the configured number of thread messages.
+learnings, and at most the configured number of thread messages. For PR-level
+turns, current-head App finding hunks are placed first within the bounded diff
+budget so a large earlier patch cannot hide the code needed to verify an
+existing finding; remaining budget may contain general PR patches.
 
 ## Scope
 

@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import quote
 
 from ...errors import LearningLoadError, ReviewInputError
@@ -452,17 +452,27 @@ class ConversationPublisher:
                     source_kind="inline",
                 )
             )
+            prior_findings = self._prior_findings(
+                comments=review_comments,
+                app_slug=app_slug,
+                head_sha=head_sha,
+            )
+            priority_hunks = (
+                self._prioritized_finding_hunks(
+                    comments=review_comments,
+                    app_slug=app_slug,
+                    head_sha=head_sha,
+                )
+                if source_kind == "issue"
+                else ()
+            )
             diff_context, changed_paths = self._load_diff_context(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 source=source,
                 source_kind=source_kind,
-            )
-            prior_findings = self._prior_findings(
-                comments=review_comments,
-                app_slug=app_slug,
-                head_sha=head_sha,
+                priority_hunks=priority_hunks,
             )
             base_sha = base.get("sha")
             if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
@@ -612,6 +622,7 @@ class ConversationPublisher:
         pull_request: int,
         source: dict[str, Any],
         source_kind: str,
+        priority_hunks: Sequence[tuple[str, str]] = (),
     ) -> tuple[str | None, tuple[str, ...]]:
         source_path = source.get("path")
         source_hunk = source.get("diff_hunk")
@@ -634,6 +645,7 @@ class ConversationPublisher:
             raise GitHubConversationError("conversation diff lookup failed") from exc
         parts: list[str] = []
         paths: list[str] = []
+        file_patches: list[tuple[str, str]] = []
         used = 0
         for item in files:
             if not isinstance(item, dict):
@@ -646,6 +658,32 @@ class ConversationPublisher:
             paths.append(filename)
             if not isinstance(patch, str) or not patch.strip():
                 continue
+            file_patches.append((filename, patch))
+
+        priority_paths: set[str] = set()
+        seen_priority: set[tuple[str, str]] = set()
+        for filename, diff_hunk in priority_hunks:
+            validate_repository_path(filename, label="conversation diff path")
+            if not isinstance(diff_hunk, str) or not diff_hunk.strip():
+                continue
+            priority = (filename, diff_hunk)
+            if priority in seen_priority:
+                continue
+            seen_priority.add(priority)
+            priority_paths.add(filename)
+            part = f"path={filename}\n{diff_hunk}"
+            remaining = MAX_CONTEXT_DIFF_BYTES - used
+            if remaining < 1:
+                break
+            bounded = _bounded_text(part, remaining)
+            if bounded is None:
+                continue
+            parts.append(bounded)
+            used += len(bounded.encode("utf-8")) + 1
+
+        for filename, patch in file_patches:
+            if filename in priority_paths:
+                continue
             part = f"path={filename}\n{patch}"
             remaining = MAX_CONTEXT_DIFF_BYTES - used
             if remaining < 1:
@@ -657,6 +695,53 @@ class ConversationPublisher:
             used += len(bounded.encode("utf-8")) + 1
         return ("\n".join(parts) or None), tuple(dict.fromkeys(paths))
 
+    @classmethod
+    def _prioritized_finding_hunks(
+        cls,
+        *,
+        comments: list[dict[str, Any]],
+        app_slug: str,
+        head_sha: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return newest current-head App hunks for issue-level context first."""
+
+        current = [
+            item
+            for item in comments
+            if cls._is_current_app_finding(
+                item,
+                app_slug=app_slug,
+                head_sha=head_sha,
+            )
+        ][-20:]
+        hunks: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in reversed(current):
+            path = item.get("path")
+            diff_hunk = item.get("diff_hunk")
+            if not isinstance(path, str) or not path:
+                continue
+            validate_repository_path(path, label="conversation finding path")
+            if not isinstance(diff_hunk, str) or not diff_hunk.strip():
+                continue
+            value = (path, diff_hunk)
+            if value in seen:
+                continue
+            seen.add(value)
+            hunks.append(value)
+        return tuple(hunks)
+
+    @staticmethod
+    def _is_current_app_finding(
+        item: dict[str, Any], *, app_slug: str, head_sha: str
+    ) -> bool:
+        user = item.get("user")
+        return (
+            isinstance(user, dict)
+            and user.get("login") == app_slug
+            and item.get("commit_id") == head_sha
+        )
+
     @staticmethod
     def _prior_findings(
         *,
@@ -666,11 +751,10 @@ class ConversationPublisher:
     ) -> tuple[ConversationFinding, ...]:
         findings: list[ConversationFinding] = []
         for item in comments:
-            user = item.get("user")
-            if (
-                not isinstance(user, dict)
-                or user.get("login") != app_slug
-                or item.get("commit_id") != head_sha
+            if not ConversationPublisher._is_current_app_finding(
+                item,
+                app_slug=app_slug,
+                head_sha=head_sha,
             ):
                 continue
             body = _bounded_text(item.get("body"), MAX_CONTEXT_FINDING_BYTES)
