@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/session-record.schema.json",
+  "title": "ReviewSensei durable review-session ledger record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "pull_request",
+    "repository_id",
+    "completed_initial_reviews",
+    "completed_verification_rounds",
+    "failed_attempts",
+    "generation",
+    "reservation_id",
+    "reserved_slot",
+    "last_committed_reservation_id",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "record_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 256},
+    "pull_request": {"type": "integer", "minimum": 1},
+    "repository_id": {"type": ["integer", "null"], "minimum": 1},
+    "completed_initial_reviews": {"type": "integer", "minimum": 0, "maximum": 32},
+    "completed_verification_rounds": {"type": "integer", "minimum": 0, "maximum": 32},
+    "failed_attempts": {"type": "integer", "minimum": 0, "maximum": 32},
+    "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "reservation_id": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[a-f0-9]{8,64}$"}
+      ]
+    },
+    "reserved_slot": {
+      "type": ["string", "null"],
+      "enum": ["initial", "verification", "failed-attempt", null]
+    },
+    "last_committed_reservation_id": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[a-f0-9]{8,64}$"}
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
+    },
+    "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

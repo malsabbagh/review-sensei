@@ -11,6 +11,13 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...outcomes import RecoveryArtifact
 from ...providers.base import ReviewProvider
+from ...session import (
+    SessionIdentity,
+    SessionLedger,
+    complete_session_round,
+    prepare_session_round,
+    session_reservation_id,
+)
 from ...verifier import CandidateFinding
 from .broker_client import BrokerClient
 from .conversation import (
@@ -34,6 +41,7 @@ class GitHubWriteOptions:
     learning_prs: bool = False
     mention_replies: bool = False
     upload_artifacts: bool = False
+    github_session_ledger: bool = False
 
 
 class GitHubApplication:
@@ -47,12 +55,14 @@ class GitHubApplication:
         reviewer: ReviewPublisher,
         learner: LearningPRPublisher,
         replier: ConversationPublisher,
+        session_ledger: SessionLedger | None = None,
     ) -> None:
         self.broker = broker
         self.http = http
         self.reviewer = reviewer
         self.learner = learner
         self.replier = replier
+        self.session_ledger = session_ledger
 
     def publish_review(
         self,
@@ -100,26 +110,76 @@ class GitHubApplication:
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",
         )
-        return self.reviewer.publish(
-            token=token,
+        ledger = self._session_ledger_for_token(token, options=options)
+        identity = SessionIdentity(
             repository=repository,
-            repository_id=repository_id,
             pull_request=pull_request,
-            head_sha=head_sha,
-            base_branch=base_branch,
-            base_sha=base_sha,
-            result=result,
-            diff=diff,
-            app_slug=app_slug,
-            auto_approve=options.auto_approve,
-            candidates=candidates,
-            snapshot=snapshot,
-            snapshot_sha256=snapshot_sha256,
-            evidence_policy=evidence_policy,
-            convergence_policy=convergence_policy,
-            blocker_candidates=blocker_candidates,
-            input_blocker_candidates=input_blocker_candidates,
+            repository_id=repository_id,
         )
+        policy = (
+            convergence_policy
+            if isinstance(convergence_policy, ReviewConvergencePolicy)
+            else ReviewConvergencePolicy()
+        )
+        prepared = None
+        if ledger is not None:
+            prepared = prepare_session_round(
+                ledger,
+                identity,
+                policy,
+                reservation_id=session_reservation_id(
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    kind="publish",
+                ),
+            )
+        try:
+            publication = self.reviewer.publish(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                result=result,
+                diff=diff,
+                app_slug=app_slug,
+                auto_approve=options.auto_approve,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                convergence_policy=convergence_policy,
+                blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
+            )
+        except Exception:
+            if ledger is not None and prepared is not None:
+                complete_session_round(ledger, identity, prepared, published=False)
+            raise
+        if ledger is not None and prepared is not None:
+            complete_session_round(
+                ledger,
+                identity,
+                prepared,
+                published=publication.status == "published",
+            )
+        return publication
+
+    def _session_ledger_for_token(
+        self, token: str, *, options: GitHubWriteOptions
+    ) -> SessionLedger | None:
+        if self.session_ledger is not None:
+            return self.session_ledger
+        if not options.github_session_ledger:
+            return None
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        if self.http is None:
+            raise GitHubPublicationError("GitHub session ledger requires HTTP")
+        return GitHubIssueCommentSessionLedger(self.http, token=token)
 
     def recover_review(
         self,

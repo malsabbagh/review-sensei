@@ -20,7 +20,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .convergence import ReviewConvergencePolicy, resolve_review_convergence_policy
+from .convergence import (
+    ReviewConvergencePolicy,
+    evaluate_round_admission,
+    resolve_review_convergence_policy,
+)
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
 from .provider_config import (
@@ -30,6 +34,7 @@ from .provider_config import (
 )
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
+from .session import SessionIdentity, resolve_local_session_ledger
 from .stages import (
     MAX_STAGE_FILES,
     category_catalog_for_configured_stages,
@@ -58,6 +63,86 @@ class DiagnosticCheck:
 
     def to_dict(self) -> dict[str, str]:
         return {"name": self.name, "status": self.status, "detail": self.detail}
+
+
+def _session_ledger_diagnostic(
+    *,
+    session_ledger: Path | str | None,
+    repository: str | None,
+    pull_request: int | None,
+    policy: ReviewConvergencePolicy | None,
+) -> tuple[DiagnosticCheck | None, dict[str, object] | None]:
+    ledger = resolve_local_session_ledger(session_ledger)
+    if ledger is None:
+        return None, None
+    if repository is None or pull_request is None:
+        return (
+            DiagnosticCheck(
+                "session-ledger",
+                "action",
+                "session ledger requires repository and pull-request",
+            ),
+            {"status": "unavailable"},
+        )
+    try:
+        identity = SessionIdentity(repository=repository, pull_request=pull_request)
+    except ReviewInputError as exc:
+        return DiagnosticCheck("session-ledger", "action", str(exc)), {
+            "status": "invalid"
+        }
+    loaded = ledger.load(identity)
+    if loaded.status == "ok" and loaded.record is not None:
+        record = loaded.record
+        payload: dict[str, object] = {
+            "status": "ok",
+            "completed_initial_reviews": record.completed_initial_reviews,
+            "completed_verification_rounds": record.completed_verification_rounds,
+            "failed_attempts": record.failed_attempts,
+            "generation": record.generation,
+        }
+        if policy is not None:
+            decision = evaluate_round_admission(record.to_round_state(), policy)
+            payload["remaining_initial_reviews"] = decision.remaining_initial_reviews
+            payload["remaining_verification_rounds"] = (
+                decision.remaining_verification_rounds
+            )
+        return (
+            DiagnosticCheck(
+                "session-ledger",
+                "pass",
+                (
+                    "initial="
+                    f"{record.completed_initial_reviews} "
+                    "verification="
+                    f"{record.completed_verification_rounds} "
+                    f"failed_attempts={record.failed_attempts}"
+                ),
+            ),
+            payload,
+        )
+    status = loaded.status
+    check_status = "pass" if status == "missing" else "action"
+    return (
+        DiagnosticCheck("session-ledger", check_status, f"session ledger is {status}"),
+        {"status": status},
+    )
+
+
+def _plan_session_record(
+    *,
+    session_ledger: Path | str | None,
+    repository: str | None,
+    pull_request: int | None,
+) -> dict[str, object] | None:
+    check, payload = _session_ledger_diagnostic(
+        session_ledger=session_ledger,
+        repository=repository,
+        pull_request=pull_request,
+        policy=None,
+    )
+    if check is None:
+        return None
+    return payload
 
 
 def _bounded_stage_names(values: Iterable[str]) -> tuple[str, ...]:
@@ -338,6 +423,8 @@ def run_doctor(
     compatibility_manifest: Path | None = None,
     allow_data_egress: bool = False,
     opener: Callable[..., Any] = urlopen,
+    session_ledger: Path | str | None = None,
+    pull_request: int | None = None,
 ) -> dict[str, Any]:
     """Return bounded, side-effect-free installation diagnostics.
 
@@ -361,6 +448,10 @@ def run_doctor(
     Operator modes report ``enforcement=publication`` because C2 applies the
     blocker-admission evaluator before GitHub review events.  The setting does
     not change ``REVIEWSENSEI_AUTO_APPROVE`` default-on semantics.
+
+    ``session_ledger`` reports the issue #136 C3 durable session record when a
+    local ledger path is supplied or ``REVIEWSENSEI_SESSION_LEDGER`` is set.
+    Missing, expired, or tampered state is explicit. Doctor never writes.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -445,6 +536,15 @@ def run_doctor(
     except ReviewInputError as exc:
         review_convergence = None
         checks.append(DiagnosticCheck("review-convergence", "action", str(exc)))
+    session_record: dict[str, object] | None = None
+    session_check, session_record = _session_ledger_diagnostic(
+        session_ledger=session_ledger,
+        repository=repository,
+        pull_request=pull_request,
+        policy=review_convergence,
+    )
+    if session_check is not None:
+        checks.append(session_check)
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -604,6 +704,8 @@ def run_doctor(
         report["provider_configuration"] = provider_configuration
     if review_convergence is not None:
         report["review_convergence"] = review_convergence.to_dict()
+    if session_record is not None:
+        report["session_record"] = session_record
     return report
 
 
@@ -624,6 +726,7 @@ def build_plan(
     base_sha: str | None = None,
     head_sha: str | None = None,
     categories_dir: Path | None = None,
+    session_ledger: Path | str | None = None,
 ) -> dict[str, Any]:
     """Build a read-only execution preview without provider or GitHub calls."""
 
@@ -691,7 +794,7 @@ def build_plan(
         skip_reasons.append("diff-not-supplied")
     if identity_base is None or identity_head is None:
         skip_reasons.append("snapshot-identity-not-supplied")
-    return {
+    document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "ready" if diff_summary["status"] == "ready" else "incomplete",
         "identity": {
@@ -722,6 +825,14 @@ def build_plan(
         "diff": diff_summary,
         "skip_reasons": skip_reasons,
     }
+    session_record = _plan_session_record(
+        session_ledger=session_ledger,
+        repository=repository,
+        pull_request=pull_request,
+    )
+    if session_record is not None:
+        document["session_record"] = session_record
+    return document
 
 
 def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str:
@@ -779,6 +890,15 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
             f"initial={review_convergence.get('max_completed_initial_reviews')} "
             f"verification={review_convergence.get('max_completed_verification_rounds')} "
             f"failed_attempts={review_convergence.get('max_failed_attempts')}"
+        )
+    session_record = document.get("session_record")
+    if isinstance(session_record, dict) and session_record.get("status"):
+        lines.append(
+            "session_ledger: "
+            f"status={session_record.get('status')} "
+            f"initial={session_record.get('completed_initial_reviews', 0)} "
+            f"verification={session_record.get('completed_verification_rounds', 0)} "
+            f"failed_attempts={session_record.get('failed_attempts', 0)}"
         )
     identity = document.get("identity")
     if isinstance(identity, dict):

@@ -38,6 +38,7 @@ SCHEMA_NAMES = (
     "review-convergence-policy",
     "blocker-admission",
     "review-round-decision",
+    "session-record",
 )
 
 

@@ -66,6 +66,7 @@ containing `/v1/`.
 | `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and enforcement (`display-only` or `publication`) |
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
 | `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
+| `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, and expiry |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -175,6 +176,13 @@ These imports are public and stable within a major version:
 - `review_sensei.derive_blocker_candidate`
 - `review_sensei.admit_review_result`
 - `review_sensei.evaluate_round_admission`
+- `review_sensei.SessionIdentity`
+- `review_sensei.SessionRecord`
+- `review_sensei.SessionLoadResult`
+- `review_sensei.LocalSessionLedger`
+- `review_sensei.InMemorySessionLedger`
+- `review_sensei.prepare_session_round`
+- `review_sensei.complete_session_round`
 - `review_sensei.plan_change`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
@@ -212,9 +220,10 @@ These imports are public and stable within a major version:
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
-validate against the review-convergence schemas. Operator modes apply
+validate against the review-convergence schemas. `SessionRecord.to_dict()`
+validates against `session-record.schema.json`. Operator modes apply
 `admit_review_result` before GitHub publication; `legacy` keeps ADR 0032/0035
-events. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
+events. C3 persists PR-wide counters without refusing publication. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -427,7 +436,8 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
-| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Display-only until publication wiring (ADR 0046) |
+| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Operator modes apply C2 admission at publication |
+| `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; github write-through). Requires repository and pull-request identity |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
@@ -531,6 +541,10 @@ review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `--base-sha` and `--head-sha` record snapshot identity when supplied.
 Doctor and plan also report the resolved review-convergence policy
 (`legacy` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
+When `--session-ledger` or `REVIEWSENSEI_SESSION_LEDGER` is set with a
+repository and pull-request identity, they also report the C3 session
+counters or an explicit missing/expired/tampered status. Doctor and plan
+never write the ledger.
 `legacy` remains compatible with ADR 0032/0035 publication.
 Operator modes apply `evaluate_blocker_admission` before GitHub review events
 and do not change `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).

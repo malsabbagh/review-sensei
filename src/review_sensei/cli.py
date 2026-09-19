@@ -831,6 +831,16 @@ def _doctor_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--session-ledger",
+        type=Path,
+        help=(
+            "Local directory for the issue #136 C3 durable session ledger. "
+            "Also reads REVIEWSENSEI_SESSION_LEDGER. Requires --repository "
+            "and --pull-request. Display only; doctor never writes."
+        ),
+    )
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument(
         "--allow-data-egress",
         action="store_true",
         help="Authorize read-only probes of a non-loopback provider endpoint.",
@@ -866,6 +876,14 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-sha")
     parser.add_argument("--head-sha")
     parser.add_argument("--categories-dir", type=Path)
+    parser.add_argument(
+        "--session-ledger",
+        type=Path,
+        help=(
+            "Local directory for the issue #136 C3 durable session ledger. "
+            "Also reads REVIEWSENSEI_SESSION_LEDGER. Display only; plan never writes."
+        ),
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -1168,6 +1186,23 @@ def _github_parser() -> argparse.ArgumentParser:
             "be republished under operator modes."
         ),
     )
+    review.add_argument(
+        "--session-ledger",
+        type=Path,
+        help=(
+            "Local directory for the issue #136 C3 durable session ledger. "
+            "Operator modes reserve/commit a counted round around publication. "
+            "Does not refuse the review (C5)."
+        ),
+    )
+    review.add_argument(
+        "--github-session-ledger",
+        action="store_true",
+        help=(
+            "Persist the C3 session ledger as one GitHub issue comment on the "
+            "source pull request. Operator modes only count rounds."
+        ),
+    )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
@@ -1266,17 +1301,24 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     )
     from .hosting.github.publication import outcome_from_publication
     from .models import ConversationReply, ReviewResult
+    from .session import resolve_local_session_ledger
 
     if not args.allow_write:
         raise ReviewInputError("github writes require --allow-write")
     broker = BrokerClient()
     http = GitHubHttp()
+    session_ledger = None
+    if args.command == "review":
+        session_ledger = resolve_local_session_ledger(
+            getattr(args, "session_ledger", None)
+        )
     application = GitHubApplication(
         broker=broker,
         http=http,
         reviewer=ReviewPublisher(http=http),
         learner=LearningPRPublisher(http=http),
         replier=ConversationPublisher(http=http),
+        session_ledger=session_ledger,
     )
     if args.command == "review":
         diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
@@ -1395,6 +1437,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     github_writes=True,
                     auto_review=args.enable_review,
                     auto_approve=args.enable_auto_approve,
+                    github_session_ledger=getattr(args, "github_session_ledger", False),
                 ),
                 oidc_token=args.oidc_token,
                 repository=args.repository,
@@ -1553,6 +1596,8 @@ def _run_doctor_command(arguments: list[str]) -> int:
             api_key_env=args.api_key_env,
             compatibility_manifest=args.compatibility_manifest,
             allow_data_egress=args.allow_data_egress,
+            session_ledger=args.session_ledger,
+            pull_request=args.pull_request,
         )
         sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
         return (
@@ -1602,6 +1647,7 @@ def _run_plan_command(arguments: list[str]) -> int:
             base_sha=args.base_sha,
             head_sha=args.head_sha,
             categories_dir=args.categories_dir,
+            session_ledger=args.session_ledger,
         )
         sys.stdout.write(render_diagnostic(report, as_json=args.as_json))
         return 0 if report["status"] == "ready" else 3
