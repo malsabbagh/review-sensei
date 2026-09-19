@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from review_sensei import ProviderResponse
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
@@ -15,8 +16,10 @@ from review_sensei.models import (
     ConversationMessage,
     ConversationReply,
     LearningProposal,
+    ReviewComment,
     ReviewResult,
 )
+from review_sensei.outcomes import RecoveryArtifact
 
 
 class RecordingBroker:
@@ -329,6 +332,44 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertIs(self.reviewer.calls[-1]["convergence_policy"], policy)
         self.assertIs(self.reviewer.calls[-1]["blocker_candidates"], facts)
         self.assertIsNone(self.reviewer.calls[-1]["input_blocker_candidates"])
+
+    def test_recover_review_rejects_operator_modes(self):
+        head = "b" * 40
+        result = ReviewResult(
+            summary="Summary.",
+            comments=(
+                ReviewComment(path="src/app.py", line=2, body="finding", blocking=True),
+            ),
+            provider="fixture",
+            review_status="complete",
+        )
+        artifact = RecoveryArtifact.create(
+            repository="owner/repo",
+            pull_request_number=1,
+            base_sha="a" * 40,
+            head_sha=head,
+            result=result.to_dict(),
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "operator-mode recovery"):
+            self.application.recover_review(
+                options=GitHubWriteOptions(github_writes=True, auto_review=True),
+                oidc_token="oidc",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                artifact=artifact,
+                diff="diff --git a/src/app.py b/src/app.py\n",
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+            )
+        self.assertEqual(self.reviewer.calls, [])
 
     def test_learning_proposals_reuse_one_learning_capability(self):
         options = GitHubWriteOptions(github_writes=True, learning_prs=True)

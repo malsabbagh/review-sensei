@@ -796,7 +796,7 @@ def _require_candidate_matches_comment(
     candidate: BlockerCandidate, comment: ReviewComment
 ) -> None:
     if candidate.path is None and candidate.line is None and candidate.side is None:
-        return
+        raise ReviewInputError("blocker candidate must bind comment identity")
     if candidate.path is not None and candidate.path != comment.path:
         raise ReviewInputError("blocker candidate must match review comment")
     if candidate.side is not None and candidate.side != comment.side:

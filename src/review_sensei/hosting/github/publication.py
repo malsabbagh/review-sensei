@@ -316,6 +316,21 @@ def changes_requested_review_body(*, excerpts: tuple[str, ...], marker: str) -> 
     return body
 
 
+def _keep_operator_inline_thread(
+    policy: ReviewConvergencePolicy, comment: ReviewComment
+) -> bool:
+    """Return whether an operator-mode finding stays as an inline thread.
+
+    Admitted blockers remain inline whenever automatic GitHub review events
+    are enabled, including when ``auto_approve`` is False (ADR 0035
+    comment-only). Non-blocking observations fold into the summary so
+    required conversation resolution cannot turn optional notes into
+    mechanical blockers. ``auto_approve`` is not part of this predicate.
+    """
+
+    return policy.automatic_github_review_events and comment.blocks_approval
+
+
 def finding_review_event(
     *,
     auto_approve: bool,
@@ -1274,10 +1289,7 @@ class ReviewPublisher:
             if not convergence_policy.inline_advisory_threads:
                 kept_inline: list[tuple[ReviewComment, str, str, str]] = []
                 for entry in prepared_comments:
-                    if (
-                        convergence_policy.automatic_github_review_events
-                        and entry[0].blocks_approval
-                    ):
+                    if _keep_operator_inline_thread(convergence_policy, entry[0]):
                         kept_inline.append(entry)
                     else:
                         advisory_folded.append(entry[0])

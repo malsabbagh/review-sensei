@@ -1046,6 +1046,20 @@ class FindingAdmissionTests(unittest.TestCase):
                 candidates=(facts,),
             )
 
+    def test_location_less_candidates_fail_closed(self):
+        comment = ReviewComment(path="src/app.py", line=2, body="finding")
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "bind comment identity"):
+            admit_review_result(
+                ReviewResult(
+                    summary="Summary.", comments=(comment,), provider="fixture"
+                ),
+                policy,
+                candidates=(BlockerCandidate(has_specific_violation=True),),
+            )
+
     def test_misaligned_candidates_fail_closed(self):
         result = ReviewResult(
             summary="Summary.",

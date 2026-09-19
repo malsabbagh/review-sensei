@@ -16,7 +16,8 @@
   with `automatic_github_review_events` can only withhold GitHub events.
   Named mandatory rules and specific violations are explicit; free-form
   `defect_kind` is not a qualifier. Derived facts bind comment identity.
-  Omitted publication policy stays `legacy`.
+  Omitted publication policy stays `legacy`. Operator-mode recovery of a
+  serialized result fails closed.
   `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned

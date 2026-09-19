@@ -155,6 +155,17 @@ class GitHubApplication:
                 "recovery artifact result is incomplete",
                 diagnostic="recovery_artifact_incomplete",
             )
+        if convergence_policy is not None and not isinstance(
+            convergence_policy, ReviewConvergencePolicy
+        ):
+            raise GitHubPublicationError("review convergence policy is invalid")
+        if (
+            convergence_policy is not None
+            and convergence_policy.enforcement == "publication"
+        ):
+            raise GitHubPublicationError(
+                "operator-mode recovery cannot re-admit a serialized result"
+            )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",

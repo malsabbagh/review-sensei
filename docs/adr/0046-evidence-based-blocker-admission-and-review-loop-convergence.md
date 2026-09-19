@@ -95,7 +95,10 @@ Publication markers and `REQUEST_CHANGES` follow effective blocking.
 `auto_approve=False`, including when `REVIEWSENSEI_REVIEW_MODE` is an
 operator mode. An omitted `convergence_policy` stays on compatible `legacy`
 and does not read the ambient environment; the CLI resolves
-`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling. Human
+`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling. Recovery
+artifacts serialize `ReviewResult` without admission fields, so
+operator-mode `--recover-from` fails closed instead of republishing the
+model proposal. Human
 adjudication withholds `APPROVE` through
 `evaluate_auto_approval` without inventing a proven blocker. Advisory
 observations in operator modes are folded into the review summary so required

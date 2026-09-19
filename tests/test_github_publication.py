@@ -2992,6 +2992,57 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertNotIn("APPROVE", self._posted_events(calls))
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
+    def test_merge_focused_auto_approve_false_keeps_admitted_blocker_inline(self):
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="must fix",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        demoted = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="optional polish",
+            blocking=True,
+            severity="medium",
+        )
+        facts = derive_blocker_candidate(
+            admitted,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        demoted_facts = derive_blocker_candidate(demoted, on_changed_path=True)
+        outcome, calls = self.publish(
+            self._responses(),
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(admitted, demoted),
+                provider="ollama",
+            ),
+            convergence_policy=policy,
+            blocker_candidates=(facts, demoted_facts),
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertIn("must fix", body["comments"][0]["body"])
+        self.assertIn("blocking=true", body["comments"][0]["body"])
+        self.assertIn("## Advisory observations", body["body"])
+        self.assertIn("optional polish", body["body"])
+        self.assertNotIn("APPROVE", self._posted_events(calls))
+        self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
+
     def test_env_merge_focused_does_not_upgrade_auto_approve_false(self):
         _comment, facts, review = self._admitted_non_blocking_comment()
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):

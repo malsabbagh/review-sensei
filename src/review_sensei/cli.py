@@ -1129,7 +1129,7 @@ def _github_parser() -> argparse.ArgumentParser:
     publication_source.add_argument(
         "--recover-from",
         type=Path,
-        help="Publish a retained recovery artifact without invoking a model",
+        help="Publish a retained recovery artifact without invoking a model. Operator review modes are refused because serialized results drop admission state.",
     )
     review.add_argument(
         "--allow-write",
@@ -1164,7 +1164,8 @@ def _github_parser() -> argparse.ArgumentParser:
         help=(
             "Review-convergence mode: legacy (default), advisory, "
             "merge-focused, or strict. Operator modes apply trusted blocker "
-            "admission before GitHub review events."
+            "admission before GitHub review events. Recovery artifacts cannot "
+            "be republished under operator modes."
         ),
     )
 
