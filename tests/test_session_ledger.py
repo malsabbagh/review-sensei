@@ -207,7 +207,14 @@ class LocalSessionLedgerTests(unittest.TestCase):
 
     def test_ledger_path_expands_home_and_environment(self):
         with tempfile.TemporaryDirectory() as raw:
-            with patch.dict(os.environ, {"HOME": raw, "RS_LEDGER_DIR": raw}):
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": raw,
+                    "USERPROFILE": raw,
+                    "RS_LEDGER_DIR": raw,
+                },
+            ):
                 self.assertEqual(
                     resolve_local_session_ledger("~/ledger").root,
                     (Path(raw) / "ledger").resolve(),
@@ -231,7 +238,14 @@ class LocalSessionLedgerTests(unittest.TestCase):
 
     def test_trusted_root_expands_home_and_environment(self):
         with tempfile.TemporaryDirectory() as raw:
-            with patch.dict(os.environ, {"HOME": raw, "RS_TRUSTED_ROOT": raw}):
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": raw,
+                    "USERPROFILE": raw,
+                    "RS_TRUSTED_ROOT": raw,
+                },
+            ):
                 ledger = resolve_local_session_ledger(
                     "~/ledger", trusted_root="$RS_TRUSTED_ROOT"
                 )
