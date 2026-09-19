@@ -10,6 +10,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Mapping, TextIO
 
+from ...disposition import parse_maintainer_command
+
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -168,6 +170,9 @@ def resolve_issue_comment(
             enable_review="true",
             head_sha=choose_head_sha(pull, requested),
         )
+    command = parse_maintainer_command(body, actor="trigger")
+    if command is not None:
+        return _resolution_from_pull(pull, operation="command", enable_review="false")
     return _resolution_from_pull(pull, operation="reply", enable_review="false")
 
 

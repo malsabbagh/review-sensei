@@ -473,12 +473,11 @@ class CliInferenceSkipTests(unittest.TestCase):
                             str(outcome_path),
                         ]
                     )
-            self.assertEqual(status, 0)
-            self.assertIn("skipped_policy", stdout.getvalue())
-            payload = json.loads(outcome_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
-            self.assertIn(payload["diagnostic"], PUBLIC_DIAGNOSTICS)
-            self.assertEqual(payload["provider_calls"], 0)
+            self.assertEqual(status, 1)
+            self.assertIn("action_required", stdout.getvalue())
+            payload = outcome_path.read_text(encoding="utf-8")
+            self.assertIn("unreviewed-head", payload)
+            self.assertIn('"provider_calls": 0', payload)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ RUN_STATUSES = frozenset(
         "budget_exhausted",
         "publication_failed",
         "already_published",
+        "action_required",
     }
 )
 _SNAPSHOT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
@@ -51,7 +52,7 @@ DEFAULT_RECOVERY_TTL_SECONDS = 6 * 60 * 60
 MAX_RECOVERY_TTL_SECONDS = 24 * 60 * 60
 PUBLIC_SCHEMA_VERSION = "1.0"
 FAILURE_RUN_STATUSES = frozenset(
-    {"provider_failed", "budget_exhausted", "publication_failed"}
+    {"provider_failed", "budget_exhausted", "publication_failed", "action_required"}
 )
 PUBLIC_DIAGNOSTICS = frozenset(
     {
@@ -104,6 +105,7 @@ _ACTIONS_SUMMARY_TITLES = {
     "budget_exhausted": "Review stopped after exhausting a resource budget",
     "publication_failed": "Review publication failed",
     "already_published": "Review already published for this head",
+    "action_required": "Review requires a human decision before another automated pass",
 }
 
 

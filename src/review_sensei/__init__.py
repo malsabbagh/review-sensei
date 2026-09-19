@@ -58,6 +58,14 @@ from .convergence import (
 from .conversation import ConversationService
 from .coverage import CoverageManifest, coverage_approval_state
 from .diagnostics import build_plan, run_doctor
+from .disposition import (
+    FindingDisposition,
+    MaintainerCommand,
+    apply_session_command,
+    authorized_maintainer,
+    parse_maintainer_command,
+    render_convergence_summary,
+)
 from .errors import AdmissionCancelled, AdmissionRejected
 from .evaluation import (
     PromotionRecord,
@@ -201,6 +209,12 @@ __all__ = [
     "ReviewContextSelection",
     "CoverageManifest",
     "coverage_approval_state",
+    "FindingDisposition",
+    "MaintainerCommand",
+    "apply_session_command",
+    "authorized_maintainer",
+    "parse_maintainer_command",
+    "render_convergence_summary",
     "BlockerAdmissionDecision",
     "BlockerCandidate",
     "ReviewConvergencePolicy",
