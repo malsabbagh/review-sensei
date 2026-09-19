@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 
 from review_sensei.baseline import (
+    LaterFindingClassification,
+    VerificationScope,
     baseline_from_review,
     candidate_from_later_finding,
     classify_later_finding,
@@ -13,12 +15,17 @@ from review_sensei.baseline import (
     plan_verification_scope,
     preview_verification_scope,
 )
-from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.context import (
+    MAX_CACHE_METADATA_ITEMS,
+    ReviewContextCacheKey,
+    finding_lifecycle_for_comment,
+)
 from review_sensei.convergence import ReviewConvergencePolicy, admit_review_result
 from review_sensei.diagnostics import build_plan, run_doctor
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
-from review_sensei.planning import related_paths_for_change
-from review_sensei.session import LocalSessionLedger, SessionIdentity, SessionRecord
+from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
+from review_sensei.session import LocalSessionLedger, SessionIdentity
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -225,6 +232,94 @@ class BaselinePlanTests(unittest.TestCase):
             "policy-change",
         )
 
+    def test_related_context_never_truncates_silently(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        with self.assertRaises(ReviewInputError):
+            baseline_from_review(
+                _result(_comment()),
+                cache_key=_key(),
+                policy=policy,
+                related_paths=tuple(
+                    f"src/base-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
+                ),
+            )
+        baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=policy,
+            related_paths=tuple(
+                f"src/base-{index}.py" for index in range(MAX_RELATED_PATHS)
+            ),
+        )
+        with self.assertRaises(ReviewInputError):
+            plan_verification_scope(
+                policy=policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/app.py",),
+                related_paths=("src/overflow.py",),
+            )
+
+    def test_invalidated_scopes_require_fallback_full_without_late_admission(
+        self,
+    ) -> None:
+        for status in ("incompatible", "incomplete-baseline"):
+            with self.assertRaises(ReviewInputError):
+                VerificationScope(
+                    status=status,
+                    round_kind="initial",
+                    late_admission_required=False,
+                    coverage_mode="incremental",
+                )
+            with self.assertRaises(ReviewInputError):
+                VerificationScope(
+                    status=status,
+                    round_kind="verification",
+                    late_admission_required=True,
+                    coverage_mode="fallback-full",
+                )
+
+    def test_boolean_fields_reject_integer_coercion(self) -> None:
+        with self.assertRaises(ReviewInputError):
+            LaterFindingClassification(
+                fingerprint=DIGEST_A,
+                classification="new-on-initial-pass",
+                is_late_relative_to_baseline=1,  # type: ignore[arg-type]
+                is_duplicate=False,
+            )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="baseline-required",
+                round_kind="initial",
+                late_admission_required=1,  # type: ignore[arg-type]
+                coverage_mode="full",
+            )
+
+    def test_schema_bound_tracks_cache_metadata_limit(self) -> None:
+        scope = VerificationScope(
+            status="baseline-required",
+            round_kind="initial",
+            late_admission_required=False,
+            coverage_mode="full",
+            reviewed_paths=tuple(
+                f"src/file-{index}.py" for index in range(MAX_CACHE_METADATA_ITEMS)
+            ),
+        )
+        self.assertEqual(
+            len(scope.to_dict()["reviewed_paths"]), MAX_CACHE_METADATA_ITEMS
+        )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="baseline-required",
+                round_kind="initial",
+                late_admission_required=False,
+                coverage_mode="full",
+                reviewed_paths=tuple(
+                    f"src/file-{index}.py"
+                    for index in range(MAX_CACHE_METADATA_ITEMS + 1)
+                ),
+            )
+
 
 class LaterFindingTests(unittest.TestCase):
     def test_reworded_same_identity_is_duplicate_not_late(self) -> None:
@@ -293,7 +388,7 @@ class LaterFindingTests(unittest.TestCase):
         regression = _comment(
             path="src/helper.py",
             symbol="help",
-            defect_kind="authz-regression",
+            defect_kind="authz",
             body="fix broke helper auth",
         )
         classification = classify_later_finding(
@@ -338,6 +433,36 @@ class LaterFindingTests(unittest.TestCase):
         )
         self.assertEqual(classification.classification, "new-regression")
         self.assertFalse(classification.is_duplicate)
+
+    def test_unrelated_changed_path_has_no_causal_parent(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment(symbol="old", defect_kind="authz", blocking=False)),
+            cache_key=_key(),
+            policy=policy,
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        unrelated = _comment(
+            symbol="new",
+            defect_kind="data-loss",
+            body="unrelated changed-path defect",
+        )
+        classification = classify_later_finding(
+            unrelated,
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/app.py",),
+            on_changed_path=True,
+        )
+        self.assertEqual(classification.classification, "new-regression")
+        self.assertIsNone(classification.causal_parent)
+        self.assertEqual(classification.lineage_reason, "none")
+        self.assertEqual(classification.attribution, "pr-change")
 
     def test_optional_on_already_reviewed_code_is_not_a_blocker(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -468,9 +593,17 @@ class DiagnosticVerificationTests(unittest.TestCase):
             root = Path(raw)
             identity = SessionIdentity("owner/repo", 136)
             ledger = LocalSessionLedger(root)
-            ledger._write(
+            initialized = ledger.initialize(identity)
+            reserved = ledger.reserve(
                 identity,
-                SessionRecord.create(identity, completed_initial_reviews=1),
+                slot="initial",
+                reservation_id="a" * 8,
+                expected_generation=initialized.generation,
+            )
+            ledger.commit(
+                identity,
+                reservation_id="a" * 8,
+                expected_generation=reserved.generation,
             )
             plan = build_plan(
                 diff=DIFF,

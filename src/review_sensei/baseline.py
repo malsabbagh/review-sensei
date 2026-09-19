@@ -137,6 +137,27 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _bounded_related_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
+    paths = _bounded_paths(values, label=label)
+    if len(paths) > MAX_RELATED_PATHS:
+        raise ReviewInputError(f"{label} exceed the related-path bound")
+    return paths
+
+
+def _merge_related_paths(*groups: Sequence[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for path in group:
+            if path in seen:
+                continue
+            if len(paths) >= MAX_RELATED_PATHS:
+                raise ReviewInputError("related paths exceed the related-path bound")
+            seen.add(path)
+            paths.append(path)
+    return tuple(paths)
+
+
 def resolution_criterion_digest(
     *,
     fingerprint: str,
@@ -258,7 +279,9 @@ class ReviewBaseline:
             _bounded_paths(self.reviewed_paths, label="reviewed"),
         )
         object.__setattr__(
-            self, "related_paths", _bounded_paths(self.related_paths, label="related")
+            self,
+            "related_paths",
+            _bounded_related_paths(self.related_paths, label="related"),
         )
         if (
             isinstance(self.generation, bool)
@@ -303,7 +326,7 @@ def baseline_from_review(
         complete=complete,
         findings=findings,
         reviewed_paths=reviewed,
-        related_paths=_bounded_paths(related_paths, label="related"),
+        related_paths=_bounded_related_paths(related_paths, label="related"),
         coverage_complete=coverage_complete,
         generation=generation,
     )
@@ -396,7 +419,9 @@ class VerificationScope:
             _bounded_paths(self.reviewed_paths, label="reviewed"),
         )
         object.__setattr__(
-            self, "related_paths", _bounded_paths(self.related_paths, label="related")
+            self,
+            "related_paths",
+            _bounded_related_paths(self.related_paths, label="related"),
         )
         object.__setattr__(
             self, "changed_paths", _bounded_paths(self.changed_paths, label="changed")
@@ -415,6 +440,15 @@ class VerificationScope:
             raise ReviewInputError("verification requires late admission")
         if self.late_admission_required and self.round_kind != "verification":
             raise ReviewInputError("late admission applies only to verification")
+        if self.status in {"incompatible", "incomplete-baseline"}:
+            if self.coverage_mode != "fallback-full":
+                raise ReviewInputError(
+                    "invalidated verification scopes require fallback-full coverage"
+                )
+            if self.late_admission_required:
+                raise ReviewInputError(
+                    "invalidated verification scopes cannot require late admission"
+                )
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -474,9 +508,9 @@ def preview_verification_scope(
         raise ReviewInputError("review convergence policy is invalid")
     changed = _bounded_paths(changed_paths, label="changed")
     related = (
-        related_paths_for_change(changed)
+        _bounded_related_paths(related_paths_for_change(changed), label="related")
         if related_paths is None
-        else _bounded_paths(related_paths, label="related")
+        else _bounded_related_paths(related_paths, label="related")
     )
     if policy.mode not in OPERATOR_REVIEW_MODES:
         return _scope(
@@ -536,9 +570,9 @@ def plan_verification_scope(
         raise ReviewInputError("review convergence policy is invalid")
     changed = _bounded_paths(changed_paths, label="changed")
     extra_related = (
-        related_paths_for_change(changed)
+        _bounded_related_paths(related_paths_for_change(changed), label="related")
         if related_paths is None
-        else _bounded_paths(related_paths, label="related")
+        else _bounded_related_paths(related_paths, label="related")
     )
     if policy.mode not in OPERATOR_REVIEW_MODES:
         return preview_verification_scope(
@@ -560,7 +594,7 @@ def plan_verification_scope(
     reason = evaluate_baseline_compatibility(
         baseline, current_key=current_key, policy=policy
     )
-    related = _unique_paths(baseline.related_paths, extra_related)[:MAX_RELATED_PATHS]
+    related = _merge_related_paths(baseline.related_paths, extra_related)
     existing_paths = tuple(
         finding.path for finding in baseline.findings if finding.path is not None
     )
@@ -594,12 +628,12 @@ def plan_verification_scope(
             previous_key=baseline.cache_key,
             previous_findings=tuple(
                 FindingLifecycle(
-                    finding.fingerprint,
-                    "still-present",
-                    finding.resolution_criterion,
-                    finding.concern,
-                    finding.path,
-                    finding.generation,
+                    fingerprint=finding.fingerprint,
+                    state="still-present",
+                    evidence=finding.resolution_criterion,
+                    concern=finding.concern,
+                    path=finding.path,
+                    generation=finding.generation,
                 )
                 for finding in baseline.findings
             ),
@@ -699,6 +733,21 @@ def _match_baseline_finding(
     return None
 
 
+def _shares_lineage_identity(comment: ReviewComment, finding: BaselineFinding) -> bool:
+    comment_kind = comment_defect_kind(comment)
+    if (
+        comment.symbol is not None
+        and finding.symbol is not None
+        and comment.symbol == finding.symbol
+    ):
+        return True
+    return (
+        comment_kind != "unknown"
+        and finding.defect_kind != "unknown"
+        and comment_kind == finding.defect_kind
+    )
+
+
 def _causal_parent(
     comment: ReviewComment,
     *,
@@ -710,19 +759,27 @@ def _causal_parent(
     related = set(related_paths)
     if comment.path in changed:
         for finding in baseline.findings:
-            if finding.blocking and finding.path in changed:
+            if (
+                finding.blocking
+                and finding.path in changed
+                and _shares_lineage_identity(comment, finding)
+            ):
                 return finding, "fix-introduced-on-changed-path"
         for finding in baseline.findings:
-            if finding.path in changed:
+            if finding.path in changed and _shares_lineage_identity(comment, finding):
                 return finding, "fix-introduced-on-changed-path"
     if comment.path in related:
         for finding in baseline.findings:
-            if finding.blocking and (
-                finding.path in changed or finding.path in related
+            if (
+                finding.blocking
+                and (finding.path in changed or finding.path in related)
+                and _shares_lineage_identity(comment, finding)
             ):
                 return finding, "fix-introduced-on-related-path"
         for finding in baseline.findings:
-            if finding.path in changed or finding.path in related:
+            if (
+                finding.path in changed or finding.path in related
+            ) and _shares_lineage_identity(comment, finding):
                 return finding, "fix-introduced-on-related-path"
     return None, "none"
 
@@ -854,8 +911,8 @@ def classify_later_finding(
             is_late_relative_to_baseline=True,
             is_duplicate=False,
             late_reason="new-regression",
-            lineage_reason="fix-introduced-on-changed-path",
-            attribution="fix-regression",
+            lineage_reason=lineage if parent is not None else "none",
+            attribution="fix-regression" if parent is not None else "pr-change",
         )
     return LaterFindingClassification(
         fingerprint=lifecycle.fingerprint,
