@@ -74,6 +74,8 @@ diff changed paths --> active lens selection
 
 ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
 ReviewService.run ----> ResourceBudget admission ----> RunOutcome
+ReviewConvergencePolicy ----> evaluate_blocker_admission / evaluate_round_admission
+                               (doctor/plan display; not a publication gate yet)
 ```
 
 `ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
@@ -670,6 +672,11 @@ a final PR preflight. The finalizer runs after review publication and after the
 AI resolves a blocking root. The existing `pull_requests: write` capability and
 per-head approval marker/idempotency boundary are shared, so approval adds no
 credential or persistence boundary.
+
+Issue #136 adds a versioned review-convergence policy (ADR 0046) that doctor
+and plan can display. Until later slices wire it into publication, GitHub
+review events continue to use the explicit finding `blocking` bit described
+above. `REVIEWSENSEI_AUTO_APPROVE=false` remains the comment-only opt-out.
 
 Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the

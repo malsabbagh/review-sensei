@@ -1671,6 +1671,9 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(args.context_root, Path("context"))
         self.assertTrue(args.network)
         self.assertTrue(args.as_json)
+        self.assertIsNone(args.review_mode)
+        mode = _doctor_parser().parse_args(["--review-mode", "merge-focused"])
+        self.assertEqual(mode.review_mode, "merge-focused")
         networked = _doctor_parser().parse_args(
             [
                 "--network",
@@ -1699,6 +1702,8 @@ class DoctorPlanCliTests(unittest.TestCase):
                 "review",
                 "--provider-mode",
                 "local",
+                "--review-mode",
+                "advisory",
                 "--base-sha",
                 "a" * 40,
                 "--head-sha",
@@ -1712,6 +1717,7 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(args.stage, ["review"])
         self.assertEqual(args.base_sha, "a" * 40)
         self.assertEqual(args.head_sha, "b" * 40)
+        self.assertEqual(args.review_mode, "advisory")
         self.assertTrue(args.as_json)
 
     def test_doctor_cli_renders_json_and_exit_code(self):
@@ -1724,6 +1730,8 @@ class DoctorPlanCliTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "v1")
         self.assertIn("checks", payload)
         self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["review_convergence"]["mode"], "legacy")
+        self.assertEqual(payload["review_convergence"]["enforcement"], "display-only")
 
     def test_doctor_cli_network_flag_reports_unreachable_endpoint(self):
         stdout = io.StringIO()

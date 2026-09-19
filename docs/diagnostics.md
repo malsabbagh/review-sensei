@@ -9,7 +9,10 @@ therefore require `--categories-dir`. Malformed configuration, empty
 directories, and symlinked assets are reported as `action` rather than
 silently treated as available. Doctor also records that symbol-aware source
 context is an opt-in trusted-base policy that stays disabled by default.
-It never calls a model, mints a broker token, or writes to GitHub.
+It reports the review-convergence policy resolved from `--review-mode` or
+`REVIEWSENSEI_REVIEW_MODE` (`legacy` by default). That check is display-only
+and does not change publication. It never calls a model, mints a broker token,
+or writes to GitHub.
 
 Offline runs do not open sockets. Passing `--network` enables read-only probes
 that distinguish:
@@ -30,7 +33,8 @@ healthy probe.
 `review-sensei plan --diff <path>` validates a supplied diff with the same
 bounded `analyze_diff` path used by review. It prints the selected stages,
 category ids, budgets, identity fields including `--base-sha`/`--head-sha` when
-supplied, skip reasons, and a zero-call/zero-write operation summary. Without a
+supplied, the resolved review-convergence policy, skip reasons, and a
+zero-call/zero-write operation summary. Without a
 diff, the plan is explicitly incomplete. Use `--json` for the versioned
 machine-readable contract.
 

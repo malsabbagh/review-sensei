@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/blocker-admission.schema.json",
+  "title": "ReviewSensei blocker admission decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "proposed_blocking",
+    "effective_blocking",
+    "needs_human",
+    "withholds_automatic_approval",
+    "automatic_github_review_events",
+    "inline_advisory_threads",
+    "disposition",
+    "severity_reason",
+    "evidence_reason",
+    "scope_reason",
+    "admission_reason"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {
+      "type": "string",
+      "enum": ["legacy", "advisory", "merge-focused", "strict"]
+    },
+    "proposed_blocking": {"type": ["boolean", "null"]},
+    "effective_blocking": {"type": "boolean"},
+    "needs_human": {"type": "boolean"},
+    "withholds_automatic_approval": {"type": "boolean"},
+    "automatic_github_review_events": {"type": "boolean"},
+    "inline_advisory_threads": {"type": "boolean"},
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "block",
+        "advisory",
+        "human-adjudication",
+        "suppressed-duplicate",
+        "honored-disposition"
+      ]
+    },
+    "severity_reason": {
+      "type": "string",
+      "enum": [
+        "legacy-explicit-blocking",
+        "legacy-severity-fallback",
+        "material-high-critical",
+        "named-mandatory-rule",
+        "below-material-threshold",
+        "preference-or-optional",
+        "not-applicable"
+      ]
+    },
+    "evidence_reason": {
+      "type": "string",
+      "enum": [
+        "legacy-unverified",
+        "validated-evidence-and-failure-condition",
+        "independent-analyzer-or-test-artifact",
+        "insufficient-evidence",
+        "json-or-line-validity-only",
+        "model-confidence-or-agreement-only",
+        "not-applicable"
+      ]
+    },
+    "scope_reason": {
+      "type": "string",
+      "enum": [
+        "legacy-unscoped",
+        "pr-attributed",
+        "fix-introduced-regression",
+        "documented-exception",
+        "pre-existing-unaffected",
+        "already-reviewed-optional",
+        "unattributed",
+        "not-applicable"
+      ]
+    },
+    "admission_reason": {
+      "type": "string",
+      "enum": [
+        "legacy-classification",
+        "admitted-blocker",
+        "new-regression",
+        "substantiated-missed-defect",
+        "duplicate-of-existing",
+        "authorized-disposition-still-valid",
+        "contradictory-evidence-needs-human",
+        "weak-high-impact-needs-human",
+        "not-admitted-advisory"
+      ]
+    }
+  }
+}

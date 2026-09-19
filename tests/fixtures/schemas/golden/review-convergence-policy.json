@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "mode": "legacy",
+  "enforcement": "display-only",
+  "max_completed_initial_reviews": 1,
+  "max_completed_verification_rounds": 2,
+  "max_failed_attempts": 6,
+  "automatic_github_review_events": true,
+  "inline_advisory_threads": true,
+  "policy_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

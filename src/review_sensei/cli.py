@@ -823,6 +823,13 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-env")
     parser.add_argument("--compatibility-manifest", type=Path)
     parser.add_argument(
+        "--review-mode",
+        help=(
+            "Review-convergence mode: legacy (default), advisory, "
+            "merge-focused, or strict. Display-only until publication wiring."
+        ),
+    )
+    parser.add_argument(
         "--allow-data-egress",
         action="store_true",
         help="Authorize read-only probes of a non-loopback provider endpoint.",
@@ -847,6 +854,13 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument("--api-key-env")
     parser.add_argument("--provider-mode")
+    parser.add_argument(
+        "--review-mode",
+        help=(
+            "Review-convergence mode: legacy (default), advisory, "
+            "merge-focused, or strict. Display-only until publication wiring."
+        ),
+    )
     parser.add_argument("--base-sha")
     parser.add_argument("--head-sha")
     parser.add_argument("--categories-dir", type=Path)
@@ -1498,6 +1512,7 @@ def _run_doctor_command(arguments: list[str]) -> int:
             context_root=args.context_root,
             include_network=args.network,
             provider_mode=os.getenv("REVIEWSENSEI_PROVIDER_MODE"),
+            review_mode=args.review_mode,
             repository=args.repository,
             profile=args.profile,
             provider=args.provider,
@@ -1551,6 +1566,7 @@ def _run_plan_command(arguments: list[str]) -> int:
             model=args.model,
             api_key_env=args.api_key_env,
             provider_mode=args.provider_mode,
+            review_mode=args.review_mode,
             base_sha=args.base_sha,
             head_sha=args.head_sha,
             categories_dir=args.categories_dir,

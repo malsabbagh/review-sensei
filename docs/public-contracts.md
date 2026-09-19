@@ -63,6 +63,9 @@ containing `/v1/`.
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |
+| `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and display-only enforcement |
+| `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
+| `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -162,6 +165,14 @@ These imports are public and stable within a major version:
 - `review_sensei.PublishableReview`
 - `review_sensei.CoverageManifest`
 - `review_sensei.TotalWorkBudget`
+- `review_sensei.ReviewConvergencePolicy`
+- `review_sensei.BlockerCandidate`
+- `review_sensei.BlockerAdmissionDecision`
+- `review_sensei.RoundSessionState`
+- `review_sensei.RoundAdmissionDecision`
+- `review_sensei.resolve_review_convergence_policy`
+- `review_sensei.evaluate_blocker_admission`
+- `review_sensei.evaluate_round_admission`
 - `review_sensei.plan_change`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
@@ -197,7 +208,11 @@ These imports are public and stable within a major version:
 - `review_sensei.ChannelPromotionRecord`
 
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
-against `run-outcome.schema.json`. `ReviewService.run` always returns a
+against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
+`BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
+validate against the review-convergence schemas. Those evaluators are not
+publication gates yet; GitHub review events still follow ADR 0032/0035.
+`ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
 as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
@@ -409,6 +424,7 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
+| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Display-only until publication wiring (ADR 0046) |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
@@ -510,6 +526,10 @@ review-sensei plan --diff pr.patch --repository owner/repo --json
 `plan` analyzes a supplied diff with the same bounded `analyze_diff` path as
 review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `--base-sha` and `--head-sha` record snapshot identity when supplied.
+Doctor and plan also report the resolved review-convergence policy
+(`legacy` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
+That contract is display-only in this release: it does not change GitHub
+publication or `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).
 `doctor --network` performs read-only GET probes and never mints a token or
 sends a generation request.
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added the issue #136 C1 review-convergence policy contract: versioned
+  `legacy` / `advisory` / `merge-focused` / `strict` modes, deterministic
+  blocker-admission and round-handoff evaluators, and doctor/plan display via
+  `--review-mode` / `REVIEWSENSEI_REVIEW_MODE`. Existing installations stay on
+  `legacy`. GitHub publication and `REVIEWSENSEI_AUTO_APPROVE` are unchanged.
+
 ## 0.5.0 - 2026-09-18
 
 - Official first public package cutoff: PyPI `review-sensei==0.5.0` and npm `@reviewsensei/cli@0.5.0` with matching platform packages, published through GitHub OIDC Trusted Publishing. Setup-v4 callers follow the movable public workflow tag `v5` (`PUBLIC_WORKFLOW_TAG=v5`, `@v5`); package versions remain immutable `X.Y.Z` (`v0.5.0`). The broker still accepts `v4` during migration via `BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS` / `brokerAcceptedPublicWorkflowTags`.
