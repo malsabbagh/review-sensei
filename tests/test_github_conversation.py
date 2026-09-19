@@ -366,9 +366,7 @@ class ConversationPublisherTests(unittest.TestCase):
     def test_bounded_text_never_exceeds_small_byte_budget(self):
         for maximum in range(1, len(b"\n[truncated]")):
             bounded = _bounded_text("é" * 100, maximum)
-            self.assertTrue(
-                bounded is None or len(bounded.encode("utf-8")) <= maximum
-            )
+            self.assertTrue(bounded is None or len(bounded.encode("utf-8")) <= maximum)
 
     def test_general_diff_truncation_stays_within_byte_budget(self):
         http, _ = make_http(
