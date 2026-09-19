@@ -97,12 +97,22 @@ def _digest(value: str) -> str:
 
 
 def _bounded_text(value: object, maximum: int) -> str | None:
+    """Return non-empty text whose UTF-8 encoding is at most ``maximum`` bytes."""
+
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.encode("utf-8", errors="strict")
     if len(raw) <= maximum:
         return value
     suffix = b"\n[truncated]"
+    if maximum <= len(suffix):
+        clipped = raw[:maximum]
+        while clipped:
+            try:
+                return clipped.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                clipped = clipped[:-1]
+        return None
     clipped = raw[: maximum - len(suffix)]
     while clipped:
         try:

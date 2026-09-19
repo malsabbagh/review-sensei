@@ -14,6 +14,8 @@ from review_sensei.hosting.github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
     MAX_CONTEXT_DIFF_BYTES,
     PreparedConversation,
+    _bounded_text,
+    _remove_emitted_priority_hunks,
     authorized_human_comment,
     has_standalone_sensei_mention,
     reply_marker,
@@ -320,6 +322,79 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertIn("+++ b/src/target.py", diff_context)
         self.assertEqual(changed_paths, ("src/target.py",))
         self.assertEqual(len(calls), 1)
+
+    def test_remove_emitted_priority_hunks_keeps_preamble_and_disjoint_hunks(self):
+        priority_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        patch = (
+            "diff --git a/src/target.py b/src/target.py\n"
+            "index abc..def 100644\n"
+            "--- a/src/target.py\n+++ b/src/target.py\n"
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after\n"
+            "@@ -100,1 +100,2 @@\n+helper\n+return helper()\n"
+        )
+
+        residual = _remove_emitted_priority_hunks(
+            patch,
+            {priority_hunk},
+            filename="src/target.py",
+        )
+
+        self.assertTrue(residual.startswith("diff --git a/src/target.py"))
+        self.assertIn("--- a/src/target.py", residual)
+        self.assertIn("@@ -100,1 +100,2 @@", residual)
+        self.assertNotIn("context-before", residual)
+
+    def test_remove_emitted_priority_hunks_reconstructs_headers_without_preamble(self):
+        priority_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
+        patch = (
+            "@@ -38,8 +38,10 @@\n context-before\n"
+            "-old\n+new\n+guard\n+return\n context-after\n"
+            "@@ -100,1 +100,2 @@\n+helper\n+return helper()\n"
+        )
+
+        residual = _remove_emitted_priority_hunks(
+            patch,
+            {priority_hunk},
+            filename="src/target.py",
+        )
+
+        self.assertTrue(residual.startswith("--- a/src/target.py\n+++ b/src/target.py"))
+        self.assertIn("@@ -100,1 +100,2 @@", residual)
+        self.assertNotIn("context-before", residual)
+
+    def test_bounded_text_never_exceeds_small_byte_budget(self):
+        for maximum in range(1, len(b"\n[truncated]")):
+            bounded = _bounded_text("é" * 100, maximum)
+            self.assertTrue(
+                bounded is None or len(bounded.encode("utf-8")) <= maximum
+            )
+
+    def test_general_diff_truncation_stays_within_byte_budget(self):
+        http, _ = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "filename": "src/large.py",
+                            "patch": "@@ -1 +1 @@\n" + "é" * MAX_CONTEXT_DIFF_BYTES,
+                        }
+                    ]
+                )
+            ]
+        )
+
+        diff_context, _ = ConversationPublisher(http=http)._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+        )
+
+        self.assertIsNotNone(diff_context)
+        self.assertLessEqual(len(diff_context.encode("utf-8")), MAX_CONTEXT_DIFF_BYTES)
+        self.assertIn("[truncated]", diff_context)
 
     def test_oversized_priority_hunk_does_not_starve_later_context(
         self,
