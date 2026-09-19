@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 
 from .baseline import VerificationScope, preview_verification_scope
 from .convergence import (
+    OPERATOR_REVIEW_MODES,
     ReviewConvergencePolicy,
     evaluate_round_admission,
     resolve_review_convergence_policy,
@@ -107,6 +108,10 @@ def _session_ledger_diagnostic(
             payload["remaining_verification_rounds"] = (
                 decision.remaining_verification_rounds
             )
+            payload["admit"] = decision.admit
+            payload["handoff"] = decision.handoff
+            payload["handoff_reason"] = decision.handoff_reason
+            payload["may_emit_approve"] = decision.may_emit_approve
         return (
             DiagnosticCheck(
                 "session-ledger",
@@ -134,12 +139,13 @@ def _plan_session_record(
     session_ledger: Path | str | None,
     repository: str | None,
     pull_request: int | None,
+    policy: ReviewConvergencePolicy | None = None,
 ) -> dict[str, object] | None:
     check, payload = _session_ledger_diagnostic(
         session_ledger=session_ledger,
         repository=repository,
         pull_request=pull_request,
-        policy=None,
+        policy=policy,
     )
     if check is None:
         return None
@@ -483,9 +489,10 @@ def run_doctor(
     ``session_ledger`` reports the issue #136 C3 durable session record when a
     local ledger path is supplied or ``REVIEWSENSEI_SESSION_LEDGER`` is set.
     Missing, expired, or tampered state is explicit. Doctor never writes.
-    Operator modes also report C4 verification scope. ``legacy`` stays
-    unscoped. After a completed initial review the next pass is verification
-    over existing concerns plus changed and related paths.
+    Operator modes also report C4 verification scope and C5 automation
+    admission. Without a ledger, operator modes cannot enforce round budgets.
+    ``legacy`` stays unscoped. After a completed initial review the next pass
+    is verification over existing concerns plus changed and related paths.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -579,6 +586,42 @@ def run_doctor(
     )
     if session_check is not None:
         checks.append(session_check)
+    if (
+        review_convergence is not None
+        and review_convergence.mode in OPERATOR_REVIEW_MODES
+    ):
+        if session_check is None:
+            checks.append(
+                DiagnosticCheck(
+                    "automation-admission",
+                    "action",
+                    "operator mode cannot enforce round budgets without a session ledger",
+                )
+            )
+        elif session_record is not None and session_record.get("status") == "ok":
+            admit = session_record.get("admit")
+            reason = session_record.get("handoff_reason")
+            detail = (
+                f"admit={admit} remaining_verification="
+                f"{session_record.get('remaining_verification_rounds')}"
+            )
+            if session_record.get("handoff"):
+                detail = f"{detail} handoff={reason}"
+            checks.append(
+                DiagnosticCheck(
+                    "automation-admission",
+                    "pass" if admit else "action",
+                    detail,
+                )
+            )
+        else:
+            checks.append(
+                DiagnosticCheck(
+                    "automation-admission",
+                    "action",
+                    "session ledger is not ready for round enforcement",
+                )
+            )
     verification_scope = None
     if review_convergence is not None:
         verification_scope = _verification_scope_from_session(
@@ -886,9 +929,16 @@ def build_plan(
         session_ledger=session_ledger,
         repository=repository,
         pull_request=pull_request,
+        policy=resolve_review_convergence_policy(mode=review_mode),
     )
     if session_record is not None:
         document["session_record"] = session_record
+    elif (
+        resolve_review_convergence_policy(mode=review_mode).mode
+        in OPERATOR_REVIEW_MODES
+    ):
+        skip_reasons.append("session-ledger-required")
+        document["skip_reasons"] = skip_reasons
     verification_scope = _verification_scope_from_session(
         policy=resolve_review_convergence_policy(mode=review_mode),
         session_record=session_record,
@@ -957,13 +1007,20 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         )
     session_record = document.get("session_record")
     if isinstance(session_record, dict) and session_record.get("status"):
-        lines.append(
+        ledger_line = (
             "session_ledger: "
             f"status={session_record.get('status')} "
             f"initial={session_record.get('completed_initial_reviews', 0)} "
             f"verification={session_record.get('completed_verification_rounds', 0)} "
             f"failed_attempts={session_record.get('failed_attempts', 0)}"
         )
+        if "admit" in session_record:
+            ledger_line = f"{ledger_line} admit={session_record.get('admit')}"
+        if session_record.get("handoff"):
+            ledger_line = (
+                f"{ledger_line} handoff={session_record.get('handoff_reason')}"
+            )
+        lines.append(ledger_line)
     verification = document.get("verification")
     if isinstance(verification, dict) and verification.get("status"):
         lines.append(
