@@ -482,7 +482,10 @@ class PublishableReviewTests(unittest.TestCase):
             evidence_policy="confirmed",
             changed_lines={"src/app.py": frozenset({2})},
             convergence_policy=policy,
-            blocker_candidates=(admitting_blocker_facts(), admitting_blocker_facts()),
+            input_blocker_candidates=(
+                admitting_blocker_facts(),
+                admitting_blocker_facts(),
+            ),
         )
         self.assertEqual(len(prepared.result.comments), 1)
         self.assertEqual(prepared.verifications[1].disposition, "rejected")
@@ -542,6 +545,29 @@ class PublishableReviewTests(unittest.TestCase):
                     admitting_blocker_facts(),
                     admitting_blocker_facts(),
                 ),
+            )
+
+    def test_confirmed_cannot_supply_both_blocker_fact_bases(self) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = admitting_blocker_facts()
+        with self.assertRaisesRegex(ReviewInputError, "one blocker candidate basis"):
+            prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                changed_lines={"src/app.py": frozenset({2})},
+                convergence_policy=policy,
+                blocker_candidates=(facts,),
+                input_blocker_candidates=(facts,),
             )
 
     def test_unsupported_policy_fails_closed(self) -> None:

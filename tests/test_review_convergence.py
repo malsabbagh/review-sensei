@@ -17,6 +17,7 @@ from review_sensei import (
 )
 from review_sensei.convergence import (
     REVIEW_MODE_ENV,
+    comment_targets_pr_change,
     policy_from_mapping,
     resolve_review_mode,
 )
@@ -731,6 +732,50 @@ class DoctorPlanDisplayTests(unittest.TestCase):
 
 
 class FindingAdmissionTests(unittest.TestCase):
+    def test_left_side_comment_is_not_attributed_from_new_file_lines(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            side="LEFT",
+            blocking=True,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        changed = {"src/app.py": frozenset({2})}
+        deleted = {"src/app.py": frozenset({2})}
+        self.assertFalse(comment_targets_pr_change(comment, changed_lines=changed))
+        self.assertTrue(comment_targets_pr_change(comment, deleted_lines=deleted))
+        right = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            side="RIGHT",
+        )
+        self.assertTrue(comment_targets_pr_change(right, changed_lines=changed))
+        file_comment = ReviewComment(
+            path="src/app.py",
+            line=None,
+            body="finding",
+            side="FILE",
+        )
+        self.assertFalse(
+            comment_targets_pr_change(
+                file_comment, changed_lines=changed, deleted_lines=deleted
+            )
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            changed_lines=changed,
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertTrue(admitted.comments[0].needs_human)
+
     def test_legacy_result_is_not_rewritten(self):
         comment = ReviewComment(
             path="src/app.py", line=2, body="finding", blocking=True, severity="low"

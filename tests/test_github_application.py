@@ -328,6 +328,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         self.assertIs(self.reviewer.calls[-1]["convergence_policy"], policy)
         self.assertIs(self.reviewer.calls[-1]["blocker_candidates"], facts)
+        self.assertIsNone(self.reviewer.calls[-1]["input_blocker_candidates"])
 
     def test_learning_proposals_reuse_one_learning_capability(self):
         options = GitHubWriteOptions(github_writes=True, learning_prs=True)

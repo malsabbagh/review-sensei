@@ -2868,7 +2868,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             snapshot_sha256=digest,
             evidence_policy="confirmed",
             convergence_policy=policy,
-            blocker_candidates=(facts, facts),
+            input_blocker_candidates=(facts, facts),
         )
         self.assertEqual(outcome.status, "published")
         body = json.loads(calls[-1][2].decode("utf-8"))

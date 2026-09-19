@@ -74,6 +74,7 @@ class GitHubApplication:
         evidence_policy: str = "legacy",
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -117,6 +118,7 @@ class GitHubApplication:
             evidence_policy=evidence_policy,
             convergence_policy=convergence_policy,
             blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
         )
 
     def recover_review(

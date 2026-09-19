@@ -8,9 +8,10 @@
   effective classification, fold advisory observations into the review
   summary, and withhold `APPROVE` for human adjudication. Confirmed
   verification proves evidence locations only; it does not invent a failure
-  condition or promote `blocking=false` findings. Caller-supplied blocker
-  facts may align with input candidates or with the post-verification
-  comment set. `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
+  condition or promote `blocking=false` findings. Published
+  `blocker_candidates` and input `input_blocker_candidates` are distinct
+  bases. Attribution uses each comment's side against new-file or old-file
+  line maps. `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned
   `legacy` / `advisory` / `merge-focused` / `strict` modes, deterministic

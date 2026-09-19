@@ -722,12 +722,43 @@ def derive_blocker_candidate(
     )
 
 
+def comment_targets_pr_change(
+    comment: ReviewComment,
+    *,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
+) -> bool:
+    """Return whether a finding targets a changed line on its declared side.
+
+    ``RIGHT`` comments use new-file ``changed_lines``. ``LEFT`` comments use
+    old-file ``deleted_lines``. File-level comments are not line-attributed.
+    Missing maps fail closed as unattributed.
+    """
+
+    if not isinstance(comment, ReviewComment):
+        raise ReviewInputError("blocker comment is invalid")
+    if comment.line is None:
+        return False
+    if comment.side == "LEFT":
+        if deleted_lines is None:
+            return False
+        allowed = deleted_lines.get(comment.path)
+        return bool(allowed and comment.line in allowed)
+    if comment.side == "RIGHT":
+        if changed_lines is None:
+            return False
+        allowed = changed_lines.get(comment.path)
+        return bool(allowed and comment.line in allowed)
+    return False
+
+
 def admit_review_result(
     result: ReviewResult,
     policy: ReviewConvergencePolicy,
     *,
     candidates: Sequence[BlockerCandidate] | None = None,
     changed_lines: Mapping[str, frozenset[int]] | None = None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
 ) -> ReviewResult:
     """Apply trusted blocker admission to each finding before publication."""
 
@@ -744,11 +775,14 @@ def admit_review_result(
         if candidates is not None:
             candidate = candidates[index]
         else:
-            on_changed = False
-            if changed_lines is not None:
-                allowed = changed_lines.get(comment.path)
-                on_changed = bool(allowed and comment.line in allowed)
-            candidate = derive_blocker_candidate(comment, on_changed_path=on_changed)
+            candidate = derive_blocker_candidate(
+                comment,
+                on_changed_path=comment_targets_pr_change(
+                    comment,
+                    changed_lines=changed_lines,
+                    deleted_lines=deleted_lines,
+                ),
+            )
         decision = evaluate_blocker_admission(candidate, policy)
         admitted.append(
             replace(
@@ -1082,6 +1116,7 @@ __all__ = [
     "RoundAdmissionDecision",
     "RoundSessionState",
     "admit_review_result",
+    "comment_targets_pr_change",
     "derive_blocker_candidate",
     "evaluate_blocker_admission",
     "evaluate_round_admission",

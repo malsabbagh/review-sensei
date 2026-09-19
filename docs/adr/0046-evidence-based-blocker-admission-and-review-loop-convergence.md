@@ -69,9 +69,11 @@ fields (`derive_blocker_candidate`) and writes `effective_blocking` /
 formats comments or chooses a GitHub review event. Confirmed evidence
 verification (#114) validates snapshot locations; it does not mint a failure
 condition or actionable remedy. Operator-mode admission stays fail-closed
-unless the caller supplies explicit `BlockerCandidate` facts. Those facts
-may be aligned with input candidates or with the post-verification comment
-set; a dropped candidate does not abort publication. The model `blocking` field
+unless the caller supplies explicit `BlockerCandidate` facts.
+`blocker_candidates` must match published comments;
+`input_blocker_candidates` must match input candidates. Attribution uses
+the comment side: `RIGHT` against new-file changed lines, `LEFT` against
+old-file deleted lines. The model `blocking` field
 remains the proposal. `ReviewComment.blocks_approval` uses the admitted
 effective value when present. Publication markers and `REQUEST_CHANGES` follow
 effective blocking. Human adjudication withholds `APPROVE` through

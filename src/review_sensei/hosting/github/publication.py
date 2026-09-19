@@ -1095,6 +1095,7 @@ class ReviewPublisher:
         evidence_policy: str = "legacy",
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -1134,8 +1135,10 @@ class ReviewPublisher:
                 snapshot_sha256=snapshot_sha256,
                 evidence_policy=evidence_policy,
                 changed_lines=analysis.changed_lines,
+                deleted_lines=analysis.deleted_lines,
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
             )
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc
