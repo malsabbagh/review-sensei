@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,6 +15,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from scripts.check_release_version import TAG_PATTERN
 
 REGISTRY_USER_AGENT = "review-sensei-npm-publish/1.0"
 
@@ -32,6 +35,9 @@ DEFAULT_READBACK_INITIAL_DELAY_SECONDS = 2.0
 DEFAULT_READBACK_MAX_DELAY_SECONDS = 30.0
 DEFAULT_PREFLIGHT_404_ATTEMPTS = 3
 DEFAULT_NPM_PUBLISH_TIMEOUT_SECONDS = 600
+BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
+BUNDLE_METADATA_MAX_BYTES = 4096
+BUNDLE_TARBALL_MAX_BYTES = 256 * 1024 * 1024
 
 
 class PublishError(RuntimeError):
@@ -61,8 +67,199 @@ def retry_delay_seconds(
     return min(delay, max_delay_seconds)
 
 
+def bundle_metadata_path(bundle_dir: Path) -> Path:
+    return bundle_dir / BUNDLE_METADATA_FILENAME
+
+
+def _is_git_sha(value: str) -> bool:
+    return len(value) == 40 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _is_release_version(value: str) -> bool:
+    return bool(TAG_PATTERN.fullmatch(f"v{value}"))
+
+
+def load_bundle_metadata(bundle_dir: Path) -> dict[str, str] | None:
+    path = bundle_metadata_path(bundle_dir)
+    if not path.is_file():
+        return None
+    with path.open("rb") as handle:
+        raw = handle.read(BUNDLE_METADATA_MAX_BYTES + 1)
+    if len(raw) > BUNDLE_METADATA_MAX_BYTES:
+        raise PublishError("release bundle bundle-metadata.json exceeds size limit")
+    try:
+        metadata = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PublishError("release bundle has invalid bundle-metadata.json") from exc
+    if not isinstance(metadata, dict):
+        raise PublishError("release bundle has invalid bundle-metadata.json")
+    allowed_keys = {"version", "source_sha"}
+    if set(metadata) != allowed_keys:
+        raise PublishError("release bundle bundle-metadata.json has unexpected fields")
+    version = metadata.get("version")
+    source_sha = metadata.get("source_sha")
+    if not isinstance(version, str) or not version:
+        raise PublishError("release bundle metadata is missing version")
+    if not _is_release_version(version):
+        raise PublishError(
+            f"release bundle metadata has invalid version at {path}: {version!r}"
+        )
+    if not isinstance(source_sha, str) or not source_sha:
+        raise PublishError("release bundle metadata is missing source_sha")
+    if not _is_git_sha(source_sha):
+        raise PublishError("release bundle metadata has invalid source_sha")
+    return {"version": version, "source_sha": source_sha}
+
+
+def _is_safe_bundle_member_name(filename: str) -> bool:
+    if not filename or filename in {".", ".."}:
+        return False
+    if filename.startswith("-") or "/" in filename or "\\" in filename:
+        return False
+    return Path(filename).name == filename
+
+
+def _parse_sha256sums_entry(line: str, *, sums_path: Path) -> tuple[str, str]:
+    stripped = line.strip()
+    if not stripped:
+        raise PublishError(f"release bundle has empty SHA256SUMS entry in {sums_path}")
+    parts = stripped.split(None, 1)
+    if len(parts) != 2:
+        raise PublishError(
+            f"release bundle has invalid SHA256SUMS entry in {sums_path}: {line!r}"
+        )
+    digest, filename = parts
+    if len(digest) != 64 or not all(char in "0123456789abcdef" for char in digest):
+        raise PublishError(
+            f"release bundle has invalid SHA256SUMS digest in {sums_path}: {line!r}"
+        )
+    if filename.startswith("*"):
+        filename = filename[1:].strip()
+    else:
+        filename = filename.strip()
+    if not _is_safe_bundle_member_name(filename):
+        raise PublishError(
+            f"release bundle SHA256SUMS entry has unsafe filename in {sums_path}: "
+            f"{filename!r}"
+        )
+    return digest, filename
+
+
+def _sha256_file(path: Path, *, max_bytes: int) -> str:
+    hasher = hashlib.sha256()
+    total = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise PublishError(
+                    f"release bundle tarball {path.name!r} exceeds size limit"
+                )
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def iter_sha256sum_entries(bundle_dir: Path) -> list[tuple[str, str]]:
+    sums_path = bundle_dir / "SHA256SUMS"
+    if not sums_path.is_file():
+        raise PublishError(f"release bundle is missing SHA256SUMS at {sums_path}")
+    entries: list[tuple[str, str]] = []
+    for line in sums_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entries.append(_parse_sha256sums_entry(line, sums_path=sums_path))
+    if not entries:
+        raise PublishError(f"release bundle SHA256SUMS is empty at {sums_path}")
+    return entries
+
+
+def list_sha256sum_subjects(bundle_dir: Path) -> list[str]:
+    return [filename for _, filename in iter_sha256sum_entries(bundle_dir)]
+
+
+def list_attestation_subjects(bundle_dir: Path) -> list[str]:
+    return [
+        filename
+        for filename in list_sha256sum_subjects(bundle_dir)
+        if filename.endswith(".tgz") or filename == BUNDLE_METADATA_FILENAME
+    ]
+
+
+def _checksum_subject_max_bytes(filename: str) -> int:
+    if filename == BUNDLE_METADATA_FILENAME:
+        return BUNDLE_METADATA_MAX_BYTES
+    return BUNDLE_TARBALL_MAX_BYTES
+
+
+def verify_bundle_checksums(bundle_dir: Path) -> None:
+    for digest, filename in iter_sha256sum_entries(bundle_dir):
+        subject_path = bundle_dir / filename
+        if not subject_path.is_file():
+            raise PublishError(
+                f"release bundle is missing subject {filename!r} declared in SHA256SUMS"
+            )
+        actual_digest = _sha256_file(
+            subject_path,
+            max_bytes=_checksum_subject_max_bytes(filename),
+        )
+        if actual_digest != digest:
+            raise PublishError(
+                f"release bundle subject {filename!r} does not match SHA256SUMS"
+            )
+
+
+def verify_bundle_version(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
+    """Validate bundle version metadata when present, then load integrity records.
+
+    Bundles without ``bundle-metadata.json`` still pass on the non-resume publish
+    path; only ``integrity.jsonl`` is required there for backwards compatibility.
+    """
+    metadata = load_bundle_metadata(bundle_dir)
+    if metadata is not None and metadata["version"] != version:
+        raise PublishError(
+            "release bundle version "
+            f"{metadata['version']!r} does not match requested {version!r}"
+        )
+    return load_integrity_records(bundle_dir, version)
+
+
+def verify_resumed_bundle(
+    bundle_dir: Path,
+    version: str,
+    *,
+    expected_source_sha: str,
+) -> dict[str, dict[str, str]]:
+    if not _is_git_sha(expected_source_sha):
+        raise PublishError("expected source SHA is not a canonical git commit")
+    metadata = load_bundle_metadata(bundle_dir)
+    if metadata is None:
+        raise PublishError(
+            f"resumed release bundle at {bundle_dir} is missing bundle-metadata.json; "
+            "only bundles produced after bundle metadata recording can be resumed"
+        )
+    if metadata["version"] != version:
+        raise PublishError(
+            "release bundle version "
+            f"{metadata['version']!r} does not match requested {version!r}"
+        )
+    if metadata["source_sha"] != expected_source_sha:
+        raise PublishError(
+            "resumed release bundle source_sha "
+            f"{metadata['source_sha']!r} does not match attested run "
+            f"{expected_source_sha!r} in {bundle_dir}"
+        )
+    verify_bundle_checksums(bundle_dir)
+    return load_integrity_records(bundle_dir, metadata["version"])
+
+
 def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str, str]]:
     integrity_path = bundle_dir / "integrity.jsonl"
+    if not integrity_path.is_file():
+        raise PublishError(
+            f"release bundle is missing integrity.jsonl at {integrity_path}"
+        )
     records = [
         json.loads(line)
         for line in integrity_path.read_text(encoding="utf-8").splitlines()
@@ -72,7 +269,9 @@ def load_integrity_records(bundle_dir: Path, version: str) -> dict[str, dict[str
         item["name"]: item for item in records if item.get("version") == version
     }
     if set(expected) != set(ALL_PACKAGES) or len(expected) != len(records):
-        raise PublishError("release bundle has an invalid package integrity set")
+        raise PublishError(
+            f"release bundle has an invalid package integrity set in {bundle_dir}"
+        )
     return expected
 
 
@@ -335,7 +534,8 @@ def classify_registry_state(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}"
+                f"{package}@{version}. Reuse the previously attested release "
+                "bundle for this version instead of rebuilding."
             )
         return "verified"
 
@@ -445,7 +645,8 @@ def read_back_with_retry(
         ):
             raise IntegrityMismatchError(
                 "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}"
+                f"{package}@{version}. Reuse the previously attested release "
+                "bundle for this version instead of rebuilding."
             )
         print(f"Verified registry readback for {package}@{version}")
         return
@@ -546,8 +747,16 @@ def preflight(
     preflight_404_attempts: int,
     initial_delay_seconds: float,
     max_delay_seconds: float,
+    expected_source_sha: str | None = None,
 ) -> None:
-    records = load_integrity_records(bundle_dir, version)
+    if expected_source_sha is not None:
+        records = verify_resumed_bundle(
+            bundle_dir,
+            version,
+            expected_source_sha=expected_source_sha,
+        )
+    else:
+        records = verify_bundle_version(bundle_dir, version)
     retry_kwargs = {
         "max_attempts": max_attempts,
         "preflight_404_attempts": preflight_404_attempts,
@@ -612,10 +821,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("preflight", "publish-platforms", "publish-launcher"),
+        choices=(
+            "preflight",
+            "publish-platforms",
+            "publish-launcher",
+            "verify-bundle",
+            "list-sha256sum-subjects",
+            "list-attestation-subjects",
+        ),
     )
     parser.add_argument("--bundle-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument(
+        "--expected-source-sha",
+        help=(
+            "When resuming a partial publish, require bundle-metadata.json "
+            "source_sha to match this commit."
+        ),
+    )
     parser.add_argument(
         "--readback-attempts",
         type=int,
@@ -650,11 +873,26 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     try:
-        if args.command == "preflight":
+        if args.command == "verify-bundle":
+            if not args.expected_source_sha:
+                raise PublishError("verify-bundle requires --expected-source-sha")
+            verify_resumed_bundle(
+                bundle_dir,
+                args.version,
+                expected_source_sha=args.expected_source_sha,
+            )
+        elif args.command == "list-sha256sum-subjects":
+            for filename in list_sha256sum_subjects(bundle_dir):
+                print(filename)
+        elif args.command == "list-attestation-subjects":
+            for filename in list_attestation_subjects(bundle_dir):
+                print(filename)
+        elif args.command == "preflight":
             preflight(
                 bundle_dir,
                 args.version,
                 preflight_404_attempts=args.preflight_404_attempts,
+                expected_source_sha=args.expected_source_sha,
                 **retry_kwargs,
             )
         elif args.command == "publish-platforms":

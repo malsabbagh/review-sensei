@@ -24,7 +24,36 @@ preflights every package: a registry entry must be absent or already match the
 attested tarball's exact npm SRI. It publishes missing platform packages first,
 reads back each exact version and `dist.integrity`, then publishes
 `@reviewsensei/cli` last. This makes a transient partial run safely retryable
-only when already-published bytes exactly match the release bundle. It also
+when already-published bytes exactly match the release bundle.
+
+If a publish job fails after some packages reach the registry, do not dispatch a
+fresh rebuild for the same version. Either re-run the failed workflow job from
+GitHub Actions, or dispatch `publish-npm.yml` again with `resume_bundle_run_id`
+set to the failed run ID so the workflow reuses that run's attested
+`review-sensei-npm-release-bundle` artifact instead of rebuilding new tarballs.
+Resume requires a bundle that includes `bundle-metadata.json` (produced by
+workflows after this metadata recording landed). Older bundles without that file
+are not eligible for resume. The resumed run must be a failed or cancelled
+manual `publish-npm` dispatch from the default branch of this repository, and
+its attested source commit and bundle metadata version must match the requested
+version. The run title must be exactly `publish-npm X.Y.Z`. Attestation
+verification binds each tarball and `bundle-metadata.json` to that run's source
+commit ref and digest via `--source-ref` and `--source-digest`; the metadata
+file is listed in `SHA256SUMS` and attested with the tarballs.
+`bundle-metadata.json` also provides a secondary check. The workflow's `verify-bundle` helper checks bundle structure and
+metadata only; attestation verification runs separately in the resume path.
+Before resuming, confirm the referenced run's head SHA is the commit
+you intended to release and matches the resuming dispatch's default-branch
+`GITHUB_SHA`; a newer default-branch commit cannot resume an older run's bundle.
+The resume path trusts that run's attested source and
+does not publish bytes built from a different dispatch commit. The resumed
+dispatch reuses the prior run's attested tarballs and `source_sha`; it does not
+publish bytes built from the resuming dispatch commit. Do not combine resume
+with a fresh rebuild for the same version. Non-resume publishes still accept
+legacy bundles that lack `bundle-metadata.json`; resume requires metadata and
+attestation. Packages already verified on the
+registry are skipped and only missing packages are published.
+It also
 installs the launcher in a clean Linux prefix, verifies that
 `node_modules/.bin/review-sensei` resolves to the launcher rather than a
 platform package, and runs its help command. The npm lane is deliberately

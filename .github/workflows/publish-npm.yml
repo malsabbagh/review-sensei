@@ -1,5 +1,8 @@
 name: Publish npm packages
 
+# Must stay byte-identical to the Python resume check: f"publish-npm {version}"
+run-name: publish-npm ${{ github.event.inputs.version }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +21,11 @@ on:
         required: true
         type: boolean
         default: false
+      resume_bundle_run_id:
+        description: "Optional failed workflow run ID whose attested npm release bundle should be reused instead of rebuilding"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      resume_mode: ${{ steps.source.outputs.resume_mode }}
     steps:
       - name: Require the canonical public default branch
         env:
@@ -55,16 +64,27 @@ jobs:
         id: source
         env:
           VERSION: ${{ inputs.version }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
         run: |
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
           test "$source_sha" = "$GITHUB_SHA"
           python scripts/check_release_version.py --tag "v$VERSION"
+          if [[ -n "$RESUME_BUNDLE_RUN_ID" ]]; then
+            if [[ ! "$RESUME_BUNDLE_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "resume_bundle_run_id must be a numeric workflow run ID"
+              exit 1
+            fi
+            printf 'resume_mode=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'resume_mode=false\n' >> "$GITHUB_OUTPUT"
+          fi
           printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
   native-build:
     name: Native standalone (${{ matrix.target }})
     needs: verify-request
+    if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -133,6 +153,8 @@ jobs:
   assemble-npm:
     name: Assemble and validate npm package set
     needs: [verify-request, native-build]
+    # Skipped on resume dispatches and when native-build did not succeed.
+    if: ${{ needs.verify-request.outputs.resume_mode != 'true' && needs.verify-request.result == 'success' && needs.native-build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -238,6 +260,10 @@ jobs:
               record.write(json.dumps({"file": path.name, "name": package_record["name"], "version": package_record["version"], "sha256": hex_digest, "integrity": sri}) + "\n")
           PY
           done
+          python scripts/write_bundle_metadata.py \
+            --bundle-dir release/npm \
+            --version "$VERSION" \
+            --source-sha "$(git rev-parse HEAD)"
 
       - name: Attest exact npm tarballs
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -253,17 +279,22 @@ jobs:
             release/npm/*.tgz
             release/npm/SHA256SUMS
             release/npm/integrity.jsonl
+            release/npm/bundle-metadata.json
 
   publish-npm:
     name: Publish npm packages
-    needs: [verify-request, assemble-npm]
-    if: ${{ inputs.publish }}
+    # Resume dispatches are selected by verify-request resume_mode; assemble-npm must
+    # be skipped on that path so a fresh bundle was not assembled in this run.
+    needs: [verify-request, native-build, assemble-npm]
+    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((needs.verify-request.outputs.resume_mode != 'true' && needs.native-build.result == 'success' && needs.assemble-npm.result == 'success') || (needs.verify-request.outputs.resume_mode == 'true' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped')) }}
     runs-on: ubuntu-latest
     environment:
       name: npm
       url: https://www.npmjs.com/org/reviewsensei
     permissions:
       contents: read
+      actions: read
+      attestations: read
       id-token: write
     steps:
       - name: Set up pinned Node.js
@@ -278,15 +309,127 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check out repository for resumed run validation
+        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: resume-source
+          persist-credentials: false
+          show-progress: false
+
       - name: Install pinned npm Trusted Publishing CLI
         run: npm install --global --ignore-scripts npm@11.5.1
 
       - name: Download validated npm release bundle
+        if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           # Single-artifact downloads still extract directly into path in v8.
           name: review-sensei-npm-release-bundle
           path: release/npm
+
+      - name: Download npm release bundle from prior workflow run
+        id: resume-bundle
+        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
+          VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DISPATCH_SOURCE_SHA:-}" ]]; then
+            echo "verify-request did not produce a dispatch source SHA" >&2
+            exit 1
+          fi
+          run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository,displayTitle)"
+          bundle_source_sha="$(python3 - "$run_json" <<'PY'
+          import json
+          import os
+          import sys
+
+          def fail(message: str) -> None:
+              print(message, file=sys.stderr)
+              sys.exit(1)
+
+          run = json.loads(sys.argv[1])
+          expected_repo = os.environ["GITHUB_REPOSITORY"]
+          expected_branch = os.environ["DEFAULT_BRANCH"]
+          version = os.environ["VERSION"]
+          run_id = str(run["databaseId"])
+          if run_id != os.environ["RESUME_BUNDLE_RUN_ID"]:
+              fail("resume_bundle_run_id does not match attested workflow run")
+          if run.get("workflowName") != "Publish npm packages":
+              fail("resume_bundle_run_id must reference a publish-npm workflow run")
+          if run.get("conclusion") not in {"failure", "cancelled"}:
+              fail(
+                  "resume_bundle_run_id must reference a completed failed or cancelled run"
+              )
+          if run.get("event") != "workflow_dispatch":
+              fail("resume_bundle_run_id must reference a manual publish-npm dispatch")
+          if run.get("headBranch") != expected_branch:
+              fail("resume_bundle_run_id must reference a default-branch dispatch")
+          head_repo = run.get("headRepository") or {}
+          owner = (head_repo.get("owner") or {}).get("login")
+          name = head_repo.get("name")
+          if f"{owner}/{name}" != expected_repo:
+              fail("resume_bundle_run_id must reference this repository")
+          display_title = run.get("displayTitle") or ""
+          if display_title != f"publish-npm {version}":
+              fail(
+                  "resume_bundle_run_id must reference a publish-npm run for the same version"
+              )
+          head_sha = run.get("headSha")
+          if not isinstance(head_sha, str) or not head_sha:
+              fail("resume_bundle_run_id is missing attested head SHA")
+          # Resume requires the failed run and this dispatch to target the same
+          # default-branch commit; see docs/releasing.md.
+          if head_sha != os.environ["DISPATCH_SOURCE_SHA"]:
+              fail(
+                  "resume_bundle_run_id must reference a run from the dispatch source commit"
+              )
+          print(head_sha)
+          PY
+          )"
+          git -C resume-source fetch origin "$bundle_source_sha"
+          git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
+          git -C resume-source checkout --detach "$bundle_source_sha"
+          python resume-source/scripts/check_release_version.py --tag "v$VERSION"
+          resume_staging="$RUNNER_TEMP/resume-bundle-staging"
+          rm -rf "$resume_staging"
+          mkdir -p "$resume_staging"
+          gh run download "$RESUME_BUNDLE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name review-sensei-npm-release-bundle \
+            --dir "$resume_staging"
+          python resume-source/scripts/publish_npm_release.py verify-bundle \
+            --bundle-dir "$resume_staging" \
+            --version "$VERSION" \
+            --expected-source-sha "$bundle_source_sha"
+          (
+            cd "$resume_staging"
+            sha256sum --check SHA256SUMS
+            while IFS= read -r filename; do
+              [[ -z "$filename" ]] && continue
+              gh attestation verify "$filename" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
+                --source-ref "refs/heads/$DEFAULT_BRANCH" \
+                --source-digest "$bundle_source_sha"
+            done < <(
+              python resume-source/scripts/publish_npm_release.py list-attestation-subjects \
+                --bundle-dir "$resume_staging"
+            )
+          )
+          rm -rf release/npm
+          mkdir -p release/npm
+          cp -a "$resume_staging"/. release/npm/
+          test -f release/npm/integrity.jsonl
+          test -f release/npm/bundle-metadata.json
+          test -f release/npm/SHA256SUMS
+          echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Verify downloaded npm tarball checksums
         shell: bash
@@ -312,6 +455,35 @@ jobs:
           test -z "$(git -C source status --porcelain=v1)"
           test -f source/scripts/publish_npm_release.py
 
+      - name: Verify resumed npm release bundle provenance
+        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          bundle_source_sha="${{ steps.resume-bundle.outputs.bundle_source_sha }}"
+          test -n "$bundle_source_sha"
+          python resume-source/scripts/publish_npm_release.py verify-bundle \
+            --bundle-dir "$GITHUB_WORKSPACE/release/npm" \
+            --version "$VERSION" \
+            --expected-source-sha "$bundle_source_sha"
+          (
+            cd "$GITHUB_WORKSPACE/release/npm"
+            while IFS= read -r filename; do
+              [[ -z "$filename" ]] && continue
+              gh attestation verify "$filename" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
+                --source-ref "refs/heads/$DEFAULT_BRANCH" \
+                --source-digest "$bundle_source_sha"
+            done < <(
+              python resume-source/scripts/publish_npm_release.py list-attestation-subjects \
+                --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+            )
+          )
+
       - name: Configure bootstrap authentication when present
         shell: bash
         env:
@@ -335,10 +507,23 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
-        run: >-
-          python source/scripts/publish_npm_release.py preflight
-          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-          --version "$VERSION"
+          RESUME_SOURCE_SHA: ${{ steps.resume-bundle.outputs.bundle_source_sha }}
+          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
+        run: |
+          set -euo pipefail
+          args=(
+            python source/scripts/publish_npm_release.py preflight
+            --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+            --version "$VERSION"
+          )
+          if [[ -n "${RESUME_BUNDLE_RUN_ID}" ]]; then
+            if [[ -z "${RESUME_SOURCE_SHA:-}" ]]; then
+              echo "resume publish requires bundle_source_sha from resume-bundle step" >&2
+              exit 1
+            fi
+            args+=(--expected-source-sha "$RESUME_SOURCE_SHA")
+          fi
+          "${args[@]}"
 
       - name: Publish platform packages first and read back integrity
         shell: bash

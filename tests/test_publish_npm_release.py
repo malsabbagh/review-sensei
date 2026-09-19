@@ -54,6 +54,47 @@ class PublishNpmReleaseTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _write_resume_bundle_files(
+        self,
+        *,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        import hashlib
+
+        integrity_path = self.bundle_dir / "integrity.jsonl"
+        if not integrity_path.is_file():
+            raise AssertionError(
+                "integrity.jsonl must exist before writing resume bundle files"
+            )
+
+        sums_lines: list[str] = []
+        for line in (
+            (self.bundle_dir / "integrity.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            tarball_name = Path(record["file"]).name
+            tarball_path = self.bundle_dir / tarball_name
+            tarball_path.write_bytes(f"tarball-{tarball_name}".encode())
+            digest = hashlib.sha256(tarball_path.read_bytes()).hexdigest()
+            sums_lines.append(f"{digest}  {tarball_name}")
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            "\n".join(sums_lines) + "\n",
+            encoding="utf-8",
+        )
+        if metadata is not None:
+            metadata_path = self.bundle_dir / "bundle-metadata.json"
+            metadata_path.write_text(
+                json.dumps(metadata, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            from scripts.write_bundle_metadata import append_sha256sums_entry
+
+            append_sha256sums_entry(self.bundle_dir, metadata_path)
+
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
@@ -1400,6 +1441,293 @@ class PublishNpmReleaseTests(unittest.TestCase):
             )
         publish.assert_not_called()
         readback.assert_not_called()
+
+    def test_verify_resumed_bundle_rejects_legacy_bundle_when_source_sha_required(
+        self,
+    ) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        with self.assertRaisesRegex(PublishError, "missing bundle-metadata.json"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="a" * 40,
+            )
+
+    def test_verify_resumed_bundle_rejects_tarball_checksum_mismatch(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        tarball = next(self.bundle_dir.glob("*.tgz"))
+        tarball.write_bytes(tarball.read_bytes() + b"tampered")
+        with self.assertRaisesRegex(PublishError, "does not match SHA256SUMS"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="a" * 40,
+            )
+
+    def test_verify_bundle_checksums_rejects_unsafe_filename(self) -> None:
+        from scripts.publish_npm_release import verify_bundle_checksums
+
+        self._write_resume_bundle_files()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{'a' * 64}  ../escape.tgz\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "unsafe filename"):
+            verify_bundle_checksums(self.bundle_dir)
+
+    def test_verify_bundle_checksums_rejects_oversized_tarball(self) -> None:
+        import hashlib
+
+        from scripts import publish_npm_release as module
+        from scripts.publish_npm_release import verify_bundle_checksums
+
+        self._write_resume_bundle_files()
+        tarball = next(self.bundle_dir.glob("*.tgz"))
+        content = b"x" * 32
+        tarball.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{digest}  {tarball.name}\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(module, "BUNDLE_TARBALL_MAX_BYTES", 16):
+            with self.assertRaisesRegex(PublishError, "exceeds size limit"):
+                verify_bundle_checksums(self.bundle_dir)
+
+    def test_list_sha256sum_subjects_rejects_unsafe_filename(self) -> None:
+        from scripts.publish_npm_release import list_sha256sum_subjects
+
+        self._write_resume_bundle_files()
+        (self.bundle_dir / "SHA256SUMS").write_text(
+            f"{'a' * 64}  ../escape.tgz\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "unsafe filename"):
+            list_sha256sum_subjects(self.bundle_dir)
+
+    def test_list_attestation_subjects_includes_metadata_and_tarballs(self) -> None:
+        from scripts.publish_npm_release import list_attestation_subjects
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        subjects = list_attestation_subjects(self.bundle_dir)
+        self.assertIn("bundle-metadata.json", subjects)
+        self.assertTrue(
+            all(
+                name.endswith(".tgz") or name == "bundle-metadata.json"
+                for name in subjects
+            )
+        )
+
+    def test_preflight_resume_requires_bundle_metadata(self) -> None:
+        from scripts.publish_npm_release import preflight
+
+        self._write_resume_bundle_files()
+        with self.assertRaisesRegex(PublishError, "missing bundle-metadata"):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=1,
+                preflight_404_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+                expected_source_sha="a" * 40,
+            )
+
+    def test_verify_resumed_bundle_checks_metadata_source_sha(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        verify_resumed_bundle(
+            self.bundle_dir,
+            "0.5.0",
+            expected_source_sha="a" * 40,
+        )
+        with self.assertRaisesRegex(PublishError, "does not match attested run"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="b" * 40,
+            )
+
+    def test_verify_bundle_version_rejects_metadata_version_mismatch(self) -> None:
+        from scripts.publish_npm_release import verify_bundle_version
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.4.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "does not match requested"):
+            verify_bundle_version(self.bundle_dir, "0.5.0")
+
+    def test_load_bundle_metadata_rejects_unexpected_fields(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps(
+                {
+                    "version": "0.5.0",
+                    "source_sha": "a" * 40,
+                    "extra": "field",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "unexpected fields"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_load_bundle_metadata_rejects_invalid_source_sha(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "A" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid source_sha"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_load_bundle_metadata_rejects_invalid_version(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0 ", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid version"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_load_bundle_metadata_rejects_short_source_sha(self) -> None:
+        from scripts.publish_npm_release import load_bundle_metadata
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "abc"}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "invalid source_sha"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_verify_resumed_bundle_rejects_noncanonical_expected_sha(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PublishError, "canonical git commit"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.5.0",
+                expected_source_sha="A" * 40,
+            )
+
+    def test_verify_resumed_bundle_rejects_metadata_integrity_version_mismatch(
+        self,
+    ) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.6.0", "source_sha": "a" * 40},
+        )
+        with self.assertRaisesRegex(PublishError, "invalid package integrity set"):
+            verify_resumed_bundle(
+                self.bundle_dir,
+                "0.6.0",
+                expected_source_sha="a" * 40,
+            )
+
+    def test_verify_resumed_bundle_requires_integrity_records(self) -> None:
+        from scripts.publish_npm_release import verify_resumed_bundle
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        self._write_resume_bundle_files()
+        (self.bundle_dir / "integrity.jsonl").unlink()
+        with self.assertRaisesRegex(PublishError, "missing integrity.jsonl"):
+            verify_resumed_bundle(
+                self.bundle_dir, "0.5.0", expected_source_sha="a" * 40
+            )
+
+    def test_verify_bundle_command_accepts_matching_source_sha(self) -> None:
+        from scripts.publish_npm_release import main
+
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": "a" * 40},
+        )
+        exit_code = main(
+            [
+                "verify-bundle",
+                "--bundle-dir",
+                str(self.bundle_dir),
+                "--version",
+                "0.5.0",
+                "--expected-source-sha",
+                "a" * 40,
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+
+    def test_verify_bundle_command_requires_expected_source_sha(self) -> None:
+        from scripts.publish_npm_release import main
+
+        exit_code = main(
+            [
+                "verify-bundle",
+                "--bundle-dir",
+                str(self.bundle_dir),
+                "--version",
+                "0.5.0",
+            ]
+        )
+        self.assertEqual(exit_code, 1)
+
+    def test_load_bundle_metadata_rejects_oversized_file(self) -> None:
+        from scripts.publish_npm_release import (
+            BUNDLE_METADATA_MAX_BYTES,
+            load_bundle_metadata,
+        )
+
+        oversized = b"x" * (BUNDLE_METADATA_MAX_BYTES + 1)
+        (self.bundle_dir / "bundle-metadata.json").write_bytes(oversized)
+        with self.assertRaisesRegex(PublishError, "exceeds size limit"):
+            load_bundle_metadata(self.bundle_dir)
+
+    def test_preflight_resume_rejects_metadata_source_sha_mismatch(self) -> None:
+        import io
+        from unittest import mock
+
+        from scripts.publish_npm_release import main
+
+        (self.bundle_dir / "bundle-metadata.json").write_text(
+            json.dumps({"version": "0.5.0", "source_sha": "a" * 40}) + "\n",
+            encoding="utf-8",
+        )
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            exit_code = main(
+                [
+                    "preflight",
+                    "--bundle-dir",
+                    str(self.bundle_dir),
+                    "--version",
+                    "0.5.0",
+                    "--expected-source-sha",
+                    "b" * 40,
+                    "--readback-attempts",
+                    "1",
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("does not match attested run", stderr.getvalue())
 
 
 if __name__ == "__main__":
