@@ -505,6 +505,27 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _continuation_rounds(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed not in {0, 1}:
+        raise argparse.ArgumentTypeError("must be 0 or 1")
+    return parsed
+
+
+def _no_progress_reason(value: str) -> str:
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("must not be empty")
+    if len(reason) > 256:
+        raise argparse.ArgumentTypeError("must be at most 256 characters")
+    if not reason.isprintable():
+        raise argparse.ArgumentTypeError("must contain printable text only")
+    return reason
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
@@ -674,6 +695,37 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_RECOVERY_TTL_SECONDS,
         help="Expiry window for --recovery-artifact (max 86400 seconds)",
+    )
+    parser.add_argument(
+        "--review-mode",
+        help=(
+            "Review-convergence mode: legacy (default), advisory, "
+            "merge-focused, or strict. Operator modes enforce C5 round "
+            "admission before inference when a session ledger is present."
+        ),
+    )
+    parser.add_argument(
+        "--session-ledger",
+        type=Path,
+        help=(
+            "Local directory for the issue #136 durable session ledger. "
+            "Operator modes reserve before inference and refuse unadmitted rounds."
+        ),
+    )
+    parser.add_argument(
+        "--continue-rounds",
+        type=_continuation_rounds,
+        default=0,
+        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
+    )
+    parser.add_argument(
+        "--no-progress",
+        type=_no_progress_reason,
+        metavar="REASON",
+        help=(
+            "Escalate immediately for a verified no-progress / contradictory-"
+            "recommendation handoff; requires an operator mode and session ledger."
+        ),
     )
     return parser
 
@@ -1197,10 +1249,9 @@ def _github_parser() -> argparse.ArgumentParser:
         "--session-ledger",
         type=Path,
         help=(
-            "Local directory for the issue #136 C3 durable session ledger. "
-            "Operator modes reserve/commit a counted round around publication. "
-            "Review command only; does not affect reply or other GitHub commands. "
-            "Does not refuse the review (C5)."
+            "Local directory for the issue #136 durable session ledger. "
+            "Operator modes reserve/commit a counted round around publication "
+            "and refuse unadmitted REQUEST_CHANGES (C5)."
         ),
     )
     review.add_argument(
@@ -1209,6 +1260,21 @@ def _github_parser() -> argparse.ArgumentParser:
         help=(
             "Persist the C3 session ledger as one GitHub issue comment on the "
             "source pull request. Operator modes only count rounds."
+        ),
+    )
+    review.add_argument(
+        "--continue-rounds",
+        type=_continuation_rounds,
+        default=0,
+        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
+    )
+    review.add_argument(
+        "--no-progress",
+        type=_no_progress_reason,
+        metavar="REASON",
+        help=(
+            "Escalate immediately for a verified no-progress / contradictory-"
+            "recommendation handoff; requires an operator mode and session ledger."
         ),
     )
 
@@ -1376,6 +1442,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 convergence_policy = ReviewConvergencePolicy()
         else:
             convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
+        no_progress_reason = getattr(args, "no_progress", None)
+        ledger_enabled = session_ledger is not None or bool(
+            getattr(args, "github_session_ledger", False)
+        )
+        if no_progress_reason is not None and (
+            not ledger_enabled or convergence_policy.mode not in OPERATOR_REVIEW_MODES
+        ):
+            raise ReviewInputError(
+                "--no-progress requires an operator review mode and session ledger"
+            )
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
@@ -1468,6 +1544,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 diff=diff,
                 app_slug=args.app_slug,
                 convergence_policy=convergence_policy,
+                continuation_rounds=getattr(args, "continue_rounds", 0),
+                no_progress=no_progress_reason is not None,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
@@ -1900,6 +1978,83 @@ def main(argv: list[str] | None = None) -> int:
                     args.categories_dir
                 ),
             )
+        from .convergence import (
+            OPERATOR_REVIEW_MODES,
+            resolve_review_convergence_policy,
+        )
+        from .session import (
+            SessionIdentity,
+            admission_diagnostic,
+            prepare_session_round,
+            record_session_failed_attempt,
+            resolve_local_session_ledger,
+            session_reservation_id,
+            should_skip_automation,
+        )
+
+        policy = resolve_review_convergence_policy(
+            mode=getattr(args, "review_mode", None)
+        )
+        ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
+        no_progress_reason = getattr(args, "no_progress", None)
+        if no_progress_reason is not None and (
+            ledger is None
+            or policy.mode not in OPERATOR_REVIEW_MODES
+            or not args.repository
+            or args.pull_request is None
+            or not (args.head_sha or "").strip()
+        ):
+            raise ReviewInputError(
+                "--no-progress requires an operator review mode and session ledger"
+            )
+        identity = None
+        reservation = None
+        held_reservation: str | None = None
+        if (
+            ledger is not None
+            and args.repository
+            and args.pull_request is not None
+            and policy.mode in OPERATOR_REVIEW_MODES
+        ):
+            head_sha = (args.head_sha or "").strip().lower()
+            if not head_sha:
+                raise ReviewInputError(
+                    "operator-mode session admission requires --head-sha"
+                )
+            identity = SessionIdentity(
+                repository=args.repository,
+                pull_request=args.pull_request,
+            )
+            reservation = session_reservation_id(
+                repository=args.repository,
+                pull_request=args.pull_request,
+                head_sha=head_sha,
+                kind="publish",
+            )
+            prepared_round = prepare_session_round(
+                ledger,
+                identity,
+                policy,
+                reservation_id=reservation,
+                continuation_rounds=getattr(args, "continue_rounds", 0),
+                no_progress=no_progress_reason is not None,
+            )
+            held_reservation = (
+                prepared_round.reservation_id if prepared_round.decision.admit else None
+            )
+            if should_skip_automation(prepared_round.decision, inference=True):
+                outcome = RunOutcome(
+                    "skipped_policy",
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=(args.base_sha or "").strip().lower() or None,
+                    head_sha=head_sha,
+                    diagnostic=admission_diagnostic(prepared_round.decision),
+                    provider_calls=0,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
         provider, stage_providers = bind_stage_providers(
             registry=default_registry(),
             settings=_provider_settings_from_args(
@@ -1953,26 +2108,48 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
-        run = service.run(
-            ReviewRequest(
-                diff=diff,
-                repository=args.repository,
-                pull_request_number=args.pull_request,
-                title=args.title,
-                instructions=args.instructions,
-                model=args.model,
-                learnings=learnings,
-                active_category_ids=context_selection.active_category_ids,
-                lens_contexts=context_selection.lens_contexts,
-                propose_learnings=args.propose_learnings,
-                limits=limits,
-                source_context=context_selection.source_context,
-                untrusted_head_sha=untrusted_head_sha,
-                orchestrate_large_changes=orchestrate,
-                work_budget=work_budget,
-            ),
-            budget=ResourceBudget.for_limits(limits),
-        )
+        try:
+            run = service.run(
+                ReviewRequest(
+                    diff=diff,
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    title=args.title,
+                    instructions=args.instructions,
+                    model=args.model,
+                    learnings=learnings,
+                    active_category_ids=context_selection.active_category_ids,
+                    lens_contexts=context_selection.lens_contexts,
+                    propose_learnings=args.propose_learnings,
+                    limits=limits,
+                    source_context=context_selection.source_context,
+                    untrusted_head_sha=untrusted_head_sha,
+                    orchestrate_large_changes=orchestrate,
+                    work_budget=work_budget,
+                ),
+                budget=ResourceBudget.for_limits(limits),
+            )
+        except Exception:
+            if (
+                ledger is not None
+                and identity is not None
+                and held_reservation is not None
+                and policy.mode in OPERATOR_REVIEW_MODES
+            ):
+                record_session_failed_attempt(
+                    ledger, identity, reservation_id=held_reservation
+                )
+            raise
+        if (
+            run.result is None
+            and ledger is not None
+            and identity is not None
+            and held_reservation is not None
+            and policy.mode in OPERATOR_REVIEW_MODES
+        ):
+            record_session_failed_attempt(
+                ledger, identity, reservation_id=held_reservation
+            )
         outcome = replace(
             run.outcome,
             base_sha=(args.base_sha or "").strip().lower() or None,

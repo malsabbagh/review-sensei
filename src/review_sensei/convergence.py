@@ -118,8 +118,10 @@ HANDOFF_REASONS = frozenset(
         "no-progress",
         "incomplete-coverage",
         "unreviewed-head",
+        "paused",
     }
 )
+MAX_CONTINUATION_ROUNDS = 1
 ROUND_KINDS = frozenset({"initial", "verification", "none"})
 
 
@@ -971,6 +973,7 @@ class RoundSessionState:
     coverage_complete: bool = False
     independently_approval_eligible: bool = False
     latest_head_reviewed: bool = False
+    paused: bool = False
 
     def __post_init__(self) -> None:
         for label in (
@@ -992,6 +995,7 @@ class RoundSessionState:
             "coverage_complete",
             "independently_approval_eligible",
             "latest_head_reviewed",
+            "paused",
         ):
             _require_bool(getattr(self, label), label=label)
 
@@ -1066,16 +1070,56 @@ def _remaining(used: int, budget: int) -> int:
     return max(0, budget - used)
 
 
+def detect_no_progress(
+    *,
+    previous_blocking: Sequence[str] = (),
+    current_blocking: Sequence[str] = (),
+    earlier_blocking: Sequence[str] = (),
+) -> bool:
+    """Return whether blockers repeated or oscillated without verified progress.
+
+    Same non-empty blocking identity set as the last pass, or A→B→A
+    alternation, is no-progress. Empty current sets are progress (concerns
+    were verified away). Callers pass trusted fingerprints, not prose.
+    """
+
+    def normalize(value: Sequence[str]) -> tuple[str, ...]:
+        values = tuple(value)
+        if any(not isinstance(item, str) or not item for item in values):
+            raise ReviewInputError("blocking identity must be a non-empty string")
+        return tuple(sorted(values))
+
+    current = normalize(current_blocking)
+    previous = normalize(previous_blocking)
+    earlier = normalize(earlier_blocking)
+    if current and current == previous:
+        return True
+    return bool(current and earlier and current == earlier)
+
+
 def evaluate_round_admission(
     state: RoundSessionState,
     policy: ReviewConvergencePolicy,
+    *,
+    continuation_rounds: int = 0,
 ) -> RoundAdmissionDecision:
-    """Admit or hand off a logical review/verification round."""
+    """Admit or hand off a logical review/verification round.
+
+    C5 host enforcement must not infer or publish a new automated review when
+    ``admit`` is false. The cap never sets ``may_emit_approve``; that bit is
+    true only when independent eligibility flags already pass.
+    """
 
     if not isinstance(state, RoundSessionState):
         raise ReviewInputError("round session state is invalid")
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
+    continuation = _require_bounded_int(
+        continuation_rounds,
+        label="continuation_rounds",
+        minimum=0,
+        maximum=MAX_CONTINUATION_ROUNDS,
+    )
 
     remaining_initial = _remaining(
         state.completed_initial_reviews, policy.max_completed_initial_reviews
@@ -1120,6 +1164,16 @@ def evaluate_round_admission(
             handoff=False,
             reason=None,
             may_approve=independently_eligible,
+        )
+
+    if state.paused:
+        return decision(
+            admit=False,
+            count=False,
+            kind="none",
+            handoff=True,
+            reason="paused",
+            may_approve=False,
         )
 
     if state.no_progress:
@@ -1174,7 +1228,6 @@ def evaluate_round_admission(
             reason=None,
             may_approve=independently_eligible,
         )
-
     if not state.latest_head_reviewed:
         return decision(
             admit=False,
@@ -1192,6 +1245,15 @@ def evaluate_round_admission(
             handoff=True,
             reason="incomplete-coverage",
             may_approve=False,
+        )
+    if continuation == 1:
+        return decision(
+            admit=True,
+            count=True,
+            kind="verification",
+            handoff=False,
+            reason=None,
+            may_approve=independently_eligible,
         )
     return decision(
         admit=False,
@@ -1283,6 +1345,7 @@ __all__ = [
     "admit_review_result",
     "comment_targets_pr_change",
     "derive_blocker_candidate",
+    "detect_no_progress",
     "evaluate_blocker_admission",
     "evaluate_round_admission",
     "normalize_review_mode",

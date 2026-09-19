@@ -1008,6 +1008,46 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             any("cleanup failed" in note for note in caught.exception.__notes__)
         )
 
+    def test_publication_cleanup_failure_does_not_mask_original_error(self):
+        class Broker:
+            def exchange(self, token, *, capability=None):
+                return "capability-token"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                raise RuntimeError("publication failed")
+
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+            session_ledger=InMemorySessionLedger(),
+        )
+        with patch(
+            "review_sensei.hosting.github.application.record_session_failed_attempt",
+            side_effect=ValueError("cleanup failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "publication failed") as caught:
+                application.publish_review(
+                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="a" * 40,
+                    base_branch="main",
+                    base_sha="b" * 40,
+                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                    diff="diff",
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+        self.assertTrue(
+            any("cleanup failed" in note for note in caught.exception.__notes__)
+        )
+
     def test_publisher_base_exception_releases_a_reservation(self):
         class Broker:
             def request_oidc_token(self):
@@ -1087,6 +1127,15 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         self.assertEqual(result.status, "published")
         loaded = ledger.load(IDENTITY)
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(
+            loaded.record.last_committed_reservation_id,
+            session_reservation_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                head_sha="a" * 40,
+                kind="publish",
+            ),
+        )
 
     def test_non_published_publication_aborts_without_counting(self):
         from review_sensei.hosting.github import PublicationResult
