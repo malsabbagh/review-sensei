@@ -679,7 +679,6 @@ REQUIRED_CONTRACT_KINDS = frozenset(
     {"required-contract", "api-contract", "compatibility-contract"}
 )
 PREFERENCE_CATEGORIES = frozenset({"style", "nit", "preference"})
-_UNKNOWN_DEFECT_KIND = "unknown"
 
 
 def derive_blocker_candidate(
@@ -703,35 +702,30 @@ def derive_blocker_candidate(
 ) -> BlockerCandidate:
     """Map structured finding fields to admission facts without parsing bodies.
 
-    Free-form ``defect_kind`` is never a specific-violation or named-mandatory
-    rule signal. Required contracts use the closed ``REQUIRED_CONTRACT_KINDS``
-    allowlist unless the caller sets ``has_required_contract``. Callers opt
-    into a specific violation or the strict independent-qualification path
-    with ``has_specific_violation`` / ``named_mandatory_rule``. Derived
-    facts bind ``path`` / ``line`` / ``side`` so a mis-zipped candidate fails
-    closed.
+    Free-form ``defect_kind`` is never a specific-violation,
+    named-mandatory-rule, or required-contract signal. Callers opt into
+    those gates with ``has_specific_violation``, ``named_mandatory_rule``,
+    or ``has_required_contract``. ``REQUIRED_CONTRACT_KINDS`` names the
+    closed contract kinds callers may opt into; derivation does not sniff
+    ``defect_kind`` for them. Preference classification uses
+    ``PREFERENCE_CATEGORIES`` only. Derived facts bind ``path`` / ``line``
+    / ``side`` so a mis-zipped candidate fails closed.
     """
 
     if not isinstance(comment, ReviewComment):
         raise ReviewInputError("blocker comment is invalid")
-    defect = (comment.defect_kind or "").strip()
-    named = defect if defect and defect.casefold() != _UNKNOWN_DEFECT_KIND else None
     if has_actionable_remedy is None:
         effort = (comment.fix_effort or "").strip().casefold()
         has_actionable_remedy = bool(effort) and effort != "unknown"
     category = (comment.category or "").strip().casefold()
-    preference = category in PREFERENCE_CATEGORIES or (
-        comment.blocking is False and named is None
-    )
+    preference = category in PREFERENCE_CATEGORIES
     high_impact = _material_severity(comment.severity)
     evidence_ok = has_independent_artifact or (
         evidence_locations_validated and has_failure_condition
     )
     weakly = high_impact and not evidence_ok
     if has_required_contract is None:
-        has_required_contract = (
-            named is not None and named.casefold() in REQUIRED_CONTRACT_KINDS
-        )
+        has_required_contract = False
     if has_specific_violation is None:
         has_specific_violation = False
     return BlockerCandidate(
@@ -1163,7 +1157,9 @@ __all__ = [
     "EVIDENCE_REASONS",
     "HANDOFF_REASONS",
     "OPERATOR_REVIEW_MODES",
+    "PREFERENCE_CATEGORIES",
     "PUBLIC_SCHEMA_VERSION",
+    "REQUIRED_CONTRACT_KINDS",
     "REVIEW_MODE_ENV",
     "REVIEW_MODES",
     "ReviewConvergencePolicy",

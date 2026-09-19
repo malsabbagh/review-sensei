@@ -16,6 +16,8 @@ from review_sensei import (
     resolve_review_convergence_policy,
 )
 from review_sensei.convergence import (
+    PREFERENCE_CATEGORIES,
+    REQUIRED_CONTRACT_KINDS,
     REVIEW_MODE_ENV,
     comment_targets_pr_change,
     policy_from_mapping,
@@ -930,9 +932,73 @@ class FindingAdmissionTests(unittest.TestCase):
             has_actionable_remedy=True,
         )
         self.assertFalse(facts.has_specific_violation)
-        self.assertTrue(facts.has_required_contract)
+        self.assertFalse(facts.has_required_contract)
         self.assertIsNone(facts.named_mandatory_rule)
+        self.assertFalse(facts.is_preference_or_optional)
+        self.assertIn("api-contract", REQUIRED_CONTRACT_KINDS)
         policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+
+    def test_explicit_required_contract_opts_into_contract_gate(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="api-contract",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_required_contract=True,
+        )
+        self.assertTrue(facts.has_required_contract)
+        self.assertFalse(facts.has_specific_violation)
+        self.assertIsNone(facts.named_mandatory_rule)
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertTrue(admitted.comments[0].effective_blocking)
+
+    def test_preference_categories_are_the_only_preference_signal(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            category="style",
+            defect_kind="api-contract",
+            fix_effort="small",
+        )
+        self.assertIn("style", PREFERENCE_CATEGORIES)
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_required_contract=True,
+        )
+        self.assertTrue(facts.is_preference_or_optional)
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
         admitted = admit_review_result(
             ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
             policy,
@@ -1022,6 +1088,8 @@ class FindingAdmissionTests(unittest.TestCase):
             has_actionable_remedy=True,
         )
         self.assertFalse(facts.has_specific_violation)
+        self.assertFalse(facts.has_required_contract)
+        self.assertIsNone(facts.named_mandatory_rule)
         policy = ReviewConvergencePolicy(
             mode="merge-focused", enforcement="publication"
         )

@@ -67,10 +67,13 @@ C2 derives `BlockerCandidate` facts from structured comment and verification
 fields (`derive_blocker_candidate`) and writes `effective_blocking` /
 `needs_human` onto each finding (`admit_review_result`) before a publisher
 formats comments or chooses a GitHub review event. Free-form `defect_kind`
-is a specific-violation signal only. Required contracts are the closed
-allowlist `required-contract`, `api-contract`, and `compatibility-contract`.
-C2 derivation never infers `has_specific_violation` or `named_mandatory_rule`
-from free-form `defect_kind`. Callers pass `has_specific_violation=` or
+is never treated as a specific-violation, named-mandatory-rule, or
+required-contract signal. Required contracts are the closed allowlist
+`required-contract`, `api-contract`, and `compatibility-contract`, but
+callers must pass `has_required_contract=` to opt into that gate; C2
+derivation does not sniff `defect_kind` for those strings. C2 derivation
+never infers `has_specific_violation` or `named_mandatory_rule` from
+free-form `defect_kind`. Callers pass `has_specific_violation=` or
 `named_mandatory_rule=` (or an explicit `BlockerCandidate`) to opt into
 those gates. Derived facts bind `path` / `line` / `side` so a misaligned
 candidate fails closed instead of admitting the wrong finding. A required
