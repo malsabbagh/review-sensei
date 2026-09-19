@@ -41,6 +41,7 @@ SCHEMA_NAMES = (
     "session-record",
     "verification-scope",
     "later-finding-classification",
+    "convergence-sequence-report",
 )
 
 

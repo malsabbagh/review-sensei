@@ -406,6 +406,7 @@ class PublicationResult:
     status: str
     review_id: int | None = None
     diagnostic: str | None = None
+    shadow: Mapping[str, object] | None = None
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -424,24 +425,6 @@ _PUBLICATION_TO_RUN_STATUS = {
     "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
     "handoff": "action_required",
-}
-
-
-_PUBLICATION_TO_RUN_STATUS = {
-    "published": "reviewed",
-    "approved": "reviewed",
-    "changes_requested": "reviewed",
-    "already_published": "already_published",
-    "already_changes_requested": "already_published",
-    "already_approved": "already_published",
-    "skipped_stale_head": "skipped_stale",
-    "skipped_stale_base": "skipped_stale",
-    "skipped_pr_state": "skipped_policy",
-    "skipped_repository_mismatch": "skipped_policy",
-    "skipped_fork": "skipped_policy",
-    "skipped_app_authored": "skipped_policy",
-    "auto_approval_disabled": "skipped_policy",
-    "disabled": "skipped_policy",
 }
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)

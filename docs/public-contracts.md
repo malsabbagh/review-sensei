@@ -69,6 +69,7 @@ containing `/v1/`.
 | `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, and expiry |
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
+| `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, limitations, and cap-never-approves flag |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -178,6 +179,12 @@ These imports are public and stable within a major version:
 - `review_sensei.derive_blocker_candidate`
 - `review_sensei.admit_review_result`
 - `review_sensei.evaluate_round_admission`
+- `review_sensei.observe_shadow_admission`
+- `review_sensei.resolve_shadow_review_mode`
+- `review_sensei.SequenceReport`
+- `review_sensei.SequenceStep`
+- `review_sensei.replay_review_sequence`
+- `review_sensei.compare_sequence_policies`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`
 - `review_sensei.SessionLoadResult`
@@ -227,7 +234,8 @@ validates against `session-record.schema.json`. Operator modes apply
 `admit_review_result` before GitHub publication; `legacy` keeps ADR 0032/0035
 events. C3 persists PR-wide counters without refusing publication. C4 plans
 verification from a complete compatible baseline and classifies later
-findings before C2 admission. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
+findings before C2 admission. C7 replays frozen sequences and may shadow an
+operator policy without changing GitHub events. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -442,6 +450,7 @@ The command is `review-sensei`. Supported flags are:
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
 | `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Operator modes apply C2 admission at publication |
 | `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; github write-through). Requires repository and pull-request identity |
+| none | `REVIEWSENSEI_REVIEW_SHADOW` | Observation-only operator mode (`advisory`, `merge-focused`, or `strict`). Never changes GitHub publication; `legacy` is rejected |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
@@ -554,7 +563,10 @@ never write the ledger. Operator modes also report C4 verification scope:
 late blockers need `new-regression` or `substantiated-missed-defect`.
 `legacy` remains compatible with ADR 0032/0035 publication.
 Operator modes apply `evaluate_blocker_admission` before GitHub review events
-and do not change `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).
+and do not change `REVIEWSENSEI_AUTO_APPROVE`. `REVIEWSENSEI_REVIEW_SHADOW`
+displays an observation-only operator policy in doctor/plan without changing
+publication. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md)
+and [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
 `doctor --network` performs read-only GET probes and never mints a token or
 sends a generation request.
 
@@ -592,11 +604,21 @@ is always supplied; the CLI never implicitly scans the current directory.
 `unset`, `known_learning_ids_without_feedback` is empty because no store was
 loaded and must not be read as "every known learning has feedback".
 
+The command also supports offline `evaluate-convergence` replay of a frozen
+synthetic sentinel against a convergence policy. It never constructs a
+provider or writes to GitHub. The compatible publication default remains
+`legacy`; `--compare-default` reports both arms. `cap_created_approval` is
+always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
+
+```bash
+review-sensei evaluate-convergence --json --compare-default
+```
+
 Exit codes are stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready; `learnings` diagnostics/feedback rendered |
+| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready; `learnings` diagnostics/feedback rendered; `evaluate-convergence` replayed |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
 | `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
 | `3` | `doctor` requested probe unverifiable with current permissions; `plan` incomplete (no diff) |

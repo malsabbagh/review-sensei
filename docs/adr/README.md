@@ -59,6 +59,7 @@ Process: `docs/process/adr-process.md`
 | [0048](0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification scope and late-finding classification | #136 | Reuses ADR 0042 plans and related paths; omission is not a fix |
 | [0049](0049-automation-admission-and-handoff.md) | Proposed | Enforce PR-wide round admission before inference and publication | #136 | Pause/duplicate/no-progress/continuation; cap never mints approval |
 | [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff |
+| [0051](0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 | Default publication stays `legacy`; shadow never skips GitHub events |
 
 ## Policy
 

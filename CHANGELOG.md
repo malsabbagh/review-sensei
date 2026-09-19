@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added the issue #136 C7 sequential evaluation and observation-only
+  shadowing: `evaluate-convergence` replays frozen synthetic sequences
+  against the real session admission seams, publishes metrics and
+  limitations, and never treats the cap as approval. `REVIEWSENSEI_REVIEW_SHADOW`
+  observes an operator policy without changing GitHub events. The
+  compatible publication default remains `legacy`. `REVIEWSENSEI_AUTO_APPROVE`
+  stays unchanged.
+
 - Added the issue #136 C4 baseline-aware verification planner: a complete
   compatible review becomes the last-assessed baseline. Later operator
   passes reuse ADR 0042 incremental plans and bounded related paths to

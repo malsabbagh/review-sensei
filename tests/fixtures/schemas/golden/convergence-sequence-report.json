@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "mode": "merge-focused",
+  "steps": [
+    {
+      "label": "initial",
+      "admit": true,
+      "handoff": false,
+      "handoff_reason": null,
+      "may_emit_approve": false,
+      "no_progress": false,
+      "round_kind": "initial"
+    }
+  ],
+  "completed_initial_reviews": 1,
+  "completed_verification_rounds": 0,
+  "handoffs": 0,
+  "no_progress_events": 0,
+  "cap_created_approval": false,
+  "limitations": [
+    "Synthetic sequences are not a claim of zero missed defects.",
+    "Default publication remains legacy until an authorized migration."
+  ]
+}

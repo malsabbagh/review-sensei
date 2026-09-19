@@ -14,6 +14,9 @@ It reports the review-convergence policy resolved from `--review-mode` or
 does not change publication. Operator modes report `enforcement=publication`
 because the blocker-admission evaluator now sits in front of GitHub review
 events. It never calls a model, mints a broker token, or writes to GitHub.
+When `REVIEWSENSEI_REVIEW_SHADOW` is set to an operator mode, doctor reports
+an observation-only `review-shadow` check; publication stays on the resolved
+review mode. `legacy` is not a valid shadow target.
 
 Offline runs do not open sockets. Passing `--network` enables read-only probes
 that distinguish:
