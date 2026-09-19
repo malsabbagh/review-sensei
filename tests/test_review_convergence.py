@@ -388,6 +388,7 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 scope_reason="pr-attributed",
                 admission_reason="admitted-blocker",
             )
+
         with self.assertRaisesRegex(ReviewInputError, "requires effective_blocking"):
             BlockerAdmissionDecision(
                 mode="merge-focused",
@@ -418,6 +419,17 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 scope_reason="pr-attributed",
                 admission_reason="weak-high-impact-needs-human",
             )
+
+    def test_classification_needs_human_precedes_contradictory_evidence(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        candidate = _admitted(
+            needs_human=True,
+            has_contradictory_evidence=True,
+        )
+        decision = evaluate_blocker_admission(candidate, policy)
+        self.assertEqual(decision.disposition, "human-adjudication")
+        self.assertTrue(decision.needs_human)
+        self.assertEqual(decision.admission_reason, "classification-needs-human")
 
 
 class RoundAdmissionDecisionTableTests(unittest.TestCase):

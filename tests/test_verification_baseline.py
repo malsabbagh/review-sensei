@@ -39,7 +39,7 @@ from review_sensei.diagnostics import (
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
-from review_sensei.session import LocalSessionLedger, SessionIdentity
+from review_sensei.session import LOAD_STATUSES, LocalSessionLedger, SessionIdentity
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -548,6 +548,57 @@ class LaterFindingTests(unittest.TestCase):
         self.assertFalse(admitted.comments[0].effective_blocking)
         self.assertFalse(admitted.comments[0].needs_human)
 
+    def test_path_kind_fallback_requires_a_specific_kind(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment(symbol="old_run", defect_kind="unknown")),
+            cache_key=_key(),
+            policy=policy,
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        classification = classify_later_finding(
+            _comment(symbol="new_run", defect_kind="unknown", body="new concern"),
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/app.py",),
+            on_changed_path=True,
+        )
+        self.assertEqual(classification.classification, "needs-human")
+        self.assertFalse(classification.is_duplicate)
+        self.assertEqual(classification.late_reason, "human-adjudication")
+
+    def test_distinct_same_path_kind_symbols_are_not_collapsed(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(
+                _comment(symbol="first", body="first", evidence_id="ev-1"),
+                _comment(symbol="second", body="second", evidence_id="ev-2"),
+            ),
+            cache_key=_key(),
+            policy=policy,
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        classification = classify_later_finding(
+            _comment(symbol="third", body="third concern", evidence_id="ev-3"),
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/app.py",),
+            on_changed_path=True,
+        )
+        self.assertEqual(classification.classification, "new-regression")
+        self.assertFalse(classification.is_duplicate)
+        self.assertTrue(classification.is_late_relative_to_baseline)
+
     def test_ambiguous_identity_requires_human_adjudication(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         first = _comment(body="first", evidence_id="ev-1")
@@ -601,6 +652,38 @@ class LaterFindingTests(unittest.TestCase):
             )
         unread = classify_omitted_finding(finding, scope=scope, path_reviewed=False)
         self.assertEqual(unread.classification, "continuing-concern")
+
+    def test_omission_stays_uncertain_on_fallback_scopes(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        complete = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        incomplete = baseline_from_review(
+            _result(_comment(), status="partial"),
+            cache_key=_key(),
+            policy=policy,
+        )
+        scopes = (
+            plan_verification_scope(
+                policy=policy,
+                baseline=complete,
+                current_key=_key(base_sha=SHA_D, head_sha=SHA_C),
+                changed_paths=("src/app.py",),
+            ),
+            plan_verification_scope(
+                policy=policy,
+                baseline=incomplete,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/app.py",),
+            ),
+        )
+        finding = complete.findings[0]
+        for scope in scopes:
+            with self.subTest(status=scope.status):
+                self.assertIn(scope.status, {"incompatible", "incomplete-baseline"})
+                omitted = classify_omitted_finding(finding, scope=scope)
+                self.assertEqual(omitted.classification, "omitted-uncertain")
+                self.assertNotEqual(omitted.classification, "verified-fixed")
 
     def test_criterion_evidence_verifies_identity_without_concern_digest(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -770,7 +853,7 @@ class LaterFindingTests(unittest.TestCase):
         self.assertEqual(classification.classification, "substantiated-missed-defect")
         self.assertEqual(classification.late_reason, "substantiated-missed-defect")
 
-    def test_invalidated_scope_keeps_late_reason(self) -> None:
+    def test_invalidated_scope_requires_human_adjudication(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         baseline = baseline_from_review(
             _result(_comment()), cache_key=_key(), policy=policy
@@ -788,8 +871,9 @@ class LaterFindingTests(unittest.TestCase):
             changed_paths=("src/app.py",),
             on_changed_path=True,
         )
-        self.assertEqual(classification.classification, "substantiated-missed-defect")
-        self.assertEqual(classification.late_reason, "substantiated-missed-defect")
+        self.assertEqual(classification.classification, "needs-human")
+        self.assertEqual(classification.late_reason, "human-adjudication")
+        self.assertEqual(classification.lineage_reason, "ambiguous-identity")
 
     def test_optional_on_already_reviewed_code_is_not_a_blocker(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -978,6 +1062,7 @@ class DiagnosticVerificationTests(unittest.TestCase):
             _normalize_session_record({"status": "future-status"}),
             {"status": "invalid"},
         )
+        self.assertIn("invalid", LOAD_STATUSES)
 
 
 class BaselineAdmissionTests(unittest.TestCase):
@@ -1083,7 +1168,7 @@ class BaselineAdmissionTests(unittest.TestCase):
         planner.assert_not_called()
         self.assertTrue(admitted.comments[0].effective_blocking)
 
-    def test_invalidated_baseline_admission_preserves_late_reason(self) -> None:
+    def test_invalidated_baseline_admission_requires_human_adjudication(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         comment = _comment()
         baseline = baseline_from_review(
@@ -1101,5 +1186,7 @@ class BaselineAdmissionTests(unittest.TestCase):
                 changed_lines={"src/app.py": frozenset({2})},
             )
         classification = mapper.call_args.args[1]
-        self.assertEqual(classification.late_reason, "substantiated-missed-defect")
+        self.assertEqual(classification.classification, "needs-human")
+        self.assertEqual(classification.late_reason, "human-adjudication")
         self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertTrue(admitted.comments[0].needs_human)

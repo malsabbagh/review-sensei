@@ -791,14 +791,15 @@ def _match_baseline_finding(
     # A moved or reworded finding can legitimately change its symbol while
     # retaining the same path and defect kind.  Admit that fallback only when
     # the path/kind pair is unique; ambiguity must remain human-adjudicated.
-    path_kind_matches = [
-        finding
-        for finding in baseline.findings
-        if finding.path == comment.path
-        and finding.defect_kind == comment_defect_kind(comment)
-    ]
-    if len(path_kind_matches) == 1:
-        return path_kind_matches[0]
+    comment_kind = comment_defect_kind(comment)
+    if comment_kind != "unknown":
+        path_kind_matches = [
+            finding
+            for finding in baseline.findings
+            if finding.path == comment.path and finding.defect_kind == comment_kind
+        ]
+        if len(path_kind_matches) == 1:
+            return path_kind_matches[0]
     return None
 
 
@@ -902,12 +903,17 @@ def classify_later_finding(
     lifecycle = finding_lifecycle_for_comment(comment)
     if scope.status != "verify":
         if scope.status in {"incompatible", "incomplete-baseline"}:
+            # A fallback-full pass has no compatible baseline facts from which
+            # to prove that a finding was missed. Keep the result explicitly
+            # human-adjudicated rather than minting the strong
+            # ``substantiated-missed-defect`` public reason unconditionally.
             return LaterFindingClassification(
                 fingerprint=lifecycle.fingerprint,
-                classification="substantiated-missed-defect",
+                classification="needs-human",
                 is_late_relative_to_baseline=True,
                 is_duplicate=False,
-                late_reason="substantiated-missed-defect",
+                late_reason="human-adjudication",
+                lineage_reason="ambiguous-identity",
                 attribution="pr-change" if on_changed_path else "unattributed",
             )
         return LaterFindingClassification(

@@ -54,12 +54,12 @@ Later findings are classified before C2 admission:
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
-falls back to a full bounded review. Its baseline-derived classifier carries
-an explicit `substantiated-missed-defect` late reason so C2 cannot silently
-admit an invalidated pass as an initial review; that path remains fail-closed
-for evidence and still requires the normal human/evidence gates. Round
-counters are not reset here (C3/C5). `legacy` stays unscoped. Publication is
-not refused (C5).
+falls back to a full bounded review. Its baseline-derived classifier returns
+`needs-human` with an explicit `human-adjudication` late reason because an
+invalidated or incomplete baseline cannot prove that a later finding was
+missed; that path remains fail-closed for evidence and still requires the
+normal human/evidence gates. Round counters are not reset here (C3/C5).
+`legacy` stays unscoped. Publication is not refused (C5).
 
 Doctor and plan display the verification scope. A preview based only on the
 session counter never reports `verify`, because it cannot prove baseline

@@ -843,7 +843,9 @@ def admit_review_result(
     ``baseline`` classifies later findings before the evaluator runs. The
     baseline-derived candidate path is intentionally fail-closed for C2
     evidence; callers with trusted evidence should supply explicit
-    ``candidates``, which keep those late-admission facts.
+    ``candidates``, which keep those late-admission facts. When explicit
+    candidates are supplied, they intentionally take precedence and the
+    optional baseline/scope inputs are not consulted.
     """
 
     if not isinstance(result, ReviewResult):
