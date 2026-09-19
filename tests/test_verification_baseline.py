@@ -613,6 +613,20 @@ class LaterFindingTests(unittest.TestCase):
         self.assertIsNone(classification.causal_parent)
         self.assertEqual(classification.lineage_reason, "none")
         self.assertEqual(classification.attribution, "pr-change")
+        candidate = candidate_from_later_finding(
+            unrelated,
+            classification,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        admitted = admit_review_result(
+            _result(unrelated), policy, candidates=(candidate,)
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertTrue(admitted.comments[0].needs_human)
 
     def test_clean_baseline_path_is_a_missed_defect(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -885,3 +899,24 @@ class BaselineAdmissionTests(unittest.TestCase):
             ("src/app.py", "src/legacy.py"),
         )
         self.assertEqual(planner.call_args.kwargs["related_paths"], ("src/helper.py",))
+
+    def test_invalidated_baseline_admission_preserves_late_reason(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        comment = _comment()
+        baseline = baseline_from_review(
+            _result(comment), cache_key=_key(), policy=policy
+        )
+        with patch(
+            "review_sensei.baseline.candidate_from_later_finding",
+            wraps=candidate_from_later_finding,
+        ) as mapper:
+            admitted = admit_review_result(
+                _result(comment),
+                policy,
+                baseline=baseline,
+                current_key=_key(base_sha=SHA_D, head_sha=SHA_C),
+                changed_lines={"src/app.py": frozenset({2})},
+            )
+        classification = mapper.call_args.args[1]
+        self.assertEqual(classification.late_reason, "substantiated-missed-defect")
+        self.assertFalse(admitted.comments[0].effective_blocking)
