@@ -68,6 +68,7 @@ def admitting_blocker_facts():
         evidence_locations_validated=True,
         has_failure_condition=True,
         has_actionable_remedy=True,
+        has_specific_violation=True,
     )
 
 
@@ -438,6 +439,7 @@ class PublishableReviewTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         prepared = prepare_publishable_review(
             ReviewResult(

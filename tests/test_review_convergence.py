@@ -875,6 +875,7 @@ class FindingAdmissionTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         admitted = admit_review_result(result, policy, candidates=(facts,))
         finding = admitted.comments[0]
@@ -899,7 +900,7 @@ class FindingAdmissionTests(unittest.TestCase):
             has_failure_condition=True,
             has_actionable_remedy=True,
         )
-        self.assertTrue(facts.has_specific_violation)
+        self.assertFalse(facts.has_specific_violation)
         self.assertFalse(facts.has_required_contract)
         self.assertIsNone(facts.named_mandatory_rule)
         policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
@@ -928,6 +929,7 @@ class FindingAdmissionTests(unittest.TestCase):
             has_failure_condition=True,
             has_actionable_remedy=True,
         )
+        self.assertFalse(facts.has_specific_violation)
         self.assertTrue(facts.has_required_contract)
         self.assertIsNone(facts.named_mandatory_rule)
         policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
@@ -988,6 +990,7 @@ class FindingAdmissionTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         admitted = admit_review_result(result, policy, candidates=(facts,))
         payload = admitted.to_dict()
@@ -1000,6 +1003,48 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertIsNone(restored.comments[0].effective_blocking)
         self.assertFalse(restored.comments[0].needs_human)
         self.assertFalse(restored.comments[0].blocking)
+
+    def test_free_form_defect_kind_is_not_a_specific_violation(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        self.assertFalse(facts.has_specific_violation)
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+
+    def test_identity_mismatch_fails_closed(self):
+        comment = ReviewComment(path="src/app.py", line=2, body="finding")
+        other = ReviewComment(path="src/other.py", line=2, body="finding")
+        facts = derive_blocker_candidate(comment, on_changed_path=True)
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "must match review comment"):
+            admit_review_result(
+                ReviewResult(summary="Summary.", comments=(other,), provider="fixture"),
+                policy,
+                candidates=(facts,),
+            )
 
     def test_misaligned_candidates_fail_closed(self):
         result = ReviewResult(

@@ -2757,6 +2757,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         outcome, calls = self.publish(
             self._responses(),
@@ -2857,6 +2858,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         outcome, calls = self.publish(
             self._responses(),
@@ -2934,6 +2936,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             evidence_locations_validated=True,
             has_failure_condition=True,
             has_actionable_remedy=True,
+            has_specific_violation=True,
         )
         result = ReviewResult(
             summary="Summary.", comments=(comment,), provider="ollama"

@@ -69,10 +69,13 @@ fields (`derive_blocker_candidate`) and writes `effective_blocking` /
 formats comments or chooses a GitHub review event. Free-form `defect_kind`
 is a specific-violation signal only. Required contracts are the closed
 allowlist `required-contract`, `api-contract`, and `compatibility-contract`.
-Named mandatory rules are never inferred; callers pass
-`named_mandatory_rule=` (or an explicit `BlockerCandidate`) to opt into the
-strict independent-qualification path. A required contract remains a
-violation source, not a substitute for high/critical impact. Confirmed
+C2 derivation never infers `has_specific_violation` or `named_mandatory_rule`
+from free-form `defect_kind`. Callers pass `has_specific_violation=` or
+`named_mandatory_rule=` (or an explicit `BlockerCandidate`) to opt into
+those gates. Derived facts bind `path` / `line` / `side` so a misaligned
+candidate fails closed instead of admitting the wrong finding. A required
+contract remains a violation source, not a substitute for high/critical
+impact. Confirmed
 evidence verification (#114) validates snapshot locations; it does not mint
 a failure condition or actionable remedy. Operator-mode admission stays
 fail-closed unless the caller supplies explicit `BlockerCandidate` facts.

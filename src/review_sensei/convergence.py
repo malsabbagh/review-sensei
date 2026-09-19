@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from .errors import ReviewInputError
-from .models import ReviewComment, ReviewResult
+from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -344,6 +344,9 @@ class BlockerCandidate:
     is_late_relative_to_baseline: bool = False
     late_reason: str | None = None
     high_impact_weakly_supported: bool = False
+    path: str | None = None
+    line: int | None = None
+    side: str | None = None
 
     def __post_init__(self) -> None:
         _require_optional_bool(self.proposed_blocking, label="proposed_blocking")
@@ -380,6 +383,23 @@ class BlockerCandidate:
                 raise ReviewInputError("named_mandatory_rule is invalid")
         _token(self.attribution, allowed=ATTRIBUTIONS, label="attribution")
         _optional_token(self.late_reason, allowed=LATE_REASONS, label="late_reason")
+        if self.path is not None:
+            from .validation import validate_repository_path
+
+            validate_repository_path(self.path, label="blocker candidate path")
+        if self.side is not None and self.side not in COMMENT_SIDES:
+            raise ReviewInputError(
+                "blocker candidate side must be LEFT, RIGHT, or FILE"
+            )
+        if self.line is not None:
+            if (
+                isinstance(self.line, bool)
+                or not isinstance(self.line, int)
+                or self.line < 1
+            ):
+                raise ReviewInputError(
+                    "blocker candidate line must be a positive integer"
+                )
 
 
 @dataclass(frozen=True)
@@ -679,14 +699,17 @@ def derive_blocker_candidate(
     late_reason: str | None = None,
     named_mandatory_rule: str | None = None,
     has_required_contract: bool | None = None,
+    has_specific_violation: bool | None = None,
 ) -> BlockerCandidate:
     """Map structured finding fields to admission facts without parsing bodies.
 
-    Free-form ``defect_kind`` is a specific-violation signal only. Required
-    contracts use the closed ``REQUIRED_CONTRACT_KINDS`` allowlist unless the
-    caller sets ``has_required_contract``. Named mandatory rules are never
-    inferred from ``defect_kind``; pass ``named_mandatory_rule`` to opt into
-    the strict independent-qualification path.
+    Free-form ``defect_kind`` is never a specific-violation or named-mandatory
+    rule signal. Required contracts use the closed ``REQUIRED_CONTRACT_KINDS``
+    allowlist unless the caller sets ``has_required_contract``. Callers opt
+    into a specific violation or the strict independent-qualification path
+    with ``has_specific_violation`` / ``named_mandatory_rule``. Derived
+    facts bind ``path`` / ``line`` / ``side`` so a mis-zipped candidate fails
+    closed.
     """
 
     if not isinstance(comment, ReviewComment):
@@ -709,10 +732,12 @@ def derive_blocker_candidate(
         has_required_contract = (
             named is not None and named.casefold() in REQUIRED_CONTRACT_KINDS
         )
+    if has_specific_violation is None:
+        has_specific_violation = False
     return BlockerCandidate(
         proposed_blocking=comment.blocking,
         severity=comment.severity,
-        has_specific_violation=named is not None,
+        has_specific_violation=has_specific_violation,
         has_required_contract=has_required_contract,
         named_mandatory_rule=named_mandatory_rule,
         has_actionable_remedy=has_actionable_remedy,
@@ -731,6 +756,9 @@ def derive_blocker_candidate(
         is_late_relative_to_baseline=is_late_relative_to_baseline,
         late_reason=late_reason,
         high_impact_weakly_supported=weakly,
+        path=comment.path,
+        line=comment.line,
+        side=comment.side,
     )
 
 
@@ -764,6 +792,19 @@ def comment_targets_pr_change(
     return False
 
 
+def _require_candidate_matches_comment(
+    candidate: BlockerCandidate, comment: ReviewComment
+) -> None:
+    if candidate.path is None and candidate.line is None and candidate.side is None:
+        return
+    if candidate.path is not None and candidate.path != comment.path:
+        raise ReviewInputError("blocker candidate must match review comment")
+    if candidate.side is not None and candidate.side != comment.side:
+        raise ReviewInputError("blocker candidate must match review comment")
+    if candidate.line is not None and candidate.line != comment.line:
+        raise ReviewInputError("blocker candidate must match review comment")
+
+
 def admit_review_result(
     result: ReviewResult,
     policy: ReviewConvergencePolicy,
@@ -786,6 +827,7 @@ def admit_review_result(
     for index, comment in enumerate(result.comments):
         if candidates is not None:
             candidate = candidates[index]
+            _require_candidate_matches_comment(candidate, comment)
         else:
             candidate = derive_blocker_candidate(
                 comment,
