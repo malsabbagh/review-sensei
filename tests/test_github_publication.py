@@ -3043,21 +3043,16 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertNotIn("APPROVE", self._posted_events(calls))
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
-    def test_env_merge_focused_does_not_upgrade_auto_approve_false(self):
+    def test_env_merge_focused_does_not_apply_leftover_blocker_facts(self):
         _comment, facts, review = self._admitted_non_blocking_comment()
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
-            outcome, calls = self.publish(
-                self._responses(),
-                result=review,
-                blocker_candidates=(facts,),
-                auto_approve=False,
-            )
-        self.assertEqual(outcome.status, "published")
-        body = json.loads(calls[-1][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
-        self.assertEqual(len(body["comments"]), 1)
-        self.assertNotIn("APPROVE", self._posted_events(calls))
-        self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
+            with self.assertRaises(GitHubPublicationError):
+                self.publish(
+                    self._responses(),
+                    result=review,
+                    blocker_candidates=(facts,),
+                    auto_approve=False,
+                )
 
     def test_omitted_policy_stays_legacy_when_env_is_merge_focused(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):

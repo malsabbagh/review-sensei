@@ -195,6 +195,25 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(args.review_mode, "merge-focused")
 
+    def test_github_reply_parser_omits_review_mode(self):
+        args = _github_parser().parse_args(
+            [
+                "reply",
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "2",
+                "--source-comment-id",
+                "3",
+                "--source-updated-at",
+                "2026-09-19T00:00:00Z",
+                "--allow-write",
+                "--enable-reply",
+            ]
+        )
+        self.assertFalse(hasattr(args, "review_mode"))
+        self.assertIsNone(getattr(args, "review_mode", None))
+
     def test_github_parser_allows_disabling_default_auto_approval(self):
         args = _github_parser().parse_args(
             [

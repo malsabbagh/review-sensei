@@ -657,7 +657,10 @@ def prepare_publishable_review(
     """Gate findings before publication using the configured evidence policy.
 
     ``legacy`` is the compatible single-pass mode: existing comments publish
-    unchanged and are identified by ``evidence_policy="legacy"``. ``confirmed``
+    unchanged and are identified by ``evidence_policy="legacy"``. Operator
+    modes may still admit those comments when ``blocker_candidates`` are
+    supplied; ``input_blocker_candidates`` and leftover facts under
+    display-only enforcement fail closed. ``confirmed``
     publishes only candidates whose evidence exists in the exact reviewed
     snapshot and, when ``changed_lines`` is supplied, targets a changed diff
     hunk. Legacy single-pass comments are dropped once candidate verification
@@ -680,6 +683,9 @@ def prepare_publishable_review(
             raise ReviewInputError(
                 "input blocker candidates require confirmed evidence policy"
             )
+        policy = convergence_policy or ReviewConvergencePolicy()
+        if blocker_candidates is not None and policy.enforcement != "publication":
+            raise ReviewInputError("blocker candidates require publication enforcement")
         # Rebuild only when upstream tagged a non-legacy policy on the result.
         if result.evidence_policy != "legacy":
             result = replace(result, evidence_policy="legacy")

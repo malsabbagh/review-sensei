@@ -16,7 +16,8 @@
   with `automatic_github_review_events` can only withhold GitHub events.
   Named mandatory rules, specific violations, and required contracts are
   explicit; free-form `defect_kind` is not a qualifier. Operator-mode
-  policies always use publication enforcement. Confirmed findings require
+  policies always use publication enforcement. Leftover blocker facts
+  under display-only enforcement fail closed. Confirmed findings require
   caller-supplied blocker facts to admit. Derived facts bind comment
   identity.
   Omitted publication policy stays `legacy`. Operator-mode recovery of a

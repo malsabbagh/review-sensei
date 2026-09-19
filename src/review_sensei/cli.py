@@ -1298,7 +1298,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
-        convergence_policy = resolve_review_convergence_policy(mode=args.review_mode)
+        convergence_policy = resolve_review_convergence_policy(
+            mode=getattr(args, "review_mode", None)
+        )
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)

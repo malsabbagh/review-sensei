@@ -597,6 +597,16 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertFalse(finding.needs_human)
         self.assertFalse(finding.blocks_approval)
 
+    def test_legacy_rejects_blocker_candidates_without_publication_enforcement(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ReviewInputError, "publication enforcement"):
+            prepare_publishable_review(
+                self.result,
+                evidence_policy="legacy",
+                blocker_candidates=(admitting_blocker_facts(),),
+            )
+
     def test_unsupported_policy_fails_closed(self) -> None:
         with self.assertRaises(ReviewInputError):
             prepare_publishable_review(self.result, evidence_policy="best-effort")
