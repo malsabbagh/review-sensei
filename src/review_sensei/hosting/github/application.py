@@ -9,6 +9,8 @@ from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
     ReviewConvergencePolicy,
+    RoundSessionState,
+    observe_shadow_admission,
 )
 from ...conversation import ConversationService
 from ...coverage import coverage_approval_state
@@ -141,13 +143,20 @@ class GitHubApplication:
             head_sha=head_sha,
             kind="publish",
         )
+        flags = {
+            "coverage_complete": False,
+            "independently_approval_eligible": False,
+            "latest_head_reviewed": False,
+            "no_progress": no_progress,
+        }
+        if isinstance(result, ReviewResult):
+            flags = _publication_round_flags(result, no_progress=no_progress)
         if ledger is not None:
             if not isinstance(head_sha, str) or not head_sha.strip():
                 raise GitHubPublicationError(
                     "session ledger requires a non-empty head_sha"
                 )
             try:
-                flags = _publication_round_flags(result, no_progress=no_progress)
                 prepared = prepare_session_round(
                     ledger,
                     identity,
@@ -162,9 +171,15 @@ class GitHubApplication:
                     no_progress=flags["no_progress"],
                 )
                 if should_skip_automation(prepared.decision, inference=False):
-                    return PublicationResult(
-                        status="handoff",
-                        diagnostic=admission_diagnostic(prepared.decision),
+                    return _with_shadow(
+                        PublicationResult(
+                            status="handoff",
+                            diagnostic=admission_diagnostic(prepared.decision),
+                        ),
+                        _shadow_observation(
+                            _shadow_state(prepared, flags),
+                            continuation_rounds=continuation_rounds,
+                        ),
                     )
             except BaseException as preparation_error:
                 cleanup_error = self._abort_held_session_reservation(
@@ -247,7 +262,13 @@ class GitHubApplication:
                 prepared,
                 published=publication.status == "published",
             )
-        return publication
+        return _with_shadow(
+            publication,
+            _shadow_observation(
+                _shadow_state(prepared, flags),
+                continuation_rounds=continuation_rounds,
+            ),
+        )
 
     def apply_maintainer_command(
         self,
@@ -636,6 +657,67 @@ class GitHubApplication:
                 source_kind=prepared.source_kind,
                 reaction_id=reaction.reaction_id,
             )
+
+
+def _shadow_state(prepared: object, flags: Mapping[str, bool]) -> RoundSessionState:
+    if prepared is None:
+        return RoundSessionState(
+            coverage_complete=bool(flags.get("coverage_complete", False)),
+            independently_approval_eligible=bool(
+                flags.get("independently_approval_eligible", False)
+            ),
+            latest_head_reviewed=bool(flags.get("latest_head_reviewed", False)),
+            no_progress=bool(flags.get("no_progress", False)),
+        )
+    extra = dict(flags)
+    record = getattr(prepared, "record", None)
+    decision = getattr(prepared, "decision", None)
+    if record is not None and bool(getattr(record, "operator_paused", False)):
+        extra["paused"] = True
+    if decision is not None and getattr(decision, "handoff_reason", None) == "paused":
+        extra["paused"] = True
+    if record is not None and hasattr(record, "to_round_state"):
+        return record.to_round_state(**extra)
+    return RoundSessionState(
+        coverage_complete=bool(extra.get("coverage_complete", False)),
+        independently_approval_eligible=bool(
+            extra.get("independently_approval_eligible", False)
+        ),
+        latest_head_reviewed=bool(extra.get("latest_head_reviewed", False)),
+        no_progress=bool(extra.get("no_progress", False)),
+        paused=bool(extra.get("paused", False)),
+    )
+
+
+def _shadow_observation(
+    state: RoundSessionState,
+    *,
+    continuation_rounds: int = 0,
+) -> dict[str, object] | None:
+    decision = observe_shadow_admission(state, continuation_rounds=continuation_rounds)
+    if decision is None:
+        return None
+    return {
+        "mode": decision.mode,
+        "admit": decision.admit,
+        "handoff": decision.handoff,
+        "handoff_reason": decision.handoff_reason,
+        "may_emit_approve": decision.may_emit_approve,
+        "observation_only": True,
+    }
+
+
+def _with_shadow(
+    result: PublicationResult, shadow: Mapping[str, object] | None
+) -> PublicationResult:
+    if not shadow:
+        return result
+    return PublicationResult(
+        status=result.status,
+        review_id=result.review_id,
+        diagnostic=result.diagnostic,
+        shadow=dict(shadow),
+    )
 
 
 def _publication_round_flags(

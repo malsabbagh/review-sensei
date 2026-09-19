@@ -100,6 +100,9 @@ transport calls; future GitHub publishers consume only validated
 | [`0046`](../adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136; C1/C2; `legacy` unchanged |
 | [`0047`](../adr/0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 C3; local JSON and GitHub issue-comment adapters |
 | [`0048`](../adr/0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification | #136 C4; IncrementalReviewPlan + late classification |
+| [`0049`](../adr/0049-automation-admission-and-handoff.md) | Proposed | Automation admission and handoff | #136 C5; cap never mints approval |
+| [`0050`](../adr/0050-maintainer-disposition-and-handoff-status.md) | Proposed | Maintainer disposition and handoff status | #136 C6; `action_required` for handoff |
+| [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),
