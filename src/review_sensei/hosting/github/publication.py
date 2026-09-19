@@ -406,6 +406,7 @@ class PublicationResult:
     status: str
     review_id: int | None = None
     diagnostic: str | None = None
+    shadow: Mapping[str, object] | None = None
 
 
 _PUBLICATION_TO_RUN_STATUS = {

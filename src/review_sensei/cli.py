@@ -533,7 +533,8 @@ def _parser() -> argparse.ArgumentParser:
         epilog=(
             "Additional commands use the same first-token dispatch as "
             "prepare-diff, evaluate, github, and promotion: doctor, plan, "
-            "prepare-diff, evaluate, github, promotion, resolve-hosted-openrouter."
+            "learnings, evaluate-convergence, prepare-diff, evaluate, github, "
+            "promotion, resolve-hosted-openrouter."
         ),
     )
     parser.add_argument(
@@ -1892,18 +1893,114 @@ def _run_learnings_command(arguments: list[str]) -> int:
         return 1
 
 
+def _evaluate_convergence_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei evaluate-convergence",
+        description=(
+            "Replay a frozen synthetic review sequence against a convergence "
+            "policy. Observation-only; does not publish or change the legacy default."
+        ),
+    )
+    parser.add_argument(
+        "--review-mode",
+        default="merge-focused",
+        help="Policy to replay (default merge-focused). Publication default stays legacy.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Write JSON instead of a short summary",
+    )
+    parser.add_argument(
+        "--compare-default",
+        action="store_true",
+        help="Also replay the compatible legacy default for observation-only comparison",
+    )
+    return parser
+
+
+def _run_evaluate_convergence_command(arguments: list[str]) -> int:
+    args = _evaluate_convergence_parser().parse_args(arguments)
+    try:
+        from .convergence import (
+            DEFAULT_REVIEW_MODE,
+            resolve_review_convergence_policy,
+        )
+        from .sequence import (
+            SequenceStep,
+            compare_sequence_policies,
+            replay_review_sequence,
+        )
+
+        policy = resolve_review_convergence_policy(mode=args.review_mode)
+        steps = (
+            SequenceStep(
+                head_sha="a" * 40,
+                blocking_identities=("defect-a", "defect-b"),
+                label="initial",
+            ),
+            SequenceStep(
+                head_sha="b" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="verification-clean",
+            ),
+            SequenceStep(
+                head_sha="c" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="second-verification",
+            ),
+            SequenceStep(
+                head_sha="d" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                latest_head_reviewed=True,
+                coverage_complete=True,
+                label="at-cap",
+            ),
+        )
+        report = replay_review_sequence(steps, policy)
+        if args.compare_default:
+            payload = compare_sequence_policies(steps, proposed=policy)
+            if args.as_json:
+                sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+            else:
+                sys.stdout.write(
+                    f"default={payload['publication_default']} "
+                    f"proposed={report.mode} handoffs={report.handoffs} "
+                    f"cap_created_approval={payload['cap_created_approval']}\n"
+                )
+            return 0
+        if args.as_json:
+            sys.stdout.write(json.dumps(report.to_dict(), indent=2) + "\n")
+        else:
+            sys.stdout.write(
+                f"mode={report.mode} default={DEFAULT_REVIEW_MODE} "
+                f"handoffs={report.handoffs} cap_created_approval="
+                f"{report.cap_created_approval}\n"
+            )
+        return 0
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 1
+
+
 _OFFLINE_COMMANDS = {
     "doctor": _run_doctor_command,
     "plan": _run_plan_command,
     "learnings": _run_learnings_command,
+    "evaluate-convergence": _run_evaluate_convergence_command,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
-    # required argparse subparsers. doctor/plan/learnings use the same
-    # first-token command map as prepare-diff, evaluate, github, and promotion.
+    # required argparse subparsers. doctor/plan/learnings/evaluate-convergence
+    # use the same first-token command map as prepare-diff, evaluate, github,
+    # and promotion.
     if args_list and args_list[0] in _OFFLINE_COMMANDS:
         return _OFFLINE_COMMANDS[args_list[0]](args_list[1:])
     if args_list and args_list[0] == "promotion":

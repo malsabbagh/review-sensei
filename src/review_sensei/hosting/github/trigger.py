@@ -10,14 +10,22 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Mapping, TextIO
 
-from ...disposition import parse_maintainer_command
-
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 _SENSEI_MENTION = "@sensei"
+_SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
+_MAINTAINER_COMMAND = re.compile(
+    r"(?:"
+    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?)"
+    r"|verify"
+    r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
+    r"\s+--reason\s+(?P<reason>\S.*)"
+    r")\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _is_valid_git_ref(value: str) -> bool:
@@ -74,6 +82,33 @@ def extract_requested_commit(body: str) -> str | None:
     if _GIT_SHA_FULL.fullmatch(token) or _GIT_SHA_PREFIX.fullmatch(token):
         return token
     return None
+
+
+def _is_maintainer_command(body: object) -> bool:
+    """Route valid command-shaped comments without importing the package.
+
+    The trusted trigger resolver runs before ReviewSensei dependencies are
+    installed. Keep this syntax-only check stdlib-only; the full parser and
+    authorization remain in ``disposition.py`` for the command workflow.
+    """
+
+    if not isinstance(body, str):
+        return False
+    mention = _SENSEI_COMMAND.search(body)
+    if mention is None:
+        return False
+    match = _MAINTAINER_COMMAND.fullmatch(body[mention.end() :].strip())
+    if match is None:
+        return False
+    reason = match.group("reason")
+    if reason is None:
+        return True
+    normalized = reason.strip().strip('"').strip("'")
+    return (
+        bool(normalized)
+        and len(normalized.encode("utf-8")) <= 512
+        and normalized.isprintable()
+    )
 
 
 def choose_head_sha(pull: Mapping[str, Any], requested: str | None) -> str:
@@ -170,8 +205,7 @@ def resolve_issue_comment(
             enable_review="true",
             head_sha=choose_head_sha(pull, requested),
         )
-    command = parse_maintainer_command(body, actor="trigger")
-    if command is not None:
+    if _is_maintainer_command(body):
         return _resolution_from_pull(pull, operation="command", enable_review="false")
     return _resolution_from_pull(pull, operation="reply", enable_review="false")
 
