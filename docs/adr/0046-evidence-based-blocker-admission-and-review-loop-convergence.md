@@ -217,7 +217,8 @@ thread mutation requires migration.
 
 ## Follow-up work
 
-- C3: durable session ledger for PR-wide counters.
+- C3: durable session ledger for PR-wide counters
+  ([ADR 0047](0047-durable-review-session-ledger.md)).
 - C4–C7 as specified in issue #136.
 - Coordinate with #114/#115 for the actual approval boundary; do not duplicate
   those gates here.

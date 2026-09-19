@@ -50,6 +50,7 @@ from .errors import (
     GitHubConversationError,
     GitHubConversationTransientError,
     GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
     GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,
     GitHubLearningProposalError,
@@ -79,6 +80,7 @@ from .oidc import (
     verify_oidc_token,
 )
 from .publication import PublicationResult, ReviewPublisher
+from .session_ledger import GitHubIssueCommentSessionLedger
 from .setup import (
     GitHubSetupClient,
     GitHubSetupTransport,
@@ -126,9 +128,11 @@ __all__ = [
     "GitHubConversationTransientError",
     "GitHubForkChecker",
     "GitHubHTTPError",
+    "GitHubHTTPPaginationLimitError",
     "GitHubHTTPResponseTooLargeError",
     "GitHubHTTPTransientError",
     "GitHubHttp",
+    "GitHubIssueCommentSessionLedger",
     "GitHubInstallationLookup",
     "GitHubLearningProposalError",
     "GitHubLearningProposalTransientError",

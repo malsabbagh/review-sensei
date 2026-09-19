@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added the issue #136 C3 durable session ledger: local filesystem and
+  GitHub issue-comment adapters store bounded PR-wide round counters with
+  integrity digests, CAS generation, reservation/commit/abort, expiry, and
+  explicit missing/tampered state. Identity reuses the ADR 0042
+  `repository` + `pull_request` pair. Doctor/plan display the record.
+  Operator-mode GitHub publication may reserve and commit a counted round
+  without refusing the review. `legacy` and `REVIEWSENSEI_AUTO_APPROVE`
+  stay unchanged.
+
 - Added the issue #136 C2 effective blocker-admission path: operator
   `advisory` / `merge-focused` / `strict` modes derive structured candidate
   facts, run the C1 evaluator before GitHub publication, preserve proposed vs

@@ -11,6 +11,13 @@ from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...outcomes import RecoveryArtifact
 from ...providers.base import ReviewProvider
+from ...session import (
+    SessionIdentity,
+    SessionLedger,
+    complete_session_round,
+    prepare_session_round,
+    session_reservation_id,
+)
 from ...verifier import CandidateFinding
 from .broker_client import BrokerClient
 from .conversation import (
@@ -34,6 +41,7 @@ class GitHubWriteOptions:
     learning_prs: bool = False
     mention_replies: bool = False
     upload_artifacts: bool = False
+    github_session_ledger: bool = False
 
 
 class GitHubApplication:
@@ -47,12 +55,14 @@ class GitHubApplication:
         reviewer: ReviewPublisher,
         learner: LearningPRPublisher,
         replier: ConversationPublisher,
+        session_ledger: SessionLedger | None = None,
     ) -> None:
         self.broker = broker
         self.http = http
         self.reviewer = reviewer
         self.learner = learner
         self.replier = replier
+        self.session_ledger = session_ledger
 
     def publish_review(
         self,
@@ -100,26 +110,146 @@ class GitHubApplication:
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",
         )
-        return self.reviewer.publish(
-            token=token,
-            repository=repository,
-            repository_id=repository_id,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            base_branch=base_branch,
-            base_sha=base_sha,
-            result=result,
-            diff=diff,
-            app_slug=app_slug,
-            auto_approve=options.auto_approve,
-            candidates=candidates,
-            snapshot=snapshot,
-            snapshot_sha256=snapshot_sha256,
-            evidence_policy=evidence_policy,
-            convergence_policy=convergence_policy,
-            blocker_candidates=blocker_candidates,
-            input_blocker_candidates=input_blocker_candidates,
+        ledger = self._session_ledger_for_token(
+            token, options=options, app_slug=app_slug
         )
+        identity = SessionIdentity(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+        )
+        policy = (
+            convergence_policy
+            if isinstance(convergence_policy, ReviewConvergencePolicy)
+            else ReviewConvergencePolicy()
+        )
+        prepared = None
+        if ledger is not None:
+            if not isinstance(head_sha, str) or not head_sha.strip():
+                raise GitHubPublicationError(
+                    "session ledger requires a non-empty head_sha"
+                )
+            reservation_id = session_reservation_id(
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                kind="publish",
+            )
+            try:
+                prepared = prepare_session_round(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation_id,
+                )
+            except BaseException as preparation_error:
+                cleanup_error = self._abort_held_session_reservation(
+                    ledger, identity, reservation_id
+                )
+                if cleanup_error is not None:
+                    preparation_error.add_note(
+                        "session reservation cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
+                raise
+        try:
+            publication = self.reviewer.publish(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                result=result,
+                diff=diff,
+                app_slug=app_slug,
+                auto_approve=options.auto_approve,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                convergence_policy=convergence_policy,
+                blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
+            )
+        except BaseException as publication_error:
+            if ledger is not None and prepared is not None:
+                try:
+                    complete_session_round(ledger, identity, prepared, published=False)
+                except BaseException as cleanup_error:
+                    if not isinstance(
+                        publication_error, (KeyboardInterrupt, SystemExit)
+                    ):
+                        raise cleanup_error from publication_error
+                    publication_error.add_note(
+                        "session reservation cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
+            raise
+        if ledger is not None and prepared is not None:
+            complete_session_round(
+                ledger,
+                identity,
+                prepared,
+                published=publication.status == "published",
+            )
+        return publication
+
+    def _session_ledger_for_token(
+        self,
+        token: str,
+        *,
+        options: GitHubWriteOptions,
+        app_slug: str | None = None,
+    ) -> SessionLedger | None:
+        if self.session_ledger is not None:
+            return self.session_ledger
+        if not options.github_session_ledger:
+            return None
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        if self.http is None:
+            raise GitHubPublicationError("GitHub session ledger requires HTTP")
+        return GitHubIssueCommentSessionLedger(
+            self.http, token=token, app_slug=app_slug
+        )
+
+    @staticmethod
+    def _abort_held_session_reservation(
+        ledger: SessionLedger,
+        identity: SessionIdentity,
+        reservation_id: str,
+    ) -> BaseException | None:
+        """Best-effort cleanup when preparation fails after reserving.
+
+        The helper revalidates ownership immediately before aborting. A full
+        reload is intentional because preparation may fail after a remote
+        reserve response has been applied; if another writer advanced the
+        generation, abort returns a diagnostic and the caller preserves the
+        original preparation error rather than masking it.
+        """
+
+        try:
+            loaded = ledger.load(identity)
+            if (
+                loaded.status in {"ok", "migrated"}
+                and loaded.record is not None
+                and loaded.record.reservation_id == reservation_id
+            ):
+                ledger.abort(
+                    identity,
+                    reservation_id=reservation_id,
+                    expected_generation=loaded.record.generation,
+                )
+        except BaseException as exc:
+            # Return every cleanup failure. The caller preserves an original
+            # interrupt while attaching a bounded note, instead of silently
+            # hiding a stuck reservation.
+            return exc
+        return None
 
     def recover_review(
         self,

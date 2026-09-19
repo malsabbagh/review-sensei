@@ -76,6 +76,8 @@ ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
 ReviewService.run ----> ResourceBudget admission ----> RunOutcome
 ReviewConvergencePolicy ----> evaluate_blocker_admission / admit_review_result
                                (legacy: ADR 0032 events; operator modes: publication)
+SessionLedger --------------> local JSON / GitHub issue-comment adapters
+                               (C3 counters; C5 will enforce)
 ```
 
 `ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets

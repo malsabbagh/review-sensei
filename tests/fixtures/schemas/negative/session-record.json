@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "repository": "owner/repo",
+  "pull_request": 136,
+  "repository_id": 99,
+  "completed_initial_reviews": 0,
+  "completed_verification_rounds": 0,
+  "failed_attempts": 0,
+  "generation": 0,
+  "reservation_id": null,
+  "reserved_slot": null,
+  "last_committed_reservation_id": null,
+  "created_at": "2026-09-19T12:00:00Z",
+  "updated_at": "2026-09-19T12:00:00Z",
+  "expires_at": "2026-10-19T12:00:00Z",
+  "record_sha256": "7466d920f838bcc1eac6c34429fb3ed4e3f2d01bd57ed222531df26fb0d55378",
+  "source_patch": "not-allowed"
+}

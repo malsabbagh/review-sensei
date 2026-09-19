@@ -56,6 +56,7 @@ transport calls; future GitHub publishers consume only validated
 | Repository-local learnings | `LearningEntry` JSON files | Repository maintainers | Loaded only from the trusted target/base checkout |
 | Learning PR provenance | v2 marker and commit trailer | ReviewSensei publisher | Binds repository/PR, pending batch, reviewed source head, latest base, exact title/body hashes, and the rendered source-title line; no provider or private review data |
 | Review configuration | Stage and category JSON files | Repository operators | Treated as trusted configuration but structurally bounded |
+| Review session ledger | `SessionRecord` JSON / GitHub issue comment | Maintainers | Bounded PR-wide round counters; no source; ADR 0047 |
 | Supplemental context | Explicit Markdown/text sources and opt-in Python symbol-aware excerpts | Repository operators | Documents/learnings by default; symbol-aware selection requires trusted-base policy |
 
 
@@ -96,6 +97,8 @@ transport calls; future GitHub publishers consume only validated
 | [`0041`](../adr/0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42; openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 | [`0042`](../adr/0042-incremental-reviews-and-finding-lifecycle.md) | Proposed | Incremental reviews and stable finding lifecycle identities | #38; coverage modes, fingerprint lifecycle, optional in-memory metadata cache |
 | [`0043`](../adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36; `ReviewService.run`, hard budgets, publication-only recovery |
+| [`0046`](../adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136; C1/C2; `legacy` unchanged |
+| [`0047`](../adr/0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 C3; local JSON and GitHub issue-comment adapters |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),
