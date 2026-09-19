@@ -1,9 +1,13 @@
-"""Durable PR-wide review-session ledger for issue #136 C3.
+"""Durable PR-wide review-session ledger for issue #136 C3/C5.
 
 C1/C2 compute round admission from ``RoundSessionState``. That state does not
 survive a fresh Actions job. C3 stores only bounded counters and CAS metadata.
-It does not store source, prompts, findings, or provider output, and it does
-not refuse publication (C5).
+It does not store source, prompts, findings, or provider output.
+
+C5 enforces the C1 decision when a ledger is present: operator modes reserve
+before inference and publication, skip unadmitted work, pause on a foreign
+in-flight reservation, treat the same reservation as a duplicate, and charge
+failed attempts. The cap never mints approval.
 
 Session identity reuses the ADR 0042 / issue #38 pair ``repository`` +
 ``pull_request``. Head SHA, model, and policy digests do not name the session
@@ -394,6 +398,7 @@ class SessionRecord:
                 flags.get("independently_approval_eligible", False)
             ),
             latest_head_reviewed=bool(flags.get("latest_head_reviewed", False)),
+            paused=bool(flags.get("paused", False)),
         )
 
     def expired(self, *, now: datetime | None = None) -> bool:
@@ -583,7 +588,7 @@ class SessionLoadResult:
 
 @dataclass(frozen=True)
 class PreparedSessionRound:
-    """Reservation plus C1 decision. C3 does not refuse publication."""
+    """Reservation plus C1 decision. C5 skips work when ``admit`` is false."""
 
     record: SessionRecord
     decision: RoundAdmissionDecision
@@ -752,9 +757,16 @@ def prepare_session_round(
     *,
     reservation_id: str,
     now: datetime | None = None,
+    continuation_rounds: int = 0,
     **state_flags: bool,
 ) -> PreparedSessionRound:
-    """Reserve a counted slot when C1 would count the round. Never skips work."""
+    """Reserve a counted slot when C1 would admit the round.
+
+    A foreign in-flight reservation pauses this job. The same
+    ``reservation_id`` after commit is a same-head duplicate. Unadmitted
+    operator rounds are not reserved so C5 can refuse inference and
+    publication without consuming the budget.
+    """
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
@@ -767,9 +779,20 @@ def prepare_session_round(
         record = loaded.record
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
-    decision = evaluate_round_admission(record.to_round_state(**state_flags), policy)
+    flags = dict(state_flags)
+    held = record.reservation_id
+    if held is not None and held != reservation_id:
+        flags.setdefault("paused", True)
+    elif record.last_committed_reservation_id == reservation_id and held is None:
+        flags.setdefault("same_head_duplicate", True)
+    decision = evaluate_round_admission(
+        record.to_round_state(**flags),
+        policy,
+        continuation_rounds=continuation_rounds,
+    )
     if (
         policy.mode not in OPERATOR_REVIEW_MODES
+        or not decision.admit
         or not decision.count_as_completed_round
     ):
         return PreparedSessionRound(
@@ -866,6 +889,69 @@ def session_reservation_id(
 ) -> str:
     payload = f"{repository}|{pull_request}|{head_sha}|{kind}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def should_skip_automation(
+    decision: RoundAdmissionDecision, *, inference: bool
+) -> bool:
+    """Whether C5 must refuse inference or a new automated review event.
+
+    Same-head duplicates, publication recovery, and transport retries do not
+    infer again, but they may still publish an already-produced result.
+    Handoff states refuse new REQUEST_CHANGES; ``may_emit_approve`` can still
+    finalize an independently eligible last-round result.
+    """
+
+    if not isinstance(decision, RoundAdmissionDecision):
+        raise ReviewInputError("round admission decision is invalid")
+    if decision.admit:
+        return False
+    if inference:
+        return True
+    if decision.may_emit_approve:
+        return False
+    return decision.handoff
+
+
+def record_session_failed_attempt(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    *,
+    reservation_id: str,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Abort a held round reservation and charge the failed-attempt budget."""
+
+    loaded = ledger.load(identity, now=now)
+    if loaded.status in {"missing", "expired"} or loaded.record is None:
+        record = ledger.initialize(identity, now=now)
+    elif loaded.status in {"ok", "migrated"}:
+        record = loaded.record
+    else:
+        raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+    if record.reservation_id == reservation_id:
+        record = ledger.abort(
+            identity,
+            reservation_id=reservation_id,
+            expected_generation=record.generation,
+            now=now,
+        )
+    fail_id = hashlib.sha256(
+        f"{reservation_id}|failed-attempt".encode("utf-8")
+    ).hexdigest()
+    reserved = ledger.reserve(
+        identity,
+        slot="failed-attempt",
+        reservation_id=fail_id,
+        expected_generation=record.generation,
+        now=now,
+    )
+    return ledger.commit(
+        identity,
+        reservation_id=fail_id,
+        expected_generation=reserved.generation,
+        now=now,
+    )
 
 
 def load_session_status(

@@ -48,6 +48,7 @@
         "no-progress",
         "incomplete-coverage",
         "unreviewed-head",
+        "paused",
         null
       ]
     },

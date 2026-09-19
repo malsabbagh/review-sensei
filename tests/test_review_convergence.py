@@ -11,6 +11,7 @@ from review_sensei import (
     RoundSessionState,
     admit_review_result,
     derive_blocker_candidate,
+    detect_no_progress,
     evaluate_blocker_admission,
     evaluate_round_admission,
     resolve_review_convergence_policy,
@@ -643,6 +644,15 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 "failed-attempt-budget-exhausted",
                 False,
             ),
+            (
+                "paused in-flight reservation hands off",
+                RoundSessionState(paused=True, completed_initial_reviews=1),
+                False,
+                "none",
+                True,
+                "paused",
+                False,
+            ),
         )
         for label, state, admit, kind, handoff, reason, may_approve in cases:
             with self.subTest(label=label):
@@ -669,6 +679,38 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertEqual(last_round.handoff_reason, "round-budget-exhausted")
         self.assertTrue(last_round.may_emit_approve)
         self.assertFalse(last_round.cap_creates_approval)
+
+    def test_continuation_admits_one_extra_verification_round(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        exhausted = RoundSessionState(
+            completed_initial_reviews=1, completed_verification_rounds=2
+        )
+        refused = evaluate_round_admission(exhausted, policy)
+        self.assertFalse(refused.admit)
+        continued = evaluate_round_admission(exhausted, policy, continuation_rounds=1)
+        self.assertTrue(continued.admit)
+        self.assertEqual(continued.round_kind, "verification")
+        self.assertTrue(continued.count_as_completed_round)
+        with self.assertRaisesRegex(ReviewInputError, "continuation_rounds"):
+            evaluate_round_admission(exhausted, policy, continuation_rounds=2)
+
+    def test_detect_no_progress_repeats_and_oscillation(self):
+        self.assertFalse(
+            detect_no_progress(previous_blocking=("a",), current_blocking=())
+        )
+        self.assertTrue(
+            detect_no_progress(previous_blocking=("a",), current_blocking=("a",))
+        )
+        self.assertTrue(
+            detect_no_progress(
+                earlier_blocking=("a",),
+                previous_blocking=("b",),
+                current_blocking=("a",),
+            )
+        )
+        self.assertFalse(
+            detect_no_progress(previous_blocking=("a",), current_blocking=("b",))
+        )
 
     def test_round_invariants_reject_cap_created_approval(self):
         with self.assertRaisesRegex(ReviewInputError, "must not create approval"):

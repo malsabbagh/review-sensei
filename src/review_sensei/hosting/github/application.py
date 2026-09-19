@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from ...convergence import BlockerCandidate, ReviewConvergencePolicy
+from ...convergence import (
+    OPERATOR_REVIEW_MODES,
+    BlockerCandidate,
+    ReviewConvergencePolicy,
+)
 from ...conversation import ConversationService
+from ...coverage import coverage_approval_state
 from ...errors import ReviewInputError
 from ...models import ReviewResult
 from ...outcomes import RecoveryArtifact
@@ -16,9 +21,12 @@ from ...session import (
     SessionLedger,
     complete_session_round,
     prepare_session_round,
+    record_session_failed_attempt,
     session_reservation_id,
+    should_skip_automation,
 )
 from ...verifier import CandidateFinding
+from .approval import has_blocking_findings, has_human_adjudication_findings
 from .broker_client import BrokerClient
 from .conversation import (
     ConversationPublisher,
@@ -85,6 +93,8 @@ class GitHubApplication:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        continuation_rounds: int = 0,
+        no_progress: bool = False,
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -124,27 +134,40 @@ class GitHubApplication:
             else ReviewConvergencePolicy()
         )
         prepared = None
+        reservation = session_reservation_id(
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            kind="round",
+        )
         if ledger is not None:
             if not isinstance(head_sha, str) or not head_sha.strip():
                 raise GitHubPublicationError(
                     "session ledger requires a non-empty head_sha"
                 )
-            reservation_id = session_reservation_id(
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                kind="publish",
-            )
             try:
+                flags = _publication_round_flags(result, no_progress=no_progress)
                 prepared = prepare_session_round(
                     ledger,
                     identity,
                     policy,
-                    reservation_id=reservation_id,
+                    reservation_id=reservation,
+                    continuation_rounds=continuation_rounds,
+                    coverage_complete=flags["coverage_complete"],
+                    independently_approval_eligible=flags[
+                        "independently_approval_eligible"
+                    ],
+                    latest_head_reviewed=flags["latest_head_reviewed"],
+                    no_progress=flags["no_progress"],
                 )
+                if should_skip_automation(prepared.decision, inference=False):
+                    return PublicationResult(
+                        status="handoff",
+                        diagnostic=prepared.decision.handoff_reason,
+                    )
             except BaseException as preparation_error:
                 cleanup_error = self._abort_held_session_reservation(
-                    ledger, identity, reservation_id
+                    ledger, identity, reservation
                 )
                 if cleanup_error is not None:
                     preparation_error.add_note(
@@ -175,7 +198,23 @@ class GitHubApplication:
                 input_blocker_candidates=input_blocker_candidates,
             )
         except BaseException as publication_error:
-            if ledger is not None and prepared is not None:
+            if ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
+                if not isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
+                    try:
+                        record_session_failed_attempt(
+                            ledger, identity, reservation_id=reservation
+                        )
+                    except BaseException as cleanup_error:
+                        if not isinstance(
+                            publication_error, (KeyboardInterrupt, SystemExit)
+                        ):
+                            raise cleanup_error from publication_error
+                        publication_error.add_note(
+                            "session reservation cleanup failed: "
+                            f"{type(cleanup_error).__name__}: "
+                            f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                        )
+            elif ledger is not None and prepared is not None:
                 try:
                     complete_session_round(ledger, identity, prepared, published=False)
                 except BaseException as cleanup_error:
@@ -491,3 +530,22 @@ class GitHubApplication:
                 source_kind=prepared.source_kind,
                 reaction_id=reaction.reaction_id,
             )
+
+
+def _publication_round_flags(
+    result: ReviewResult, *, no_progress: bool = False
+) -> dict[str, bool]:
+    coverage = coverage_approval_state(result.coverage)
+    coverage_complete = result.coverage is None or coverage == "reviewed"
+    eligible = (
+        coverage_complete
+        and result.review_status == "complete"
+        and not has_blocking_findings(result)
+        and not has_human_adjudication_findings(result)
+    )
+    return {
+        "coverage_complete": coverage_complete,
+        "independently_approval_eligible": eligible,
+        "latest_head_reviewed": True,
+        "no_progress": no_progress,
+    }

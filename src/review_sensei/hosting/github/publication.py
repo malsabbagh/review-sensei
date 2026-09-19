@@ -405,6 +405,26 @@ def finding_declares_blocking(body: object) -> bool:
 class PublicationResult:
     status: str
     review_id: int | None = None
+    diagnostic: str | None = None
+
+
+_PUBLICATION_TO_RUN_STATUS = {
+    "published": "reviewed",
+    "approved": "reviewed",
+    "changes_requested": "reviewed",
+    "already_published": "already_published",
+    "already_changes_requested": "already_published",
+    "already_approved": "already_published",
+    "skipped_stale_head": "skipped_stale",
+    "skipped_stale_base": "skipped_stale",
+    "skipped_pr_state": "skipped_policy",
+    "skipped_repository_mismatch": "skipped_policy",
+    "skipped_fork": "skipped_policy",
+    "skipped_app_authored": "skipped_policy",
+    "auto_approval_disabled": "skipped_policy",
+    "disabled": "skipped_policy",
+    "handoff": "skipped_policy",
+}
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -445,6 +465,8 @@ def outcome_from_publication(
 
     status = _PUBLICATION_TO_RUN_STATUS.get(result.status, "publication_failed")
     token = diagnostic
+    if token is None:
+        token = getattr(result, "diagnostic", None)
     if token is None:
         candidate = _PUBLICATION_DIAGNOSTIC_OVERRIDES.get(result.status, result.status)
         if candidate in PUBLIC_DIAGNOSTICS:
