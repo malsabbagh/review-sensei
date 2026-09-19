@@ -20,6 +20,7 @@ from review_sensei.hosting.github.session_ledger import (
 from review_sensei.models import ReviewResult
 from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
+    MAX_SESSION_TTL,
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
@@ -67,6 +68,18 @@ class SessionRecordTests(unittest.TestCase):
 
             restored = SessionRecord.from_dict(record.to_dict())
             validate.assert_called_once_with(restored.to_dict(), "session-record")
+
+    def test_reservation_and_last_commit_ids_must_differ(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW).to_dict()
+        record.update(
+            {
+                "reservation_id": "abcd1234",
+                "reserved_slot": "initial",
+                "last_committed_reservation_id": "abcd1234",
+            }
+        )
+        with self.assertRaisesRegex(ReviewInputError, "must differ"):
+            SessionRecord.from_dict(record)
 
 
 class LocalSessionLedgerTests(unittest.TestCase):
@@ -176,6 +189,27 @@ class LocalSessionLedgerTests(unittest.TestCase):
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
         self.assertEqual(loaded.record.expires_at, created.expires_at)
 
+    def test_legacy_v01_clamps_overlong_expiry(self):
+        legacy = {
+            "schema_version": "0.1",
+            "repository": IDENTITY.repository,
+            "pull_request_number": IDENTITY.pull_request,
+            "repository_id": IDENTITY.repository_id,
+            "created_at": FIXED_NOW.isoformat().replace("+00:00", "Z"),
+            "expires_at": (FIXED_NOW + timedelta(days=120))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        path = self.ledger._path(IDENTITY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "migrated")
+        expected_expiry = (
+            (FIXED_NOW + MAX_SESSION_TTL).isoformat().replace("+00:00", "Z")
+        )
+        self.assertEqual(loaded.record.expires_at, expected_expiry)
+
 
 class RoundPersistenceTests(unittest.TestCase):
     def test_operator_mode_reserves_and_commits_without_refusing(self):
@@ -245,6 +279,23 @@ class RoundPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(replayed_commit, committed)
         self.assertEqual(replayed_commit.completed_initial_reviews, 1)
+        with self.assertRaisesRegex(ReviewInputError, "outcome conflicts"):
+            complete_session_round(
+                commit_ledger,
+                IDENTITY,
+                commit_prepared,
+                published=False,
+                now=FIXED_NOW,
+            )
+        same_attempt = prepare_session_round(
+            commit_ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="abcd1234",
+            now=FIXED_NOW,
+        )
+        self.assertIsNone(same_attempt.reservation_id)
+        self.assertEqual(same_attempt.record.completed_initial_reviews, 1)
 
         abort_ledger = InMemorySessionLedger()
         abort_prepared = prepare_session_round(
@@ -322,6 +373,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 json_response([]),
                 json_response({"id": 7, "body": body}, status=201),
                 json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
                 json_response({"id": 7, "body": reserved_body}),
             ]
         )
@@ -336,6 +388,31 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         self.assertEqual(updated.reservation_id, "abcd1234")
+
+    def test_initialize_fails_closed_on_concurrent_duplicate_comments(self):
+        first = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        second = first.evolve(now=FIXED_NOW, generation=1)
+        first_body = render_session_comment(
+            repository_id=99, pull_request=136, record=first
+        )
+        second_body = render_session_comment(
+            repository_id=99, pull_request=136, record=second
+        )
+        http, _calls = make_http(
+            [
+                json_response([]),
+                json_response({"id": 7, "body": first_body}, status=201),
+                json_response(
+                    [
+                        {"id": 7, "body": first_body},
+                        {"id": 8, "body": second_body},
+                    ]
+                ),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        with self.assertRaisesRegex(ReviewInputError, "multiple session comments"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
 
     def test_multiple_markers_fail_closed(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -355,6 +432,10 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "missing")
 
+    def test_quoted_marker_prefix_without_marker_is_ignored(self):
+        body = f"A maintainer quoted {SESSION_MARKER_PREFIX} in a reply."
+        self.assertIsNone(parse_session_comment(body, identity=IDENTITY))
+
     def test_malformed_session_comment_maps_to_integrity_failed(self):
         body = (
             f"{SESSION_MARKER_PREFIX} repo=99 pr=136 gen=0 "
@@ -367,6 +448,94 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
 
 class GitHubApplicationSessionTests(unittest.TestCase):
+    def test_preparation_failure_releases_a_reservation(self):
+        class Broker:
+            def request_oidc_token(self):
+                return "oidc-token"
+
+            def exchange(self, token, *, capability=None):
+                return f"capability-{capability}"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                raise AssertionError("publisher must not run")
+
+        ledger = InMemorySessionLedger()
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+            session_ledger=ledger,
+        )
+        original_prepare = prepare_session_round
+
+        def reserve_then_fail(*args, **kwargs):
+            original_prepare(*args, **kwargs)
+            raise RuntimeError("preparation failed")
+
+        with patch(
+            "review_sensei.hosting.github.application.prepare_session_round",
+            side_effect=reserve_then_fail,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "preparation failed"):
+                application.publish_review(
+                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="a" * 40,
+                    base_branch="main",
+                    base_sha="b" * 40,
+                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                    diff="diff",
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+        loaded = ledger.load(IDENTITY)
+        self.assertIsNone(loaded.record.reservation_id)
+
+    def test_publisher_base_exception_releases_a_reservation(self):
+        class Broker:
+            def request_oidc_token(self):
+                return "oidc-token"
+
+            def exchange(self, token, *, capability=None):
+                return f"capability-{capability}"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                raise KeyboardInterrupt()
+
+        ledger = InMemorySessionLedger()
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+            session_ledger=ledger,
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="a" * 40,
+                base_branch="main",
+                base_sha="b" * 40,
+                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                diff="diff",
+                app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            )
+        loaded = ledger.load(IDENTITY)
+        self.assertIsNone(loaded.record.reservation_id)
+
     def test_operator_publish_commits_local_ledger(self):
         class Broker:
             def request_oidc_token(self):
@@ -434,6 +603,7 @@ class DiagnosticSessionTests(unittest.TestCase):
                 repository="owner/repo",
                 pull_request=136,
             )
+            self.assertEqual(plan["identity"]["pull_request"], 136)
             self.assertEqual(plan["session_record"]["status"], "ok")
             with tempfile.TemporaryDirectory() as empty_raw:
                 missing = run_doctor(

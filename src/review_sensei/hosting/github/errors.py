@@ -131,6 +131,12 @@ class GitHubHTTPResponseTooLargeError(GitHubHTTPError):
     error_category = "github_http_response_too_large"
 
 
+class GitHubHTTPPaginationLimitError(GitHubHTTPError):
+    """Raised when a bounded GitHub pagination walk reaches its page limit."""
+
+    error_category = "github_http_pagination_limit"
+
+
 class GitHubHTTPTransientError(GitHubHTTPError):
     """Raised for transient GitHub REST failures."""
 

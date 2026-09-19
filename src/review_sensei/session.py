@@ -260,6 +260,13 @@ class SessionRecord:
             ),
         )
         if (
+            self.reservation_id is not None
+            and self.reservation_id == self.last_committed_reservation_id
+        ):
+            raise ReviewInputError(
+                "reservation_id and last_committed_reservation_id must differ"
+            )
+        if (
             self.reserved_slot is not None
             and self.reserved_slot not in RESERVATION_SLOTS
         ):
@@ -640,6 +647,8 @@ def mutate_reserved(
     expected_generation: int,
     now: datetime | None = None,
 ) -> SessionRecord:
+    if record.last_committed_reservation_id == reservation_id:
+        return record
     if record.generation != expected_generation:
         raise ReviewInputError("session generation conflict")
     if record.reservation_id == reservation_id and record.reserved_slot == slot:
@@ -753,6 +762,16 @@ def prepare_session_round(
         )
     if decision.round_kind not in RESERVATION_SLOTS:
         raise ReviewInputError("admitted round kind cannot be reserved")
+    # Reservation ids are deterministic for a repository, PR head, and slot.
+    # Once that exact attempt committed, a retry is an idempotent no-op rather
+    # than a second reservation that would alias last_committed_reservation_id.
+    if (
+        record.reservation_id is None
+        and record.last_committed_reservation_id == reservation_id
+    ):
+        return PreparedSessionRound(
+            record=record, decision=decision, reservation_id=None
+        )
     reserved = ledger.reserve(
         identity,
         slot=decision.round_kind,
@@ -788,7 +807,30 @@ def complete_session_round(
         and loaded.record.reservation_id is None
         and loaded.record.last_committed_reservation_id == prepared.reservation_id
     ):
-        return loaded.record
+        if not published:
+            raise ReviewInputError(
+                "session completion outcome conflicts with committed reservation"
+            )
+        slot = prepared.record.reserved_slot
+        if slot is None:
+            raise ReviewInputError("prepared session reservation is invalid")
+        expected_initial = prepared.record.completed_initial_reviews + (
+            1 if slot == "initial" else 0
+        )
+        expected_verification = prepared.record.completed_verification_rounds + (
+            1 if slot == "verification" else 0
+        )
+        expected_failed = prepared.record.failed_attempts + (
+            1 if slot == "failed-attempt" else 0
+        )
+        if (
+            loaded.record.generation == prepared.record.generation + 1
+            and loaded.record.completed_initial_reviews == expected_initial
+            and loaded.record.completed_verification_rounds == expected_verification
+            and loaded.record.failed_attempts == expected_failed
+        ):
+            return loaded.record
+        raise ReviewInputError("session completion replay is inconsistent")
     if (
         not published
         and loaded.status in {"ok", "migrated"}
@@ -1008,6 +1050,12 @@ class LocalSessionLedger:
             os.fsync(handle.fileno())
             handle.close()
             os.replace(handle.name, path)
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         except OSError as exc:
             handle.close()
             try:
@@ -1029,13 +1077,18 @@ class LocalSessionLedger:
                     migrated.get("created_at") or _format_datetime(_aware_now(now))
                 )
                 created_time = _parse_aware_datetime(created_at, label="created_at")
-                expires_at = migrated.get("expires_at")
-                if expires_at is None:
-                    expires_at = _format_datetime(created_time + DEFAULT_SESSION_TTL)
+                expires_value = migrated.get("expires_at")
+                if expires_value is None:
+                    expires_at = created_time + DEFAULT_SESSION_TTL
+                else:
+                    expires_at = _parse_aware_datetime(
+                        expires_value, label="expires_at"
+                    )
+                    expires_at = min(expires_at, created_time + MAX_SESSION_TTL)
                 migrated_record = SessionRecord.create(
                     identity,
                     now=created_time,
-                    expires_at=str(expires_at),
+                    expires_at=_format_datetime(expires_at),
                     completed_initial_reviews=_require_bounded_int(
                         migrated["completed_initial_reviews"],
                         label="completed_initial_reviews",

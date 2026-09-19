@@ -28,6 +28,7 @@ from ...session import (
 )
 from .errors import (
     GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
@@ -81,13 +82,11 @@ def parse_session_comment(
     *,
     identity: SessionIdentity,
 ) -> SessionRecord | None:
-    if (
-        not isinstance(body, str)
-        or not _within_session_comment_limit(body)
-        or SESSION_MARKER_PREFIX not in body
-    ):
+    if not isinstance(body, str) or not _within_session_comment_limit(body):
         return None
     matches = list(SESSION_MARKER_RE.finditer(body))
+    if not matches:
+        return None
     if len(matches) != 1:
         raise SessionLoadError(
             SessionLoadReason.CONFLICT, "session comment marker is ambiguous"
@@ -193,11 +192,9 @@ class GitHubIssueCommentSessionLedger:
             raise GitHubPublicationTransientError(
                 "session ledger discovery failed"
             ) from exc
+        except GitHubHTTPPaginationLimitError as exc:
+            raise ReviewInputError("session comment discovery exceeded bound") from exc
         except GitHubHTTPError as exc:
-            if "exceeded configured page limit" in str(exc):
-                raise ReviewInputError(
-                    "session comment discovery exceeded bound"
-                ) from exc
             raise GitHubPublicationError("session ledger discovery failed") from exc
         found: list[tuple[int, SessionRecord]] = []
         for item in items:
@@ -279,7 +276,23 @@ class GitHubIssueCommentSessionLedger:
                     "session comment create was ambiguous"
                 )
             raise GitHubPublicationError("session comment create failed")
-        return record
+        verified_id, verified_record = self._discover(identity)
+        if verified_id is None or verified_record is None:
+            raise GitHubPublicationTransientError(
+                "session comment create could not be verified"
+            )
+        created_id = payload.get("id")
+        if (
+            isinstance(created_id, bool)
+            or not isinstance(created_id, int)
+            or created_id != verified_id
+            or verified_record.record_sha256 != record.record_sha256
+        ):
+            raise SessionLoadError(
+                SessionLoadReason.CONFLICT,
+                "session comment create raced with another initializer",
+            )
+        return verified_record
 
     def _replace(
         self,

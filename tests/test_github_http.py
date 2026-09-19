@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 from review_sensei.hosting.github import (
     GitHubHttp,
     GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
     GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,
 )
@@ -107,7 +108,7 @@ class GitHubHttpTests(unittest.TestCase):
     def test_paginate_refuses_more_than_configured_pages(self):
         page = b"[" + b'{"id":1},' * 99 + b'{"id":1}]'
         http, calls = self.make_http([(200, page)] * 10)
-        with self.assertRaises(GitHubHTTPError):
+        with self.assertRaises(GitHubHTTPPaginationLimitError):
             http.paginate(path="/repos/owner/repo/issues", token="t")
         self.assertEqual(len(calls), 10)
 

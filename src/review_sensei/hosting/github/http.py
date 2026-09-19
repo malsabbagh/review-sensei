@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from .errors import (
     GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
     GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,
 )
@@ -219,4 +220,6 @@ class GitHubHttp:
             collected.extend(body)
             if len(body) < page_size:
                 return collected
-        raise GitHubHTTPError("GitHub pagination exceeded configured page limit")
+        raise GitHubHTTPPaginationLimitError(
+            "GitHub pagination exceeded configured page limit"
+        )

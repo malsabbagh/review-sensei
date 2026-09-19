@@ -123,17 +123,22 @@ class GitHubApplication:
         )
         prepared = None
         if ledger is not None:
-            prepared = prepare_session_round(
-                ledger,
-                identity,
-                policy,
-                reservation_id=session_reservation_id(
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    kind="publish",
-                ),
+            reservation_id = session_reservation_id(
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                kind="publish",
             )
+            try:
+                prepared = prepare_session_round(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation_id,
+                )
+            except BaseException:
+                self._abort_held_session_reservation(ledger, identity, reservation_id)
+                raise
         try:
             publication = self.reviewer.publish(
                 token=token,
@@ -155,9 +160,12 @@ class GitHubApplication:
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
             )
-        except Exception:
+        except BaseException:
             if ledger is not None and prepared is not None:
-                complete_session_round(ledger, identity, prepared, published=False)
+                try:
+                    complete_session_round(ledger, identity, prepared, published=False)
+                except BaseException:
+                    pass
             raise
         if ledger is not None and prepared is not None:
             complete_session_round(
@@ -180,6 +188,31 @@ class GitHubApplication:
         if self.http is None:
             raise GitHubPublicationError("GitHub session ledger requires HTTP")
         return GitHubIssueCommentSessionLedger(self.http, token=token)
+
+    @staticmethod
+    def _abort_held_session_reservation(
+        ledger: SessionLedger,
+        identity: SessionIdentity,
+        reservation_id: str,
+    ) -> None:
+        """Best-effort cleanup when preparation fails after reserving."""
+
+        try:
+            loaded = ledger.load(identity)
+            if (
+                loaded.status in {"ok", "migrated"}
+                and loaded.record is not None
+                and loaded.record.reservation_id == reservation_id
+            ):
+                ledger.abort(
+                    identity,
+                    reservation_id=reservation_id,
+                    expected_generation=loaded.record.generation,
+                )
+        except BaseException:
+            # Preserve the preparation failure; a later run can surface any
+            # cleanup race through the ledger's normal CAS path.
+            pass
 
     def recover_review(
         self,

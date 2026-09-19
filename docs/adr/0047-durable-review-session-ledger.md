@@ -51,15 +51,17 @@ Mutations are compare-and-swap on `generation`. `reserve` holds
 and is idempotent for the same `reservation_id`. `abort` drops an uncommitted
 hold. Local files migrate `schema_version=0.1` documents that use
 `pull_request_number` and have no digest; GitHub-backed loads never migrate or
-rehash.
+rehash. A deterministic reservation id is an idempotency key for one
+repository/PR-head/slot attempt; after that id commits, a retry does not create
+another reservation.
 
 The visible consumer is doctor/plan display plus GitHub publication
 write-through. Operator modes (`advisory`, `merge-focused`, `strict`) reserve
 before `ReviewPublisher.publish` and commit only when the publication status is
-`published`. `legacy` may initialize a record for display but does not count
-rounds. C3 does not refuse a review when the C1 decision would hand off; that
-enforcement remains C5. `REVIEWSENSEI_AUTO_APPROVE` and #114/#115 gates are
-unchanged.
+`published`. `legacy` may initialize a missing record for display, but it does
+not reserve or count a round. C3 does not refuse a review when the C1 decision
+would hand off; that enforcement remains C5. `REVIEWSENSEI_AUTO_APPROVE` and
+#114/#115 gates are unchanged.
 
 ## Scope
 
@@ -89,6 +91,11 @@ Tradeoffs:
 - A GitHub comment can be deleted. C3 reports missing rather than inventing
   counters.
 - Concurrent jobs lose a CAS race instead of double-counting.
+- GitHub initialization posts once and then rediscoveries the bounded marker.
+  If a torn or concurrent create leaves multiple session comments, discovery
+  returns `conflict` and initialization does not overwrite either comment. An
+  operator must delete the extra or invalid session comment manually, leaving
+  at most one valid marker, before retrying.
 
 ## Alternatives considered
 

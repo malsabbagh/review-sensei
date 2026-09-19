@@ -551,7 +551,9 @@ When `--session-ledger` or `REVIEWSENSEI_SESSION_LEDGER` is set with a
 repository and pull-request identity, they also report the C3 session
 counters or an explicit missing/expired/tampered status. Doctor and plan
 never write the ledger.
-`legacy` remains compatible with ADR 0032/0035 publication.
+`legacy` remains compatible with ADR 0032/0035 publication; when a session
+ledger is configured, publication may initialize a display-only record but
+never reserves or counts a round.
 Operator modes apply `evaluate_blocker_admission` before GitHub review events
 and do not change `REVIEWSENSEI_AUTO_APPROVE`. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md).
 `doctor --network` performs read-only GET probes and never mints a token or
