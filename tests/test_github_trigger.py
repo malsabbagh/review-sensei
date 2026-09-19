@@ -231,6 +231,17 @@ class GitHubTriggerTests(unittest.TestCase):
 
 
 class InlineCallerResolverTests(unittest.TestCase):
+    def test_generated_callers_run_trigger_as_a_package_module(self):
+        expected = "PYTHONPATH=src python -m review_sensei.hosting.github.trigger"
+        for name, text in (
+            ("repository", REPO_CALLER.read_text(encoding="utf-8")),
+            ("example", EXAMPLE_CALLER.read_text(encoding="utf-8")),
+            ("generated", _tagged_workflow("v5")),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(expected, text)
+                self.assertNotIn('PYTHONPATH=src python "$resolver"', text)
+
     def test_generated_callers_embed_the_same_inline_resolver(self):
         repo = REPO_CALLER.read_text(encoding="utf-8")
         example = EXAMPLE_CALLER.read_text(encoding="utf-8")
