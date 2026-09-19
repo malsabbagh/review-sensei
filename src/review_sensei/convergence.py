@@ -677,8 +677,17 @@ def derive_blocker_candidate(
     has_contradictory_evidence: bool = False,
     is_late_relative_to_baseline: bool = False,
     late_reason: str | None = None,
+    named_mandatory_rule: str | None = None,
+    has_required_contract: bool | None = None,
 ) -> BlockerCandidate:
-    """Map structured finding fields to admission facts without parsing bodies."""
+    """Map structured finding fields to admission facts without parsing bodies.
+
+    Free-form ``defect_kind`` is a specific-violation signal only. Required
+    contracts use the closed ``REQUIRED_CONTRACT_KINDS`` allowlist unless the
+    caller sets ``has_required_contract``. Named mandatory rules are never
+    inferred from ``defect_kind``; pass ``named_mandatory_rule`` to opt into
+    the strict independent-qualification path.
+    """
 
     if not isinstance(comment, ReviewComment):
         raise ReviewInputError("blocker comment is invalid")
@@ -696,13 +705,16 @@ def derive_blocker_candidate(
         evidence_locations_validated and has_failure_condition
     )
     weakly = high_impact and not evidence_ok
+    if has_required_contract is None:
+        has_required_contract = (
+            named is not None and named.casefold() in REQUIRED_CONTRACT_KINDS
+        )
     return BlockerCandidate(
         proposed_blocking=comment.blocking,
         severity=comment.severity,
         has_specific_violation=named is not None,
-        has_required_contract=named is not None
-        and named.casefold() in REQUIRED_CONTRACT_KINDS,
-        named_mandatory_rule=named,
+        has_required_contract=has_required_contract,
+        named_mandatory_rule=named_mandatory_rule,
         has_actionable_remedy=has_actionable_remedy,
         evidence_locations_validated=evidence_locations_validated,
         has_failure_condition=has_failure_condition,

@@ -14,6 +14,8 @@
   line maps. Admitted `effective_blocking` / `needs_human` stay runtime-only
   and are omitted from the v1 comment schema. Intersecting `auto_approve`
   with `automatic_github_review_events` can only withhold GitHub events.
+  Named mandatory rules are explicit; free-form `defect_kind` is not a
+  strict-mode qualifier. Omitted publication policy stays `legacy`.
   `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned

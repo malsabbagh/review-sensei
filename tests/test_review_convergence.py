@@ -882,6 +882,90 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertTrue(finding.effective_blocking)
         self.assertTrue(finding.blocks_approval)
 
+    def test_derivation_does_not_treat_defect_kind_as_named_mandatory_rule(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="medium",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        self.assertTrue(facts.has_specific_violation)
+        self.assertFalse(facts.has_required_contract)
+        self.assertIsNone(facts.named_mandatory_rule)
+        policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertFalse(admitted.comments[0].needs_human)
+
+    def test_required_contract_kinds_are_not_named_mandatory_rules(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=True,
+            severity="medium",
+            defect_kind="api-contract",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        self.assertTrue(facts.has_required_contract)
+        self.assertIsNone(facts.named_mandatory_rule)
+        policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+
+    def test_explicit_named_mandatory_rule_opts_into_strict_path(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="medium",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            named_mandatory_rule="authz-must-deny",
+        )
+        self.assertEqual(facts.named_mandatory_rule, "authz-must-deny")
+        policy = ReviewConvergencePolicy(mode="strict", enforcement="publication")
+        admitted = admit_review_result(
+            ReviewResult(summary="Summary.", comments=(comment,), provider="fixture"),
+            policy,
+            candidates=(facts,),
+        )
+        self.assertTrue(admitted.comments[0].effective_blocking)
+        self.assertFalse(admitted.comments[0].needs_human)
+
     def test_admitted_result_omits_runtime_fields_from_public_document(self):
         comment = ReviewComment(
             path="src/app.py",

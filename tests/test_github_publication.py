@@ -3005,6 +3005,15 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertNotIn("APPROVE", self._posted_events(calls))
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
+    def test_omitted_policy_stays_legacy_when_env_is_merge_focused(self):
+        with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
+            outcome, calls = self.publish(self._responses())
+        self.assertEqual(outcome.status, "published")
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertIn("blocking=true", body["comments"][0]["body"])
+
     def test_advisory_with_auto_approve_true_does_not_approve_or_request_changes(
         self,
     ):

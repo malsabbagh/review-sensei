@@ -31,7 +31,6 @@ from .convergence import (
     admit_review_result,
     comment_targets_pr_change,
     derive_blocker_candidate,
-    resolve_review_convergence_policy,
 )
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
@@ -618,7 +617,7 @@ def _with_admission(
     deleted_lines: Mapping[str, frozenset[int]] | None = None,
     derived: Sequence[BlockerCandidate] | None = None,
 ) -> ReviewResult:
-    policy = convergence_policy or resolve_review_convergence_policy()
+    policy = convergence_policy or ReviewConvergencePolicy()
     return admit_review_result(
         result,
         policy,

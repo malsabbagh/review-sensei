@@ -66,10 +66,16 @@ independently of high/critical severity when the other gates pass.
 C2 derives `BlockerCandidate` facts from structured comment and verification
 fields (`derive_blocker_candidate`) and writes `effective_blocking` /
 `needs_human` onto each finding (`admit_review_result`) before a publisher
-formats comments or chooses a GitHub review event. Confirmed evidence
-verification (#114) validates snapshot locations; it does not mint a failure
-condition or actionable remedy. Operator-mode admission stays fail-closed
-unless the caller supplies explicit `BlockerCandidate` facts.
+formats comments or chooses a GitHub review event. Free-form `defect_kind`
+is a specific-violation signal only. Required contracts are the closed
+allowlist `required-contract`, `api-contract`, and `compatibility-contract`.
+Named mandatory rules are never inferred; callers pass
+`named_mandatory_rule=` (or an explicit `BlockerCandidate`) to opt into the
+strict independent-qualification path. A required contract remains a
+violation source, not a substitute for high/critical impact. Confirmed
+evidence verification (#114) validates snapshot locations; it does not mint
+a failure condition or actionable remedy. Operator-mode admission stays
+fail-closed unless the caller supplies explicit `BlockerCandidate` facts.
 `blocker_candidates` must match published comments;
 `input_blocker_candidates` must match input candidates. Attribution uses
 the comment side: `RIGHT` against new-file changed lines, `LEFT` against
@@ -84,7 +90,10 @@ Publication markers and `REQUEST_CHANGES` follow effective blocking.
 `automatic_github_review_events`. The conjunction can only withhold
 `REQUEST_CHANGES` and the APPROVE finalizer; it cannot upgrade an explicit
 `auto_approve=False`, including when `REVIEWSENSEI_REVIEW_MODE` is an
-operator mode. Human adjudication withholds `APPROVE` through
+operator mode. An omitted `convergence_policy` stays on compatible `legacy`
+and does not read the ambient environment; the CLI resolves
+`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling. Human
+adjudication withholds `APPROVE` through
 `evaluate_auto_approval` without inventing a proven blocker. Advisory
 observations in operator modes are folded into the review summary so required
 conversation resolution cannot turn optional notes into mechanical blockers.
