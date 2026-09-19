@@ -42,7 +42,7 @@ SESSION_MARKER_RE = re.compile(
     r"digest=(?P<digest>[a-f0-9]{64}) -->"
 )
 _JSON_FENCE_RE = re.compile(
-    r"```json\n(?P<body>\{.*?\})\n```",
+    r"```json\n(?P<body>\{.*\})\n```(?=\n|$)",
     re.DOTALL,
 )
 _SESSION_INTRO = "ReviewSensei session ledger (round counters only; no source)."
@@ -84,7 +84,15 @@ def parse_session_comment(
 ) -> SessionRecord | None:
     if not isinstance(body, str) or not _within_session_comment_limit(body):
         return None
+    if identity.repository_id is None:
+        raise ReviewInputError("GitHub session identity requires repository_id")
     matches = list(SESSION_MARKER_RE.finditer(body))
+    matches = [
+        match
+        for match in matches
+        if int(match["repository_id"]) == identity.repository_id
+        and int(match["pull_request"]) == identity.pull_request
+    ]
     if not matches:
         return None
     if len(matches) != 1:
@@ -92,18 +100,6 @@ def parse_session_comment(
             SessionLoadReason.CONFLICT, "session comment marker is ambiguous"
         )
     marker = matches[0]
-    if identity.repository_id is None:
-        raise ReviewInputError("GitHub session identity requires repository_id")
-    if int(marker["repository_id"]) != identity.repository_id:
-        raise SessionLoadError(
-            SessionLoadReason.CONFLICT,
-            "session comment repository_id does not match",
-        )
-    if int(marker["pull_request"]) != identity.pull_request:
-        raise SessionLoadError(
-            SessionLoadReason.CONFLICT,
-            "session comment pull_request does not match",
-        )
     fenced = _JSON_FENCE_RE.search(body)
     if fenced is None:
         raise SessionLoadError(
@@ -181,7 +177,7 @@ class GitHubIssueCommentSessionLedger:
             raise GitHubPublicationError("session ledger request failed") from exc
 
     def _discover(
-        self, identity: SessionIdentity
+        self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> tuple[int | None, SessionRecord | None]:
         repository_id = self._require_identity(identity)
         try:
@@ -193,7 +189,10 @@ class GitHubIssueCommentSessionLedger:
                 "session ledger discovery failed"
             ) from exc
         except GitHubHTTPPaginationLimitError as exc:
-            raise ReviewInputError("session comment discovery exceeded bound") from exc
+            raise SessionLoadError(
+                SessionLoadReason.INTEGRITY_FAILED,
+                "session comment discovery exceeded bound",
+            ) from exc
         except GitHubHTTPError as exc:
             raise GitHubPublicationError("session ledger discovery failed") from exc
         found: list[tuple[int, SessionRecord]] = []
@@ -238,9 +237,9 @@ class GitHubIssueCommentSessionLedger:
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> SessionLoadResult:
         try:
-            _comment_id, record = self._discover(identity)
+            _comment_id, record = self._discover(identity, now=now)
         except SessionLoadError as exc:
-            return SessionLoadResult(status=exc.reason.value)
+            return SessionLoadResult(status=exc.reason.value, detail=str(exc))
         if record is None:
             return SessionLoadResult(status="missing")
         return load_session_status(record, now=now)
@@ -276,7 +275,7 @@ class GitHubIssueCommentSessionLedger:
                     "session comment create was ambiguous"
                 )
             raise GitHubPublicationError("session comment create failed")
-        verified_id, verified_record = self._discover(identity)
+        verified_id, verified_record = self._discover(identity, now=now)
         if verified_id is None or verified_record is None:
             raise GitHubPublicationTransientError(
                 "session comment create could not be verified"
@@ -301,7 +300,7 @@ class GitHubIssueCommentSessionLedger:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
-        comment_id, record = self._discover(identity)
+        comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None:
             raise ReviewInputError("session record is missing")
         if record.expired(now=now):
@@ -329,7 +328,14 @@ class GitHubIssueCommentSessionLedger:
                 )
             raise GitHubPublicationError("session comment update failed")
         verified = parse_session_comment(payload.get("body"), identity=identity)
-        if verified is None or verified.record_sha256 != updated.record_sha256:
+        payload_id = payload.get("id")
+        if (
+            isinstance(payload_id, bool)
+            or not isinstance(payload_id, int)
+            or payload_id != comment_id
+            or verified is None
+            or verified.record_sha256 != updated.record_sha256
+        ):
             raise ReviewInputError("session comment update lost")
         return verified
 

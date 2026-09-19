@@ -555,10 +555,18 @@ class SessionLoadResult:
 
     status: str
     record: SessionRecord | None = None
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in LOAD_STATUSES:
             raise ReviewInputError("session load status is invalid")
+        if self.detail is not None and (
+            not isinstance(self.detail, str)
+            or not self.detail
+            or len(self.detail) > 160
+            or not self.detail.isprintable()
+        ):
+            raise ReviewInputError("session load detail is invalid")
         if self.status in {"ok", "migrated"}:
             if not isinstance(self.record, SessionRecord):
                 raise ReviewInputError("session load requires a record")
@@ -986,7 +994,9 @@ class InMemorySessionLedger:
 
 
 def _safe_ledger_name(repository: str) -> str:
-    return repository.replace("/", "--")
+    """Return an injective, filesystem-safe name for a repository slug."""
+
+    return repository.replace("/", "%2F")
 
 
 class LocalSessionLedger:
@@ -1044,12 +1054,14 @@ class LocalSessionLedger:
             prefix=f".{identity.pull_request}.",
             suffix=".tmp",
         )
+        replaced = False
         try:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
             handle.close()
             os.replace(handle.name, path)
+            replaced = True
             if os.name != "nt":
                 directory_fd = os.open(path.parent, os.O_RDONLY)
                 try:
@@ -1058,10 +1070,15 @@ class LocalSessionLedger:
                     os.close(directory_fd)
         except OSError as exc:
             handle.close()
-            try:
-                os.unlink(handle.name)
-            except OSError:
-                pass
+            if not replaced:
+                try:
+                    os.unlink(handle.name)
+                except OSError:
+                    pass
+            if replaced:
+                raise ReviewInputError(
+                    "session ledger replaced but directory sync failed"
+                ) from exc
             raise ReviewInputError("session ledger could not be written") from exc
 
     def load(
@@ -1243,4 +1260,10 @@ def resolve_local_session_ledger(
     raw = path if path is not None else os.getenv(SESSION_LEDGER_ENV)
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None
-    return LocalSessionLedger(Path(raw))
+    if not isinstance(raw, (str, Path)) or (isinstance(raw, str) and "\x00" in raw):
+        raise ReviewInputError("session ledger path is invalid")
+    try:
+        root = Path(raw)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ReviewInputError("session ledger path is invalid") from exc
+    return LocalSessionLedger(root)

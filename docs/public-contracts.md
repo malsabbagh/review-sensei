@@ -443,7 +443,7 @@ The command is `review-sensei`. Supported flags are:
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
 | `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Operator modes apply C2 admission at publication |
-| `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; github write-through). Requires repository and pull-request identity |
+| `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; `github review` write-through). The GitHub review flag does not affect `reply` or other GitHub subcommands. Requires repository and pull-request identity |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |

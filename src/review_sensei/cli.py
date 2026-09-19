@@ -1192,6 +1192,7 @@ def _github_parser() -> argparse.ArgumentParser:
         help=(
             "Local directory for the issue #136 C3 durable session ledger. "
             "Operator modes reserve/commit a counted round around publication. "
+            "Review command only; does not affect reply or other GitHub commands. "
             "Does not refuse the review (C5)."
         ),
     )

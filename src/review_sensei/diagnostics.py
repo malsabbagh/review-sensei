@@ -130,10 +130,12 @@ def _session_ledger_diagnostic(
             ),
             {"status": status},
         )
-    return (
-        DiagnosticCheck("session-ledger", "action", f"session ledger is {status}"),
-        {"status": status},
-    )
+    detail = f"session ledger is {status}"
+    payload = {"status": status}
+    if loaded.detail is not None:
+        detail = f"{detail}: {loaded.detail}"
+        payload["detail"] = loaded.detail
+    return DiagnosticCheck("session-ledger", "action", detail), payload
 
 
 def _plan_session_record(

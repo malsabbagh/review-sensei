@@ -53,7 +53,9 @@ hold. Local files migrate `schema_version=0.1` documents that use
 `pull_request_number` and have no digest; GitHub-backed loads never migrate or
 rehash. A deterministic reservation id is an idempotency key for one
 repository/PR-head/slot attempt; after that id commits, a retry does not create
-another reservation.
+another reservation. An abort replay that observes a later generation raises a
+CAS conflict, which tells the caller to reload rather than silently dropping a
+different writer's reservation.
 
 The visible consumer is doctor/plan display plus GitHub publication
 write-through. Operator modes (`advisory`, `merge-focused`, `strict`) reserve
@@ -96,6 +98,11 @@ Tradeoffs:
   returns `conflict` and initialization does not overwrite either comment. An
   operator must delete the extra or invalid session comment manually, leaving
   at most one valid marker, before retrying.
+- Local repository directory names percent-encode the identity separator, so
+  repository slugs remain injective on disk. Local writes fsync the temporary
+  file and, on POSIX, the containing directory; if the directory fsync fails
+  after replacement, the write is treated as durably replaced and the caller
+  receives the synchronization error without deleting the new record.
 
 ## Alternatives considered
 

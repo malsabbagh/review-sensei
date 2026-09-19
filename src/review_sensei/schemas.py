@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -44,6 +45,7 @@ def _schema_registry() -> Registry:
     return _SCHEMA_REGISTRY
 
 
+@lru_cache(maxsize=None)
 def _validator(schema_name: str) -> Draft202012Validator:
     schema = load_schema(schema_name)
     try:

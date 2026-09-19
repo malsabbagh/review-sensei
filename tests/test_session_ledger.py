@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,11 @@ from unittest.mock import patch
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
+from review_sensei.hosting.github import (
+    GitHubApplication,
+    GitHubHTTPPaginationLimitError,
+    GitHubWriteOptions,
+)
 from review_sensei.hosting.github.session_ledger import (
     SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
@@ -28,6 +33,7 @@ from review_sensei.session import (
     complete_session_round,
     migrate_session_document,
     prepare_session_round,
+    resolve_local_session_ledger,
     session_reservation_id,
 )
 
@@ -163,6 +169,26 @@ class LocalSessionLedgerTests(unittest.TestCase):
     def test_local_ledger_documents_single_writer_contract(self):
         self.assertTrue(self.ledger.SINGLE_WRITER_PER_IDENTITY)
         self.assertIn("single writer", (self.ledger.__doc__ or "").lower())
+
+    def test_repository_paths_are_injective(self):
+        left = SessionIdentity("owner--repo/x", 136)
+        right = SessionIdentity("owner/repo--x", 136)
+        self.assertNotEqual(self.ledger._path(left), self.ledger._path(right))
+
+    @unittest.skipUnless(os.name != "nt", "directory fsync is POSIX-only")
+    def test_directory_sync_failure_preserves_replaced_record(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        with patch(
+            "review_sensei.session.os.fsync",
+            side_effect=[None, OSError("directory sync failed")],
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "directory sync failed"):
+                self.ledger._write(IDENTITY, record)
+        self.assertEqual(self.ledger.load(IDENTITY).status, "ok")
+
+    def test_invalid_ledger_path_is_sanitized(self):
+        with self.assertRaisesRegex(ReviewInputError, "path is invalid"):
+            resolve_local_session_ledger("bad\x00path")
 
     def test_legacy_v01_migrates_counters(self):
         created = SessionRecord.create(
@@ -414,6 +440,34 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "multiple session comments"):
             ledger.initialize(IDENTITY, now=FIXED_NOW)
 
+    def test_update_rejects_a_different_comment_id(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        reserved = record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="abcd1234",
+            reserved_slot="initial",
+        )
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        http, _calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response({"id": 8, "body": reserved_body}),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        with self.assertRaisesRegex(ReviewInputError, "update lost"):
+            ledger.reserve(
+                IDENTITY,
+                slot="initial",
+                reservation_id="abcd1234",
+                expected_generation=0,
+                now=FIXED_NOW,
+            )
+
     def test_multiple_markers_fail_closed(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         body = render_session_comment(repository_id=99, pull_request=136, record=record)
@@ -435,6 +489,27 @@ class GitHubSessionLedgerTests(unittest.TestCase):
     def test_quoted_marker_prefix_without_marker_is_ignored(self):
         body = f"A maintainer quoted {SESSION_MARKER_PREFIX} in a reply."
         self.assertIsNone(parse_session_comment(body, identity=IDENTITY))
+
+    def test_marker_for_another_identity_is_ignored(self):
+        record = SessionRecord.create(
+            SessionIdentity("other/repo", 999, repository_id=100), now=FIXED_NOW
+        )
+        body = render_session_comment(
+            repository_id=100, pull_request=999, record=record
+        )
+        self.assertIsNone(parse_session_comment(body, identity=IDENTITY))
+
+    def test_pagination_limit_is_a_fail_closed_load_status(self):
+        http, _calls = make_http([json_response([])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        with patch.object(
+            http,
+            "paginate",
+            side_effect=GitHubHTTPPaginationLimitError("page limit"),
+        ):
+            loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "integrity-failed")
+        self.assertEqual(loaded.detail, "session comment discovery exceeded bound")
 
     def test_malformed_session_comment_maps_to_integrity_failed(self):
         body = (

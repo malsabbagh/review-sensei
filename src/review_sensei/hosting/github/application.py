@@ -136,8 +136,12 @@ class GitHubApplication:
                     policy,
                     reservation_id=reservation_id,
                 )
-            except BaseException:
-                self._abort_held_session_reservation(ledger, identity, reservation_id)
+            except BaseException as preparation_error:
+                cleanup_error = self._abort_held_session_reservation(
+                    ledger, identity, reservation_id
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error from preparation_error
                 raise
         try:
             publication = self.reviewer.publish(
@@ -160,12 +164,15 @@ class GitHubApplication:
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
             )
-        except BaseException:
+        except BaseException as publication_error:
             if ledger is not None and prepared is not None:
                 try:
                     complete_session_round(ledger, identity, prepared, published=False)
-                except BaseException:
-                    pass
+                except BaseException as cleanup_error:
+                    if not isinstance(
+                        publication_error, (KeyboardInterrupt, SystemExit)
+                    ):
+                        raise cleanup_error from publication_error
             raise
         if ledger is not None and prepared is not None:
             complete_session_round(
@@ -194,7 +201,7 @@ class GitHubApplication:
         ledger: SessionLedger,
         identity: SessionIdentity,
         reservation_id: str,
-    ) -> None:
+    ) -> BaseException | None:
         """Best-effort cleanup when preparation fails after reserving."""
 
         try:
@@ -209,10 +216,13 @@ class GitHubApplication:
                     reservation_id=reservation_id,
                     expected_generation=loaded.record.generation,
                 )
-        except BaseException:
-            # Preserve the preparation failure; a later run can surface any
-            # cleanup race through the ledger's normal CAS path.
-            pass
+        except BaseException as exc:
+            # Preserve interrupts, but return ordinary cleanup failures so the
+            # caller can surface a stuck-reservation diagnostic.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                return None
+            return exc
+        return None
 
     def recover_review(
         self,
