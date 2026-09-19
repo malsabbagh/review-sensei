@@ -60,6 +60,10 @@ without inventing a proven blocker.
 
 `advisory` uses the same admission rules but sets
 `automatic_github_review_events=false` and `inline_advisory_threads=false`.
+That withholds `APPROVE` and `REQUEST_CHANGES`. Advisory still posts a
+`COMMENT` review whose body carries the folded observations; it does not
+suppress the review POST entirely, because the summary would otherwise
+have no GitHub vehicle.
 `strict` remains bounded and additionally lets a named mandatory rule qualify
 independently of high/critical severity when the other gates pass.
 
@@ -107,10 +111,11 @@ Publication markers and `REQUEST_CHANGES` follow effective blocking.
 `auto_approve=False`, including when `REVIEWSENSEI_REVIEW_MODE` is an
 operator mode. An omitted `convergence_policy` stays on compatible `legacy`
 and does not read the ambient environment; the CLI resolves
-`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling. Recovery
-artifacts serialize `ReviewResult` without admission fields, so
-operator-mode `--recover-from` fails closed instead of republishing the
-model proposal. Human
+`--review-mode` / `REVIEWSENSEI_REVIEW_MODE` before calling a fresh
+review. Recovery artifacts serialize `ReviewResult` without admission
+fields. `--recover-from` therefore uses compatible `legacy` unless the
+caller passes an explicit operator `--review-mode`, which is refused.
+Ambient `REVIEWSENSEI_REVIEW_MODE` cannot break recovery. Human
 adjudication withholds `APPROVE` through
 `evaluate_auto_approval` without inventing a proven blocker. Advisory
 observations in operator modes are folded into the review summary so required

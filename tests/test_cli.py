@@ -214,6 +214,86 @@ class CliTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "review_mode"))
         self.assertIsNone(getattr(args, "review_mode", None))
 
+    def test_github_recover_ignores_env_review_mode(self):
+        from datetime import datetime, timedelta, timezone
+
+        from review_sensei.convergence import REVIEW_MODE_ENV
+        from review_sensei.hosting import github as github_module
+        from review_sensei.models import ReviewResult
+        from review_sensei.outcomes import RecoveryArtifact
+
+        class FakeApplication:
+            instance = None
+
+            def __init__(self, **kwargs):
+                self.calls = []
+                FakeApplication.instance = self
+
+            def recover_review(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(status="published")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "diff.patch"
+            artifact_path = root / "recovery.json"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            artifact = RecoveryArtifact.create(
+                repository="owner/repo",
+                pull_request_number=2,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                result=ReviewResult(
+                    summary="Summary.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ).to_dict(),
+                expires_at=(
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                ).isoformat(),
+            )
+            artifact_path.write_text(json.dumps(artifact.to_dict()), encoding="utf-8")
+            with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
+                with patch.multiple(
+                    github_module,
+                    BrokerClient=lambda: object(),
+                    GitHubHttp=lambda: object(),
+                    ReviewPublisher=lambda **kwargs: object(),
+                    LearningPRPublisher=lambda **kwargs: object(),
+                    ConversationPublisher=lambda **kwargs: object(),
+                    GitHubApplication=FakeApplication,
+                ):
+                    status = main(
+                        [
+                            "github",
+                            "review",
+                            "--diff",
+                            str(diff_path),
+                            "--repository",
+                            "owner/repo",
+                            "--repository-id",
+                            "1",
+                            "--pull-request",
+                            "2",
+                            "--head-sha",
+                            "a" * 40,
+                            "--base-branch",
+                            "main",
+                            "--base-sha",
+                            "b" * 40,
+                            "--allow-write",
+                            "--enable-review",
+                            "--recover-from",
+                            str(artifact_path),
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        policy = FakeApplication.instance.calls[0]["convergence_policy"]
+        self.assertEqual(policy.mode, "legacy")
+        self.assertEqual(policy.enforcement, "display-only")
+
     def test_github_parser_allows_disabling_default_auto_approval(self):
         args = _github_parser().parse_args(
             [

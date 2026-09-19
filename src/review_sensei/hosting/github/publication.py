@@ -337,7 +337,12 @@ def finding_review_event(
     result: ReviewResult,
     policy: ReviewConvergencePolicy | None = None,
 ) -> tuple[str, str]:
-    """Return the GitHub review event and state for one finding publication."""
+    """Return the GitHub review event and state for one finding publication.
+
+    ``automatic_github_review_events=False`` (advisory) withholds
+    ``APPROVE`` / ``REQUEST_CHANGES``. The publisher still posts a
+    ``COMMENT`` review so folded observations have a summary body.
+    """
 
     if policy is not None and not policy.automatic_github_review_events:
         return "COMMENT", "COMMENTED"

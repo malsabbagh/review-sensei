@@ -1156,6 +1156,22 @@ class FindingAdmissionTests(unittest.TestCase):
                 candidates=(BlockerCandidate(has_specific_violation=True),),
             )
 
+    def test_partial_identity_without_path_fails_closed(self):
+        comment = ReviewComment(path="src/app.py", line=2, body="finding", side="RIGHT")
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "bind comment identity"):
+            admit_review_result(
+                ReviewResult(
+                    summary="Summary.", comments=(comment,), provider="fixture"
+                ),
+                policy,
+                candidates=(
+                    BlockerCandidate(has_specific_violation=True, line=2, side="RIGHT"),
+                ),
+            )
+
     def test_misaligned_candidates_fail_closed(self):
         result = ReviewResult(
             summary="Summary.",

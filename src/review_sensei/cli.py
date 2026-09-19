@@ -1129,7 +1129,7 @@ def _github_parser() -> argparse.ArgumentParser:
     publication_source.add_argument(
         "--recover-from",
         type=Path,
-        help="Publish a retained recovery artifact without invoking a model. Operator review modes are refused because serialized results drop admission state.",
+        help="Publish a retained recovery artifact without invoking a model. Ambient REVIEWSENSEI_REVIEW_MODE does not apply; an explicit operator --review-mode is refused because serialized results drop admission state.",
     )
     review.add_argument(
         "--allow-write",
@@ -1244,7 +1244,12 @@ def _github_parser() -> argparse.ArgumentParser:
 
 
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
-    from .convergence import resolve_review_convergence_policy
+    from .convergence import (
+        OPERATOR_REVIEW_MODES,
+        ReviewConvergencePolicy,
+        resolve_review_convergence_policy,
+        resolve_review_mode,
+    )
     from .hosting.github import (
         BrokerClient,
         ConversationPublisher,
@@ -1298,9 +1303,19 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
-        convergence_policy = resolve_review_convergence_policy(
-            mode=getattr(args, "review_mode", None)
-        )
+        explicit_mode = getattr(args, "review_mode", None)
+        if args.recover_from:
+            if (
+                explicit_mode is not None
+                and resolve_review_mode(explicit_mode) in OPERATOR_REVIEW_MODES
+            ):
+                convergence_policy = resolve_review_convergence_policy(
+                    mode=explicit_mode
+                )
+            else:
+                convergence_policy = ReviewConvergencePolicy()
+        else:
+            convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)

@@ -20,8 +20,11 @@
   under display-only enforcement fail closed. Confirmed findings require
   caller-supplied blocker facts to admit. Derived facts bind comment
   identity.
-  Omitted publication policy stays `legacy`. Operator-mode recovery of a
-  serialized result fails closed.
+  Omitted publication policy stays `legacy`. `--recover-from` uses
+  `legacy` unless an explicit operator `--review-mode` is passed.
+  Ambient `REVIEWSENSEI_REVIEW_MODE` cannot break recovery. Operator-mode
+  recovery of a serialized result still fails closed when that flag is
+  set. Advisory still posts a `COMMENT` review for folded observations.
   `legacy` and `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned
