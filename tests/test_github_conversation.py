@@ -295,18 +295,18 @@ class ConversationPublisherTests(unittest.TestCase):
             ]
         )
 
-        diff_context, changed_paths = (
-            ConversationPublisher(http=http)._load_diff_context(
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                source={},
-                source_kind="issue",
-                priority_hunks=[
-                    ("src/target.py", target_hunk),
-                    ("src/target.py", target_hunk),
-                ],
-            )
+        diff_context, changed_paths = ConversationPublisher(
+            http=http
+        )._load_diff_context(
+            token="token",
+            repository="owner/repo",
+            pull_request=1,
+            source={},
+            source_kind="issue",
+            priority_hunks=[
+                ("src/target.py", target_hunk),
+                ("src/target.py", target_hunk),
+            ],
         )
 
         self.assertIsNotNone(diff_context)

@@ -169,8 +169,7 @@ def _remove_emitted_priority_hunks(patch: str, emitted: set[str]) -> str:
             else len(lines)
         )
         if any(
-            _diff_hunks_overlap(patch_range, priority)
-            for priority in priority_ranges
+            _diff_hunks_overlap(patch_range, priority) for priority in priority_ranges
         ):
             removed = True
             continue
