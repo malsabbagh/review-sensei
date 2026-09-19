@@ -31,6 +31,12 @@ two adapters:
   the source pull request, bound by
   `<!-- reviewsensei:session:v1 repo=... pr=... gen=... digest=... -->`.
 
+The GitHub comment has a separate bounded framing allowance (`2 *
+MAX_SESSION_RECORD_BYTES`) so the serialized record, JSON fence, intro, and
+marker are capped before parsing. Schema field limits remain stricter than that
+byte ceiling; a comment that fits the transport bound but violates a field
+limit is an integrity failure, not a sizing expansion.
+
 `LocalSessionLedger` is a single-writer adapter per repository/pull-request
 identity. Its atomic replacement protects individual files but does not claim
 inter-process locking; concurrent hosted jobs use the GitHub-backed adapter's
@@ -50,8 +56,10 @@ Mutations are compare-and-swap on `generation`. `reserve` holds
 `initial` / `verification` / `failed-attempt`. `commit` applies the increment
 and is idempotent for the same `reservation_id`. `abort` drops an uncommitted
 hold. Local files migrate `schema_version=0.1` documents that use
-`pull_request_number` and have no digest; GitHub-backed loads never migrate or
-rehash. A deterministic reservation id is an idempotency key for one
+`pull_request_number`, carry an explicit `created_at`, and have no digest;
+GitHub-backed loads never migrate or rehash. Legacy expiries are bounded both
+above and below before the migrated record is accepted. A deterministic
+reservation id is an idempotency key for one
 repository/PR-head/slot attempt; after that id commits, a retry does not create
 another reservation. An abort replay that observes a later generation raises a
 CAS conflict, which tells the caller to reload rather than silently dropping a
@@ -103,6 +111,15 @@ Tradeoffs:
   file and, on POSIX, the containing directory; if the directory fsync fails
   after replacement, the write is treated as durably replaced and the caller
   receives the synchronization error without deleting the new record.
+- Local initialization uses an exclusive filesystem create for a missing
+  identity, so concurrent initializers lose explicitly instead of replacing a
+  first record. Callers with a trusted checkout root may pass it to the path
+  resolver for containment; traversal and Windows device/UNC paths are always
+  rejected.
+- GitHub discovery accepts only terminal, bot-authored session markers. When
+  an App slug is available it must match the comment author, and each mutation
+  re-discovers the marker immediately before its update to reject a stale
+  generation.
 
 ## Alternatives considered
 

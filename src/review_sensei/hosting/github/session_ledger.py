@@ -37,9 +37,9 @@ from .http import GitHubHttp
 
 SESSION_MARKER_PREFIX = "<!-- reviewsensei:session:v1"
 SESSION_MARKER_RE = re.compile(
-    r"<!-- reviewsensei:session:v1 repo=(?P<repository_id>[1-9][0-9]*) "
+    r"(?m)^<!-- reviewsensei:session:v1 repo=(?P<repository_id>[1-9][0-9]*) "
     r"pr=(?P<pull_request>[1-9][0-9]*) gen=(?P<generation>0|[1-9][0-9]*) "
-    r"digest=(?P<digest>[a-f0-9]{64}) -->"
+    r"digest=(?P<digest>[a-f0-9]{64}) -->$"
 )
 _JSON_FENCE_RE = re.compile(
     r"```json\n(?P<body>\{.*\})\n```(?=\n|$)",
@@ -86,7 +86,12 @@ def parse_session_comment(
         return None
     if identity.repository_id is None:
         raise ReviewInputError("GitHub session identity requires repository_id")
-    matches = list(SESSION_MARKER_RE.finditer(body))
+    terminal_end = len(body.rstrip())
+    matches = [
+        match
+        for match in SESSION_MARKER_RE.finditer(body)
+        if match.end() == terminal_end
+    ]
     matches = [
         match
         for match in matches
@@ -142,13 +147,24 @@ def parse_session_comment(
 class GitHubIssueCommentSessionLedger:
     """GitHub-backed session ledger using one issue comment per pull request."""
 
-    def __init__(self, http: GitHubHttp, *, token: str) -> None:
+    def __init__(
+        self,
+        http: GitHubHttp,
+        *,
+        token: str,
+        app_slug: str | None = None,
+    ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
         if not isinstance(token, str) or not token.strip():
             raise ReviewInputError("GitHub session ledger token is empty")
+        if app_slug is not None and (
+            not isinstance(app_slug, str) or not app_slug.strip()
+        ):
+            raise ReviewInputError("GitHub session ledger app slug is invalid")
         self.http = http
         self.token = token
+        self.app_slug = app_slug
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -199,6 +215,22 @@ class GitHubIssueCommentSessionLedger:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            author = item.get("user")
+            if author is None and self.app_slug is None:
+                # Older test transports omitted the always-present GitHub
+                # ``user`` object. Production callers pass ``app_slug`` and
+                # therefore require an explicit bot author below.
+                pass
+            else:
+                if not isinstance(author, dict) or author.get("type") != "Bot":
+                    continue
+                author_login = author.get("login")
+                if not isinstance(author_login, str):
+                    continue
+                if self.app_slug is not None and (
+                    author_login.casefold() != self.app_slug.casefold()
+                ):
+                    continue
             body = item.get("body")
             if (
                 not isinstance(body, str)
@@ -269,23 +301,28 @@ class GitHubIssueCommentSessionLedger:
                 )
             },
         )
-        if status not in {200, 201} or not isinstance(payload, dict):
-            if status in {409, 422, 429} or status >= 500:
-                raise GitHubPublicationTransientError(
-                    "session comment create was ambiguous"
-                )
+        ambiguous = status in {202, 409, 422, 429} or status >= 500
+        if not (200 <= status < 300 or ambiguous):
             raise GitHubPublicationError("session comment create failed")
         verified_id, verified_record = self._discover(identity, now=now)
         if verified_id is None or verified_record is None:
+            if ambiguous:
+                raise GitHubPublicationTransientError(
+                    "session comment create could not be verified"
+                )
             raise GitHubPublicationTransientError(
                 "session comment create could not be verified"
             )
-        created_id = payload.get("id")
-        if (
+        if verified_record.record_sha256 != record.record_sha256:
+            raise SessionLoadError(
+                SessionLoadReason.CONFLICT,
+                "session comment create raced with another initializer",
+            )
+        created_id = payload.get("id") if isinstance(payload, dict) else None
+        if status in {200, 201} and (
             isinstance(created_id, bool)
             or not isinstance(created_id, int)
             or created_id != verified_id
-            or verified_record.record_sha256 != record.record_sha256
         ):
             raise SessionLoadError(
                 SessionLoadReason.CONFLICT,
@@ -305,6 +342,15 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session record is missing")
         if record.expired(now=now):
             raise ReviewInputError("session record is missing")
+        latest_comment_id, latest_record = self._discover(identity, now=now)
+        if (
+            latest_comment_id != comment_id
+            or latest_record is None
+            or latest_record.record_sha256 != record.record_sha256
+            or latest_record.generation != record.generation
+        ):
+            raise ReviewInputError("session generation conflict")
+        record = latest_record
         updated = mutate(record)
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(

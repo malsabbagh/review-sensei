@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import re
 import tempfile
@@ -37,6 +38,9 @@ from .schemas import validate_public_document
 PUBLIC_SCHEMA_VERSION = "1.0"
 SESSION_LEDGER_ENV = "REVIEWSENSEI_SESSION_LEDGER"
 DEFAULT_SESSION_TTL = timedelta(days=30)
+# Keep a small lower bound when migrating an untrusted legacy expiry that is
+# still in the future, so a writable v0.1 file cannot force an immediate reset.
+MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
 MAX_SESSION_RECORD_BYTES = 4096
 # GitHub comments include a bounded intro, JSON fence, and marker around the
@@ -143,6 +147,9 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
         raise ReviewInputError("session record schema_version is unsupported")
     if "record_sha256" in value:
         raise ReviewInputError("legacy session record must not include record_sha256")
+    created_at = value.get("created_at")
+    if not isinstance(created_at, str) or not created_at.strip():
+        raise ReviewInputError("legacy session record requires created_at")
     pull_request = value.get("pull_request", value.get("pull_request_number"))
     migrated = {
         "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -156,7 +163,7 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
         "reservation_id": value.get("reservation_id"),
         "reserved_slot": value.get("reserved_slot"),
         "last_committed_reservation_id": value.get("last_committed_reservation_id"),
-        "created_at": value.get("created_at"),
+        "created_at": created_at,
         "updated_at": value.get("updated_at", value.get("created_at")),
         "expires_at": value.get("expires_at"),
     }
@@ -1039,7 +1046,13 @@ class LocalSessionLedger:
             raise ReviewInputError("session record is invalid")
         return payload
 
-    def _write(self, identity: SessionIdentity, record: SessionRecord) -> None:
+    def _write(
+        self,
+        identity: SessionIdentity,
+        record: SessionRecord,
+        *,
+        exclusive: bool = False,
+    ) -> None:
         path = self._path(identity)
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(
@@ -1054,14 +1067,24 @@ class LocalSessionLedger:
             prefix=f".{identity.pull_request}.",
             suffix=".tmp",
         )
-        replaced = False
+        installed = False
+        temporary_removed = False
         try:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
             handle.close()
-            os.replace(handle.name, path)
-            replaced = True
+            if exclusive:
+                # Link a fully fsynced temporary file into place without
+                # replacing an existing destination. This is the filesystem
+                # equivalent of O_CREAT|O_EXCL for initialization.
+                os.link(handle.name, path)
+                installed = True
+                os.unlink(handle.name)
+                temporary_removed = True
+            else:
+                os.replace(handle.name, path)
+                installed = True
             if os.name != "nt":
                 directory_fd = os.open(path.parent, os.O_RDONLY)
                 try:
@@ -1070,12 +1093,16 @@ class LocalSessionLedger:
                     os.close(directory_fd)
         except OSError as exc:
             handle.close()
-            if not replaced:
+            if not installed and not temporary_removed:
                 try:
                     os.unlink(handle.name)
                 except OSError:
                     pass
-            if replaced:
+            if exclusive and isinstance(exc, FileExistsError):
+                raise ReviewInputError(
+                    "session already exists (concurrent initialization)"
+                ) from exc
+            if installed:
                 raise ReviewInputError(
                     "session ledger replaced but directory sync failed"
                 ) from exc
@@ -1090,18 +1117,34 @@ class LocalSessionLedger:
                 return SessionLoadResult(status="missing")
             if document.get("schema_version") == "0.1":
                 migrated = migrate_session_document(document)
-                created_at = str(
-                    migrated.get("created_at") or _format_datetime(_aware_now(now))
-                )
+                created_at_value = migrated.get("created_at")
+                if not isinstance(created_at_value, str) or not created_at_value:
+                    raise ReviewInputError("legacy session record requires created_at")
+                created_at = created_at_value
                 created_time = _parse_aware_datetime(created_at, label="created_at")
                 expires_value = migrated.get("expires_at")
                 if expires_value is None:
                     expires_at = created_time + DEFAULT_SESSION_TTL
                 else:
-                    expires_at = _parse_aware_datetime(
+                    parsed_expires_at = _parse_aware_datetime(
                         expires_value, label="expires_at"
                     )
-                    expires_at = min(expires_at, created_time + MAX_SESSION_TTL)
+                    current = _aware_now(now)
+                    if parsed_expires_at <= current:
+                        raise ReviewInputError(
+                            "legacy session expires_at is already expired"
+                        )
+                    maximum_expiry = created_time + MAX_SESSION_TTL
+                    minimum_expiry = max(
+                        created_time + MIN_SESSION_TTL,
+                        current + MIN_SESSION_TTL,
+                    )
+                    if maximum_expiry < minimum_expiry:
+                        raise ReviewInputError(
+                            "legacy session expiry cannot satisfy the configured bounds"
+                        )
+                    expires_at = min(parsed_expires_at, maximum_expiry)
+                    expires_at = max(expires_at, minimum_expiry)
                 migrated_record = SessionRecord.create(
                     identity,
                     now=created_time,
@@ -1167,7 +1210,7 @@ class LocalSessionLedger:
         if loaded.status in {"integrity-failed", "conflict"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
-        self._write(identity, record)
+        self._write(identity, record, exclusive=loaded.status == "missing")
         return record
 
     def persist_migrated(
@@ -1254,16 +1297,51 @@ class LocalSessionLedger:
 
 def resolve_local_session_ledger(
     path: str | Path | None = None,
+    *,
+    trusted_root: str | Path | None = None,
 ) -> LocalSessionLedger | None:
-    """Return a local ledger from ``--session-ledger`` or the ambient env."""
+    """Return a local ledger from ``--session-ledger`` or the ambient env.
+
+    Callers with a trusted checkout boundary may pass ``trusted_root`` to
+    contain the resolved ledger directory. Without that boundary the operator
+    owns the explicitly supplied location, but traversal and Windows namespace
+    paths are rejected and relative paths are canonicalized once.
+    """
 
     raw = path if path is not None else os.getenv(SESSION_LEDGER_ENV)
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None
-    if not isinstance(raw, (str, Path)) or (isinstance(raw, str) and "\x00" in raw):
+    if not isinstance(raw, (str, Path)):
         raise ReviewInputError("session ledger path is invalid")
+    raw_text = os.fspath(raw)
+    if not isinstance(raw_text, str) or "\x00" in raw_text:
+        raise ReviewInputError("session ledger path is invalid")
+    if os.name == "nt":
+        windows_path = raw_text.replace("/", "\\")
+        if windows_path.startswith(("\\\\", "\\\\?\\", "\\\\.\\", "\\??\\")):
+            raise ReviewInputError("session ledger path is invalid")
+        if ntpath.splitdrive(windows_path)[0] and not ntpath.isabs(windows_path):
+            raise ReviewInputError("session ledger path is invalid")
     try:
         root = Path(raw)
+        if ".." in root.parts:
+            raise ReviewInputError("session ledger path traversal is not allowed")
+        root = root.resolve()
+        if trusted_root is not None:
+            if not isinstance(trusted_root, (str, Path)):
+                raise ReviewInputError("session ledger trusted root is invalid")
+            trusted_text = os.fspath(trusted_root)
+            if not isinstance(trusted_text, str) or "\x00" in trusted_text:
+                raise ReviewInputError("session ledger trusted root is invalid")
+            trusted = Path(trusted_root).resolve()
+            try:
+                root.relative_to(trusted)
+            except ValueError as exc:
+                raise ReviewInputError(
+                    "session ledger path is outside the trusted root"
+                ) from exc
+    except ReviewInputError:
+        raise
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewInputError("session ledger path is invalid") from exc
     return LocalSessionLedger(root)

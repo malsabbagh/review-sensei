@@ -110,7 +110,9 @@ class GitHubApplication:
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",
         )
-        ledger = self._session_ledger_for_token(token, options=options)
+        ledger = self._session_ledger_for_token(
+            token, options=options, app_slug=app_slug
+        )
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -141,6 +143,13 @@ class GitHubApplication:
                     ledger, identity, reservation_id
                 )
                 if cleanup_error is not None:
+                    if isinstance(preparation_error, (KeyboardInterrupt, SystemExit)):
+                        preparation_error.add_note(
+                            "session reservation cleanup failed: "
+                            f"{type(cleanup_error).__name__}: "
+                            f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                        )
+                        raise
                     raise cleanup_error from preparation_error
                 raise
         try:
@@ -173,6 +182,11 @@ class GitHubApplication:
                         publication_error, (KeyboardInterrupt, SystemExit)
                     ):
                         raise cleanup_error from publication_error
+                    publication_error.add_note(
+                        "session reservation cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
             raise
         if ledger is not None and prepared is not None:
             complete_session_round(
@@ -184,7 +198,11 @@ class GitHubApplication:
         return publication
 
     def _session_ledger_for_token(
-        self, token: str, *, options: GitHubWriteOptions
+        self,
+        token: str,
+        *,
+        options: GitHubWriteOptions,
+        app_slug: str | None = None,
     ) -> SessionLedger | None:
         if self.session_ledger is not None:
             return self.session_ledger
@@ -194,7 +212,9 @@ class GitHubApplication:
 
         if self.http is None:
             raise GitHubPublicationError("GitHub session ledger requires HTTP")
-        return GitHubIssueCommentSessionLedger(self.http, token=token)
+        return GitHubIssueCommentSessionLedger(
+            self.http, token=token, app_slug=app_slug
+        )
 
     @staticmethod
     def _abort_held_session_reservation(
@@ -217,10 +237,9 @@ class GitHubApplication:
                     expected_generation=loaded.record.generation,
                 )
         except BaseException as exc:
-            # Preserve interrupts, but return ordinary cleanup failures so the
-            # caller can surface a stuck-reservation diagnostic.
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                return None
+            # Return every cleanup failure. The caller preserves an original
+            # interrupt while attaching a bounded note, instead of silently
+            # hiding a stuck reservation.
             return exc
         return None
 

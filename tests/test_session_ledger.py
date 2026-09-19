@@ -26,9 +26,11 @@ from review_sensei.models import ReviewResult
 from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_TTL,
+    MIN_SESSION_TTL,
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    SessionLoadResult,
     SessionRecord,
     complete_session_round,
     migrate_session_document,
@@ -189,6 +191,62 @@ class LocalSessionLedgerTests(unittest.TestCase):
     def test_invalid_ledger_path_is_sanitized(self):
         with self.assertRaisesRegex(ReviewInputError, "path is invalid"):
             resolve_local_session_ledger("bad\x00path")
+
+    def test_ledger_path_can_be_contained_by_a_trusted_root(self):
+        with tempfile.TemporaryDirectory() as trusted_raw:
+            trusted = Path(trusted_raw)
+            ledger = resolve_local_session_ledger(
+                trusted / "ledger", trusted_root=trusted
+            )
+            self.assertEqual(ledger.root, (trusted / "ledger").resolve())
+            with self.assertRaisesRegex(ReviewInputError, "outside the trusted root"):
+                resolve_local_session_ledger(
+                    trusted.parent / "escape", trusted_root=trusted
+                )
+
+    def test_initialize_uses_exclusive_create_for_a_stale_missing_read(self):
+        first = self.ledger.initialize(IDENTITY, now=FIXED_NOW)
+        del first
+        second = LocalSessionLedger(Path(self.temp.name))
+        with patch.object(
+            second, "load", return_value=SessionLoadResult(status="missing")
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "concurrent initialization"):
+                second.initialize(IDENTITY, now=FIXED_NOW)
+
+    def test_legacy_short_expiry_is_floored(self):
+        legacy = {
+            "schema_version": "0.1",
+            "repository": IDENTITY.repository,
+            "pull_request_number": IDENTITY.pull_request,
+            "repository_id": IDENTITY.repository_id,
+            "created_at": FIXED_NOW.isoformat().replace("+00:00", "Z"),
+            "expires_at": (FIXED_NOW + timedelta(seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        path = self.ledger._path(IDENTITY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "migrated")
+        self.assertGreaterEqual(
+            datetime.fromisoformat(loaded.record.expires_at.replace("Z", "+00:00")),
+            FIXED_NOW + MIN_SESSION_TTL,
+        )
+
+    def test_legacy_missing_created_at_fails_closed(self):
+        legacy = {
+            "schema_version": "0.1",
+            "repository": IDENTITY.repository,
+            "pull_request_number": IDENTITY.pull_request,
+        }
+        path = self.ledger._path(IDENTITY)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        self.assertEqual(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed"
+        )
 
     def test_legacy_v01_migrates_counters(self):
         created = SessionRecord.create(
@@ -400,6 +458,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 json_response({"id": 7, "body": body}, status=201),
                 json_response([{"id": 7, "body": body}]),
                 json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
                 json_response({"id": 7, "body": reserved_body}),
             ]
         )
@@ -455,6 +514,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         http, _calls = make_http(
             [
                 json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
                 json_response({"id": 8, "body": reserved_body}),
             ]
         )
@@ -467,6 +527,86 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 expected_generation=0,
                 now=FIXED_NOW,
             )
+
+    def test_update_rejects_a_competing_generation_before_patch(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        competing = record.evolve(now=FIXED_NOW, generation=1)
+        competing_body = render_session_comment(
+            repository_id=99, pull_request=136, record=competing
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": competing_body}]),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            ledger.reserve(
+                IDENTITY,
+                slot="initial",
+                reservation_id="abcd1234",
+                expected_generation=0,
+                now=FIXED_NOW,
+            )
+        self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
+
+    def test_update_rejects_a_different_record_digest(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        competing = record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="ffff1234",
+            reserved_slot="initial",
+        )
+        competing_body = render_session_comment(
+            repository_id=99, pull_request=136, record=competing
+        )
+        http, _calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"id": 7, "body": competing_body}),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        with self.assertRaisesRegex(ReviewInputError, "update lost"):
+            ledger.reserve(
+                IDENTITY,
+                slot="initial",
+                reservation_id="abcd1234",
+                expected_generation=0,
+                now=FIXED_NOW,
+            )
+
+    def test_human_marker_is_ignored(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, _calls = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "id": 7,
+                            "body": body,
+                            "user": {"login": "attacker", "type": "User"},
+                        }
+                    ]
+                )
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="reviewsensei[bot]"
+        )
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+
+    def test_marker_must_be_terminal(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        quoted = f"{body}\nQuoted after marker"
+        self.assertIsNone(parse_session_comment(quoted, identity=IDENTITY))
 
     def test_multiple_markers_fail_closed(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -513,8 +653,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
     def test_malformed_session_comment_maps_to_integrity_failed(self):
         body = (
+            "```json\n{}\n```\n"
             f"{SESSION_MARKER_PREFIX} repo=99 pr=136 gen=0 "
-            f"digest={'0' * 64} -->\n```json\n{{}}\n```"
+            f"digest={'0' * 64} -->"
         )
         http, _calls = make_http([json_response([{"id": 1, "body": body}])])
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
