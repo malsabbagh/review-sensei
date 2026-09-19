@@ -834,6 +834,14 @@ def mutate_commit(
     if record.reservation_id != reservation_id or record.reserved_slot is None:
         raise ReviewInputError("session reservation does not match")
     increments = _apply_slot(record, record.reserved_slot)
+    allowed_increments = {
+        "completed_initial_reviews",
+        "completed_verification_rounds",
+        "failed_attempts",
+    }
+    unexpected_increments = set(increments) - allowed_increments
+    if unexpected_increments:
+        raise ReviewInputError("session counter increment is unsupported")
     return record.evolve(
         now=now,
         generation=_next_generation(record),

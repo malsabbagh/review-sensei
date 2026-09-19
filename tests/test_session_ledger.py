@@ -400,6 +400,27 @@ class RoundPersistenceTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
         self.assertEqual(loaded.record.completed_initial_reviews, 0)
 
+    def test_commit_rejects_unknown_counter_increments(self):
+        ledger = InMemorySessionLedger()
+        prepared = prepare_session_round(
+            ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="strict"),
+            reservation_id="abcd1234",
+            now=FIXED_NOW,
+        )
+        with patch(
+            "review_sensei.session._apply_slot",
+            return_value={"unexpected_counter": 1},
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "increment is unsupported"):
+                ledger.commit(
+                    IDENTITY,
+                    reservation_id="abcd1234",
+                    expected_generation=prepared.record.generation,
+                    now=FIXED_NOW,
+                )
+
     def test_complete_session_round_is_idempotent_after_commit_and_abort(self):
         commit_ledger = InMemorySessionLedger()
         commit_prepared = prepare_session_round(
