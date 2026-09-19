@@ -1009,10 +1009,11 @@ def _safe_ledger_name(repository: str) -> str:
 class LocalSessionLedger:
     """Filesystem ledger under an operator-supplied directory.
 
-    This adapter assumes a single writer per repository/pull-request identity. Its
-    atomic file replacement protects individual writes, but it does not claim
-    inter-process locking; concurrent hosted jobs should use the GitHub-backed
-    adapter instead.
+    This adapter assumes a single writer per repository/pull-request identity.
+    Its atomic file replacement protects individual writes, but it does not
+    claim inter-process locking; concurrent hosted jobs should use the
+    GitHub-backed adapter instead, whose hosted checks are also best-effort
+    unless the deployment serializes writers.
     """
 
     SINGLE_WRITER_PER_IDENTITY = True
@@ -1128,6 +1129,16 @@ class LocalSessionLedger:
                     raise ReviewInputError("legacy session record requires created_at")
                 created_at = created_at_value
                 created_time = _parse_aware_datetime(created_at, label="created_at")
+                updated_at_value = migrated.get("updated_at")
+                if not isinstance(updated_at_value, str) or not updated_at_value:
+                    raise ReviewInputError("legacy session record requires updated_at")
+                updated_time = _parse_aware_datetime(
+                    updated_at_value, label="updated_at"
+                )
+                if updated_time < created_time:
+                    raise ReviewInputError(
+                        "legacy session updated_at precedes created_at"
+                    )
                 expires_value = migrated.get("expires_at")
                 if expires_value is None:
                     expires_at = created_time + DEFAULT_SESSION_TTL
@@ -1151,10 +1162,10 @@ class LocalSessionLedger:
                         )
                     expires_at = min(parsed_expires_at, maximum_expiry)
                     expires_at = max(expires_at, minimum_expiry)
-                migrated_record = SessionRecord.create(
-                    identity,
-                    now=created_time,
-                    expires_at=_format_datetime(expires_at),
+                migrated_record = SessionRecord._construct(
+                    repository=identity.repository,
+                    pull_request=identity.pull_request,
+                    repository_id=identity.repository_id,
                     completed_initial_reviews=_require_bounded_int(
                         migrated["completed_initial_reviews"],
                         label="completed_initial_reviews",
@@ -1184,6 +1195,9 @@ class LocalSessionLedger:
                     last_committed_reservation_id=migrated.get(
                         "last_committed_reservation_id"
                     ),  # type: ignore[arg-type]
+                    created_at=_format_datetime(created_time),
+                    updated_at=_format_datetime(updated_time),
+                    expires_at=_format_datetime(expires_at),
                 )
                 if migrated_record.expired(now=now):
                     return SessionLoadResult(status="expired")
@@ -1341,7 +1355,8 @@ def resolve_local_session_ledger(
             trusted_text = os.fspath(trusted_root)
             if not isinstance(trusted_text, str) or "\x00" in trusted_text:
                 raise ReviewInputError("session ledger trusted root is invalid")
-            trusted = Path(trusted_root).resolve()
+            trusted_text = os.path.expandvars(os.path.expanduser(trusted_text))
+            trusted = Path(trusted_text).resolve()
             try:
                 root.relative_to(trusted)
             except ValueError as exc:

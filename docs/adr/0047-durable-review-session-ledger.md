@@ -63,19 +63,28 @@ and is idempotent for the same `reservation_id`. `abort` drops an uncommitted
 hold. Local files migrate `schema_version=0.1` documents that use
 `pull_request_number`, carry an explicit `created_at`, and have no digest;
 GitHub-backed loads never migrate or rehash. Legacy expiries are bounded both
-above and below before the migrated record is accepted. A deterministic
+above and below before the migrated record is accepted; legacy `updated_at` is
+validated and retained (or normalized from `created_at` when omitted). A
+deterministic
 reservation id is an idempotency key for one
 repository/PR-head/slot attempt; after that id commits, a retry does not create
 another reservation. An abort replay that observes a later generation raises a
 CAS conflict, which tells the caller to reload rather than silently dropping a
 different writer's reservation.
 
+Initialization is an idempotent ensure operation for an already validated
+record. A caller that loses the initial read/create race can continue with the
+record discovered from the winning writer; torn creates that leave multiple
+markers still fail closed as a conflict.
+
 The visible consumer is doctor/plan display plus GitHub publication
 write-through. Operator modes (`advisory`, `merge-focused`, `strict`) reserve
 before `ReviewPublisher.publish` and commit only when the publication status is
-`published`. `legacy` may initialize a missing record for display, but it does
-not reserve or count a round. C3 does not refuse a review when the C1 decision
-would hand off; that enforcement remains C5. `REVIEWSENSEI_AUTO_APPROVE` and
+`published`; every other publication result aborts the hold without counting,
+so stale-head and transient retries remain eligible for a later attempt.
+`legacy` may initialize a missing record for display, but it does not reserve or
+count a round. C3 does not refuse a review when the C1 decision would hand off;
+that enforcement remains C5. `REVIEWSENSEI_AUTO_APPROVE` and
 #114/#115 gates are unchanged.
 
 ## Scope

@@ -229,6 +229,14 @@ class LocalSessionLedgerTests(unittest.TestCase):
                     trusted.parent / "escape", trusted_root=trusted
                 )
 
+    def test_trusted_root_expands_home_and_environment(self):
+        with tempfile.TemporaryDirectory() as raw:
+            with patch.dict(os.environ, {"HOME": raw, "RS_TRUSTED_ROOT": raw}):
+                ledger = resolve_local_session_ledger(
+                    "~/ledger", trusted_root="$RS_TRUSTED_ROOT"
+                )
+                self.assertEqual(ledger.root, (Path(raw) / "ledger").resolve())
+
     def test_initialize_uses_exclusive_create_for_a_stale_missing_read(self):
         first = self.ledger.initialize(IDENTITY, now=FIXED_NOW)
         del first
@@ -287,6 +295,9 @@ class LocalSessionLedgerTests(unittest.TestCase):
             "failed_attempts": 0,
             "generation": 0,
             "created_at": created.created_at,
+            "updated_at": (FIXED_NOW + timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
         }
         migrated = migrate_session_document(legacy)
         self.assertEqual(migrated["pull_request"], 136)
@@ -296,6 +307,10 @@ class LocalSessionLedgerTests(unittest.TestCase):
         loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "migrated")
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(
+            loaded.record.updated_at,
+            (FIXED_NOW + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        )
         self.assertEqual(loaded.record.expires_at, created.expires_at)
 
     def test_legacy_v01_clamps_overlong_expiry(self):
@@ -524,6 +539,14 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
         with self.assertRaisesRegex(ReviewInputError, "multiple session comments"):
             ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+    def test_initialize_is_idempotent_when_another_writer_already_created(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, calls = make_http([json_response([{"id": 7, "body": body}])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        self.assertEqual(ledger.initialize(IDENTITY, now=FIXED_NOW), record)
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
 
     def test_update_rejects_a_different_comment_id(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -1019,6 +1042,45 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         self.assertEqual(result.status, "published")
         loaded = ledger.load(IDENTITY)
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+
+    def test_non_published_publication_aborts_without_counting(self):
+        from review_sensei.hosting.github import PublicationResult
+
+        class Broker:
+            def exchange(self, token, *, capability=None):
+                return "capability-token"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                return PublicationResult(status="skipped_stale", review_id=None)
+
+        ledger = InMemorySessionLedger()
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+            session_ledger=ledger,
+        )
+        result = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+            diff="diff",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertEqual(result.status, "skipped_stale")
+        loaded = ledger.load(IDENTITY)
+        self.assertEqual(loaded.record.completed_initial_reviews, 0)
+        self.assertIsNone(loaded.record.reservation_id)
 
 
 class DiagnosticSessionTests(unittest.TestCase):

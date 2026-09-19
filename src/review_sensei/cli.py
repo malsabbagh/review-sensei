@@ -1317,6 +1317,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     http = GitHubHttp()
     session_ledger = None
     if args.command == "review":
+        if (
+            getattr(args, "session_ledger", None) is not None
+            or getattr(args, "github_session_ledger", False)
+        ) and (
+            not getattr(args, "repository", None)
+            or getattr(args, "pull_request", None) is None
+        ):
+            raise ReviewInputError(
+                "session ledger requires --repository and --pull-request"
+            )
         session_ledger = resolve_local_session_ledger(
             getattr(args, "session_ledger", None)
         )

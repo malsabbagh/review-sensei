@@ -24,8 +24,12 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "repository": {"type": "string", "minLength": 1, "maxLength": 256},
-    "pull_request": {"type": "integer", "minimum": 1},
-    "repository_id": {"type": ["integer", "null"], "minimum": 1},
+    "pull_request": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "repository_id": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 2147483647
+    },
     "completed_initial_reviews": {"type": "integer", "minimum": 0, "maximum": 32},
     "completed_verification_rounds": {"type": "integer", "minimum": 0, "maximum": 32},
     "failed_attempts": {"type": "integer", "minimum": 0, "maximum": 32},

@@ -160,7 +160,9 @@ class GitHubIssueCommentSessionLedger:
     The GitHub REST API path used here has no conditional PATCH primitive, so
     generation checks are advisory across independent writers. A deployment
     that needs strict compare-and-swap semantics must serialize mutations
-    outside this adapter.
+    outside this adapter. The caller supplies the short-lived capability token
+    exchanged for the review-publication capability; this adapter deliberately
+    uses only the issue-comment endpoints on the shared bounded HTTP client.
     """
 
     def __init__(
@@ -301,7 +303,13 @@ class GitHubIssueCommentSessionLedger:
     ) -> SessionRecord:
         loaded = self.load(identity, now=now)
         if loaded.status in {"ok", "migrated"}:
-            raise ReviewInputError("session already exists")
+            # Initialization is an idempotent ensure operation. A caller can
+            # observe ``missing`` and lose the race before its second load;
+            # returning the already validated marker lets that loser continue
+            # with the same durable identity instead of failing spuriously.
+            if loaded.record is None:
+                raise ReviewInputError("session load returned no record")
+            return loaded.record
         if loaded.status in {"integrity-failed", "conflict"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         repository_id = self._require_identity(identity)
