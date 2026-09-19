@@ -46,8 +46,12 @@ cross-process protection is therefore best-effort; deployments requiring a
 strict no-lost-update guarantee must serialize writers for an identity.
 
 Session identity is the ADR 0042 pair `repository` + `pull_request`. Optional
-`repository_id` binds GitHub comments. Head SHA, model, and policy digests are
-not part of the key and cannot reset the round limit.
+`repository_id` binds GitHub comments; the repository slug remains the
+canonical cross-adapter key, while the numeric id is only a hosted-comment
+ownership check. A repository rename is therefore a new slug identity unless
+an operator performs an explicit migration; the adapter never silently joins
+records across those identities. Head SHA, model, and policy digests are not
+part of the key and cannot reset the round limit.
 
 Records store only counters, CAS `generation`, a paired reservation, expiry,
 and `record_sha256`. They never contain source, prompts, findings, or provider
@@ -68,9 +72,9 @@ validated and retained (or normalized from `created_at` when omitted). A
 deterministic
 reservation id is an idempotency key for one
 repository/PR-head/slot attempt; after that id commits, a retry does not create
-another reservation. An abort replay that observes a later generation raises a
-CAS conflict, which tells the caller to reload rather than silently dropping a
-different writer's reservation.
+another reservation. An abort replay is a no-op once the reservation is
+already absent; an active reservation owned by another id still raises a CAS
+conflict, so stale cleanup cannot drop a different writer's hold.
 
 Initialization is an idempotent ensure operation for an already validated
 record. A caller that loses the initial read/create race can continue with the

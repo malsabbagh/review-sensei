@@ -437,11 +437,42 @@ class RoundPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(replayed_abort, aborted)
         self.assertEqual(replayed_abort.completed_initial_reviews, 0)
-        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+        self.assertEqual(
             abort_ledger.abort(
                 IDENTITY,
                 reservation_id="ffff1234",
                 expected_generation=abort_prepared.record.generation,
+                now=FIXED_NOW,
+            ),
+            aborted,
+        )
+
+        held_ledger = InMemorySessionLedger()
+        held_prepared = prepare_session_round(
+            held_ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="strict"),
+            reservation_id="aaaa1234",
+            now=FIXED_NOW,
+        )
+        released = held_ledger.abort(
+            IDENTITY,
+            reservation_id="aaaa1234",
+            expected_generation=held_prepared.record.generation,
+            now=FIXED_NOW,
+        )
+        competing = held_ledger.reserve(
+            IDENTITY,
+            slot="initial",
+            reservation_id="bbbb1234",
+            expected_generation=released.generation,
+            now=FIXED_NOW,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "reservation does not match"):
+            held_ledger.abort(
+                IDENTITY,
+                reservation_id="aaaa1234",
+                expected_generation=competing.generation,
                 now=FIXED_NOW,
             )
 

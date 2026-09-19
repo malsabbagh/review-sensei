@@ -663,6 +663,8 @@ def mutate_reserved(
     now: datetime | None = None,
 ) -> SessionRecord:
     if record.last_committed_reservation_id == reservation_id:
+        # A committed id is an idempotency key for the same logical attempt;
+        # callers must not reuse it for a different reservation slot.
         return record
     if record.generation != expected_generation:
         raise ReviewInputError("session generation conflict")
@@ -717,16 +719,14 @@ def mutate_abort(
 ) -> SessionRecord:
     """Release a reservation with CAS.
 
-    An already-absent reservation is a no-op only when the expected generation
-    still matches; a stale replay raises a generation conflict.
+    An already-absent reservation is a no-op because there is no hold left to
+    release. A live reservation owned by another id remains a conflict.
     """
 
     if (
         record.reservation_id is None
         and record.last_committed_reservation_id != reservation_id
     ):
-        if record.generation != expected_generation:
-            raise ReviewInputError("session generation conflict")
         return record
     if (
         record.last_committed_reservation_id == reservation_id
@@ -846,21 +846,6 @@ def complete_session_round(
         ):
             return loaded.record
         raise ReviewInputError("session completion replay is inconsistent")
-    if (
-        not published
-        and loaded.status in {"ok", "migrated"}
-        and loaded.record is not None
-        and loaded.record.reservation_id is None
-        and loaded.record.generation == prepared.record.generation + 1
-        and loaded.record.completed_initial_reviews
-        == prepared.record.completed_initial_reviews
-        and loaded.record.completed_verification_rounds
-        == prepared.record.completed_verification_rounds
-        and loaded.record.failed_attempts == prepared.record.failed_attempts
-        and loaded.record.last_committed_reservation_id
-        == prepared.record.last_committed_reservation_id
-    ):
-        return loaded.record
     if published:
         return ledger.commit(
             identity,
