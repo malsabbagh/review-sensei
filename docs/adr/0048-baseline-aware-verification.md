@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-09-19
 Last amended: 2026-09-19
 GitHub Issue: #136
-Pull Request: draft PR to be linked
+Pull Request: [#140](https://github.com/malsabbagh/review-sensei/pull/140)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -125,7 +125,7 @@ omitting `baseline=` from admission and ignoring the new plan fields.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: draft PR to be linked
+- Pull request: [#140](https://github.com/malsabbagh/review-sensei/pull/140)
 - Related: [ADR 0037](0037-symbol-aware-source-context.md),
   [ADR 0042](0042-incremental-reviews-and-finding-lifecycle.md),
   [ADR 0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md),
