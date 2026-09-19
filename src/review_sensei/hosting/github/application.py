@@ -199,7 +199,19 @@ class GitHubApplication:
             )
         except BaseException as publication_error:
             if ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
-                if not isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
+                if isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
+                    if prepared is not None:
+                        try:
+                            complete_session_round(
+                                ledger, identity, prepared, published=False
+                            )
+                        except BaseException as cleanup_error:
+                            publication_error.add_note(
+                                "session reservation cleanup failed: "
+                                f"{type(cleanup_error).__name__}: "
+                                f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                else:
                     try:
                         record_session_failed_attempt(
                             ledger, identity, reservation_id=reservation
