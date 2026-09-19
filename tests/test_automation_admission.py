@@ -3,12 +3,13 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
+from argparse import ArgumentTypeError
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import main
+from review_sensei.cli import _no_progress_reason, main
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import run_doctor
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
@@ -94,9 +95,55 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
         self.assertEqual(loaded.record.completed_verification_rounds, 2)
         self.assertEqual(loaded.record.failed_attempts, 0)
+        self.assertEqual(loaded.record.generation, record.generation)
         self.assertEqual(
             admission_diagnostic(prepared.decision), "round-budget-exhausted"
         )
+
+    def test_no_progress_reason_is_bounded_and_non_empty(self):
+        self.assertEqual(
+            _no_progress_reason("  verified contradiction  "),
+            "verified contradiction",
+        )
+        with self.assertRaises(ArgumentTypeError):
+            _no_progress_reason("\n")
+        with self.assertRaises(ArgumentTypeError):
+            _no_progress_reason("x" * 257)
+
+    def test_no_progress_requires_operator_mode_and_ledger(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            diff_path = root / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            response_path = root / "response.json"
+            response_path.write_text('{"summary":"ok","comments":[]}', encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(response_path),
+                        "--review-mode",
+                        "merge-focused",
+                        "--no-progress",
+                        "verified contradiction",
+                        "--repository",
+                        IDENTITY.repository,
+                        "--pull-request",
+                        str(IDENTITY.pull_request),
+                        "--head-sha",
+                        HEAD,
+                    ]
+                )
+            self.assertEqual(status, 1)
+            self.assertIn(
+                "--no-progress requires an operator review mode and session ledger",
+                stderr.getvalue(),
+            )
 
     def test_in_flight_reservation_pauses_other_jobs(self):
         ledger = InMemorySessionLedger()

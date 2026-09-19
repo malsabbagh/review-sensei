@@ -218,10 +218,6 @@ class GitHubApplication:
                             ledger, identity, reservation_id=reservation
                         )
                     except BaseException as cleanup_error:
-                        if not isinstance(
-                            publication_error, (KeyboardInterrupt, SystemExit)
-                        ):
-                            raise cleanup_error from publication_error
                         publication_error.add_note(
                             "session reservation cleanup failed: "
                             f"{type(cleanup_error).__name__}: "
@@ -231,10 +227,6 @@ class GitHubApplication:
                 try:
                     complete_session_round(ledger, identity, prepared, published=False)
                 except BaseException as cleanup_error:
-                    if not isinstance(
-                        publication_error, (KeyboardInterrupt, SystemExit)
-                    ):
-                        raise cleanup_error from publication_error
                     publication_error.add_note(
                         "session reservation cleanup failed: "
                         f"{type(cleanup_error).__name__}: "
@@ -559,6 +551,9 @@ def _publication_round_flags(
     return {
         "coverage_complete": coverage_complete,
         "independently_approval_eligible": eligible,
+        # ReviewPublisher performs the exact-head preflight immediately before
+        # publishing. A stale head returns a non-published result, and the
+        # caller aborts the reservation rather than counting the round.
         "latest_head_reviewed": True,
         "no_progress": no_progress,
     }

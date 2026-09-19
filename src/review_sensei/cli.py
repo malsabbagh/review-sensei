@@ -515,6 +515,17 @@ def _continuation_rounds(value: str) -> int:
     return parsed
 
 
+def _no_progress_reason(value: str) -> str:
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("must not be empty")
+    if len(reason) > 256:
+        raise argparse.ArgumentTypeError("must be at most 256 characters")
+    if not reason.isprintable():
+        raise argparse.ArgumentTypeError("must contain printable text only")
+    return reason
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
@@ -709,8 +720,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-progress",
-        action="store_true",
-        help="Escalate immediately for a verified no-progress / contradictory-recommendation handoff.",
+        type=_no_progress_reason,
+        metavar="REASON",
+        help=(
+            "Escalate immediately for a verified no-progress / contradictory-"
+            "recommendation handoff; requires an operator mode and session ledger."
+        ),
     )
     return parser
 
@@ -1255,8 +1270,12 @@ def _github_parser() -> argparse.ArgumentParser:
     )
     review.add_argument(
         "--no-progress",
-        action="store_true",
-        help="Escalate immediately for a verified no-progress / contradictory-recommendation handoff.",
+        type=_no_progress_reason,
+        metavar="REASON",
+        help=(
+            "Escalate immediately for a verified no-progress / contradictory-"
+            "recommendation handoff; requires an operator mode and session ledger."
+        ),
     )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
@@ -1423,6 +1442,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 convergence_policy = ReviewConvergencePolicy()
         else:
             convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
+        no_progress_reason = getattr(args, "no_progress", None)
+        ledger_enabled = session_ledger is not None or bool(
+            getattr(args, "github_session_ledger", False)
+        )
+        if no_progress_reason is not None and (
+            not ledger_enabled or convergence_policy.mode not in OPERATOR_REVIEW_MODES
+        ):
+            raise ReviewInputError(
+                "--no-progress requires an operator review mode and session ledger"
+            )
         if args.recover_from:
             try:
                 artifact = load_recovery_artifact(args.recover_from)
@@ -1516,7 +1545,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 app_slug=args.app_slug,
                 convergence_policy=convergence_policy,
                 continuation_rounds=getattr(args, "continue_rounds", 0),
-                no_progress=bool(getattr(args, "no_progress", False)),
+                no_progress=no_progress_reason is not None,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
@@ -1967,8 +1996,20 @@ def main(argv: list[str] | None = None) -> int:
             mode=getattr(args, "review_mode", None)
         )
         ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
+        no_progress_reason = getattr(args, "no_progress", None)
+        if no_progress_reason is not None and (
+            ledger is None
+            or policy.mode not in OPERATOR_REVIEW_MODES
+            or not args.repository
+            or args.pull_request is None
+            or not (args.head_sha or "").strip()
+        ):
+            raise ReviewInputError(
+                "--no-progress requires an operator review mode and session ledger"
+            )
         identity = None
         reservation = None
+        held_reservation: str | None = None
         if (
             ledger is not None
             and args.repository
@@ -1996,8 +2037,9 @@ def main(argv: list[str] | None = None) -> int:
                 policy,
                 reservation_id=reservation,
                 continuation_rounds=getattr(args, "continue_rounds", 0),
-                no_progress=bool(getattr(args, "no_progress", False)),
+                no_progress=no_progress_reason is not None,
             )
+            held_reservation = prepared_round.reservation_id
             if should_skip_automation(prepared_round.decision, inference=True):
                 outcome = RunOutcome(
                     "skipped_policy",
@@ -2089,21 +2131,23 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 ledger is not None
                 and identity is not None
-                and reservation is not None
+                and held_reservation is not None
                 and policy.mode in OPERATOR_REVIEW_MODES
             ):
                 record_session_failed_attempt(
-                    ledger, identity, reservation_id=reservation
+                    ledger, identity, reservation_id=held_reservation
                 )
             raise
         if (
             run.result is None
             and ledger is not None
             and identity is not None
-            and reservation is not None
+            and held_reservation is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            record_session_failed_attempt(ledger, identity, reservation_id=reservation)
+            record_session_failed_attempt(
+                ledger, identity, reservation_id=held_reservation
+            )
         outcome = replace(
             run.outcome,
             base_sha=(args.base_sha or "").strip().lower() or None,
