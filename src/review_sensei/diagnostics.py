@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .convergence import ReviewConvergencePolicy, resolve_review_convergence_policy
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
 from .provider_config import (
@@ -327,6 +328,7 @@ def run_doctor(
     context_root: Path | None = None,
     include_network: bool = False,
     provider_mode: str | None = None,
+    review_mode: str | None = None,
     repository: str | None = None,
     profile: str | None = None,
     provider: str | None = None,
@@ -352,6 +354,11 @@ def run_doctor(
     ``provider_mode`` reports operator configuration only.  When omitted, doctor
     reads ``REVIEWSENSEI_PROVIDER_MODE`` as a diagnostic default; this is not a
     review-time trust boundary and does not authorize provider calls.
+
+    ``review_mode`` reports the issue #136 review-convergence policy.  When
+    omitted, doctor reads ``REVIEWSENSEI_REVIEW_MODE`` and defaults to
+    ``legacy``.  The resolved policy is display-only in this slice and does not
+    change publication or ``REVIEWSENSEI_AUTO_APPROVE``.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -423,6 +430,19 @@ def run_doctor(
     except ReviewInputError as exc:
         provider_configuration = None
         checks.append(DiagnosticCheck("provider-mode", "action", str(exc)))
+    review_convergence: ReviewConvergencePolicy | None
+    try:
+        review_convergence = resolve_review_convergence_policy(mode=review_mode)
+        checks.append(
+            DiagnosticCheck(
+                "review-convergence",
+                "pass",
+                review_convergence.doctor_detail(),
+            )
+        )
+    except ReviewInputError as exc:
+        review_convergence = None
+        checks.append(DiagnosticCheck("review-convergence", "action", str(exc)))
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -580,6 +600,8 @@ def run_doctor(
     }
     if provider_configuration is not None:
         report["provider_configuration"] = provider_configuration
+    if review_convergence is not None:
+        report["review_convergence"] = review_convergence.to_dict()
     return report
 
 
@@ -596,6 +618,7 @@ def build_plan(
     model: str | None = None,
     api_key_env: str | None = None,
     provider_mode: str | None = None,
+    review_mode: str | None = None,
     base_sha: str | None = None,
     head_sha: str | None = None,
     categories_dir: Path | None = None,
@@ -680,6 +703,9 @@ def build_plan(
         "categories": categories,
         "provider_mode": mode,
         "provider_configuration": provider_configuration,
+        "review_convergence": resolve_review_convergence_policy(
+            mode=review_mode
+        ).to_dict(),
         "budgets": {
             "max_diff_bytes": DEFAULT_REVIEW_LIMITS.max_diff_bytes,
             "max_prompt_bytes": DEFAULT_REVIEW_LIMITS.max_prompt_bytes,
@@ -742,6 +768,16 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         timeout_seconds = provider_configuration.get("timeout_seconds")
         if timeout_seconds is not None:
             lines.append(f"timeout_seconds: {timeout_seconds}")
+    review_convergence = document.get("review_convergence")
+    if isinstance(review_convergence, dict) and review_convergence.get("mode"):
+        lines.append(
+            "review_convergence: "
+            f"mode={review_convergence.get('mode')} "
+            f"enforcement={review_convergence.get('enforcement')} "
+            f"initial={review_convergence.get('max_completed_initial_reviews')} "
+            f"verification={review_convergence.get('max_completed_verification_rounds')} "
+            f"failed_attempts={review_convergence.get('max_failed_attempts')}"
+        )
     identity = document.get("identity")
     if isinstance(identity, dict):
         if identity.get("base_sha") or identity.get("head_sha"):

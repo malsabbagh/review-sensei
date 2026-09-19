@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-round-decision.schema.json",
+  "title": "ReviewSensei review-round admission decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "admit",
+    "count_as_completed_round",
+    "round_kind",
+    "remaining_initial_reviews",
+    "remaining_verification_rounds",
+    "handoff",
+    "handoff_reason",
+    "may_emit_approve",
+    "cap_creates_approval"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {
+      "type": "string",
+      "enum": ["legacy", "advisory", "merge-focused", "strict"]
+    },
+    "admit": {"type": "boolean"},
+    "count_as_completed_round": {"type": "boolean"},
+    "round_kind": {
+      "type": "string",
+      "enum": ["initial", "verification", "none"]
+    },
+    "remaining_initial_reviews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "remaining_verification_rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "handoff": {"type": "boolean"},
+    "handoff_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        "round-budget-exhausted",
+        "failed-attempt-budget-exhausted",
+        "no-progress",
+        "incomplete-coverage",
+        "unreviewed-head",
+        null
+      ]
+    },
+    "may_emit_approve": {"type": "boolean"},
+    "cap_creates_approval": {"type": "boolean", "const": false}
+  }
+}

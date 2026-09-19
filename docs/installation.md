@@ -134,6 +134,7 @@ environment used to run ReviewSensei. The CLI reads:
 | `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
 | `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
 | `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
+| `REVIEWSENSEI_REVIEW_MODE` | `legacy` | Doctor/plan review-convergence mode (`legacy`, `advisory`, `merge-focused`, `strict`); publication unchanged |
 | `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
 | `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
 | `OLLAMA_API_KEY` | empty | Optional bearer credential |

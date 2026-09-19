@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "mode": "merge-focused",
+  "proposed_blocking": true,
+  "effective_blocking": true,
+  "needs_human": false,
+  "withholds_automatic_approval": true,
+  "automatic_github_review_events": true,
+  "inline_advisory_threads": false,
+  "disposition": "block",
+  "severity_reason": "material-high-critical",
+  "evidence_reason": "validated-evidence-and-failure-condition",
+  "scope_reason": "pr-attributed",
+  "admission_reason": "admitted-blocker"
+}

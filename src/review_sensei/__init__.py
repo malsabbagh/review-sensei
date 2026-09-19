@@ -30,6 +30,16 @@ from .context import (
     stable_concern_identity,
     stable_finding_fingerprint,
 )
+from .convergence import (
+    BlockerAdmissionDecision,
+    BlockerCandidate,
+    ReviewConvergencePolicy,
+    RoundAdmissionDecision,
+    RoundSessionState,
+    evaluate_blocker_admission,
+    evaluate_round_admission,
+    resolve_review_convergence_policy,
+)
 from .conversation import ConversationService
 from .coverage import CoverageManifest, coverage_approval_state
 from .diagnostics import build_plan, run_doctor
@@ -156,6 +166,14 @@ __all__ = [
     "ReviewContextSelection",
     "CoverageManifest",
     "coverage_approval_state",
+    "BlockerAdmissionDecision",
+    "BlockerCandidate",
+    "ReviewConvergencePolicy",
+    "RoundAdmissionDecision",
+    "RoundSessionState",
+    "evaluate_blocker_admission",
+    "evaluate_round_admission",
+    "resolve_review_convergence_policy",
     "LargeChangePlan",
     "ReviewChunk",
     "TotalWorkBudget",

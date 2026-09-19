@@ -35,6 +35,9 @@ SCHEMA_NAMES = (
     "candidate-finding",
     "verification-result",
     "coverage-manifest",
+    "review-convergence-policy",
+    "blocker-admission",
+    "review-round-decision",
 )
 
 
