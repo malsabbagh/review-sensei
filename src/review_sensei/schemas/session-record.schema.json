@@ -61,6 +61,7 @@
       "format": "date-time",
       "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
     },
-    "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "operator_paused": {"type": "boolean"}
   }
 }

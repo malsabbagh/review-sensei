@@ -6,7 +6,7 @@
   "required": ["schema_version", "status", "stage_summary", "provider_calls", "retry_attempts", "prompt_bytes", "response_bytes", "elapsed_ms", "diagnostic"],
   "properties": {
     "schema_version": {"const": "1.0"},
-    "status": {"enum": ["reviewed", "partial", "skipped_stale", "skipped_policy", "provider_failed", "budget_exhausted", "publication_failed", "already_published"]},
+    "status": {"enum": ["reviewed", "partial", "skipped_stale", "skipped_policy", "provider_failed", "budget_exhausted", "publication_failed", "already_published", "action_required"]},
     "repository": {"type": ["string", "null"], "maxLength": 256},
     "pull_request_number": {"type": ["integer", "null"], "minimum": 1},
     "base_sha": {"type": ["string", "null"], "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},

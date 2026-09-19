@@ -58,6 +58,7 @@ Process: `docs/process/adr-process.md`
 | [0047](0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 | Local and GitHub-backed adapters; CAS/expiry; no publication refusal |
 | [0048](0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification scope and late-finding classification | #136 | Reuses ADR 0042 plans and related paths; omission is not a fix |
 | [0049](0049-automation-admission-and-handoff.md) | Proposed | Enforce PR-wide round admission before inference and publication | #136 | Pause/duplicate/no-progress/continuation; cap never mints approval |
+| [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff |
 
 ## Policy
 
