@@ -8,6 +8,7 @@ those per-request limits or silently truncating work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Sequence
 
 from .coverage import (
     COVERAGE_OUTCOMES,
@@ -24,6 +25,7 @@ from .validation import (
     ReviewLimits,
     TotalWorkBudget,
     utf8_size,
+    validate_repository_path,
 )
 
 MAX_RELATED_PATHS = 32
@@ -159,6 +161,32 @@ def _related_paths(path: str, changed: tuple[str, ...]) -> tuple[str, ...]:
             related.append(candidate)
         if len(related) >= MAX_RELATED_PATHS:
             break
+    return tuple(related)
+
+
+def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    """Return bounded same-directory siblings among the changed paths.
+
+    Issue #136 C4 reuses this directory relationship as cross-file impact
+    when a caller has not supplied symbol-aware related paths from #40.
+    """
+
+    if isinstance(changed_paths, (str, bytes)):
+        raise ReviewInputError("changed paths must be a sequence of paths")
+    changed = tuple(changed_paths)
+    related: list[str] = []
+    for path in changed:
+        validate_repository_path(path, label="changed path")
+    for path in changed:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        for candidate in changed:
+            if candidate == path:
+                continue
+            candidate_parent = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
+            if candidate_parent == parent and candidate not in related:
+                if len(related) >= MAX_RELATED_PATHS:
+                    raise ReviewInputError("related paths exceed MAX_RELATED_PATHS")
+                related.append(candidate)
     return tuple(related)
 
 
@@ -616,4 +644,5 @@ __all__ = [
     "is_generated_path",
     "merge_chunk_coverage",
     "plan_change",
+    "related_paths_for_change",
 ]

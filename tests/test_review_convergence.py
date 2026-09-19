@@ -257,6 +257,14 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 "contradictory-evidence-needs-human",
             ),
             (
+                "classification needs human without contradiction",
+                _admitted(needs_human=True),
+                merge,
+                "human-adjudication",
+                False,
+                "classification-needs-human",
+            ),
+            (
                 "weak high-impact needs human",
                 _admitted(high_impact_weakly_supported=True),
                 merge,
@@ -380,6 +388,7 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 scope_reason="pr-attributed",
                 admission_reason="admitted-blocker",
             )
+
         with self.assertRaisesRegex(ReviewInputError, "requires effective_blocking"):
             BlockerAdmissionDecision(
                 mode="merge-focused",
@@ -410,6 +419,17 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 scope_reason="pr-attributed",
                 admission_reason="weak-high-impact-needs-human",
             )
+
+    def test_classification_needs_human_precedes_contradictory_evidence(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        candidate = _admitted(
+            needs_human=True,
+            has_contradictory_evidence=True,
+        )
+        decision = evaluate_blocker_admission(candidate, policy)
+        self.assertEqual(decision.disposition, "human-adjudication")
+        self.assertTrue(decision.needs_human)
+        self.assertEqual(decision.admission_reason, "classification-needs-human")
 
 
 class RoundAdmissionDecisionTableTests(unittest.TestCase):
@@ -1033,6 +1053,26 @@ class FindingAdmissionTests(unittest.TestCase):
             candidates=(facts,),
         )
         self.assertFalse(admitted.comments[0].effective_blocking)
+
+        renamed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            category="preference-lens",
+            defect_kind="api-contract",
+            fix_effort="small",
+        )
+        renamed_facts = derive_blocker_candidate(
+            renamed,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_required_contract=True,
+        )
+        self.assertFalse(renamed_facts.is_preference_or_optional)
 
     def test_explicit_named_mandatory_rule_opts_into_strict_path(self):
         comment = ReviewComment(

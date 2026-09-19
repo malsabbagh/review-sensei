@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/later-finding-classification.schema.json",
+  "title": "ReviewSensei later-finding classification v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fingerprint",
+    "classification",
+    "is_late_relative_to_baseline",
+    "late_reason",
+    "is_duplicate",
+    "causal_parent",
+    "lineage_reason",
+    "attribution"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "classification": {
+      "type": "string",
+      "enum": [
+        "continuing-concern",
+        "reworded-or-moved",
+        "verified-fixed",
+        "omitted-uncertain",
+        "new-regression",
+        "substantiated-missed-defect",
+        "already-reviewed-optional",
+        "pre-existing",
+        "needs-human",
+        "new-on-initial-pass"
+      ]
+    },
+    "is_late_relative_to_baseline": { "type": "boolean" },
+    "late_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        "new-regression",
+        "substantiated-missed-defect",
+        "human-adjudication",
+        null
+      ]
+    },
+    "is_duplicate": { "type": "boolean" },
+    "causal_parent": {
+      "anyOf": [
+        { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        { "type": "null" }
+      ]
+    },
+    "lineage_reason": {
+      "type": "string",
+      "enum": [
+        "none",
+        "same-concern",
+        "reworded-or-moved",
+        "fix-introduced-on-changed-path",
+        "fix-introduced-on-related-path",
+        "missed-on-already-reviewed-path",
+        "unattributed",
+        "ambiguous-identity"
+      ]
+    },
+    "attribution": {
+      "type": "string",
+      "enum": [
+        "pr-change",
+        "fix-regression",
+        "documented-exception",
+        "pre-existing",
+        "already-reviewed-optional",
+        "unattributed"
+      ]
+    }
+  }
+}

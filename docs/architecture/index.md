@@ -14,7 +14,7 @@ result before a future publisher can consume it.
 
 | Area | Purpose | Owner | Key paths | Notes |
 | --- | --- | --- | --- | --- |
-| Review core | Provider-neutral request, parsing, orchestration, and validated results | Maintainers | `src/review_sensei/{models,diff,service,stages,coverage,planning}.py` | Must not import GitHub or provider SDKs; coverage is explicit and chunking is opt-in |
+| Review core | Provider-neutral request, parsing, orchestration, and validated results | Maintainers | `src/review_sensei/{models,diff,service,stages,coverage,planning,baseline}.py` | Must not import GitHub or provider SDKs; coverage is explicit and chunking is opt-in; C4 verification reuses incremental plans |
 | Evaluation | Bounded corpus loading, fixture/live scoring, privacy scan, and report contracts | Maintainers | `src/review_sensei/evaluation.py`, `evaluation/v1/` | Fixture mode is offline; live egress is CLI-gated |
 | Validation boundary | Frozen downward-only limits, canonical paths, strict quoted-path decoding, and bounded file reads | Maintainers | `src/review_sensei/validation.py` | Shared by request, diff, stage, transport, and publisher contracts |
 | Portable workflow boundary | Ref/repository validation, bounded diff preparation, and installed-package workflow composition | Maintainers | `src/review_sensei/workflow.py`, `examples/github-actions/review-sensei-review.yml` | Must not execute head code or interpolate untrusted refs into shell commands |
@@ -99,6 +99,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0043`](../adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36; `ReviewService.run`, hard budgets, publication-only recovery |
 | [`0046`](../adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136; C1/C2; `legacy` unchanged |
 | [`0047`](../adr/0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 C3; local JSON and GitHub issue-comment adapters |
+| [`0048`](../adr/0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification | #136 C4; IncrementalReviewPlan + late classification |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

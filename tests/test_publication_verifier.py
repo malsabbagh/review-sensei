@@ -94,6 +94,55 @@ class PublishableReviewTests(unittest.TestCase):
         self.assertEqual(prepared.result.to_dict()["evidence_policy"], "legacy")
         self.assertEqual(prepared.unpublished, 0)
 
+    def test_legacy_admission_forwards_baseline_scope_inputs(self) -> None:
+        with patch(
+            "review_sensei.verifier.admit_review_result",
+            side_effect=lambda result, policy, **kwargs: result,
+        ) as admission:
+            prepare_publishable_review(
+                self.result,
+                baseline=object(),  # type: ignore[arg-type]
+                changed_paths=("src/app.py",),
+                related_paths=(),
+                current_key=object(),  # type: ignore[arg-type]
+                evidence_confirmed_concerns=("a" * 64,),
+            )
+        kwargs = admission.call_args.kwargs
+        self.assertIsNotNone(kwargs["baseline"])
+        self.assertEqual(kwargs["changed_paths"], ("src/app.py",))
+        self.assertEqual(kwargs["related_paths"], ())
+        self.assertIsNotNone(kwargs["current_key"])
+        self.assertEqual(kwargs["evidence_confirmed_concerns"], ("a" * 64,))
+
+    def test_confirmed_admission_forwards_baseline_scope_inputs(self) -> None:
+        with patch(
+            "review_sensei.verifier.admit_review_result",
+            side_effect=lambda result, policy, **kwargs: result,
+        ) as admission:
+            prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                baseline=object(),  # type: ignore[arg-type]
+                changed_paths=("src/app.py",),
+                related_paths=(),
+                current_key=object(),  # type: ignore[arg-type]
+                evidence_confirmed_concerns=("b" * 64,),
+            )
+        kwargs = admission.call_args.kwargs
+        self.assertIsNotNone(kwargs["baseline"])
+        self.assertEqual(kwargs["changed_paths"], ("src/app.py",))
+        self.assertEqual(kwargs["related_paths"], ())
+        self.assertIsNotNone(kwargs["current_key"])
+        self.assertEqual(kwargs["evidence_confirmed_concerns"], ("b" * 64,))
+
     def test_true_defect_is_confirmed_and_becomes_the_only_finding(self) -> None:
         true_defect = candidate(snapshot_sha=self.snapshot_sha)
         prepared = prepare_publishable_review(

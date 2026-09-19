@@ -1,5 +1,17 @@
 """Provider-neutral AI code review primitives for ReviewSensei."""
 
+from .baseline import (
+    BaselineFinding,
+    LaterFindingClassification,
+    ReviewBaseline,
+    VerificationScope,
+    baseline_from_review,
+    classify_later_finding,
+    classify_omitted_finding,
+    match_baseline_finding,
+    plan_verification_scope,
+    preview_verification_scope,
+)
 from .concurrency import (
     AdmissionLease,
     AdmissionOutcome,
@@ -191,6 +203,16 @@ __all__ = [
     "ReviewConvergencePolicy",
     "RoundAdmissionDecision",
     "RoundSessionState",
+    "BaselineFinding",
+    "LaterFindingClassification",
+    "ReviewBaseline",
+    "VerificationScope",
+    "baseline_from_review",
+    "classify_later_finding",
+    "classify_omitted_finding",
+    "match_baseline_finding",
+    "plan_verification_scope",
+    "preview_verification_scope",
     "SessionIdentity",
     "SessionLoadError",
     "SessionLoadReason",

@@ -23,7 +23,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from .convergence import (
     BlockerCandidate,
@@ -42,6 +42,10 @@ from .validation import (
     utf8_size,
     validate_repository_path,
 )
+
+if TYPE_CHECKING:
+    from .baseline import ReviewBaseline
+    from .context import ReviewContextCacheKey
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _MENTION_PREFIX = re.compile(r"(^|\s)@")
@@ -629,6 +633,11 @@ def _with_admission(
     changed_lines: Mapping[str, frozenset[int]] | None,
     deleted_lines: Mapping[str, frozenset[int]] | None = None,
     derived: Sequence[BlockerCandidate] | None = None,
+    baseline: ReviewBaseline | None = None,
+    changed_paths: Sequence[str] | None = None,
+    related_paths: Sequence[str] = (),
+    current_key: ReviewContextCacheKey | None = None,
+    evidence_confirmed_concerns: Sequence[str] = (),
 ) -> ReviewResult:
     policy = convergence_policy or ReviewConvergencePolicy()
     return admit_review_result(
@@ -637,6 +646,11 @@ def _with_admission(
         candidates=blocker_candidates if blocker_candidates is not None else derived,
         changed_lines=changed_lines,
         deleted_lines=deleted_lines,
+        baseline=baseline,
+        changed_paths=changed_paths,
+        related_paths=related_paths,
+        current_key=current_key,
+        evidence_confirmed_concerns=evidence_confirmed_concerns,
     )
 
 
@@ -653,6 +667,11 @@ def prepare_publishable_review(
     convergence_policy: ReviewConvergencePolicy | None = None,
     blocker_candidates: Sequence[BlockerCandidate] | None = None,
     input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    baseline: ReviewBaseline | None = None,
+    changed_paths: Sequence[str] | None = None,
+    related_paths: Sequence[str] = (),
+    current_key: ReviewContextCacheKey | None = None,
+    evidence_confirmed_concerns: Sequence[str] = (),
 ) -> PublishableReview:
     """Gate findings before publication using the configured evidence policy.
 
@@ -695,6 +714,11 @@ def prepare_publishable_review(
             blocker_candidates=blocker_candidates,
             changed_lines=changed_lines,
             deleted_lines=deleted_lines,
+            baseline=baseline,
+            changed_paths=changed_paths,
+            related_paths=related_paths,
+            current_key=current_key,
+            evidence_confirmed_concerns=evidence_confirmed_concerns,
         )
         return PublishableReview(result, (), "legacy", 0)
 
@@ -785,6 +809,11 @@ def prepare_publishable_review(
         ),
         changed_lines=changed_lines,
         deleted_lines=deleted_lines,
+        baseline=baseline,
+        changed_paths=changed_paths,
+        related_paths=related_paths,
+        current_key=current_key,
+        evidence_confirmed_concerns=evidence_confirmed_concerns,
     )
     return PublishableReview(
         prepared, tuple(final_verifications), "confirmed", unpublished

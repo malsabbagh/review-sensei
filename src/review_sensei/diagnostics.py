@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .baseline import VerificationScope, preview_verification_scope
 from .convergence import (
     ReviewConvergencePolicy,
     evaluate_round_admission,
@@ -34,7 +35,7 @@ from .provider_config import (
 )
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
-from .session import SessionIdentity, resolve_local_session_ledger
+from .session import LOAD_STATUSES, SessionIdentity, resolve_local_session_ledger
 from .stages import (
     MAX_STAGE_FILES,
     category_catalog_for_configured_stages,
@@ -47,6 +48,9 @@ DOCTOR_OK = 0
 DOCTOR_ACTION_REQUIRED = 2
 DOCTOR_UNKNOWN = 3
 SCHEMA_VERSION = "v1"
+# Diagnostic-only token; it is never a persisted SessionRecord or a
+# SessionLoadResult status.
+INVALID_SESSION_STATUS = "invalid"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_REPOSITORY_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
@@ -152,7 +156,64 @@ def _plan_session_record(
     )
     if check is None:
         return None
-    return payload
+    return _normalize_session_record(payload)
+
+
+def _normalize_session_record(
+    record: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Expose a stable status token in caller-facing diagnostics."""
+
+    if record is None:
+        return None
+    normalized = dict(record)
+    status = normalized.get("status")
+    if status is None:
+        normalized["status"] = "missing"
+    elif not isinstance(status, str) or status not in LOAD_STATUSES:
+        normalized["status"] = INVALID_SESSION_STATUS
+    return normalized
+
+
+def _verification_scope_from_session(
+    *,
+    policy: ReviewConvergencePolicy | None,
+    session_record: dict[str, object] | None,
+    changed_paths: tuple[str, ...] = (),
+) -> VerificationScope | None:
+    if policy is None:
+        return None
+    completed: int | None = None
+    session_status: str | None = None
+    if session_record is not None:
+        if "status" not in session_record:
+            # A partial record has no trustworthy counter, but it is not an
+            # integrity failure.  Treat it like an uninitialized ledger so
+            # preview remains a safe baseline-required display.
+            session_status = "missing"
+        else:
+            status = session_record.get("status")
+            session_status = (
+                status
+                if isinstance(status, str) and status in LOAD_STATUSES
+                else "invalid"
+            )
+        if session_status == "ok":
+            initial = session_record.get("completed_initial_reviews")
+            if isinstance(initial, int) and not isinstance(initial, bool):
+                completed = initial
+            else:
+                # A syntactically valid status with an invalid counter is not
+                # a zero-count ledger; it is untrusted state.
+                session_status = "invalid"
+        elif session_status == "missing":
+            completed = 0
+    return preview_verification_scope(
+        policy=policy,
+        completed_initial_reviews=completed,
+        session_status=session_status,
+        changed_paths=changed_paths,
+    )
 
 
 def _bounded_stage_names(values: Iterable[str]) -> tuple[str, ...]:
@@ -462,6 +523,9 @@ def run_doctor(
     ``session_ledger`` reports the issue #136 C3 durable session record when a
     local ledger path is supplied or ``REVIEWSENSEI_SESSION_LEDGER`` is set.
     Missing, expired, or tampered state is explicit. Doctor never writes.
+    Operator modes also report C4 verification scope. ``legacy`` stays
+    unscoped. After a completed initial review the next pass is verification
+    over existing concerns plus changed and related paths.
     """
 
     checks: list[DiagnosticCheck] = []
@@ -547,14 +611,34 @@ def run_doctor(
         review_convergence = None
         checks.append(DiagnosticCheck("review-convergence", "action", str(exc)))
     session_record: dict[str, object] | None = None
-    session_check, session_record = _session_ledger_diagnostic(
+    session_check, raw_session_record = _session_ledger_diagnostic(
         session_ledger=session_ledger,
         repository=repository,
         pull_request=pull_request,
         policy=review_convergence,
     )
+    session_record = _normalize_session_record(raw_session_record)
     if session_check is not None:
         checks.append(session_check)
+    verification_scope = None
+    if review_convergence is not None:
+        verification_scope = _verification_scope_from_session(
+            policy=review_convergence,
+            session_record=session_record,
+        )
+        if verification_scope is not None:
+            check_status = (
+                "action" if verification_scope.status == "ledger-untrusted" else "pass"
+            )
+            detail = (
+                f"status={verification_scope.status} "
+                f"round={verification_scope.round_kind} "
+                "late_admission="
+                f"{verification_scope.late_admission_required}"
+            )
+            if verification_scope.invalidation_reason is not None:
+                detail = f"{detail} reason={verification_scope.invalidation_reason}"
+            checks.append(DiagnosticCheck("verification-scope", check_status, detail))
     configured_category_catalog = None
     configured_categories_error: str | None = None
     if categories_dir is not None:
@@ -716,6 +800,8 @@ def run_doctor(
         report["review_convergence"] = review_convergence.to_dict()
     if session_record is not None:
         report["session_record"] = session_record
+    if verification_scope is not None:
+        report["verification"] = verification_scope.to_dict()
     return report
 
 
@@ -763,11 +849,13 @@ def build_plan(
 
     if diff is None:
         diff_summary: dict[str, Any] = {"supplied": False, "status": "unknown"}
+        changed_paths: tuple[str, ...] = ()
     elif not isinstance(diff, str):
         raise ReviewInputError("diff must be a string")
     else:
         # Plan readiness uses the same bounded diff analysis path as review.
         analysis = analyze_diff(diff, limits=DEFAULT_REVIEW_LIMITS)
+        changed_paths = analysis.changed_paths
         diff_summary = {
             "supplied": True,
             "status": "ready",
@@ -842,6 +930,13 @@ def build_plan(
     )
     if session_record is not None:
         document["session_record"] = session_record
+    verification_scope = _verification_scope_from_session(
+        policy=resolve_review_convergence_policy(mode=review_mode),
+        session_record=session_record,
+        changed_paths=changed_paths,
+    )
+    if verification_scope is not None:
+        document["verification"] = verification_scope.to_dict()
     return document
 
 
@@ -913,6 +1008,15 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
                     f" failed_attempts={session_record.get('failed_attempts', 0)}"
                 )
             lines.append(f"session_ledger: {detail}")
+    verification = document.get("verification")
+    if isinstance(verification, dict) and verification.get("status"):
+        lines.append(
+            "verification: "
+            f"status={verification.get('status')} "
+            f"round={verification.get('round_kind')} "
+            f"late_admission={verification.get('late_admission_required')} "
+            f"paths={len(verification.get('reviewed_paths') or ())}"
+        )
     identity = document.get("identity")
     if isinstance(identity, dict):
         if identity.get("base_sha") or identity.get("head_sha"):
