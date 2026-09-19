@@ -304,15 +304,22 @@ class GitHubApplication:
                     operator_paused=False,
                     summary="writes_disabled",
                 )
-            if command.action == "status" and oidc_token is None:
-                raise GitHubPublicationError(
-                    "hosted maintainer status requires a caller-supplied OIDC token"
-                )
+            if command.action == "status":
+                if oidc_token is None:
+                    raise GitHubPublicationError(
+                        "hosted maintainer status requires a caller-supplied OIDC token"
+                    )
+                exchange_input = oidc_token
+                capability = "review_status"
+            else:
+                # Every hosted mutation is broker-authorized. The caller may
+                # supply the OIDC assertion, but it is never treated as a
+                # capability token or as proof of maintainer identity.
+                exchange_input = oidc_token or self.broker.request_oidc_token()
+                capability = "review_publish"
             token = self.broker.exchange(
-                oidc_token or self.broker.request_oidc_token(),
-                capability=(
-                    "review_status" if command.action == "status" else "review_publish"
-                ),
+                exchange_input,
+                capability=capability,
             )
             ledger = self._session_ledger_for_token(token, options=options)
         if ledger is None:

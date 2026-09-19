@@ -1293,7 +1293,10 @@ def _github_parser() -> argparse.ArgumentParser:
     command.add_argument(
         "--session-ledger",
         type=Path,
-        help="Local directory for the durable session ledger",
+        help=(
+            "Local operator directory for the durable session ledger; hosted "
+            "webhook commands use GitHubApplication and broker authorization."
+        ),
     )
     command.add_argument(
         "--allow-write",

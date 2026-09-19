@@ -22,7 +22,7 @@ import ntpath
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -319,11 +319,13 @@ class SessionRecord:
     record_sha256: str
     operator_paused: bool = False
     dispositions: tuple[Mapping[str, object], ...] = ()
-    # The shape is selected only while loading an existing untrusted document.
-    # Newly constructed or evolved records always use the current payload.
-    _digest_shape: str = field(default="current", repr=False, compare=False)
+    # The shape is selected only while loading an existing untrusted document;
+    # it is not part of the public record or its equality contract.
+    _digest_shape_input: InitVar[str] = "current"
+    _digest_shape: str = field(default="current", init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _digest_shape_input: str) -> None:
+        object.__setattr__(self, "_digest_shape", _digest_shape_input)
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -597,7 +599,7 @@ class SessionRecord:
             record_sha256=str(value.get("record_sha256", "")),
             operator_paused=_operator_paused(value.get("operator_paused", False)),
             dispositions=_stored_dispositions(value.get("dispositions", [])),
-            _digest_shape=digest_shape,
+            _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
         return record

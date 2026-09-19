@@ -263,14 +263,23 @@ def apply_session_command(
             operator_paused=True,
             summary="automated review paused pending maintainer continuation",
         )
-    if command.action in {"verify", "continue"}:
-        record = _set_operator_paused(ledger, identity, record, paused=False, now=now)
-        rounds = command.continuation_rounds if command.action == "continue" else 0
+    if command.action == "verify":
         return record, MaintainerCommandResult(
-            action=command.action,
+            action="verify",
+            applied=False,
+            operator_paused=paused,
+            summary=(
+                "verification requires an evidence-backed review result; "
+                "session pause state is unchanged"
+            ),
+        )
+    if command.action == "continue":
+        record = _set_operator_paused(ledger, identity, record, paused=False, now=now)
+        return record, MaintainerCommandResult(
+            action="continue",
             applied=True,
             operator_paused=False,
-            continuation_rounds=rounds,
+            continuation_rounds=command.continuation_rounds,
             summary="automated review may continue under C5 admission",
         )
     if command.action == "status":
@@ -394,6 +403,21 @@ def render_convergence_summary(
     handoff_reason: str | None = None,
 ) -> str:
     """One durable author-facing summary. Numbers are caller-supplied facts."""
+
+    for label, value in (
+        ("remaining_verification", remaining_verification),
+        ("verified_fixed", verified_fixed),
+        ("new_regressions", new_regressions),
+        ("advisory", advisory),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ReviewInputError(f"{label} must be a non-negative integer")
+    if not isinstance(handoff_reason, (str, type(None))):
+        raise ReviewInputError("handoff_reason is invalid")
+    if handoff_reason is not None and (
+        len(handoff_reason.encode("utf-8")) > 128 or not handoff_reason.isprintable()
+    ):
+        raise ReviewInputError("handoff_reason is invalid")
 
     next_action = (
         "human review before another automated pass" if handoff else "continue"

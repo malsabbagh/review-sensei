@@ -185,6 +185,16 @@ class SessionCommandTests(unittest.TestCase):
         )
         self.assertTrue(committed.operator_paused)
 
+    def test_verify_does_not_unpause_without_evidence(self):
+        ledger = InMemorySessionLedger()
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        verify = parse_maintainer_command("@sensei verify", actor="alice")
+        record, result = apply_session_command(ledger, IDENTITY, verify, now=FIXED_NOW)
+        self.assertFalse(result.applied)
+        self.assertTrue(record.operator_paused)
+        self.assertIn("evidence-backed", result.summary)
+
     def test_status_reports_the_authoritative_head_binding(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(
@@ -412,6 +422,45 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(broker.exchanges, [])
         self.assertEqual(broker.oidc_requests, 0)
 
+    def test_hosted_mutation_always_exchanges_caller_oidc(self):
+        class Broker:
+            def __init__(self):
+                self.exchanges = []
+
+            def exchange(self, token, *, capability=None):
+                self.exchanges.append((token, capability))
+                return "capability-token"
+
+        broker = Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        with patch.object(
+            application,
+            "_session_ledger_for_token",
+            return_value=InMemorySessionLedger(),
+        ):
+            result = application.apply_maintainer_command(
+                options=GitHubWriteOptions(
+                    github_writes=True, github_session_ledger=True
+                ),
+                oidc_token="caller-oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                body="@sensei review pause",
+                actor_login="alice",
+                association="MEMBER",
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertTrue(result.applied)
+        self.assertEqual(broker.exchanges, [("caller-oidc", "review_publish")])
+
 
 class SummaryTests(unittest.TestCase):
     def test_handoff_summary_asks_for_human_review(self):
@@ -427,6 +476,22 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertIn("human review", text)
         self.assertIn("round-budget-exhausted", text)
+
+    def test_handoff_summary_rejects_unbounded_counts_and_reasons(self):
+        with self.assertRaisesRegex(ReviewInputError, "remaining_verification"):
+            render_convergence_summary(
+                mode="merge-focused",
+                round_kind="verification",
+                remaining_verification=-1,
+            )
+        with self.assertRaisesRegex(ReviewInputError, "handoff_reason"):
+            render_convergence_summary(
+                mode="merge-focused",
+                round_kind="verification",
+                remaining_verification=0,
+                handoff=True,
+                handoff_reason="x" * 129,
+            )
 
 
 class CliCommandTests(unittest.TestCase):
