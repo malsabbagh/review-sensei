@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.baseline import (
     LaterFindingClassification,
@@ -20,8 +21,16 @@ from review_sensei.context import (
     ReviewContextCacheKey,
     finding_lifecycle_for_comment,
 )
-from review_sensei.convergence import ReviewConvergencePolicy, admit_review_result
-from review_sensei.diagnostics import build_plan, run_doctor
+from review_sensei.convergence import (
+    ReviewConvergencePolicy,
+    admit_review_result,
+    derive_blocker_candidate,
+)
+from review_sensei.diagnostics import (
+    _verification_scope_from_session,
+    build_plan,
+    run_doctor,
+)
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
@@ -260,6 +269,24 @@ class BaselinePlanTests(unittest.TestCase):
                 related_paths=("src/overflow.py",),
             )
 
+    def test_reviewed_context_never_truncates_silently(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=policy,
+            reviewed_paths=tuple(
+                f"src/reviewed-{index}.py" for index in range(MAX_CACHE_METADATA_ITEMS)
+            ),
+        )
+        with self.assertRaises(ReviewInputError):
+            plan_verification_scope(
+                policy=policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/overflow.py",),
+            )
+
     def test_invalidated_scopes_require_fallback_full_without_late_admission(
         self,
     ) -> None:
@@ -278,6 +305,20 @@ class BaselinePlanTests(unittest.TestCase):
                     late_admission_required=True,
                     coverage_mode="fallback-full",
                 )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="verify",
+                round_kind="verification",
+                late_admission_required=True,
+                coverage_mode="unscoped",
+            )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="legacy-unscoped",
+                round_kind="initial",
+                late_admission_required=False,
+                coverage_mode="unscoped",
+            )
 
     def test_boolean_fields_reject_integer_coercion(self) -> None:
         with self.assertRaises(ReviewInputError):
@@ -319,6 +360,14 @@ class BaselinePlanTests(unittest.TestCase):
                     for index in range(MAX_CACHE_METADATA_ITEMS + 1)
                 ),
             )
+        with self.assertRaises(ReviewInputError):
+            VerificationScope(
+                status="baseline-required",
+                round_kind="initial",
+                late_admission_required=False,
+                coverage_mode="full",
+                reviewed_paths=("src/duplicate.py",) * (MAX_CACHE_METADATA_ITEMS + 1),
+            )
 
 
 class LaterFindingTests(unittest.TestCase):
@@ -348,6 +397,29 @@ class LaterFindingTests(unittest.TestCase):
         self.assertEqual(
             classification.to_dict()["lineage_reason"], "reworded-or-moved"
         )
+
+    def test_ambiguous_identity_requires_human_adjudication(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        first = _comment(body="first", evidence_id="ev-1")
+        second = _comment(body="second", evidence_id="ev-2")
+        baseline = baseline_from_review(
+            _result(first, second), cache_key=_key(), policy=policy
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        classification = classify_later_finding(
+            _comment(body="first", evidence_id="ev-1"),
+            baseline=baseline,
+            scope=scope,
+            changed_paths=("src/app.py",),
+            on_changed_path=True,
+        )
+        self.assertEqual(classification.classification, "needs-human")
+        self.assertEqual(classification.lineage_reason, "ambiguous-identity")
 
     def test_omission_is_not_fixed(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -576,6 +648,14 @@ class LaterFindingTests(unittest.TestCase):
 
 
 class DiagnosticVerificationTests(unittest.TestCase):
+    def test_unknown_session_status_is_untrusted(self) -> None:
+        scope = _verification_scope_from_session(
+            policy=ReviewConvergencePolicy(mode="merge-focused"),
+            session_record={"status": "future-status"},
+        )
+        assert scope is not None
+        self.assertEqual(scope.status, "ledger-untrusted")
+
     def test_doctor_and_plan_display_verification_scope(self) -> None:
         doctor = run_doctor(review_mode="merge-focused")
         check = next(
@@ -614,3 +694,64 @@ class DiagnosticVerificationTests(unittest.TestCase):
             )
             self.assertEqual(plan["verification"]["status"], "verify")
             self.assertTrue(plan["verification"]["late_admission_required"])
+
+
+class BaselineAdmissionTests(unittest.TestCase):
+    def test_baseline_admission_is_fail_closed_without_explicit_candidate_facts(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        comment = _comment()
+        baseline = baseline_from_review(
+            _result(comment), cache_key=_key(), policy=policy
+        )
+        result = admit_review_result(
+            _result(comment),
+            policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        self.assertFalse(result.comments[0].effective_blocking)
+        explicit = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        explicit_result = admit_review_result(
+            _result(comment),
+            policy,
+            baseline=baseline,
+            candidates=(explicit,),
+        )
+        self.assertTrue(explicit_result.comments[0].effective_blocking)
+
+    def test_baseline_admission_includes_changed_deleted_and_related_paths(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        comment = _comment(path="src/legacy.py", side="LEFT")
+        with patch(
+            "review_sensei.baseline.plan_verification_scope",
+            wraps=plan_verification_scope,
+        ) as planner:
+            admit_review_result(
+                _result(comment),
+                policy,
+                baseline=baseline,
+                changed_lines={"src/app.py": frozenset({2})},
+                deleted_lines={"src/legacy.py": frozenset({2})},
+                related_paths=("src/helper.py",),
+                current_key=_key(head_sha=SHA_C),
+            )
+        self.assertEqual(
+            planner.call_args.kwargs["changed_paths"],
+            ("src/app.py", "src/legacy.py"),
+        )
+        self.assertEqual(planner.call_args.kwargs["related_paths"], ("src/helper.py",))

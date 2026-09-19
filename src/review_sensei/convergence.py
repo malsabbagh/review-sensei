@@ -823,8 +823,10 @@ def admit_review_result(
     Operator modes always carry ``enforcement="publication"`` (the dataclass
     coerces that invariant), so admission runs. ``legacy`` stays
     ``display-only`` and returns the result unchanged. An optional C4
-    ``baseline`` classifies later findings before the evaluator runs.
-    Caller-supplied ``candidates`` keep explicit late-admission facts.
+    ``baseline`` classifies later findings before the evaluator runs. The
+    baseline-derived candidate path is intentionally fail-closed for C2
+    evidence; callers with trusted evidence should supply explicit
+    ``candidates``, which keep those late-admission facts.
     """
 
     if not isinstance(result, ReviewResult):
@@ -849,8 +851,15 @@ def admit_review_result(
             raise ReviewInputError("current review cache key is invalid")
         if changed_paths is not None:
             verification_changed = tuple(changed_paths)
-        elif changed_lines is not None:
-            verification_changed = tuple(changed_lines)
+        elif changed_lines is not None or deleted_lines is not None:
+            paths: list[str] = []
+            for mapping in (changed_lines, deleted_lines):
+                if mapping is None:
+                    continue
+                for path in mapping:
+                    if path not in paths:
+                        paths.append(path)
+            verification_changed = tuple(paths)
         verification_scope = plan_verification_scope(
             policy=policy,
             baseline=baseline,

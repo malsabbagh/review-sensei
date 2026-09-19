@@ -127,13 +127,13 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
         raise ReviewInputError(f"{label} must be a sequence of paths")
     paths: list[str] = []
     seen: set[str] = set()
-    for path in values:
+    for index, path in enumerate(values):
+        if index >= MAX_CACHE_METADATA_ITEMS:
+            raise ReviewInputError(f"{label} exceed the metadata bound")
         validate_repository_path(path, label=label)
         if path not in seen:
             seen.add(path)
             paths.append(path)
-        if len(paths) > MAX_CACHE_METADATA_ITEMS:
-            raise ReviewInputError(f"{label} exceed the metadata bound")
     return tuple(paths)
 
 
@@ -380,10 +380,10 @@ def _unique_paths(*groups: Sequence[str]) -> tuple[str, ...]:
     for group in groups:
         for path in group:
             if path not in seen:
+                if len(paths) >= MAX_CACHE_METADATA_ITEMS:
+                    raise ReviewInputError("reviewed paths exceed the metadata bound")
                 seen.add(path)
                 paths.append(path)
-            if len(paths) >= MAX_CACHE_METADATA_ITEMS:
-                return tuple(paths)
     return tuple(paths)
 
 
@@ -440,6 +440,15 @@ class VerificationScope:
             raise ReviewInputError("verification requires late admission")
         if self.late_admission_required and self.round_kind != "verification":
             raise ReviewInputError("late admission applies only to verification")
+        if self.status == "verify" and self.coverage_mode not in {
+            "incremental",
+            "fallback-full",
+        }:
+            raise ReviewInputError(
+                "verification requires incremental or fallback-full coverage"
+            )
+        if self.status == "legacy-unscoped" and self.round_kind != "none":
+            raise ReviewInputError("legacy-unscoped scopes must have no round")
         if self.status in {"incompatible", "incomplete-baseline"}:
             if self.coverage_mode != "fallback-full":
                 raise ReviewInputError(
@@ -819,7 +828,7 @@ def classify_later_finding(
         if finding.identity_key()
         == (comment.path, comment.symbol or "", comment_defect_kind(comment))
     ]
-    if len(matches) > 1 and _match_baseline_finding(comment, baseline) is None:
+    if len(matches) > 1:
         return LaterFindingClassification(
             fingerprint=lifecycle.fingerprint,
             classification="needs-human",

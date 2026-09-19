@@ -44,7 +44,9 @@ Later findings are classified before C2 admission:
   sits on that change.
 - A substantiated defect on already-reviewed PR scope may be
   `substantiated-missed-defect`.
-- Preference on already-reviewed code stays advisory.
+- Preference on already-reviewed code stays advisory. The preference signal is
+  intentionally limited to the normalized category IDs `style`, `nit`, and
+  `preference`; other free-form category names are not treated as preferences.
 - Unattributed target-branch issues stay `pre-existing`.
 - Ambiguous identity matches require human adjudication.
 
@@ -55,7 +57,10 @@ relative to untrusted evidence. Round counters are not reset here (C3/C5).
 `legacy` stays unscoped. Publication is not refused (C5).
 
 Doctor and plan display the verification scope. `admit_review_result` applies
-the classification when a baseline is supplied and candidates are not.
+the classification when a baseline is supplied and candidates are not. That
+baseline-derived path remains fail-closed for C2 evidence; callers with
+trusted evidence must supply explicit blocker candidates, which take
+precedence over derived baseline candidates.
 
 ## Scope
 

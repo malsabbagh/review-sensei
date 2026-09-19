@@ -58,7 +58,7 @@
     },
     "reviewed_paths": {
       "type": "array",
-      "maxItems": 1024,
+      "maxItems": 512,
       "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
     },
     "related_paths": {
@@ -68,13 +68,13 @@
     },
     "changed_paths": {
       "type": "array",
-      "maxItems": 1024,
+      "maxItems": 512,
       "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
     },
     "existing_concerns": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 1024
+      "maximum": 512
     }
   }
 }

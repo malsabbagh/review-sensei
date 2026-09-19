@@ -35,7 +35,7 @@ from .provider_config import (
 )
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
-from .session import SessionIdentity, resolve_local_session_ledger
+from .session import LOAD_STATUSES, SessionIdentity, resolve_local_session_ledger
 from .stages import (
     MAX_STAGE_FILES,
     category_catalog_for_configured_stages,
@@ -168,7 +168,9 @@ def _verification_scope_from_session(
     session_status: str | None = None
     if session_record is not None:
         status = session_record.get("status")
-        session_status = status if isinstance(status, str) else "invalid"
+        session_status = (
+            status if isinstance(status, str) and status in LOAD_STATUSES else "invalid"
+        )
         if session_status == "ok":
             initial = session_record.get("completed_initial_reviews", 0)
             completed = (

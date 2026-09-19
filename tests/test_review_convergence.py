@@ -1034,6 +1034,26 @@ class FindingAdmissionTests(unittest.TestCase):
         )
         self.assertFalse(admitted.comments[0].effective_blocking)
 
+        renamed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            category="preference-lens",
+            defect_kind="api-contract",
+            fix_effort="small",
+        )
+        renamed_facts = derive_blocker_candidate(
+            renamed,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_required_contract=True,
+        )
+        self.assertFalse(renamed_facts.is_preference_or_optional)
+
     def test_explicit_named_mandatory_rule_opts_into_strict_path(self):
         comment = ReviewComment(
             path="src/app.py",

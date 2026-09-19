@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
+from review_sensei.context import MAX_CACHE_METADATA_ITEMS
 from review_sensei.errors import (
     ContextLoadError,
     LearningLoadError,
@@ -13,6 +14,7 @@ from review_sensei.errors import (
     ReviewSenseiError,
 )
 from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.planning import MAX_RELATED_PATHS
 from review_sensei.schemas import SCHEMA_DIR, validate_public_document
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +92,22 @@ class PublicSchemaTests(unittest.TestCase):
                         json.loads(path.read_text(encoding="utf-8")),
                         schema_name,
                     )
+
+    def test_verification_scope_schema_limits_match_runtime_bounds(self) -> None:
+        schema = json.loads(
+            (SCHEMA_DIR / "verification-scope.schema.json").read_text(encoding="utf-8")
+        )
+        properties = schema["properties"]
+        self.assertEqual(
+            properties["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
+        )
+        self.assertEqual(
+            properties["changed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
+        )
+        self.assertEqual(
+            properties["existing_concerns"]["maximum"], MAX_CACHE_METADATA_ITEMS
+        )
+        self.assertEqual(properties["related_paths"]["maxItems"], MAX_RELATED_PATHS)
 
     def test_review_comment_schema_requires_line_or_file_side(self) -> None:
         with self.assertRaises(ReviewInputError):
