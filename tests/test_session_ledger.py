@@ -5,17 +5,21 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.session_ledger import (
+    SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
+    parse_session_comment,
     render_session_comment,
 )
 from review_sensei.models import ReviewResult
 from review_sensei.session import (
+    MAX_SESSION_RECORD_BYTES,
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
@@ -54,6 +58,15 @@ class SessionRecordTests(unittest.TestCase):
     def test_ttl_bound(self):
         with self.assertRaisesRegex(ReviewInputError, "ttl"):
             SessionRecord.create(IDENTITY, now=FIXED_NOW, ttl=timedelta(days=91))
+
+    def test_schema_validation_is_reserved_for_untrusted_documents(self):
+        with patch("review_sensei.session.validate_public_document") as validate:
+            record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+            record.evolve(now=FIXED_NOW, generation=1)
+            validate.assert_not_called()
+
+            restored = SessionRecord.from_dict(record.to_dict())
+            validate.assert_called_once_with(restored.to_dict(), "session-record")
 
 
 class LocalSessionLedgerTests(unittest.TestCase):
@@ -140,7 +153,6 @@ class LocalSessionLedgerTests(unittest.TestCase):
             "failed_attempts": 0,
             "generation": 0,
             "created_at": created.created_at,
-            "expires_at": created.expires_at,
         }
         migrated = migrate_session_document(legacy)
         self.assertEqual(migrated["pull_request"], 136)
@@ -150,6 +162,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
         loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "migrated")
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(loaded.record.expires_at, created.expires_at)
 
 
 class RoundPersistenceTests(unittest.TestCase):
@@ -203,6 +216,41 @@ class RoundPersistenceTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
         self.assertEqual(loaded.record.completed_initial_reviews, 0)
 
+    def test_complete_session_round_is_idempotent_after_commit_and_abort(self):
+        commit_ledger = InMemorySessionLedger()
+        commit_prepared = prepare_session_round(
+            commit_ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="abcd1234",
+            now=FIXED_NOW,
+        )
+        committed = complete_session_round(
+            commit_ledger, IDENTITY, commit_prepared, published=True, now=FIXED_NOW
+        )
+        replayed_commit = complete_session_round(
+            commit_ledger, IDENTITY, commit_prepared, published=True, now=FIXED_NOW
+        )
+        self.assertEqual(replayed_commit, committed)
+        self.assertEqual(replayed_commit.completed_initial_reviews, 1)
+
+        abort_ledger = InMemorySessionLedger()
+        abort_prepared = prepare_session_round(
+            abort_ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="strict"),
+            reservation_id="ffff1234",
+            now=FIXED_NOW,
+        )
+        aborted = complete_session_round(
+            abort_ledger, IDENTITY, abort_prepared, published=False, now=FIXED_NOW
+        )
+        replayed_abort = complete_session_round(
+            abort_ledger, IDENTITY, abort_prepared, published=False, now=FIXED_NOW
+        )
+        self.assertEqual(replayed_abort, aborted)
+        self.assertEqual(replayed_abort.completed_initial_reviews, 0)
+
 
 class GitHubSessionLedgerTests(unittest.TestCase):
     def test_initialize_and_cas_via_issue_comment(self):
@@ -246,6 +294,14 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "conflict")
+
+    def test_oversized_session_comments_are_skipped(self):
+        oversized = SESSION_MARKER_PREFIX + ("x" * (MAX_SESSION_RECORD_BYTES * 2 + 1))
+        self.assertIsNone(parse_session_comment(oversized, identity=IDENTITY))
+        http, _calls = make_http([json_response([{"id": 1, "body": oversized}])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "missing")
 
 
 class GitHubApplicationSessionTests(unittest.TestCase):

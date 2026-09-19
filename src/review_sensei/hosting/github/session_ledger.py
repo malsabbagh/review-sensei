@@ -45,6 +45,13 @@ _JSON_FENCE_RE = re.compile(
 _SESSION_INTRO = "ReviewSensei session ledger (round counters only; no source)."
 
 
+def _within_session_comment_limit(body: str) -> bool:
+    try:
+        return len(body.encode("utf-8")) <= MAX_SESSION_RECORD_BYTES * 2
+    except UnicodeError:
+        return False
+
+
 def session_marker(
     *, repository_id: int, pull_request: int, record: SessionRecord
 ) -> str:
@@ -72,7 +79,11 @@ def parse_session_comment(
     *,
     identity: SessionIdentity,
 ) -> SessionRecord | None:
-    if not isinstance(body, str) or SESSION_MARKER_PREFIX not in body:
+    if (
+        not isinstance(body, str)
+        or not _within_session_comment_limit(body)
+        or SESSION_MARKER_PREFIX not in body
+    ):
         return None
     matches = list(SESSION_MARKER_RE.finditer(body))
     if len(matches) != 1:
@@ -163,7 +174,11 @@ class GitHubIssueCommentSessionLedger:
             if not isinstance(item, dict):
                 continue
             body = item.get("body")
-            if not isinstance(body, str) or SESSION_MARKER_PREFIX not in body:
+            if (
+                not isinstance(body, str)
+                or not _within_session_comment_limit(body)
+                or SESSION_MARKER_PREFIX not in body
+            ):
                 continue
             comment_id = item.get("id")
             if (

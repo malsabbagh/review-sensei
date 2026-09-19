@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, cast
 
 from .convergence import (
     MAX_FAILED_ATTEMPTS,
@@ -256,7 +256,6 @@ class SessionRecord:
         digest = self._payload_digest()
         if self.record_sha256 != digest:
             raise ReviewInputError("session record integrity check failed")
-        validate_public_document(self.to_dict(), "session-record")
 
     def _payload_digest(self) -> str:
         payload = self._payload()
@@ -279,6 +278,57 @@ class SessionRecord:
             "updated_at": self.updated_at,
             "expires_at": self.expires_at,
         }
+
+    @classmethod
+    def _construct(
+        cls,
+        *,
+        repository: str,
+        pull_request: int,
+        repository_id: int | None,
+        completed_initial_reviews: int,
+        completed_verification_rounds: int,
+        failed_attempts: int,
+        generation: int,
+        reservation_id: str | None,
+        reserved_slot: str | None,
+        last_committed_reservation_id: str | None,
+        created_at: str,
+        updated_at: str,
+        expires_at: str,
+    ) -> "SessionRecord":
+        payload = {
+            "schema_version": PUBLIC_SCHEMA_VERSION,
+            "repository": repository,
+            "pull_request": pull_request,
+            "repository_id": repository_id,
+            "completed_initial_reviews": completed_initial_reviews,
+            "completed_verification_rounds": completed_verification_rounds,
+            "failed_attempts": failed_attempts,
+            "generation": generation,
+            "reservation_id": reservation_id,
+            "reserved_slot": reserved_slot,
+            "last_committed_reservation_id": last_committed_reservation_id,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "expires_at": expires_at,
+        }
+        return cls(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+            completed_initial_reviews=completed_initial_reviews,
+            completed_verification_rounds=completed_verification_rounds,
+            failed_attempts=failed_attempts,
+            generation=generation,
+            reservation_id=reservation_id,
+            reserved_slot=reserved_slot,
+            last_committed_reservation_id=last_committed_reservation_id,
+            created_at=created_at,
+            updated_at=updated_at,
+            expires_at=expires_at,
+            record_sha256=_digest_payload(payload),
+        )
 
     def to_dict(self) -> dict[str, object]:
         payload = self._payload()
@@ -319,7 +369,7 @@ class SessionRecord:
     def from_dict(cls, value: Mapping[str, object]) -> "SessionRecord":
         if not isinstance(value, Mapping):
             raise ReviewInputError("session record is invalid")
-        return cls(
+        record = cls(
             repository=str(value.get("repository", "")),
             pull_request=_require_bounded_int(
                 value.get("pull_request"),
@@ -369,6 +419,8 @@ class SessionRecord:
             expires_at=str(value.get("expires_at", "")),
             record_sha256=str(value.get("record_sha256", "")),
         )
+        validate_public_document(record.to_dict(), "session-record")
+        return record
 
     @classmethod
     def create(
@@ -400,23 +452,21 @@ class SessionRecord:
                 raise ReviewInputError("session ttl is invalid")
             expires = created + ttl
         created_stamp = _format_datetime(created)
-        payload = {
-            "schema_version": PUBLIC_SCHEMA_VERSION,
-            "repository": identity.repository,
-            "pull_request": identity.pull_request,
-            "repository_id": identity.repository_id,
-            "completed_initial_reviews": completed_initial_reviews,
-            "completed_verification_rounds": completed_verification_rounds,
-            "failed_attempts": failed_attempts,
-            "generation": generation,
-            "reservation_id": reservation_id,
-            "reserved_slot": reserved_slot,
-            "last_committed_reservation_id": last_committed_reservation_id,
-            "created_at": created_stamp,
-            "updated_at": created_stamp,
-            "expires_at": _format_datetime(expires),
-        }
-        return cls.from_dict({**payload, "record_sha256": _digest_payload(payload)})
+        return cls._construct(
+            repository=identity.repository,
+            pull_request=identity.pull_request,
+            repository_id=identity.repository_id,
+            completed_initial_reviews=completed_initial_reviews,
+            completed_verification_rounds=completed_verification_rounds,
+            failed_attempts=failed_attempts,
+            generation=generation,
+            reservation_id=reservation_id,
+            reserved_slot=reserved_slot,
+            last_committed_reservation_id=last_committed_reservation_id,
+            created_at=created_stamp,
+            updated_at=created_stamp,
+            expires_at=_format_datetime(expires),
+        )
 
     def evolve(
         self,
@@ -431,23 +481,43 @@ class SessionRecord:
         last_committed_reservation_id: str | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
-        payload = self._payload()
-        payload["updated_at"] = updated
-        if generation is not None:
-            payload["generation"] = generation
-        if completed_initial_reviews is not None:
-            payload["completed_initial_reviews"] = completed_initial_reviews
-        if completed_verification_rounds is not None:
-            payload["completed_verification_rounds"] = completed_verification_rounds
-        if failed_attempts is not None:
-            payload["failed_attempts"] = failed_attempts
-        if reservation_id is not ...:
-            payload["reservation_id"] = reservation_id  # type: ignore[assignment]
-        if reserved_slot is not ...:
-            payload["reserved_slot"] = reserved_slot  # type: ignore[assignment]
-        if last_committed_reservation_id is not ...:
-            payload["last_committed_reservation_id"] = last_committed_reservation_id  # type: ignore[assignment]
-        return self.from_dict({**payload, "record_sha256": _digest_payload(payload)})
+        return type(self)._construct(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+            completed_initial_reviews=(
+                self.completed_initial_reviews
+                if completed_initial_reviews is None
+                else completed_initial_reviews
+            ),
+            completed_verification_rounds=(
+                self.completed_verification_rounds
+                if completed_verification_rounds is None
+                else completed_verification_rounds
+            ),
+            failed_attempts=(
+                self.failed_attempts if failed_attempts is None else failed_attempts
+            ),
+            generation=self.generation if generation is None else generation,
+            reservation_id=(
+                self.reservation_id
+                if reservation_id is ...
+                else cast(str | None, reservation_id)
+            ),
+            reserved_slot=(
+                self.reserved_slot
+                if reserved_slot is ...
+                else cast(str | None, reserved_slot)
+            ),
+            last_committed_reservation_id=(
+                self.last_committed_reservation_id
+                if last_committed_reservation_id is ...
+                else cast(str | None, last_committed_reservation_id)
+            ),
+            created_at=self.created_at,
+            updated_at=updated,
+            expires_at=self.expires_at,
+        )
 
 
 @dataclass(frozen=True)
@@ -679,17 +749,24 @@ def complete_session_round(
 
     if prepared.reservation_id is None:
         return prepared.record
+    # A publisher retry can invoke completion after a previous commit/abort
+    # already advanced the durable generation. Refresh the CAS token so the
+    # ledger's idempotency checks can win without weakening concurrent races.
+    loaded = ledger.load(identity, now=now)
+    expected_generation = prepared.record.generation
+    if loaded.status in {"ok", "migrated"} and loaded.record is not None:
+        expected_generation = loaded.record.generation
     if published:
         return ledger.commit(
             identity,
             reservation_id=prepared.reservation_id,
-            expected_generation=prepared.record.generation,
+            expected_generation=expected_generation,
             now=now,
         )
     return ledger.abort(
         identity,
         reservation_id=prepared.reservation_id,
-        expected_generation=prepared.record.generation,
+        expected_generation=expected_generation,
         now=now,
     )
 
@@ -892,16 +969,17 @@ class LocalSessionLedger:
         try:
             if document.get("schema_version") == "0.1":
                 migrated = migrate_session_document(document)
-                created = SessionRecord.create(
+                created_at = str(
+                    migrated.get("created_at") or _format_datetime(_aware_now(now))
+                )
+                created_time = _parse_aware_datetime(created_at, label="created_at")
+                expires_at = migrated.get("expires_at")
+                if expires_at is None:
+                    expires_at = _format_datetime(created_time + DEFAULT_SESSION_TTL)
+                migrated_record = SessionRecord.create(
                     identity,
-                    now=_parse_aware_datetime(
-                        str(
-                            migrated.get("created_at")
-                            or _format_datetime(_aware_now(now))
-                        ),
-                        label="created_at",
-                    ),
-                    expires_at=str(migrated.get("expires_at") or ""),
+                    now=created_time,
+                    expires_at=str(expires_at),
                     completed_initial_reviews=_require_bounded_int(
                         migrated["completed_initial_reviews"],
                         label="completed_initial_reviews",
@@ -932,9 +1010,9 @@ class LocalSessionLedger:
                         "last_committed_reservation_id"
                     ),  # type: ignore[arg-type]
                 )
-                if created.expired(now=now):
+                if migrated_record.expired(now=now):
                     return SessionLoadResult(status="expired")
-                return SessionLoadResult(status="migrated", record=created)
+                return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
         except ReviewInputError as exc:
             if "integrity" in str(exc):
