@@ -1,6 +1,7 @@
 import unittest
 
 from review_sensei import ProviderResponse
+from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubPublicationError,
@@ -287,6 +288,46 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(self.learner.calls[0]["token"], "capability-learning_write")
         self.assertEqual(self.replier.calls[0]["token"], "capability-issue_reply")
         self.assertTrue(self.replier.calls[0]["auto_approve"])
+
+    def test_publish_review_forwards_blocker_candidates(self):
+        options = GitHubWriteOptions(auto_review=True, github_writes=True)
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = (
+            BlockerCandidate(
+                proposed_blocking=False,
+                severity="high",
+                has_specific_violation=True,
+                has_actionable_remedy=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                attribution="pr-change",
+            ),
+        )
+        outcome = self.application.publish_review(
+            options=options,
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff="diff",
+            app_slug="review-sensei[bot]",
+            convergence_policy=policy,
+            blocker_candidates=facts,
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertIs(self.reviewer.calls[-1]["convergence_policy"], policy)
+        self.assertIs(self.reviewer.calls[-1]["blocker_candidates"], facts)
 
     def test_learning_proposals_reuse_one_learning_capability(self):
         options = GitHubWriteOptions(github_writes=True, learning_prs=True)

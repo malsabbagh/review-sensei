@@ -780,6 +780,34 @@ class FindingAdmissionTests(unittest.TestCase):
         self.assertFalse(finding.effective_blocking)
         self.assertTrue(finding.needs_human)
 
+    def test_verified_locations_alone_do_not_promote_proposed_non_blocking(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        result = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+        )
+        admitted = admit_review_result(result, policy, candidates=(facts,))
+        finding = admitted.comments[0]
+        self.assertFalse(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertTrue(finding.needs_human)
+        self.assertFalse(finding.blocks_approval)
+
     def test_explicit_facts_can_admit_despite_proposed_non_blocking(self):
         comment = ReviewComment(
             path="src/app.py",

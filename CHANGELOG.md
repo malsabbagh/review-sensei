@@ -6,7 +6,9 @@
   `advisory` / `merge-focused` / `strict` modes derive structured candidate
   facts, run the C1 evaluator before GitHub publication, preserve proposed vs
   effective classification, fold advisory observations into the review
-  summary, and withhold `APPROVE` for human adjudication. `legacy` and
+  summary, and withhold `APPROVE` for human adjudication. Confirmed
+  verification proves evidence locations only; it does not invent a failure
+  condition or promote `blocking=false` findings. `legacy` and
   `REVIEWSENSEI_AUTO_APPROVE` stay unchanged.
 
 - Added the issue #136 C1 review-convergence policy contract: versioned

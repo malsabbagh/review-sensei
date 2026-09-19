@@ -66,7 +66,10 @@ independently of high/critical severity when the other gates pass.
 C2 derives `BlockerCandidate` facts from structured comment and verification
 fields (`derive_blocker_candidate`) and writes `effective_blocking` /
 `needs_human` onto each finding (`admit_review_result`) before a publisher
-formats comments or chooses a GitHub review event. The model `blocking` field
+formats comments or chooses a GitHub review event. Confirmed evidence
+verification (#114) validates snapshot locations; it does not mint a failure
+condition or actionable remedy. Operator-mode admission stays fail-closed
+unless the caller supplies explicit `BlockerCandidate` facts. The model `blocking` field
 remains the proposal. `ReviewComment.blocks_approval` uses the admitted
 effective value when present. Publication markers and `REQUEST_CHANGES` follow
 effective blocking. Human adjudication withholds `APPROVE` through

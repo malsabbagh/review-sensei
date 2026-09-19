@@ -2,8 +2,10 @@ import hashlib
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 from review_sensei.context import ContextSnapshot, SourceContextCoverage
+from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import evaluate_auto_approval
 from review_sensei.models import ReviewComment, ReviewResult
@@ -355,6 +357,84 @@ class PublishableReviewTests(unittest.TestCase):
             (finding,), self.snapshot, snapshot_sha256=self.snapshot_sha
         )
         self.assertEqual(results[0].disposition, "confirmed")
+
+    def test_confirmed_verification_does_not_promote_proposed_non_blocking(
+        self,
+    ) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        proposed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        with patch(
+            "review_sensei.verifier._candidate_to_comment",
+            return_value=proposed,
+        ):
+            prepared = prepare_publishable_review(
+                ReviewResult(
+                    summary="Review complete.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+                snapshot=self.snapshot,
+                snapshot_sha256=self.snapshot_sha,
+                evidence_policy="confirmed",
+                changed_lines={"src/app.py": frozenset({2})},
+                convergence_policy=policy,
+            )
+        finding = prepared.result.comments[0]
+        self.assertFalse(finding.blocking)
+        self.assertFalse(finding.effective_blocking)
+        self.assertTrue(finding.needs_human)
+        self.assertFalse(finding.blocks_approval)
+
+    def test_confirmed_explicit_facts_can_still_admit_a_blocker(self) -> None:
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        proposed = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            proposed,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review complete.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            candidates=(candidate(snapshot_sha=self.snapshot_sha),),
+            snapshot=self.snapshot,
+            snapshot_sha256=self.snapshot_sha,
+            evidence_policy="confirmed",
+            changed_lines={"src/app.py": frozenset({2})},
+            convergence_policy=policy,
+            blocker_candidates=(facts,),
+        )
+        finding = prepared.result.comments[0]
+        self.assertTrue(finding.effective_blocking)
+        self.assertTrue(finding.blocks_approval)
 
     def test_unsupported_policy_fails_closed(self) -> None:
         with self.assertRaises(ReviewInputError):

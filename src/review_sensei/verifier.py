@@ -548,6 +548,31 @@ def _comment_in_changed_lines(
     return bool(allowed and comment.line in allowed)
 
 
+def _blocker_candidate_from_verification(
+    comment: ReviewComment,
+    verification: VerificationResult,
+    *,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
+) -> BlockerCandidate:
+    """Map trusted verification facts without minting a failure condition.
+
+    Snapshot confirmation proves evidence locations. Trigger text is not a
+    trusted failure condition or remedy, so those gates stay fail-closed
+    unless the comment already carries structured fields such as
+    ``fix_effort``. Attribution is ``pr-change`` only when the finding sits
+    on a supplied changed-line set.
+    """
+
+    on_changed = changed_lines is not None and _comment_in_changed_lines(
+        comment, changed_lines
+    )
+    return derive_blocker_candidate(
+        comment,
+        on_changed_path=on_changed,
+        evidence_locations_validated=verification.evidence_valid,
+    )
+
+
 def _with_admission(
     result: ReviewResult,
     *,
@@ -648,12 +673,10 @@ def prepare_publishable_review(
             continue
         published.append(comment)
         derived_facts.append(
-            derive_blocker_candidate(
+            _blocker_candidate_from_verification(
                 comment,
-                on_changed_path=True,
-                evidence_locations_validated=verification.evidence_valid,
-                has_failure_condition=True,
-                has_actionable_remedy=verification.actionable,
+                verification,
+                changed_lines=changed_lines,
             )
         )
         final_verifications.append(verification)

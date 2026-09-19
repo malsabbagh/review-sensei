@@ -2770,6 +2770,48 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertIn("blocking=true", body["comments"][0]["body"])
         self.assertIn("Proposed: Non-blocking", body["comments"][0]["body"])
 
+    def test_confirmed_merge_focused_does_not_invent_failure_conditions(self):
+        snapshot = {"src/app.py": "keep\nchange\n"}
+        digest = hashlib.sha256(
+            json.dumps(
+                dict(sorted(snapshot.items())),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        confirmed = CandidateFinding(
+            "Added line is unbounded.",
+            "Call the changed helper with empty input.",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, digest, "change"),),
+            "The new line can fail closed callers.",
+        )
+        outcome, calls = self.publish(
+            self._comment_only_responses(),
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(confirmed,),
+            snapshot=snapshot,
+            snapshot_sha256=digest,
+            evidence_policy="confirmed",
+            convergence_policy=policy,
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["comments"], [])
+        self.assertIn("## Advisory observations", body["body"])
+        self.assertNotIn("blocking=true", body["body"])
+
     def test_advisory_mode_publishes_comment_only_summary(self):
         policy = ReviewConvergencePolicy(mode="advisory", enforcement="publication")
         outcome, calls = self.publish(
