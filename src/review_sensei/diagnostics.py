@@ -153,7 +153,23 @@ def _plan_session_record(
     )
     if check is None:
         return None
-    return payload
+    return _normalize_session_record(payload)
+
+
+def _normalize_session_record(
+    record: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Expose a stable status token in caller-facing diagnostics."""
+
+    if record is None:
+        return None
+    normalized = dict(record)
+    status = normalized.get("status")
+    if status is None:
+        normalized["status"] = "missing"
+    elif not isinstance(status, str) or status not in LOAD_STATUSES:
+        normalized["status"] = "invalid"
+    return normalized
 
 
 def _verification_scope_from_session(
@@ -180,12 +196,13 @@ def _verification_scope_from_session(
                 else "invalid"
             )
         if session_status == "ok":
-            initial = session_record.get("completed_initial_reviews", 0)
-            completed = (
-                initial
-                if isinstance(initial, int) and not isinstance(initial, bool)
-                else 0
-            )
+            initial = session_record.get("completed_initial_reviews")
+            if isinstance(initial, int) and not isinstance(initial, bool):
+                completed = initial
+            else:
+                # A syntactically valid status with an invalid counter is not
+                # a zero-count ledger; it is untrusted state.
+                session_status = "invalid"
         elif session_status == "missing":
             completed = 0
     return preview_verification_scope(
@@ -591,12 +608,13 @@ def run_doctor(
         review_convergence = None
         checks.append(DiagnosticCheck("review-convergence", "action", str(exc)))
     session_record: dict[str, object] | None = None
-    session_check, session_record = _session_ledger_diagnostic(
+    session_check, raw_session_record = _session_ledger_diagnostic(
         session_ledger=session_ledger,
         repository=repository,
         pull_request=pull_request,
         policy=review_convergence,
     )
+    session_record = _normalize_session_record(raw_session_record)
     if session_check is not None:
         checks.append(session_check)
     verification_scope = None

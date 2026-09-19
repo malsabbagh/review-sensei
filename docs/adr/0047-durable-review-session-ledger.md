@@ -175,7 +175,7 @@ or files are inert counters.
 
 ## Follow-up work
 
-- C4: baseline-aware verification (this ADR).
+- C4: baseline-aware verification ([ADR 0048](0048-baseline-aware-verification.md)).
 - C5–C7 as specified in issue #136.
 - C5 consumes this ledger to refuse/handoff autonomous rounds.
 

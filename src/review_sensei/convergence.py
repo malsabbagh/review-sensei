@@ -20,13 +20,13 @@ import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping, Sequence
 
+from .context import ReviewContextCacheKey
 from .errors import ReviewInputError
 from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
 
 if TYPE_CHECKING:
     from .baseline import ReviewBaseline
-    from .context import ReviewContextCacheKey
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 REVIEW_MODE_ENV = "REVIEWSENSEI_REVIEW_MODE"
@@ -51,7 +51,9 @@ ATTRIBUTIONS = frozenset(
         "unattributed",
     }
 )
-LATE_REASONS = frozenset({"new-regression", "substantiated-missed-defect"})
+LATE_REASONS = frozenset(
+    {"new-regression", "substantiated-missed-defect", "human-adjudication"}
+)
 DISPOSITIONS = frozenset(
     {
         "block",
@@ -104,6 +106,7 @@ ADMISSION_REASONS = frozenset(
         "duplicate-of-existing",
         "authorized-disposition-still-valid",
         "contradictory-evidence-needs-human",
+        "classification-needs-human",
         "weak-high-impact-needs-human",
         "not-admitted-advisory",
     }
@@ -346,6 +349,7 @@ class BlockerCandidate:
     is_duplicate: bool = False
     has_authorized_disposition: bool = False
     has_contradictory_evidence: bool = False
+    needs_human: bool = False
     is_preference_or_optional: bool = False
     is_late_relative_to_baseline: bool = False
     late_reason: str | None = None
@@ -375,6 +379,7 @@ class BlockerCandidate:
             "is_duplicate",
             "has_authorized_disposition",
             "has_contradictory_evidence",
+            "needs_human",
             "is_preference_or_optional",
             "is_late_relative_to_baseline",
             "high_impact_weakly_supported",
@@ -588,6 +593,18 @@ def evaluate_blocker_admission(
             evidence_reason="not-applicable",
             scope_reason="not-applicable",
             admission_reason="authorized-disposition-still-valid",
+        )
+    if candidate.needs_human:
+        return _admission(
+            policy=policy,
+            candidate=candidate,
+            disposition="human-adjudication",
+            effective_blocking=False,
+            needs_human=True,
+            severity_reason="not-applicable",
+            evidence_reason="not-applicable",
+            scope_reason=_scope_reason_for(candidate.attribution),
+            admission_reason="classification-needs-human",
         )
     if candidate.has_contradictory_evidence:
         return _admission(
@@ -841,7 +858,6 @@ def admit_review_result(
     verification_changed: tuple[str, ...] = ()
     if candidates is None and baseline is not None:
         from .baseline import ReviewBaseline, plan_verification_scope
-        from .context import ReviewContextCacheKey
 
         if not isinstance(baseline, ReviewBaseline):
             raise ReviewInputError("review baseline is invalid")
@@ -865,18 +881,30 @@ def admit_review_result(
             baseline=baseline,
             current_key=current_key,
             changed_paths=verification_changed,
-            related_paths=None if not related_paths else related_paths,
+            related_paths=related_paths,
             confirmed_concerns=evidence_confirmed_concerns,
         )
+    if verification_scope is not None:
+        from .baseline import (
+            _match_baseline_finding,
+            candidate_from_later_finding,
+            classify_later_finding,
+        )
+
+        if baseline is None:  # pragma: no cover - guarded above
+            raise ReviewInputError("review baseline is invalid")
+        confirmed_concerns = set(evidence_confirmed_concerns)
+        confirmed_criterion_by_concern = {
+            finding.concern: finding.resolution_criterion
+            for finding in baseline.findings
+            if finding.concern is not None and finding.concern in confirmed_concerns
+        }
     admitted: list[ReviewComment] = []
     for index, comment in enumerate(result.comments):
         if candidates is not None:
             candidate = candidates[index]
             _require_candidate_matches_comment(candidate, comment)
         elif verification_scope is not None:
-            from .baseline import candidate_from_later_finding, classify_later_finding
-            from .context import finding_lifecycle_for_comment
-
             if baseline is None:
                 raise ReviewInputError("review baseline is invalid")
             on_changed_path = comment_targets_pr_change(
@@ -884,17 +912,11 @@ def admit_review_result(
                 changed_lines=changed_lines,
                 deleted_lines=deleted_lines,
             )
-            lifecycle = finding_lifecycle_for_comment(comment)
-            confirmed_concerns = set(evidence_confirmed_concerns)
-            evidence_criterion = next(
-                (
-                    finding.resolution_criterion
-                    for finding in baseline.findings
-                    if finding.concern is not None
-                    and finding.concern == lifecycle.concern
-                    and finding.concern in confirmed_concerns
-                ),
-                None,
+            matched = _match_baseline_finding(comment, baseline)
+            evidence_criterion = (
+                confirmed_criterion_by_concern.get(matched.concern)
+                if matched is not None and matched.concern is not None
+                else None
             )
             classification = classify_later_finding(
                 comment,

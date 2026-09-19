@@ -29,7 +29,9 @@ from review_sensei.convergence import (
     admit_review_result,
     derive_blocker_candidate,
 )
+from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.diagnostics import (
+    _normalize_session_record,
     _verification_scope_from_session,
     build_plan,
     run_doctor,
@@ -60,6 +62,14 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
 SHA_D = "d" * 40
+
+_DEFAULT_COVERAGE = CoverageManifest(
+    files=(
+        FileCoverage("src/app.py", "reviewed"),
+        FileCoverage("src/helper.py", "reviewed"),
+    ),
+    enumerated_paths=("src/app.py", "src/helper.py"),
+)
 
 
 def _key(**overrides: object) -> ReviewContextCacheKey:
@@ -94,12 +104,17 @@ def _comment(**overrides: object) -> ReviewComment:
     return ReviewComment(**values)  # type: ignore[arg-type]
 
 
-def _result(*comments: ReviewComment, status: str = "complete") -> ReviewResult:
+def _result(
+    *comments: ReviewComment,
+    status: str = "complete",
+    coverage: CoverageManifest | None = _DEFAULT_COVERAGE,
+) -> ReviewResult:
     return ReviewResult(
         summary="baseline review",
         comments=comments,
         provider="fixture",
         review_status=status,
+        coverage=coverage,
     )
 
 
@@ -107,6 +122,13 @@ class RelatedPathTests(unittest.TestCase):
     def test_same_directory_siblings_are_related(self) -> None:
         related = related_paths_for_change(("src/app.py", "src/helper.py", "docs/a.md"))
         self.assertEqual(related, ("src/helper.py", "src/app.py"))
+
+    def test_related_path_overflow_fails_closed(self) -> None:
+        changed = tuple(
+            f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 2)
+        )
+        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
+            related_paths_for_change(changed)
 
 
 class PreviewScopeTests(unittest.TestCase):
@@ -178,6 +200,28 @@ class BaselinePlanTests(unittest.TestCase):
         self.assertEqual(scope.incremental.previous_key, previous)
         self.assertIn("src/app.py", scope.incremental.reviewed_paths)
         self.assertIn("src/helper.py", scope.incremental.related_paths)
+
+    def test_incomplete_context_falls_back_without_late_admission(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        with patch(
+            "review_sensei.baseline.related_paths_for_change",
+            side_effect=AssertionError("derived related paths must be skipped"),
+        ):
+            scope = plan_verification_scope(
+                policy=policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/app.py", "src/helper.py"),
+                context_complete=False,
+            )
+        self.assertEqual(scope.status, "incomplete-baseline")
+        self.assertEqual(scope.invalidation_reason, "coverage-incomplete")
+        self.assertEqual(scope.coverage_mode, "fallback-full")
+        self.assertIsNone(scope.incremental)
+        self.assertFalse(scope.late_admission_required)
 
     def test_incomplete_review_cannot_establish_baseline(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -309,6 +353,23 @@ class BaselinePlanTests(unittest.TestCase):
                 changed_paths=("src/overflow.py",),
             )
 
+    def test_coverage_enumerated_paths_never_truncate_reviewed_scope(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        paths = tuple(
+            f"src/enumerated-{index}.py"
+            for index in range(MAX_CACHE_METADATA_ITEMS + 1)
+        )
+        coverage = CoverageManifest(
+            files=tuple(FileCoverage(path, "reviewed") for path in paths),
+            enumerated_paths=paths,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "MAX_CACHE_METADATA_ITEMS"):
+            baseline_from_review(
+                _result(_comment(), coverage=coverage),
+                cache_key=_key(),
+                policy=policy,
+            )
+
     def test_invalidated_scopes_require_fallback_full_without_late_admission(
         self,
     ) -> None:
@@ -333,6 +394,20 @@ class BaselinePlanTests(unittest.TestCase):
                 round_kind="verification",
                 late_admission_required=True,
                 coverage_mode="unscoped",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "incremental coverage"):
+            VerificationScope(
+                status="verify",
+                round_kind="verification",
+                late_admission_required=True,
+                coverage_mode="fallback-full",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "incremental plan"):
+            VerificationScope(
+                status="verify",
+                round_kind="verification",
+                late_admission_required=True,
+                coverage_mode="incremental",
             )
         with self.assertRaises(ReviewInputError):
             VerificationScope(
@@ -401,8 +476,26 @@ class BaselinePlanTests(unittest.TestCase):
 
     def test_complete_clean_baseline_requires_reviewed_scope(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
-        with self.assertRaises(ReviewInputError):
-            baseline_from_review(_result(), cache_key=_key(), policy=policy)
+        baseline = baseline_from_review(
+            _result(coverage=None), cache_key=_key(), policy=policy
+        )
+        self.assertFalse(baseline.complete)
+
+    def test_legacy_result_without_coverage_stays_incomplete(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment(), coverage=None), cache_key=_key(), policy=policy
+        )
+        self.assertFalse(baseline.complete)
+        self.assertFalse(baseline.coverage_complete)
+        self.assertEqual(
+            evaluate_baseline_compatibility(
+                baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=policy,
+            ),
+            "coverage-incomplete",
+        )
 
 
 class LaterFindingTests(unittest.TestCase):
@@ -433,6 +526,28 @@ class LaterFindingTests(unittest.TestCase):
             classification.to_dict()["lineage_reason"], "reworded-or-moved"
         )
 
+    def test_reworded_symbol_uses_original_criterion_for_confirmation(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        original = _comment(body="original wording", symbol="old_run")
+        baseline = baseline_from_review(
+            _result(original), cache_key=_key(), policy=policy
+        )
+        moved = _comment(
+            body="reworded and moved wording", symbol="new_run", evidence_id="ev-2"
+        )
+        admitted = admit_review_result(
+            _result(moved),
+            policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+            evidence_confirmed_concerns=(
+                finding_lifecycle_for_comment(original).concern,
+            ),
+        )
+        self.assertFalse(admitted.comments[0].effective_blocking)
+        self.assertFalse(admitted.comments[0].needs_human)
+
     def test_ambiguous_identity_requires_human_adjudication(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         first = _comment(body="first", evidence_id="ev-1")
@@ -455,6 +570,7 @@ class LaterFindingTests(unittest.TestCase):
         )
         self.assertEqual(classification.classification, "needs-human")
         self.assertEqual(classification.lineage_reason, "ambiguous-identity")
+        self.assertEqual(classification.late_reason, "human-adjudication")
 
     def test_omission_is_not_fixed(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -613,6 +729,7 @@ class LaterFindingTests(unittest.TestCase):
         self.assertIsNone(classification.causal_parent)
         self.assertEqual(classification.lineage_reason, "none")
         self.assertEqual(classification.attribution, "pr-change")
+        self.assertEqual(classification.late_reason, "human-adjudication")
         candidate = candidate_from_later_finding(
             unrelated,
             classification,
@@ -622,6 +739,8 @@ class LaterFindingTests(unittest.TestCase):
             has_actionable_remedy=True,
             has_specific_violation=True,
         )
+        self.assertTrue(candidate.needs_human)
+        self.assertFalse(candidate.has_contradictory_evidence)
         admitted = admit_review_result(
             _result(unrelated), policy, candidates=(candidate,)
         )
@@ -839,6 +958,27 @@ class DiagnosticVerificationTests(unittest.TestCase):
         assert scope is not None
         self.assertEqual(scope.status, "baseline-required")
 
+    def test_invalid_session_counter_is_untrusted(self) -> None:
+        scope = _verification_scope_from_session(
+            policy=ReviewConvergencePolicy(mode="merge-focused"),
+            session_record={
+                "status": "ok",
+                "completed_initial_reviews": "1",
+            },
+        )
+        assert scope is not None
+        self.assertEqual(scope.status, "ledger-untrusted")
+
+    def test_session_record_status_is_normalized_for_callers(self) -> None:
+        self.assertEqual(
+            _normalize_session_record({"completed_initial_reviews": 1}),
+            {"completed_initial_reviews": 1, "status": "missing"},
+        )
+        self.assertEqual(
+            _normalize_session_record({"status": "future-status"}),
+            {"status": "invalid"},
+        )
+
 
 class BaselineAdmissionTests(unittest.TestCase):
     def test_baseline_admission_is_fail_closed_without_explicit_candidate_facts(
@@ -899,6 +1039,49 @@ class BaselineAdmissionTests(unittest.TestCase):
             ("src/app.py", "src/legacy.py"),
         )
         self.assertEqual(planner.call_args.kwargs["related_paths"], ("src/helper.py",))
+
+    def test_explicit_empty_related_paths_are_not_derived(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        with patch(
+            "review_sensei.baseline.plan_verification_scope",
+            wraps=plan_verification_scope,
+        ) as planner:
+            admit_review_result(
+                _result(_comment()),
+                policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/app.py", "src/helper.py"),
+                related_paths=(),
+            )
+        self.assertEqual(planner.call_args.kwargs["related_paths"], ())
+
+    def test_explicit_candidates_precede_baseline_planning(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        comment = _comment()
+        baseline = baseline_from_review(
+            _result(comment), cache_key=_key(), policy=policy
+        )
+        candidate = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        with patch("review_sensei.baseline.plan_verification_scope") as planner:
+            admitted = admit_review_result(
+                _result(comment),
+                policy,
+                baseline=baseline,
+                candidates=(candidate,),
+            )
+        planner.assert_not_called()
+        self.assertTrue(admitted.comments[0].effective_blocking)
 
     def test_invalidated_baseline_admission_preserves_late_reason(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

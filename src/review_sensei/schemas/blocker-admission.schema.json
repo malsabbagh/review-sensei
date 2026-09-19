@@ -88,6 +88,7 @@
         "duplicate-of-existing",
         "authorized-disposition-still-valid",
         "contradictory-evidence-needs-human",
+        "classification-needs-human",
         "weak-high-impact-needs-human",
         "not-admitted-advisory"
       ]

@@ -4,7 +4,9 @@ import json
 import unittest
 from pathlib import Path
 
+from review_sensei.baseline import FINDING_CLASSIFICATIONS, LINEAGE_REASONS
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS
+from review_sensei.convergence import ATTRIBUTIONS, LATE_REASONS
 from review_sensei.errors import (
     ContextLoadError,
     LearningLoadError,
@@ -108,6 +110,25 @@ class PublicSchemaTests(unittest.TestCase):
             properties["existing_concerns"]["maximum"], MAX_CACHE_METADATA_ITEMS
         )
         self.assertEqual(properties["related_paths"]["maxItems"], MAX_RELATED_PATHS)
+
+    def test_later_finding_schema_enums_match_runtime_contract(self) -> None:
+        schema = json.loads(
+            (SCHEMA_DIR / "later-finding-classification.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        properties = schema["properties"]
+        self.assertEqual(
+            set(properties["classification"]["enum"]), set(FINDING_CLASSIFICATIONS)
+        )
+        self.assertEqual(
+            {item for item in properties["late_reason"]["enum"] if item is not None},
+            set(LATE_REASONS),
+        )
+        self.assertEqual(
+            set(properties["lineage_reason"]["enum"]), set(LINEAGE_REASONS)
+        )
+        self.assertEqual(set(properties["attribution"]["enum"]), set(ATTRIBUTIONS))
 
     def test_review_comment_schema_requires_line_or_file_side(self) -> None:
         with self.assertRaises(ReviewInputError):

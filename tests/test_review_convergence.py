@@ -257,6 +257,14 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 "contradictory-evidence-needs-human",
             ),
             (
+                "classification needs human without contradiction",
+                _admitted(needs_human=True),
+                merge,
+                "human-adjudication",
+                False,
+                "classification-needs-human",
+            ),
+            (
                 "weak high-impact needs human",
                 _admitted(high_impact_weakly_supported=True),
                 merge,

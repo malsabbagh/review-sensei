@@ -25,6 +25,7 @@ from .validation import (
     ReviewLimits,
     TotalWorkBudget,
     utf8_size,
+    validate_repository_path,
 )
 
 MAX_RELATED_PATHS = 32
@@ -175,13 +176,17 @@ def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
     changed = tuple(changed_paths)
     related: list[str] = []
     for path in changed:
-        if not isinstance(path, str) or not path:
-            raise ReviewInputError("changed path must be a non-empty string")
-        for candidate in _related_paths(path, changed):
-            if candidate not in related:
+        validate_repository_path(path, label="changed path")
+    for path in changed:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        for candidate in changed:
+            if candidate == path:
+                continue
+            candidate_parent = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
+            if candidate_parent == parent and candidate not in related:
+                if len(related) >= MAX_RELATED_PATHS:
+                    raise ReviewInputError("related paths exceed MAX_RELATED_PATHS")
                 related.append(candidate)
-            if len(related) >= MAX_RELATED_PATHS:
-                return tuple(related)
     return tuple(related)
 
 

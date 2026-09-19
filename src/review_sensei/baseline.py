@@ -130,7 +130,7 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
     seen: set[str] = set()
     for index, path in enumerate(values):
         if index >= MAX_CACHE_METADATA_ITEMS:
-            raise ReviewInputError(f"{label} exceed the metadata bound")
+            raise ReviewInputError(f"{label} paths exceed MAX_CACHE_METADATA_ITEMS")
         validate_repository_path(path, label=label)
         if path not in seen:
             seen.add(path)
@@ -141,7 +141,7 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
 def _bounded_related_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
     paths = _bounded_paths(values, label=label)
     if len(paths) > MAX_RELATED_PATHS:
-        raise ReviewInputError(f"{label} exceed the related-path bound")
+        raise ReviewInputError("related paths exceed MAX_RELATED_PATHS")
     return paths
 
 
@@ -153,7 +153,7 @@ def _merge_related_paths(*groups: Sequence[str]) -> tuple[str, ...]:
             if path in seen:
                 continue
             if len(paths) >= MAX_RELATED_PATHS:
-                raise ReviewInputError("related paths exceed the related-path bound")
+                raise ReviewInputError("related paths exceed MAX_RELATED_PATHS")
             seen.add(path)
             paths.append(path)
     return tuple(paths)
@@ -308,8 +308,7 @@ def baseline_from_review(
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
     coverage_state = coverage_approval_state(result.coverage)
-    coverage_complete = result.coverage is None or coverage_state == "reviewed"
-    complete = result.review_status == "complete" and coverage_complete
+    coverage_complete = result.coverage is not None and coverage_state == "reviewed"
     findings = tuple(
         baseline_finding_from_comment(comment, generation=generation)
         for comment in result.comments
@@ -321,6 +320,13 @@ def baseline_from_review(
         reviewed = _bounded_paths(paths, label="reviewed")
     else:
         reviewed = _bounded_paths(reviewed_paths, label="reviewed")
+    # A legacy result without a coverage manifest is only a baseline when the
+    # caller supplies the reviewed scope explicitly.  Finding paths alone do
+    # not prove that the rest of the change was enumerated and reviewed.
+    complete = result.review_status == "complete" and (
+        (result.coverage is not None and coverage_complete)
+        or reviewed_paths is not None
+    )
     if complete and not reviewed:
         raise ReviewInputError(
             "complete baseline requires reviewed paths or complete coverage"
@@ -386,7 +392,9 @@ def _unique_paths(*groups: Sequence[str]) -> tuple[str, ...]:
         for path in group:
             if path not in seen:
                 if len(paths) >= MAX_CACHE_METADATA_ITEMS:
-                    raise ReviewInputError("reviewed paths exceed the metadata bound")
+                    raise ReviewInputError(
+                        "reviewed paths exceed MAX_CACHE_METADATA_ITEMS"
+                    )
                 seen.add(path)
                 paths.append(path)
     return tuple(paths)
@@ -448,11 +456,10 @@ class VerificationScope:
             raise ReviewInputError("late admission applies only to verification")
         if self.status == "verify" and self.coverage_mode not in {
             "incremental",
-            "fallback-full",
         }:
-            raise ReviewInputError(
-                "verification requires incremental or fallback-full coverage"
-            )
+            raise ReviewInputError("verification requires incremental coverage")
+        if self.status == "verify" and self.incremental is None:
+            raise ReviewInputError("verification requires an incremental plan")
         if self.status == "legacy-unscoped" and self.round_kind != "none":
             raise ReviewInputError("legacy-unscoped scopes must have no round")
         if self.status in {"incompatible", "incomplete-baseline"}:
@@ -552,17 +559,6 @@ def preview_verification_scope(
             changed_paths=changed,
             related_paths=related,
         )
-    if completed_initial_reviews is None or completed_initial_reviews < 1:
-        return _scope(
-            status="baseline-required",
-            round_kind="initial",
-            late_admission_required=False,
-            coverage_mode="full",
-            invalidation_reason="missing-baseline",
-            reviewed_paths=changed,
-            related_paths=related,
-            changed_paths=changed,
-        )
     # A preview has no baseline cache key to compare with the current head.
     # It may describe the operator's next step, but it must never authorize
     # late admission solely from a session counter.
@@ -593,15 +589,22 @@ def plan_verification_scope(
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
     changed = _bounded_paths(changed_paths, label="changed")
-    raw_extra_related = (
-        related_paths_for_change(changed) if related_paths is None else related_paths
-    )
     if policy.mode not in OPERATOR_REVIEW_MODES:
+        raw_extra_related = (
+            related_paths_for_change(changed)
+            if related_paths is None
+            else related_paths
+        )
         extra_related = _bounded_related_paths(raw_extra_related, label="related")
         return preview_verification_scope(
             policy=policy, changed_paths=changed, related_paths=extra_related
         )
     if baseline is None:
+        raw_extra_related = (
+            related_paths_for_change(changed)
+            if related_paths is None
+            else related_paths
+        )
         extra_related = _bounded_related_paths(raw_extra_related, label="related")
         return _scope(
             status="baseline-required",
@@ -636,7 +639,12 @@ def plan_verification_scope(
         # related context exceeds the incremental related-path cap.  This
         # branch is an explicit fallback-full scope, so that context is not
         # trusted for late admission.
-        _bounded_paths(raw_extra_related, label="related")
+        # A fallback-full scope does not trust related context.  Validate only
+        # explicitly supplied paths; deriving directory siblings here would do
+        # unnecessary work and could turn a safe invalidation into an input
+        # failure for unrelated context.
+        if related_paths is not None:
+            _bounded_paths(related_paths, label="related")
         return _scope(
             status=status,
             round_kind="initial",
@@ -648,6 +656,23 @@ def plan_verification_scope(
             changed_paths=changed,
             existing_concerns=len(baseline.findings),
         )
+    if not context_complete:
+        if related_paths is not None:
+            _bounded_paths(related_paths, label="related")
+        return _scope(
+            status="incomplete-baseline",
+            round_kind="initial",
+            late_admission_required=False,
+            coverage_mode="fallback-full",
+            invalidation_reason="coverage-incomplete",
+            reviewed_paths=changed,
+            related_paths=(),
+            changed_paths=changed,
+            existing_concerns=len(baseline.findings),
+        )
+    raw_extra_related = (
+        related_paths_for_change(changed) if related_paths is None else related_paths
+    )
     extra_related = _bounded_related_paths(raw_extra_related, label="related")
     related = _merge_related_paths(baseline.related_paths, extra_related)
     reviewed = _unique_paths(existing_paths, baseline.reviewed_paths, changed, related)
@@ -680,7 +705,7 @@ def plan_verification_scope(
         status="verify",
         round_kind="verification",
         late_admission_required=True,
-        coverage_mode="incremental" if context_complete else "fallback-full",
+        coverage_mode="incremental",
         reviewed_paths=reviewed,
         related_paths=related,
         changed_paths=changed,
@@ -727,6 +752,8 @@ class LaterFindingClassification:
             raise ReviewInputError("duplicates must keep an existing concern identity")
         if self.late_reason is not None and not self.is_late_relative_to_baseline:
             raise ReviewInputError("late_reason requires a late finding")
+        if self.is_late_relative_to_baseline and self.late_reason is None:
+            raise ReviewInputError("late finding requires an explicit late_reason")
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -761,6 +788,17 @@ def _match_baseline_finding(
     ]
     if len(matches) == 1:
         return matches[0]
+    # A moved or reworded finding can legitimately change its symbol while
+    # retaining the same path and defect kind.  Admit that fallback only when
+    # the path/kind pair is unique; ambiguity must remain human-adjudicated.
+    path_kind_matches = [
+        finding
+        for finding in baseline.findings
+        if finding.path == comment.path
+        and finding.defect_kind == comment_defect_kind(comment)
+    ]
+    if len(path_kind_matches) == 1:
+        return path_kind_matches[0]
     return None
 
 
@@ -891,6 +929,7 @@ def classify_later_finding(
             classification="needs-human",
             is_late_relative_to_baseline=True,
             is_duplicate=False,
+            late_reason="human-adjudication",
             lineage_reason="ambiguous-identity",
             attribution="unattributed",
         )
@@ -927,6 +966,7 @@ def classify_later_finding(
             classification="needs-human",
             is_late_relative_to_baseline=True,
             is_duplicate=False,
+            late_reason="human-adjudication",
             lineage_reason="ambiguous-identity",
             attribution="unattributed",
         )
@@ -943,6 +983,7 @@ def classify_later_finding(
             classification="already-reviewed-optional",
             is_late_relative_to_baseline=True,
             is_duplicate=False,
+            late_reason="human-adjudication",
             causal_parent=None if parent is None else parent.fingerprint,
             lineage_reason="missed-on-already-reviewed-path",
             attribution="already-reviewed-optional",
@@ -981,6 +1022,7 @@ def classify_later_finding(
             classification="needs-human",
             is_late_relative_to_baseline=True,
             is_duplicate=False,
+            late_reason="human-adjudication",
             lineage_reason="none",
             attribution="pr-change",
         )
@@ -1060,6 +1102,20 @@ def candidate_from_later_finding(
 
     if not isinstance(classification, LaterFindingClassification):
         raise ReviewInputError("later finding classification is invalid")
+    if (
+        classification.is_late_relative_to_baseline
+        and classification.late_reason is None
+    ):
+        raise ReviewInputError(
+            "late finding classification requires an explicit late reason"
+        )
+    if (
+        classification.late_reason is not None
+        and not classification.is_late_relative_to_baseline
+    ):
+        raise ReviewInputError(
+            "late finding classification reason requires a late finding"
+        )
     candidate = derive_blocker_candidate(
         comment,
         on_changed_path=on_changed_path,
@@ -1068,14 +1124,17 @@ def candidate_from_later_finding(
         has_independent_artifact=has_independent_artifact,
         has_actionable_remedy=has_actionable_remedy,
         is_duplicate=classification.is_duplicate,
-        has_contradictory_evidence=has_contradictory_evidence
-        or classification.classification == "needs-human",
+        has_contradictory_evidence=has_contradictory_evidence,
         is_late_relative_to_baseline=classification.is_late_relative_to_baseline,
         late_reason=classification.late_reason,
         has_specific_violation=has_specific_violation,
         has_required_contract=has_required_contract,
     )
-    return replace(candidate, attribution=classification.attribution)
+    return replace(
+        candidate,
+        attribution=classification.attribution,
+        needs_human=classification.classification == "needs-human",
+    )
 
 
 __all__ = [

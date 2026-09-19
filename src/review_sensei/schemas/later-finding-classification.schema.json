@@ -39,7 +39,12 @@
     "is_late_relative_to_baseline": { "type": "boolean" },
     "late_reason": {
       "type": ["string", "null"],
-      "enum": ["new-regression", "substantiated-missed-defect", null]
+      "enum": [
+        "new-regression",
+        "substantiated-missed-defect",
+        "human-adjudication",
+        null
+      ]
     },
     "is_duplicate": { "type": "boolean" },
     "causal_parent": {
