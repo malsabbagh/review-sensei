@@ -579,9 +579,7 @@ class SessionRecord:
             updated_at=updated,
             expires_at=self.expires_at,
             operator_paused=(
-                self.operator_paused
-                if operator_paused is None
-                else operator_paused
+                self.operator_paused if operator_paused is None else operator_paused
             ),
         )
 
