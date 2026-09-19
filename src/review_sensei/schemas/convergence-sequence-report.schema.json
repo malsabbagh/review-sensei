@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/convergence-sequence-report.schema.json",
+  "title": "ReviewSensei convergence sequence evaluation report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "steps",
+    "completed_initial_reviews",
+    "completed_verification_rounds",
+    "handoffs",
+    "no_progress_events",
+    "cap_created_approval",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {
+      "type": "string",
+      "enum": ["legacy", "advisory", "merge-focused", "strict"]
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "admit",
+          "handoff",
+          "handoff_reason",
+          "may_emit_approve",
+          "no_progress",
+          "round_kind"
+        ],
+        "properties": {
+          "label": {"type": "string", "minLength": 1, "maxLength": 128},
+          "admit": {"type": "boolean"},
+          "handoff": {"type": "boolean"},
+          "handoff_reason": {
+            "type": ["string", "null"],
+            "enum": [
+              "round-budget-exhausted",
+              "failed-attempt-budget-exhausted",
+              "no-progress",
+              "incomplete-coverage",
+              "unreviewed-head",
+              "paused",
+              null
+            ]
+          },
+          "may_emit_approve": {"type": "boolean"},
+          "no_progress": {"type": "boolean"},
+          "round_kind": {"type": "string", "enum": ["initial", "verification", "none"]}
+        }
+      }
+    },
+    "completed_initial_reviews": {"type": "integer", "minimum": 0, "maximum": 32},
+    "completed_verification_rounds": {"type": "integer", "minimum": 0, "maximum": 32},
+    "handoffs": {"type": "integer", "minimum": 0, "maximum": 32},
+    "no_progress_events": {"type": "integer", "minimum": 0, "maximum": 32},
+    "cap_created_approval": {"type": "boolean"},
+    "limitations": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    }
+  }
+}

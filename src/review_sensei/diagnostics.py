@@ -26,6 +26,7 @@ from .convergence import (
     ReviewConvergencePolicy,
     evaluate_round_admission,
     resolve_review_convergence_policy,
+    resolve_shadow_review_mode,
 )
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
@@ -577,6 +578,23 @@ def run_doctor(
     except ReviewInputError as exc:
         review_convergence = None
         checks.append(DiagnosticCheck("review-convergence", "action", str(exc)))
+    shadow_policy: ReviewConvergencePolicy | None = None
+    try:
+        shadow_mode = resolve_shadow_review_mode()
+        if shadow_mode is not None:
+            shadow_policy = resolve_review_convergence_policy(mode=shadow_mode)
+            checks.append(
+                DiagnosticCheck(
+                    "review-shadow",
+                    "pass",
+                    (
+                        f"observation-only {shadow_policy.mode}; "
+                        "publication stays on the resolved review mode"
+                    ),
+                )
+            )
+    except ReviewInputError as exc:
+        checks.append(DiagnosticCheck("review-shadow", "action", str(exc)))
     session_record: dict[str, object] | None = None
     session_check, session_record = _session_ledger_diagnostic(
         session_ledger=session_ledger,
@@ -800,6 +818,8 @@ def run_doctor(
         report["provider_configuration"] = provider_configuration
     if review_convergence is not None:
         report["review_convergence"] = review_convergence.to_dict()
+    if shadow_policy is not None:
+        report["shadow_review_convergence"] = shadow_policy.to_dict()
     if session_record is not None:
         report["session_record"] = session_record
     if verification_scope is not None:
@@ -894,6 +914,10 @@ def build_plan(
         skip_reasons.append("diff-not-supplied")
     if identity_base is None or identity_head is None:
         skip_reasons.append("snapshot-identity-not-supplied")
+    shadow_plan: dict[str, object] | None = None
+    shadow_mode = resolve_shadow_review_mode()
+    if shadow_mode is not None:
+        shadow_plan = resolve_review_convergence_policy(mode=shadow_mode).to_dict()
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "ready" if diff_summary["status"] == "ready" else "incomplete",
@@ -925,6 +949,8 @@ def build_plan(
         "diff": diff_summary,
         "skip_reasons": skip_reasons,
     }
+    if shadow_plan is not None:
+        document["shadow_review_convergence"] = shadow_plan
     session_record = _plan_session_record(
         session_ledger=session_ledger,
         repository=repository,
@@ -1004,6 +1030,13 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
             f"initial={review_convergence.get('max_completed_initial_reviews')} "
             f"verification={review_convergence.get('max_completed_verification_rounds')} "
             f"failed_attempts={review_convergence.get('max_failed_attempts')}"
+        )
+    shadow_review = document.get("shadow_review_convergence")
+    if isinstance(shadow_review, dict) and shadow_review.get("mode"):
+        lines.append(
+            "review_shadow: "
+            f"mode={shadow_review.get('mode')} observation-only "
+            f"enforcement={shadow_review.get('enforcement')}"
         )
     session_record = document.get("session_record")
     if isinstance(session_record, dict) and session_record.get("status"):

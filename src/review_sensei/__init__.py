@@ -52,7 +52,9 @@ from .convergence import (
     detect_no_progress,
     evaluate_blocker_admission,
     evaluate_round_admission,
+    observe_shadow_admission,
     resolve_review_convergence_policy,
+    resolve_shadow_review_mode,
 )
 from .conversation import ConversationService
 from .coverage import CoverageManifest, coverage_approval_state
@@ -126,6 +128,13 @@ from .release_manifest import (
     validate_compatibility_manifest,
     verify_artifact_digests,
     verify_worker_compatibility,
+)
+from .sequence import (
+    SequenceReport,
+    SequenceStep,
+    SequenceStepOutcome,
+    compare_sequence_policies,
+    replay_review_sequence,
 )
 from .service import ReviewRun, ReviewService
 from .session import (
@@ -233,6 +242,7 @@ __all__ = [
     "evaluate_blocker_admission",
     "evaluate_round_admission",
     "detect_no_progress",
+    "observe_shadow_admission",
     "complete_session_round",
     "migrate_session_document",
     "prepare_session_round",
@@ -240,6 +250,12 @@ __all__ = [
     "resolve_local_session_ledger",
     "should_skip_automation",
     "resolve_review_convergence_policy",
+    "resolve_shadow_review_mode",
+    "SequenceReport",
+    "SequenceStep",
+    "SequenceStepOutcome",
+    "compare_sequence_policies",
+    "replay_review_sequence",
     "LargeChangePlan",
     "ReviewChunk",
     "TotalWorkBudget",

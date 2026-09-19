@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 REVIEW_MODE_ENV = "REVIEWSENSEI_REVIEW_MODE"
+REVIEW_SHADOW_ENV = "REVIEWSENSEI_REVIEW_SHADOW"
 DEFAULT_REVIEW_MODE = "legacy"
 REVIEW_MODES = frozenset({"legacy", "advisory", "merge-focused", "strict"})
 OPERATOR_REVIEW_MODES = frozenset({"advisory", "merge-focused", "strict"})
@@ -185,6 +186,44 @@ def resolve_review_mode(explicit: str | None = None) -> str:
     if explicit is not None:
         return normalize_review_mode(explicit)
     return normalize_review_mode(os.getenv(REVIEW_MODE_ENV))
+
+
+def resolve_shadow_review_mode(explicit: str | None = None) -> str | None:
+    """Return an observation-only operator mode, or None when unset.
+
+    Shadow never changes GitHub publication. ``legacy`` is not a valid
+    shadow target because it is already the compatible default.
+    """
+
+    raw = explicit if explicit is not None else os.getenv(REVIEW_SHADOW_ENV)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    mode = normalize_review_mode(raw)
+    if mode == "legacy":
+        raise ReviewInputError("shadow review mode cannot be legacy")
+    return mode
+
+
+def observe_shadow_admission(
+    state: RoundSessionState,
+    *,
+    continuation_rounds: int = 0,
+    explicit: str | None = None,
+) -> RoundAdmissionDecision | None:
+    """Evaluate an operator policy without mutating publication or the ledger.
+
+    Returns ``None`` when shadowing is unset. Callers must not skip GitHub
+    events from this decision; publication stays on the resolved review mode.
+    """
+
+    mode = resolve_shadow_review_mode(explicit)
+    if mode is None:
+        return None
+    return evaluate_round_admission(
+        state,
+        resolve_review_convergence_policy(mode=mode),
+        continuation_rounds=continuation_rounds,
+    )
 
 
 def _legacy_blocks(*, proposed_blocking: bool | None, severity: str | None) -> bool:
@@ -1295,6 +1334,7 @@ __all__ = [
     "PUBLIC_SCHEMA_VERSION",
     "REQUIRED_CONTRACT_KINDS",
     "REVIEW_MODE_ENV",
+    "REVIEW_SHADOW_ENV",
     "REVIEW_MODES",
     "ReviewConvergencePolicy",
     "RoundAdmissionDecision",
@@ -1306,8 +1346,10 @@ __all__ = [
     "evaluate_blocker_admission",
     "evaluate_round_admission",
     "normalize_review_mode",
+    "observe_shadow_admission",
     "policy_from_mapping",
     "publication_enforcement_for_mode",
     "resolve_review_convergence_policy",
     "resolve_review_mode",
+    "resolve_shadow_review_mode",
 ]
