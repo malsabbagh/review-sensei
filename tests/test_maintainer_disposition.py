@@ -377,6 +377,47 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(result.action, "status")
         self.assertEqual(application.broker.exchanges, ["review_status"])
 
+    def test_hosted_status_does_not_read_an_injected_local_ledger(self):
+        class Broker:
+            def __init__(self):
+                self.exchanges = []
+
+            def exchange(self, token, *, capability=None):
+                self.exchanges.append(capability)
+                return "token"
+
+        local_ledger = InMemorySessionLedger()
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(local_ledger, IDENTITY, pause, now=FIXED_NOW)
+        remote_ledger = InMemorySessionLedger()
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+            session_ledger=local_ledger,
+        )
+        with patch.object(
+            application, "_session_ledger_for_token", return_value=remote_ledger
+        ) as get_ledger:
+            result = application.apply_maintainer_command(
+                options=GitHubWriteOptions(
+                    github_writes=False, github_session_ledger=True
+                ),
+                oidc_token="oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                body="@sensei review status",
+                actor_login="alice",
+                association="MEMBER",
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertIn("paused=False", result.summary)
+        self.assertTrue(get_ledger.call_args.kwargs["prefer_remote"])
+
     def test_hosted_status_requires_caller_oidc_token(self):
         class Broker:
             def __init__(self):

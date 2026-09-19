@@ -295,7 +295,11 @@ class GitHubApplication:
         # does not need a broker capability or a GitHub write opt-in. Hosted
         # ledgers still exchange below because the issue comment must be read
         # through the broker-owned installation token.
-        ledger = self.session_ledger if command.action == "status" else None
+        ledger = (
+            self.session_ledger
+            if command.action == "status" and not options.github_session_ledger
+            else None
+        )
         if ledger is None:
             if command.action != "status" and not options.github_writes:
                 return MaintainerCommandResult(
@@ -321,7 +325,11 @@ class GitHubApplication:
                 exchange_input,
                 capability=capability,
             )
-            ledger = self._session_ledger_for_token(token, options=options)
+            ledger = self._session_ledger_for_token(
+                token,
+                options=options,
+                prefer_remote=command.action == "status",
+            )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
         _record, result = apply_session_command(ledger, identity, command)
@@ -333,8 +341,9 @@ class GitHubApplication:
         *,
         options: GitHubWriteOptions,
         app_slug: str | None = None,
+        prefer_remote: bool = False,
     ) -> SessionLedger | None:
-        if self.session_ledger is not None:
+        if self.session_ledger is not None and not prefer_remote:
             return self.session_ledger
         if not options.github_session_ledger:
             return None
