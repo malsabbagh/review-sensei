@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-09-19
 GitHub Issue: #136
-Pull Request: draft PR to be linked
+Pull Request: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -154,7 +154,7 @@ GitHub thread mutation requires migration.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: draft PR to be linked
+- Pull request: [#137](https://github.com/malsabbagh/review-sensei/pull/137)
 - Related: [ADR 0032](0032-blocking-finding-classification-for-approvals.md),
   [ADR 0035](0035-request-changes-for-blocking-findings.md),
   [ADR 0039](0039-verify-candidate-findings-before-publication.md),
