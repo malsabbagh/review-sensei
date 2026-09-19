@@ -573,6 +573,32 @@ def _blocker_candidate_from_verification(
     )
 
 
+def _align_confirmed_blocker_candidates(
+    *,
+    blocker_candidates: Sequence[BlockerCandidate] | None,
+    input_count: int,
+    published_indices: Sequence[int],
+    derived: Sequence[BlockerCandidate],
+) -> Sequence[BlockerCandidate]:
+    """Align caller facts with the post-verification comment set.
+
+    Callers may pass one fact per input candidate (pre-verification) or one
+    fact per published comment (post-verification). Other lengths fail closed
+    with a clear error instead of aborting publication after a zip mismatch.
+    """
+
+    if blocker_candidates is None:
+        return derived
+    published_count = len(published_indices)
+    if len(blocker_candidates) == published_count:
+        return blocker_candidates
+    if len(blocker_candidates) == input_count:
+        return tuple(blocker_candidates[index] for index in published_indices)
+    raise ReviewInputError(
+        "blocker candidates must align with review comments or input candidates"
+    )
+
+
 def _with_admission(
     result: ReviewResult,
     *,
@@ -649,10 +675,13 @@ def prepare_publishable_review(
         limits=review_limits,
     )
     published: list[ReviewComment] = []
+    published_indices: list[int] = []
     derived_facts: list[BlockerCandidate] = []
     final_verifications: list[VerificationResult] = []
     unpublished_candidates = 0
-    for candidate, verification in zip(candidates, verifications, strict=True):
+    for index, (candidate, verification) in enumerate(
+        zip(candidates, verifications, strict=True)
+    ):
         if verification.disposition != "confirmed":
             final_verifications.append(verification)
             unpublished_candidates += 1
@@ -672,6 +701,7 @@ def prepare_publishable_review(
             unpublished_candidates += 1
             continue
         published.append(comment)
+        published_indices.append(index)
         derived_facts.append(
             _blocker_candidate_from_verification(
                 comment,
@@ -706,9 +736,13 @@ def prepare_publishable_review(
     prepared = _with_admission(
         prepared,
         convergence_policy=convergence_policy,
-        blocker_candidates=blocker_candidates,
+        blocker_candidates=_align_confirmed_blocker_candidates(
+            blocker_candidates=blocker_candidates,
+            input_count=len(candidates),
+            published_indices=published_indices,
+            derived=tuple(derived_facts),
+        ),
         changed_lines=changed_lines,
-        derived=tuple(derived_facts),
     )
     return PublishableReview(
         prepared, tuple(final_verifications), "confirmed", unpublished

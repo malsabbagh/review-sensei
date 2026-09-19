@@ -2812,6 +2812,70 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertIn("## Advisory observations", body["body"])
         self.assertNotIn("blocking=true", body["body"])
 
+    def test_confirmed_merge_focused_survives_dropped_candidate_facts(self):
+        snapshot = {"src/app.py": "keep\nchange\n"}
+        digest = hashlib.sha256(
+            json.dumps(
+                dict(sorted(snapshot.items())),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        confirmed = CandidateFinding(
+            "Added line is unbounded.",
+            "Call the changed helper with empty input.",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, digest, "change"),),
+            "The new line can fail closed callers.",
+        )
+        rejected = CandidateFinding(
+            "This claims a secret that is not in the snapshot.",
+            "Read an API key.",
+            "src/app.py",
+            (EvidenceReference("src/app.py", 2, digest, "api_key = secret"),),
+            "Unsupported evidence cannot become a finding.",
+        )
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+        )
+        outcome, calls = self.publish(
+            self._responses(),
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(confirmed, rejected),
+            snapshot=snapshot,
+            snapshot_sha256=digest,
+            evidence_policy="confirmed",
+            convergence_policy=policy,
+            blocker_candidates=(facts, facts),
+        )
+        self.assertEqual(outcome.status, "published")
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertIn("Added line is unbounded.", body["comments"][0]["body"])
+
     def test_advisory_mode_publishes_comment_only_summary(self):
         policy = ReviewConvergencePolicy(mode="advisory", enforcement="publication")
         outcome, calls = self.publish(
