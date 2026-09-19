@@ -65,7 +65,12 @@ the current exact head, bounded diff context, prior App findings, trusted-base
 learnings, and at most the configured number of thread messages. For PR-level
 turns, current-head App finding hunks are placed first within the bounded diff
 budget so a large earlier patch cannot hide the code needed to verify an
-existing finding; remaining budget may contain general PR patches.
+existing finding; remaining budget may contain general PR patches. The priority
+set is limited to the newest 20 current-head findings, deduplicated by
+path/hunk, and structurally overlapping file hunks are removed before disjoint
+file hunks are appended. Priority hunks that cannot fit are skipped so later
+findings can use the remaining budget; separator accounting preserves the
+12 KiB byte ceiling.
 
 ## Scope
 

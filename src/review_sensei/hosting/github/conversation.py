@@ -112,7 +112,9 @@ def _bounded_text(value: object, maximum: int) -> str | None:
     return suffix.decode("ascii").lstrip()
 
 
-def _parse_diff_hunk_range(value: str) -> tuple[int, int, int, int] | None:
+def _parse_diff_hunk_header(value: str) -> tuple[int, int, int, int] | None:
+    """Parse the unified-diff header from a hunk block or header line."""
+
     first_line = value.splitlines()[0] if value else ""
     match = DIFF_HUNK_HEADER.match(first_line)
     if match is None:
@@ -144,23 +146,26 @@ def _diff_hunks_overlap(
     )
 
 
-def _remove_emitted_priority_hunks(patch: str, emitted: set[str]) -> str:
+def _remove_emitted_priority_hunks(
+    patch: str, emitted: set[str], *, filename: str
+) -> str:
     priority_ranges = [
         parsed
         for hunk in emitted
-        if (parsed := _parse_diff_hunk_range(hunk)) is not None
+        if (parsed := _parse_diff_hunk_header(hunk)) is not None
     ]
     if not priority_ranges:
         return patch
     lines = patch.splitlines(keepends=True)
     patch_hunks: list[tuple[int, tuple[int, int, int, int]]] = []
     for index, line in enumerate(lines):
-        parsed = _parse_diff_hunk_range(line)
+        parsed = _parse_diff_hunk_header(line)
         if parsed is not None:
             patch_hunks.append((index, parsed))
     if not patch_hunks:
         return patch
-    kept = lines[: patch_hunks[0][0]]
+    preamble = lines[: patch_hunks[0][0]]
+    kept_hunks: list[list[str]] = []
     removed = False
     for position, (start, patch_range) in enumerate(patch_hunks):
         end = (
@@ -173,8 +178,14 @@ def _remove_emitted_priority_hunks(patch: str, emitted: set[str]) -> str:
         ):
             removed = True
             continue
-        kept.extend(lines[start:end])
-    return "".join(kept) if removed else patch
+        kept_hunks.append(lines[start:end])
+    if not removed:
+        return patch
+    if not kept_hunks:
+        return ""
+    if not preamble:
+        preamble = [f"--- a/{filename}\n", f"+++ b/{filename}\n"]
+    return "".join(preamble + [line for hunk in kept_hunks for line in hunk])
 
 
 def has_standalone_sensei_mention(body: object) -> bool:
@@ -753,7 +764,10 @@ class ConversationPublisher:
         emitted_priority_hunks: dict[str, set[str]] = {}
         seen_priority: set[tuple[str, str]] = set()
         for filename, diff_hunk in priority_hunks:
-            validate_repository_path(filename, label="conversation diff path")
+            try:
+                validate_repository_path(filename, label="conversation diff path")
+            except ReviewInputError:
+                continue
             if not isinstance(diff_hunk, str) or not diff_hunk.strip():
                 continue
             priority = (filename, diff_hunk)
@@ -771,7 +785,9 @@ class ConversationPublisher:
 
         for filename, patch in file_patches:
             remaining_patch = _remove_emitted_priority_hunks(
-                patch, emitted_priority_hunks.get(filename, set())
+                patch,
+                emitted_priority_hunks.get(filename, set()),
+                filename=filename,
             )
             if not remaining_patch.strip():
                 continue
@@ -810,7 +826,10 @@ class ConversationPublisher:
             diff_hunk = item.get("diff_hunk")
             if not isinstance(path, str) or not path:
                 continue
-            validate_repository_path(path, label="conversation finding path")
+            try:
+                validate_repository_path(path, label="conversation finding path")
+            except ReviewInputError:
+                continue
             if not isinstance(diff_hunk, str) or not diff_hunk.strip():
                 continue
             value = (path, diff_hunk)

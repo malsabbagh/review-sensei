@@ -279,6 +279,9 @@ class ConversationPublisherTests(unittest.TestCase):
         target_hunk = "@@ -40,2 +40,4 @@\n-old\n+new\n+guard\n+return"
         helper_hunk = "@@ -100,1 +100,2 @@\n+helper\n+return helper()"
         target_patch = (
+            "diff --git a/src/target.py b/src/target.py\n"
+            "index abc..def 100644\n"
+            "--- a/src/target.py\n+++ b/src/target.py\n"
             "@@ -38,8 +38,10 @@\n context-before\n"
             "-old\n+new\n+guard\n+return\n context-after"
         )
@@ -313,6 +316,8 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(diff_context.count(target_hunk), 1)
         self.assertIn(helper_hunk, diff_context)
         self.assertNotIn("context-before", diff_context)
+        self.assertIn("--- a/src/target.py", diff_context)
+        self.assertIn("+++ b/src/target.py", diff_context)
         self.assertEqual(changed_paths, ("src/target.py",))
         self.assertEqual(len(calls), 1)
 
@@ -383,6 +388,33 @@ class ConversationPublisherTests(unittest.TestCase):
 
         self.assertEqual(hunks[0][0], "src/newer.py")
         self.assertEqual(hunks[1][0], "src/older.py")
+
+    def test_prioritized_finding_hunks_skip_invalid_paths(self):
+        head = "b" * 40
+        comments = [
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:02:00Z",
+                "path": "../invalid.py",
+                "diff_hunk": "@@ -1 +1 @@\n+invalid",
+            },
+            {
+                "user": {"login": "review-sensei[bot]"},
+                "commit_id": head,
+                "created_at": "2026-08-19T00:01:00Z",
+                "path": "src/valid.py",
+                "diff_hunk": "@@ -1 +1 @@\n+valid",
+            },
+        ]
+
+        hunks = ConversationPublisher._prioritized_finding_hunks(
+            comments=comments,
+            app_slug="review-sensei[bot]",
+            head_sha=head,
+        )
+
+        self.assertEqual(hunks, (("src/valid.py", "@@ -1 +1 @@\n+valid"),))
 
     def test_prepare_inline_child_resolves_and_validates_root(self):
         updated = "2026-08-19T00:00:00Z"
