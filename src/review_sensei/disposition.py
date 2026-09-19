@@ -15,6 +15,7 @@ from typing import Sequence, cast
 
 from .errors import ReviewInputError
 from .session import (
+    MAX_STORED_DISPOSITIONS,
     SessionIdentity,
     SessionLedger,
     SessionRecord,
@@ -35,6 +36,7 @@ MAINTAINER_ACTIONS = frozenset(
 FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
+MAX_ACTOR_BYTES = 256
 _SENSEI = re.compile(r"(?<![\w@])@sensei(?=\s+)")
 _CONTINUE_ROUNDS = re.compile(
     r"^review\s+continue(?:\s+--rounds\s+(0|1))?\s*$", re.IGNORECASE
@@ -47,6 +49,7 @@ _FINDING = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _FINGERPRINT = re.compile(r"^[a-f0-9]{16,64}$")
+_HEAD_SHA = re.compile(r"^[a-f0-9]{40,64}$")
 
 
 def _aware_now(now: datetime | None = None) -> datetime:
@@ -60,7 +63,7 @@ def _require_reason(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReviewInputError("maintainer disposition requires a reason")
     reason = value.strip()
-    if len(reason.encode("utf-8")) > MAX_REASON_BYTES:
+    if len(reason.encode("utf-8")) > MAX_REASON_BYTES or not reason.isprintable():
         raise ReviewInputError("maintainer disposition reason exceeds the bound")
     return reason
 
@@ -103,6 +106,10 @@ class MaintainerCommand:
             raise ReviewInputError("maintainer actor is invalid")
         if self.continuation_rounds not in {0, 1}:
             raise ReviewInputError("continuation_rounds must be 0 or 1")
+        if self.head_sha is not None and (
+            not isinstance(self.head_sha, str) or not _HEAD_SHA.fullmatch(self.head_sha)
+        ):
+            raise ReviewInputError("maintainer head_sha is invalid")
         if self.action in FINDING_ACTIONS:
             if self.finding_fingerprint is None or not _FINGERPRINT.fullmatch(
                 self.finding_fingerprint
@@ -170,9 +177,29 @@ class FindingDisposition:
             raise ReviewInputError("disposition fingerprint is invalid")
         if self.action not in FINDING_ACTIONS:
             raise ReviewInputError("disposition action is unsupported")
-        _require_reason(self.reason)
-        if not isinstance(self.actor, str) or not self.actor.strip():
+            _require_reason(self.reason)
+        if (
+            not isinstance(self.actor, str)
+            or not self.actor.strip()
+            or len(self.actor.encode("utf-8")) > MAX_ACTOR_BYTES
+            or not self.actor.isprintable()
+        ):
             raise ReviewInputError("disposition actor is invalid")
+        if self.head_sha is not None and (
+            not isinstance(self.head_sha, str) or not _HEAD_SHA.fullmatch(self.head_sha)
+        ):
+            raise ReviewInputError("disposition head_sha is invalid")
+        if self.expires_at is not None:
+            if not isinstance(self.expires_at, str):
+                raise ReviewInputError("disposition expires_at is invalid")
+            try:
+                parsed_expiry = datetime.fromisoformat(
+                    self.expires_at.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ReviewInputError("disposition expires_at is invalid") from exc
+            if parsed_expiry.tzinfo is None or parsed_expiry.utcoffset() is None:
+                raise ReviewInputError("disposition expires_at must include a timezone")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -247,6 +274,7 @@ def apply_session_command(
             summary="automated review may continue under C5 admission",
         )
     if command.action == "status":
+        head_suffix = f" head={command.head_sha}" if command.head_sha else ""
         return record, MaintainerCommandResult(
             action="status",
             applied=False,
@@ -255,7 +283,7 @@ def apply_session_command(
                 f"initial={record.completed_initial_reviews} "
                 f"verification={record.completed_verification_rounds} "
                 f"failed_attempts={record.failed_attempts} "
-                f"paused={paused}"
+                f"paused={paused}{head_suffix}"
             ),
         )
     disposition = FindingDisposition(
@@ -310,6 +338,8 @@ def _append_disposition(
     *,
     now: datetime | None,
 ) -> SessionRecord:
+    if len(record.dispositions) >= MAX_STORED_DISPOSITIONS:
+        raise ReviewInputError("session disposition limit reached")
     replace = getattr(ledger, "replace", None)
     if not callable(replace):
         raise ReviewInputError("session ledger does not support CAS mutation")

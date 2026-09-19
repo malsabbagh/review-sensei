@@ -242,6 +242,26 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_capability_permissions_invalid");
   });
 
+  it("rejects implicit contents read for the read-only status capability", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_scoped_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: {
+          pull_requests: "read",
+          metadata: "read",
+          contents: "read",
+        },
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { pull_requests: "read" }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
   it("rejects a missing metadata grant when metadata was requested explicitly", async () => {
     const client = api();
     vi.spyOn(client, "request").mockResolvedValue({

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
+from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosting.github import (
     GitHubApplication,
@@ -546,6 +547,16 @@ class RoundPersistenceTests(unittest.TestCase):
 
 
 class GitHubSessionLedgerTests(unittest.TestCase):
+    def test_status_reads_missing_remote_session_without_creating_comment(self):
+        http, calls = make_http([json_response([])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        command = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW
+        )
+        self.assertEqual(result.action, "status")
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
+
     def test_initialize_and_cas_via_issue_comment(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         body = render_session_comment(repository_id=99, pull_request=136, record=record)

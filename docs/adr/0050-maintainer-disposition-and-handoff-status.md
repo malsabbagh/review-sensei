@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-09-19
 Last amended: 2026-09-19
 GitHub Issue: #136
-Pull Request: [#142](https://github.com/malsabbagh/review-sensei/pull/142)
+Pull Request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -116,9 +116,9 @@ to `legacy` or omitting the ledger. Unresolved findings are not discarded.
 ## Links
 
 - Related issue: [#136](https://github.com/malsabbagh/review-sensei/issues/136)
-- Pull request: [#142](https://github.com/malsabbagh/review-sensei/pull/142)
+- Pull request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 - Related: [ADR 0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md),
   [ADR 0047](0047-durable-review-session-ledger.md),
   [ADR 0049](0049-automation-admission-and-handoff.md)
 - Supersedes: none
-- Superseded by: none
+- Superseded by: none (C7 sequential evaluation is a follow-up, not a replacement.)

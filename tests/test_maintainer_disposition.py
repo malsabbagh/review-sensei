@@ -9,6 +9,7 @@ from unittest.mock import patch
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.disposition import (
+    FindingDisposition,
     apply_session_command,
     authorized_maintainer,
     parse_maintainer_command,
@@ -113,6 +114,23 @@ class MaintainerCommandParseTests(unittest.TestCase):
             parse_maintainer_command("@sensei dismiss abcd1234abcd1234", actor="alice")
         )
 
+    def test_finding_disposition_enforces_storage_bounds(self):
+        with self.assertRaisesRegex(ReviewInputError, "actor"):
+            FindingDisposition(
+                fingerprint="abcd1234abcd1234",
+                action="dismiss",
+                reason="accepted",
+                actor="alice\n",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "head_sha"):
+            FindingDisposition(
+                fingerprint="abcd1234abcd1234",
+                action="dismiss",
+                reason="accepted",
+                actor="alice",
+                head_sha="not-a-sha",
+            )
+
 
 class SessionCommandTests(unittest.TestCase):
     def test_pause_and_continue_mutate_operator_paused(self):
@@ -157,6 +175,16 @@ class SessionCommandTests(unittest.TestCase):
         )
         self.assertTrue(committed.operator_paused)
 
+    def test_status_reports_the_authoritative_head_binding(self):
+        ledger = InMemorySessionLedger()
+        command = parse_maintainer_command(
+            "@sensei review status", actor="alice", head_sha="a" * 40
+        )
+        _record, result = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW
+        )
+        self.assertIn(f"head={'a' * 40}", result.summary)
+
     def test_disposition_is_not_a_verified_fix(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(
@@ -173,6 +201,23 @@ class SessionCommandTests(unittest.TestCase):
         self.assertEqual(
             session_dispositions(loaded.record)[0].fingerprint, "abcd1234abcd1234"
         )
+
+    def test_fifth_disposition_is_rejected_without_corrupting_the_record(self):
+        ledger = InMemorySessionLedger()
+        for index in range(4):
+            command = parse_maintainer_command(
+                f"@sensei dismiss {index + 1:016x} --reason accepted",
+                actor="alice",
+            )
+            apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        fifth = parse_maintainer_command(
+            "@sensei dismiss 0000000000000005 --reason accepted", actor="alice"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "limit"):
+            apply_session_command(ledger, IDENTITY, fifth, now=FIXED_NOW)
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "ok")
+        self.assertEqual(len(loaded.record.dispositions), 4)
 
     def test_operator_pause_requires_public_cas_replace(self):
         class LegacyLedger:
