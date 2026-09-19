@@ -36,7 +36,12 @@ from .provider_config import (
 )
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
-from .session import LOAD_STATUSES, SessionIdentity, resolve_local_session_ledger
+from .session import (
+    LOAD_STATUSES,
+    SessionIdentity,
+    admission_diagnostic,
+    resolve_local_session_ledger,
+)
 from .stages import (
     MAX_STAGE_FILES,
     category_catalog_for_configured_stages,
@@ -114,6 +119,7 @@ def _session_ledger_diagnostic(
             payload["admit"] = decision.admit
             payload["handoff"] = decision.handoff
             payload["handoff_reason"] = decision.handoff_reason
+            payload["diagnostic"] = admission_diagnostic(decision)
             payload["may_emit_approve"] = decision.may_emit_approve
         return (
             DiagnosticCheck(
@@ -646,6 +652,8 @@ def run_doctor(
                 f"admit={admit} remaining_verification="
                 f"{session_record.get('remaining_verification_rounds')}"
             )
+            if not admit:
+                detail = f"{detail} diagnostic={session_record.get('diagnostic')}"
             if session_record.get("handoff"):
                 detail = f"{detail} handoff={reason}"
             checks.append(

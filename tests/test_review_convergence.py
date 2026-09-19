@@ -685,6 +685,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         exhausted = RoundSessionState(
             completed_initial_reviews=1,
             completed_verification_rounds=2,
+            coverage_complete=True,
             latest_head_reviewed=True,
         )
         refused = evaluate_round_admission(exhausted, policy)
@@ -710,6 +711,23 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertFalse(decision.admit)
         self.assertEqual(decision.handoff_reason, "unreviewed-head")
 
+    def test_continuation_does_not_admit_incomplete_coverage(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        decision = evaluate_round_admission(
+            RoundSessionState(
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+                coverage_complete=False,
+                independently_approval_eligible=True,
+                latest_head_reviewed=True,
+            ),
+            policy,
+            continuation_rounds=1,
+        )
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.handoff_reason, "incomplete-coverage")
+        self.assertFalse(decision.may_emit_approve)
+
     def test_detect_no_progress_repeats_and_oscillation(self):
         self.assertFalse(
             detect_no_progress(previous_blocking=("a",), current_blocking=())
@@ -727,6 +745,8 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertFalse(
             detect_no_progress(previous_blocking=("a",), current_blocking=("b",))
         )
+        with self.assertRaisesRegex(ReviewInputError, "blocking identity"):
+            detect_no_progress(current_blocking=("a", 1))  # type: ignore[arg-type]
 
     def test_round_invariants_reject_cap_created_approval(self):
         with self.assertRaisesRegex(ReviewInputError, "must not create approval"):

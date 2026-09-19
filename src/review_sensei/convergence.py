@@ -1083,13 +1083,15 @@ def detect_no_progress(
     were verified away). Callers pass trusted fingerprints, not prose.
     """
 
-    current = tuple(sorted(current_blocking))
-    previous = tuple(sorted(previous_blocking))
-    earlier = tuple(sorted(earlier_blocking))
-    if any(
-        not isinstance(item, str) or not item for item in current + previous + earlier
-    ):
-        raise ReviewInputError("blocking identity must be a non-empty string")
+    def normalize(value: Sequence[str]) -> tuple[str, ...]:
+        values = tuple(value)
+        if any(not isinstance(item, str) or not item for item in values):
+            raise ReviewInputError("blocking identity must be a non-empty string")
+        return tuple(sorted(values))
+
+    current = normalize(current_blocking)
+    previous = normalize(previous_blocking)
+    earlier = normalize(earlier_blocking)
     if current and current == previous:
         return True
     return bool(current and earlier and current == earlier)
@@ -1235,15 +1237,6 @@ def evaluate_round_admission(
             reason="unreviewed-head",
             may_approve=False,
         )
-    if continuation == 1:
-        return decision(
-            admit=True,
-            count=True,
-            kind="verification",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
     if not state.coverage_complete:
         return decision(
             admit=False,
@@ -1252,6 +1245,15 @@ def evaluate_round_admission(
             handoff=True,
             reason="incomplete-coverage",
             may_approve=False,
+        )
+    if continuation == 1:
+        return decision(
+            admit=True,
+            count=True,
+            kind="verification",
+            handoff=False,
+            reason=None,
+            may_approve=independently_eligible,
         )
     return decision(
         admit=False,

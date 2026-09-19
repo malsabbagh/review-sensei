@@ -2039,7 +2039,9 @@ def main(argv: list[str] | None = None) -> int:
                 continuation_rounds=getattr(args, "continue_rounds", 0),
                 no_progress=no_progress_reason is not None,
             )
-            held_reservation = prepared_round.reservation_id
+            held_reservation = (
+                prepared_round.reservation_id if prepared_round.decision.admit else None
+            )
             if should_skip_automation(prepared_round.decision, inference=True):
                 outcome = RunOutcome(
                     "skipped_policy",

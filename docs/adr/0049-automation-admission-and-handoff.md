@@ -41,7 +41,8 @@ session ledger:
   charges `failed-attempt`. Failed attempts are bounded separately from
   completed rounds.
 - `--continue-rounds 1` admits one extra verification round for that
-  invocation only. Workflows must not pass it by default.
+  invocation only after the latest-head and coverage gates pass. Workflows
+  must not pass it by default.
 - `--no-progress REASON` is accepted only with an operator mode and an
   enabled local or GitHub-backed session ledger. The bounded printable reason
   is an operator attestation for this invocation; it is not persisted or

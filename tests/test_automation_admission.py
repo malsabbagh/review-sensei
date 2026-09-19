@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from argparse import ArgumentTypeError
@@ -15,6 +16,7 @@ from review_sensei.diagnostics import run_doctor
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.publication import PublicationResult
 from review_sensei.models import ReviewResult
+from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
@@ -236,6 +238,7 @@ class AutomationAdmissionTests(unittest.TestCase):
             reservation_id=_reservation(),
             now=FIXED_NOW,
             continuation_rounds=1,
+            coverage_complete=True,
             latest_head_reviewed=True,
         )
         self.assertTrue(prepared.decision.admit)
@@ -402,6 +405,7 @@ class DiagnosticAutomationTests(unittest.TestCase):
             )
             self.assertEqual(check["status"], "action")
             self.assertIn("admit=False", check["detail"])
+            self.assertIn("diagnostic=unreviewed-head", check["detail"])
 
 
 class CliInferenceSkipTests(unittest.TestCase):
@@ -471,9 +475,10 @@ class CliInferenceSkipTests(unittest.TestCase):
                     )
             self.assertEqual(status, 0)
             self.assertIn("skipped_policy", stdout.getvalue())
-            payload = outcome_path.read_text(encoding="utf-8")
-            self.assertIn("round-budget-exhausted", payload)
-            self.assertIn('"provider_calls": 0', payload)
+            payload = json.loads(outcome_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
+            self.assertIn(payload["diagnostic"], PUBLIC_DIAGNOSTICS)
+            self.assertEqual(payload["provider_calls"], 0)
 
 
 if __name__ == "__main__":
