@@ -254,9 +254,21 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
                 "admitted-blocker",
             ),
             (
-                "required contract can block without high severity",
+                "required contract still needs high severity in merge-focused",
                 _admitted(
                     severity="medium",
+                    has_specific_violation=False,
+                    has_required_contract=True,
+                ),
+                merge,
+                "advisory",
+                False,
+                "not-admitted-advisory",
+            ),
+            (
+                "required contract with high severity can block in merge-focused",
+                _admitted(
+                    severity="high",
                     has_specific_violation=False,
                     has_required_contract=True,
                 ),
@@ -512,6 +524,65 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 False,
             ),
             (
+                "eligible duplicate cannot approve",
+                RoundSessionState(
+                    same_head_duplicate=True,
+                    independently_approval_eligible=True,
+                    coverage_complete=True,
+                    latest_head_reviewed=True,
+                ),
+                False,
+                "none",
+                False,
+                None,
+                False,
+            ),
+            (
+                "duplicate with no-progress still hands off",
+                RoundSessionState(
+                    same_head_duplicate=True,
+                    no_progress=True,
+                    independently_approval_eligible=True,
+                    coverage_complete=True,
+                    latest_head_reviewed=True,
+                ),
+                False,
+                "none",
+                True,
+                "no-progress",
+                False,
+            ),
+            (
+                "recovery with exhausted attempts still hands off",
+                RoundSessionState(
+                    publication_recovery=True,
+                    failed_attempts=6,
+                    independently_approval_eligible=True,
+                    coverage_complete=True,
+                    latest_head_reviewed=True,
+                ),
+                False,
+                "none",
+                True,
+                "failed-attempt-budget-exhausted",
+                False,
+            ),
+            (
+                "retry with no-progress still hands off",
+                RoundSessionState(
+                    transport_or_structural_retry=True,
+                    no_progress=True,
+                    independently_approval_eligible=True,
+                    coverage_complete=True,
+                    latest_head_reviewed=True,
+                ),
+                False,
+                "none",
+                True,
+                "no-progress",
+                False,
+            ),
+            (
                 "no-progress hands off early",
                 RoundSessionState(completed_initial_reviews=1, no_progress=True),
                 False,
@@ -541,6 +612,20 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 self.assertFalse(decision.cap_creates_approval)
                 self.assertEqual(decision.count_as_completed_round, admit)
                 validate_public_document(decision.to_dict(), "review-round-decision")
+        last_round = evaluate_round_admission(
+            RoundSessionState(
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+                independently_approval_eligible=True,
+                coverage_complete=True,
+                latest_head_reviewed=True,
+            ),
+            policy,
+        )
+        self.assertTrue(last_round.handoff)
+        self.assertEqual(last_round.handoff_reason, "round-budget-exhausted")
+        self.assertTrue(last_round.may_emit_approve)
+        self.assertFalse(last_round.cap_creates_approval)
 
     def test_round_invariants_reject_cap_created_approval(self):
         with self.assertRaisesRegex(ReviewInputError, "must not create approval"):

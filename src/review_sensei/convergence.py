@@ -580,12 +580,14 @@ def evaluate_blocker_admission(
             admission_reason="weak-high-impact-needs-human",
         )
 
-    named_rule = candidate.has_required_contract or (
-        policy.mode == "strict" and bool(candidate.named_mandatory_rule)
-    )
+    named_rule = policy.mode == "strict" and bool(candidate.named_mandatory_rule)
     material, severity_reason = _severity_assessment(candidate, named_rule=named_rule)
     evidence_ok, evidence_reason = _evidence_assessment(candidate)
-    violation = candidate.has_specific_violation or named_rule
+    violation = (
+        candidate.has_specific_violation
+        or candidate.has_required_contract
+        or named_rule
+    )
     if named_rule:
         material = True
         severity_reason = "named-mandatory-rule"
@@ -806,20 +808,6 @@ def evaluate_round_admission(
             may_approve=independently_eligible,
         )
 
-    if (
-        state.same_head_duplicate
-        or state.publication_recovery
-        or state.transport_or_structural_retry
-    ):
-        return decision(
-            admit=False,
-            count=False,
-            kind="none",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
-
     if state.no_progress:
         return decision(
             admit=False,
@@ -837,6 +825,20 @@ def evaluate_round_admission(
             kind="none",
             handoff=True,
             reason="failed-attempt-budget-exhausted",
+            may_approve=False,
+        )
+
+    if (
+        state.same_head_duplicate
+        or state.publication_recovery
+        or state.transport_or_structural_retry
+    ):
+        return decision(
+            admit=False,
+            count=False,
+            kind="none",
+            handoff=False,
+            reason=None,
             may_approve=False,
         )
 

@@ -43,14 +43,16 @@ Four controls stay distinct:
 `legacy` preserves today's effective blocking rule (explicit `blocking` wins,
 else case-insensitive `high`/`critical`) and does not cap rounds. Operator
 modes ignore the model boolean as authority. Merge-focused admits a blocker
-only when the candidate has a specific violation or named required contract,
-material impact, an actionable remedy, validated evidence plus a failure
-condition or an independent analyzer/test artifact, PR/fix/exception
-attribution, and no duplicate, still-valid human disposition, or contradictory
-evidence. JSON validity, line validity, model confidence, and LLM agreement
-are not proof. Late blockers after a baseline require `new-regression` or
-`substantiated-missed-defect`. Weak high-impact concerns and contradictions
-escalate to human adjudication without inventing a proven blocker.
+only when the candidate has a specific violation or an explicitly required
+repository contract, high/critical material impact, an actionable remedy,
+validated evidence plus a failure condition or an independent analyzer/test
+artifact, PR/fix/exception attribution, and no duplicate, still-valid human
+disposition, or contradictory evidence. A required contract is a violation
+source, not a substitute for high/critical impact. JSON validity, line
+validity, model confidence, and LLM agreement are not proof. Late blockers
+after a baseline require `new-regression` or `substantiated-missed-defect`.
+Weak high-impact concerns and contradictions escalate to human adjudication
+without inventing a proven blocker.
 
 `advisory` uses the same admission rules but sets
 `automatic_github_review_events=false` and `inline_advisory_threads=false`.
@@ -59,11 +61,12 @@ independently of high/critical severity when the other gates pass.
 
 Round admission counts completed logical reviews, not provider calls, commits,
 or retries. Same-head duplicates, publication recovery, and transport or
-structural retries do not consume the completed-round budget. No-progress and
-exhausted failed-attempt or round budgets hand off. The cap never creates
-approval eligibility; a last allowed round may approve only when independent
-gates already pass. Incomplete coverage or an unreviewed later head cannot
-approve.
+structural retries do not consume the completed-round budget and cannot emit
+approval. No-progress and exhausted failed-attempt budgets hand off even when
+the current invocation is a duplicate, recovery, or retry. The cap never
+creates approval eligibility; a last allowed round may approve only when
+independent gates already pass. Incomplete coverage or an unreviewed later
+head cannot approve.
 
 C1 enforcement is `display-only`. Doctor and plan report the resolved policy
 and digest. Publication continues to use ADR 0032/0035 until C2.
