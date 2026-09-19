@@ -931,7 +931,7 @@ jobs:
           fi
           resolver="src/review_sensei/hosting/github/trigger.py"
           if [[ -f "$resolver" ]]; then
-            PYTHONPATH=src python -m review_sensei.hosting.github.trigger \
+            PYTHONPATH=src python "$resolver" \
               --event "$EVENT_NAME" \
               --comment-body "$COMMENT_BODY" \
               --pull-json "$pull_json" \

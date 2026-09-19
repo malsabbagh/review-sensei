@@ -231,8 +231,8 @@ class GitHubTriggerTests(unittest.TestCase):
 
 
 class InlineCallerResolverTests(unittest.TestCase):
-    def test_generated_callers_run_trigger_as_a_package_module(self):
-        expected = "PYTHONPATH=src python -m review_sensei.hosting.github.trigger"
+    def test_generated_callers_run_trigger_as_a_standalone_script(self):
+        expected = 'PYTHONPATH=src python "$resolver"'
         for name, text in (
             ("repository", REPO_CALLER.read_text(encoding="utf-8")),
             ("example", EXAMPLE_CALLER.read_text(encoding="utf-8")),
@@ -240,7 +240,29 @@ class InlineCallerResolverTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn(expected, text)
-                self.assertNotIn('PYTHONPATH=src python "$resolver"', text)
+                self.assertNotIn(
+                    "PYTHONPATH=src python -m review_sensei.hosting.github.trigger",
+                    text,
+                )
+
+    def test_standalone_trigger_script_does_not_require_package_dependencies(self):
+        resolver = (
+            ROOT / "src" / "review_sensei" / "hosting" / "github" / "trigger.py"
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        result = subprocess.run(
+            [sys.executable, str(resolver), "--help"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "Resolve ReviewSensei workflow trigger metadata", result.stdout
+        )
 
     def test_generated_callers_embed_the_same_inline_resolver(self):
         repo = REPO_CALLER.read_text(encoding="utf-8")
