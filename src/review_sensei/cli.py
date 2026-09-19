@@ -1955,6 +1955,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         from .session import (
             SessionIdentity,
+            admission_diagnostic,
             prepare_session_round,
             record_session_failed_attempt,
             resolve_local_session_ledger,
@@ -1987,7 +1988,7 @@ def main(argv: list[str] | None = None) -> int:
                 repository=args.repository,
                 pull_request=args.pull_request,
                 head_sha=head_sha,
-                kind="round",
+                kind="publish",
             )
             prepared_round = prepare_session_round(
                 ledger,
@@ -2004,7 +2005,7 @@ def main(argv: list[str] | None = None) -> int:
                     pull_request_number=args.pull_request,
                     base_sha=(args.base_sha or "").strip().lower() or None,
                     head_sha=head_sha,
-                    diagnostic=prepared_round.decision.handoff_reason,
+                    diagnostic=admission_diagnostic(prepared_round.decision),
                     provider_calls=0,
                 )
                 emit_host_outcome(outcome, output_path=args.outcome)

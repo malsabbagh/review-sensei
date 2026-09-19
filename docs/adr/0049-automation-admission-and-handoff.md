@@ -44,6 +44,9 @@ session ledger:
   invocation only. Workflows must not pass it by default.
 - `detect_no_progress` treats a repeated non-empty blocking identity set
   or A→B→A oscillation as no-progress. Empty current sets are progress.
+  C5 accepts this as trusted caller-supplied state; the GitHub publication
+  adapter does not persist prior finding identities or infer no-progress on
+  its own in this slice.
 - `legacy` is unchanged. Without a ledger, operator modes cannot enforce
   and doctor reports action required. `REVIEWSENSEI_AUTO_APPROVE` and
   #114/#115 gates are unchanged.

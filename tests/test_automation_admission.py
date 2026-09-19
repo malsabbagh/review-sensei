@@ -19,6 +19,7 @@ from review_sensei.session import (
     LocalSessionLedger,
     SessionIdentity,
     SessionRecord,
+    admission_diagnostic,
     complete_session_round,
     prepare_session_round,
     record_session_failed_attempt,
@@ -39,7 +40,7 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 HEAD = "a" * 40
 
 
-def _reservation(*, kind: str = "round") -> str:
+def _reservation(*, kind: str = "publish") -> str:
     return session_reservation_id(
         repository=IDENTITY.repository,
         pull_request=IDENTITY.pull_request,
@@ -77,7 +78,13 @@ class AutomationAdmissionTests(unittest.TestCase):
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         policy = ReviewConvergencePolicy(mode="merge-focused")
         prepared = prepare_session_round(
-            ledger, IDENTITY, policy, reservation_id=_reservation(), now=FIXED_NOW
+            ledger,
+            IDENTITY,
+            policy,
+            reservation_id=_reservation(),
+            now=FIXED_NOW,
+            latest_head_reviewed=True,
+            coverage_complete=True,
         )
         self.assertFalse(prepared.decision.admit)
         self.assertIsNone(prepared.reservation_id)
@@ -86,6 +93,10 @@ class AutomationAdmissionTests(unittest.TestCase):
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertIsNone(loaded.record.reservation_id)
         self.assertEqual(loaded.record.completed_verification_rounds, 2)
+        self.assertEqual(loaded.record.failed_attempts, 0)
+        self.assertEqual(
+            admission_diagnostic(prepared.decision), "round-budget-exhausted"
+        )
 
     def test_in_flight_reservation_pauses_other_jobs(self):
         ledger = InMemorySessionLedger()
@@ -104,6 +115,26 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertFalse(second.decision.admit)
         self.assertEqual(second.decision.handoff_reason, "paused")
         self.assertIsNone(second.reservation_id)
+
+    def test_exhausted_unreviewed_head_reports_unreviewed_diagnostic(self):
+        ledger = InMemorySessionLedger()
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=1,
+            completed_verification_rounds=2,
+        )
+        ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
+        prepared = prepare_session_round(
+            ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id=_reservation(),
+            now=FIXED_NOW,
+            coverage_complete=True,
+        )
+        self.assertFalse(prepared.decision.admit)
+        self.assertEqual(admission_diagnostic(prepared.decision), "unreviewed-head")
 
     def test_same_reservation_after_commit_is_duplicate_not_a_new_round(self):
         ledger = InMemorySessionLedger()
@@ -124,6 +155,22 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertTrue(should_skip_automation(replay.decision, inference=True))
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(admission_diagnostic(replay.decision), "already_published")
+
+    def test_same_in_flight_reservation_pauses_retry(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        reservation = _reservation()
+        first = prepare_session_round(
+            ledger, IDENTITY, policy, reservation_id=reservation, now=FIXED_NOW
+        )
+        self.assertTrue(first.decision.admit)
+        retry = prepare_session_round(
+            ledger, IDENTITY, policy, reservation_id=reservation, now=FIXED_NOW
+        )
+        self.assertFalse(retry.decision.admit)
+        self.assertEqual(retry.decision.handoff_reason, "paused")
+        self.assertIsNone(retry.reservation_id)
 
     def test_continuation_reserves_one_extra_verification_round(self):
         ledger = InMemorySessionLedger()
@@ -142,6 +189,7 @@ class AutomationAdmissionTests(unittest.TestCase):
             reservation_id=_reservation(),
             now=FIXED_NOW,
             continuation_rounds=1,
+            latest_head_reviewed=True,
         )
         self.assertTrue(prepared.decision.admit)
         self.assertEqual(prepared.decision.round_kind, "verification")
@@ -335,9 +383,22 @@ class CliInferenceSkipTests(unittest.TestCase):
                     self.created.append(settings)
                     raise AssertionError("provider must not be constructed")
 
+            from review_sensei.session import prepare_session_round as real_prepare
+
+            def prepare_reviewed_head(ledger, identity, policy, **kwargs):
+                kwargs["latest_head_reviewed"] = True
+                kwargs["coverage_complete"] = True
+                return real_prepare(ledger, identity, policy, **kwargs)
+
             stdout = io.StringIO()
             stderr = io.StringIO()
-            with patch("review_sensei.cli.default_registry", return_value=Registry()):
+            with (
+                patch(
+                    "review_sensei.session.prepare_session_round",
+                    side_effect=prepare_reviewed_head,
+                ),
+                patch("review_sensei.cli.default_registry", return_value=Registry()),
+            ):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     status = main(
                         [
@@ -364,7 +425,7 @@ class CliInferenceSkipTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn("skipped_policy", stdout.getvalue())
             payload = outcome_path.read_text(encoding="utf-8")
-            self.assertIn("unreviewed-head", payload)
+            self.assertIn("round-budget-exhausted", payload)
             self.assertIn('"provider_calls": 0', payload)
 
 

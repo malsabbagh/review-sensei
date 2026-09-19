@@ -1087,6 +1087,15 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         self.assertEqual(result.status, "published")
         loaded = ledger.load(IDENTITY)
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(
+            loaded.record.last_committed_reservation_id,
+            session_reservation_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                head_sha="a" * 40,
+                kind="publish",
+            ),
+        )
 
     def test_non_published_publication_aborts_without_counting(self):
         from review_sensei.hosting.github import PublicationResult

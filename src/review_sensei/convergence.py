@@ -1226,16 +1226,6 @@ def evaluate_round_admission(
             reason=None,
             may_approve=independently_eligible,
         )
-    if continuation == 1:
-        return decision(
-            admit=True,
-            count=True,
-            kind="verification",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
-
     if not state.latest_head_reviewed:
         return decision(
             admit=False,
@@ -1244,6 +1234,15 @@ def evaluate_round_admission(
             handoff=True,
             reason="unreviewed-head",
             may_approve=False,
+        )
+    if continuation == 1:
+        return decision(
+            admit=True,
+            count=True,
+            kind="verification",
+            handoff=False,
+            reason=None,
+            may_approve=independently_eligible,
         )
     if not state.coverage_complete:
         return decision(

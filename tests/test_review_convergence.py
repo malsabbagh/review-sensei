@@ -683,7 +683,9 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
     def test_continuation_admits_one_extra_verification_round(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         exhausted = RoundSessionState(
-            completed_initial_reviews=1, completed_verification_rounds=2
+            completed_initial_reviews=1,
+            completed_verification_rounds=2,
+            latest_head_reviewed=True,
         )
         refused = evaluate_round_admission(exhausted, policy)
         self.assertFalse(refused.admit)
@@ -693,6 +695,20 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertTrue(continued.count_as_completed_round)
         with self.assertRaisesRegex(ReviewInputError, "continuation_rounds"):
             evaluate_round_admission(exhausted, policy, continuation_rounds=2)
+
+    def test_continuation_does_not_admit_an_unreviewed_head(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        decision = evaluate_round_admission(
+            RoundSessionState(
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+                latest_head_reviewed=False,
+            ),
+            policy,
+            continuation_rounds=1,
+        )
+        self.assertFalse(decision.admit)
+        self.assertEqual(decision.handoff_reason, "unreviewed-head")
 
     def test_detect_no_progress_repeats_and_oscillation(self):
         self.assertFalse(

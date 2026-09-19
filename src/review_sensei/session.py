@@ -762,10 +762,10 @@ def prepare_session_round(
 ) -> PreparedSessionRound:
     """Reserve a counted slot when C1 would admit the round.
 
-    A foreign in-flight reservation pauses this job. The same
-    ``reservation_id`` after commit is a same-head duplicate. Unadmitted
-    operator rounds are not reserved so C5 can refuse inference and
-    publication without consuming the budget.
+    Any in-flight reservation pauses this job, including a retry carrying the
+    same reservation id. The same ``reservation_id`` after commit is a
+    same-head duplicate. Unadmitted operator rounds are not reserved so C5 can
+    refuse inference and publication without consuming the budget.
     """
 
     if not isinstance(policy, ReviewConvergencePolicy):
@@ -781,7 +781,7 @@ def prepare_session_round(
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     flags = dict(state_flags)
     held = record.reservation_id
-    if held is not None and held != reservation_id:
+    if held is not None:
         flags.setdefault("paused", True)
     elif record.last_committed_reservation_id == reservation_id and held is None:
         flags.setdefault("same_head_duplicate", True)
@@ -889,6 +889,23 @@ def session_reservation_id(
 ) -> str:
     payload = f"{repository}|{pull_request}|{head_sha}|{kind}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def admission_diagnostic(decision: RoundAdmissionDecision) -> str:
+    """Return a closed public diagnostic for a refused admission decision."""
+
+    if not isinstance(decision, RoundAdmissionDecision):
+        raise ReviewInputError("round admission decision is invalid")
+    if decision.handoff_reason is not None:
+        return decision.handoff_reason
+    if decision.handoff:
+        if (
+            decision.remaining_initial_reviews == 0
+            and decision.remaining_verification_rounds == 0
+        ):
+            return "round-budget-exhausted"
+        return "incomplete-coverage"
+    return "already_published"
 
 
 def should_skip_automation(

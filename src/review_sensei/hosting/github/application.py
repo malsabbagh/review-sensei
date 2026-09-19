@@ -19,6 +19,7 @@ from ...providers.base import ReviewProvider
 from ...session import (
     SessionIdentity,
     SessionLedger,
+    admission_diagnostic,
     complete_session_round,
     prepare_session_round,
     record_session_failed_attempt,
@@ -138,7 +139,7 @@ class GitHubApplication:
             repository=repository,
             pull_request=pull_request,
             head_sha=head_sha,
-            kind="round",
+            kind="publish",
         )
         if ledger is not None:
             if not isinstance(head_sha, str) or not head_sha.strip():
@@ -163,7 +164,7 @@ class GitHubApplication:
                 if should_skip_automation(prepared.decision, inference=False):
                     return PublicationResult(
                         status="handoff",
-                        diagnostic=prepared.decision.handoff_reason,
+                        diagnostic=admission_diagnostic(prepared.decision),
                     )
             except BaseException as preparation_error:
                 cleanup_error = self._abort_held_session_reservation(
