@@ -31,6 +31,11 @@ two adapters:
   the source pull request, bound by
   `<!-- reviewsensei:session:v1 repo=... pr=... gen=... digest=... -->`.
 
+`LocalSessionLedger` is a single-writer adapter per repository/pull-request
+identity. Its atomic replacement protects individual files but does not claim
+inter-process locking; concurrent hosted jobs use the GitHub-backed adapter's
+CAS path instead.
+
 Session identity is the ADR 0042 pair `repository` + `pull_request`. Optional
 `repository_id` binds GitHub comments. Head SHA, model, and policy digests are
 not part of the key and cannot reset the round limit.

@@ -19,6 +19,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Mapping, Protocol, cast
 
@@ -38,6 +39,10 @@ SESSION_LEDGER_ENV = "REVIEWSENSEI_SESSION_LEDGER"
 DEFAULT_SESSION_TTL = timedelta(days=30)
 MAX_SESSION_TTL = timedelta(days=90)
 MAX_SESSION_RECORD_BYTES = 4096
+# GitHub comments include a bounded intro, JSON fence, and marker around the
+# serialized record. Keep that framing allowance named and tied to the record
+# bound so the two adapters cannot drift independently.
+MAX_SESSION_COMMENT_BYTES = MAX_SESSION_RECORD_BYTES * 2
 MAX_GENERATION = 2_147_483_647
 RESERVATION_SLOTS = frozenset({"initial", "verification", "failed-attempt"})
 _RESERVATION_ID_RE = re.compile(r"^[a-f0-9]{8,64}$")
@@ -50,6 +55,23 @@ _DATETIME_RE = re.compile(
 LOAD_STATUSES = frozenset(
     {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
 )
+
+
+class SessionLoadReason(str, Enum):
+    """Stable reasons for a hosted session document load failure."""
+
+    INTEGRITY_FAILED = "integrity-failed"
+    CONFLICT = "conflict"
+
+
+class SessionLoadError(ReviewInputError):
+    """Typed load failure used by adapters instead of parsing error text."""
+
+    def __init__(self, reason: SessionLoadReason, message: str) -> None:
+        if not isinstance(reason, SessionLoadReason):
+            raise ReviewInputError("session load reason is invalid")
+        self.reason = reason
+        super().__init__(message)
 
 
 def _require_bool(value: object, *, label: str) -> None:
@@ -669,6 +691,12 @@ def mutate_abort(
     expected_generation: int,
     now: datetime | None = None,
 ) -> SessionRecord:
+    """Release a reservation with CAS.
+
+    An already-absent reservation is a no-op only when the expected generation
+    still matches; a stale replay raises a generation conflict.
+    """
+
     if (
         record.reservation_id is None
         and record.last_committed_reservation_id != reservation_id
@@ -749,24 +777,44 @@ def complete_session_round(
 
     if prepared.reservation_id is None:
         return prepared.record
-    # A publisher retry can invoke completion after a previous commit/abort
-    # already advanced the durable generation. Refresh the CAS token so the
-    # ledger's idempotency checks can win without weakening concurrent races.
+    # A publisher retry can invoke completion after a previous commit already
+    # advanced the durable generation. Only that exact reservation replay may
+    # use the fresh record; otherwise retain the generation captured at reserve
+    # so a competing writer still loses the CAS race instead of double-counting.
     loaded = ledger.load(identity, now=now)
-    expected_generation = prepared.record.generation
-    if loaded.status in {"ok", "migrated"} and loaded.record is not None:
-        expected_generation = loaded.record.generation
+    if (
+        loaded.status in {"ok", "migrated"}
+        and loaded.record is not None
+        and loaded.record.reservation_id is None
+        and loaded.record.last_committed_reservation_id == prepared.reservation_id
+    ):
+        return loaded.record
+    if (
+        not published
+        and loaded.status in {"ok", "migrated"}
+        and loaded.record is not None
+        and loaded.record.reservation_id is None
+        and loaded.record.generation == prepared.record.generation + 1
+        and loaded.record.completed_initial_reviews
+        == prepared.record.completed_initial_reviews
+        and loaded.record.completed_verification_rounds
+        == prepared.record.completed_verification_rounds
+        and loaded.record.failed_attempts == prepared.record.failed_attempts
+        and loaded.record.last_committed_reservation_id
+        == prepared.record.last_committed_reservation_id
+    ):
+        return loaded.record
     if published:
         return ledger.commit(
             identity,
             reservation_id=prepared.reservation_id,
-            expected_generation=expected_generation,
+            expected_generation=prepared.record.generation,
             now=now,
         )
     return ledger.abort(
         identity,
         reservation_id=prepared.reservation_id,
-        expected_generation=expected_generation,
+        expected_generation=prepared.record.generation,
         now=now,
     )
 
@@ -778,7 +826,7 @@ def session_reservation_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _load_status_for_record(
+def load_session_status(
     record: SessionRecord, *, now: datetime | None = None
 ) -> SessionLoadResult:
     if record.expired(now=now):
@@ -803,7 +851,7 @@ class InMemorySessionLedger:
             identity.repository_id,
         }:
             return SessionLoadResult(status="conflict")
-        return _load_status_for_record(record, now=now)
+        return load_session_status(record, now=now)
 
     def initialize(
         self,
@@ -900,7 +948,15 @@ def _safe_ledger_name(repository: str) -> str:
 
 
 class LocalSessionLedger:
-    """Filesystem ledger under an operator-supplied directory."""
+    """Filesystem ledger under an operator-supplied directory.
+
+    This adapter assumes a single writer per repository/pull-request identity. Its
+    atomic file replacement protects individual writes, but it does not claim
+    inter-process locking; concurrent hosted jobs should use the GitHub-backed
+    adapter instead.
+    """
+
+    SINGLE_WRITER_PER_IDENTITY = True
 
     def __init__(self, root: Path) -> None:
         if not isinstance(root, Path):
@@ -963,10 +1019,10 @@ class LocalSessionLedger:
     def load(
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> SessionLoadResult:
-        document = self._read_document(self._path(identity))
-        if document is None:
-            return SessionLoadResult(status="missing")
         try:
+            document = self._read_document(self._path(identity))
+            if document is None:
+                return SessionLoadResult(status="missing")
             if document.get("schema_version") == "0.1":
                 migrated = migrate_session_document(document)
                 created_at = str(
@@ -1014,10 +1070,8 @@ class LocalSessionLedger:
                     return SessionLoadResult(status="expired")
                 return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
-        except ReviewInputError as exc:
-            if "integrity" in str(exc):
-                return SessionLoadResult(status="integrity-failed")
-            raise
+        except ReviewInputError:
+            return SessionLoadResult(status="integrity-failed")
         if (
             identity.repository != record.repository
             or identity.pull_request != record.pull_request
@@ -1028,7 +1082,7 @@ class LocalSessionLedger:
             identity.repository_id,
         }:
             return SessionLoadResult(status="conflict")
-        return _load_status_for_record(record, now=now)
+        return load_session_status(record, now=now)
 
     def initialize(
         self,

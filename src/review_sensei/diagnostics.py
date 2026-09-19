@@ -121,9 +121,17 @@ def _session_ledger_diagnostic(
             payload,
         )
     status = loaded.status
-    check_status = "pass" if status == "missing" else "action"
+    if status == "missing":
+        return (
+            DiagnosticCheck(
+                "session-ledger",
+                "pass",
+                "session ledger is not yet initialized",
+            ),
+            {"status": status},
+        )
     return (
-        DiagnosticCheck("session-ledger", check_status, f"session ledger is {status}"),
+        DiagnosticCheck("session-ledger", "action", f"session ledger is {status}"),
         {"status": status},
     )
 

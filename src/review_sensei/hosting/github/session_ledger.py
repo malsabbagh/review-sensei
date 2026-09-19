@@ -15,11 +15,13 @@ from typing import Any
 
 from ...errors import ReviewInputError
 from ...session import (
-    MAX_SESSION_RECORD_BYTES,
+    MAX_SESSION_COMMENT_BYTES,
     SessionIdentity,
+    SessionLoadError,
+    SessionLoadReason,
     SessionLoadResult,
     SessionRecord,
-    _load_status_for_record,
+    load_session_status,
     mutate_abort,
     mutate_commit,
     mutate_reserved,
@@ -47,7 +49,7 @@ _SESSION_INTRO = "ReviewSensei session ledger (round counters only; no source)."
 
 def _within_session_comment_limit(body: str) -> bool:
     try:
-        return len(body.encode("utf-8")) <= MAX_SESSION_RECORD_BYTES * 2
+        return len(body.encode("utf-8")) <= MAX_SESSION_COMMENT_BYTES
     except UnicodeError:
         return False
 
@@ -69,7 +71,7 @@ def render_session_comment(
         f"{_SESSION_INTRO}\n\n```json\n{document}\n```\n\n"
         f"{session_marker(repository_id=repository_id, pull_request=pull_request, record=record)}"
     )
-    if len(body.encode("utf-8")) > MAX_SESSION_RECORD_BYTES * 2:
+    if len(body.encode("utf-8")) > MAX_SESSION_COMMENT_BYTES:
         raise ReviewInputError("session comment exceeds the configured size limit")
     return body
 
@@ -87,30 +89,58 @@ def parse_session_comment(
         return None
     matches = list(SESSION_MARKER_RE.finditer(body))
     if len(matches) != 1:
-        raise ReviewInputError("session comment marker is ambiguous")
+        raise SessionLoadError(
+            SessionLoadReason.CONFLICT, "session comment marker is ambiguous"
+        )
     marker = matches[0]
     if identity.repository_id is None:
         raise ReviewInputError("GitHub session identity requires repository_id")
     if int(marker["repository_id"]) != identity.repository_id:
-        raise ReviewInputError("session comment repository_id does not match")
+        raise SessionLoadError(
+            SessionLoadReason.CONFLICT,
+            "session comment repository_id does not match",
+        )
     if int(marker["pull_request"]) != identity.pull_request:
-        raise ReviewInputError("session comment pull_request does not match")
+        raise SessionLoadError(
+            SessionLoadReason.CONFLICT,
+            "session comment pull_request does not match",
+        )
     fenced = _JSON_FENCE_RE.search(body)
     if fenced is None:
-        raise ReviewInputError("session comment JSON is missing")
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED, "session comment JSON is missing"
+        )
     try:
         payload = json.loads(fenced["body"])
     except json.JSONDecodeError as exc:
-        raise ReviewInputError("session comment JSON is invalid") from exc
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED, "session comment JSON is invalid"
+        ) from exc
     if not isinstance(payload, dict):
-        raise ReviewInputError("session comment JSON is invalid")
-    record = SessionRecord.from_dict(payload)
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED, "session comment JSON is invalid"
+        )
+    try:
+        record = SessionRecord.from_dict(payload)
+    except ReviewInputError as exc:
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED, "session comment record is invalid"
+        ) from exc
     if record.record_sha256 != marker["digest"]:
-        raise ReviewInputError("session comment digest does not match")
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED,
+            "session comment digest does not match",
+        )
     if record.generation != int(marker["generation"]):
-        raise ReviewInputError("session comment generation does not match")
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED,
+            "session comment generation does not match",
+        )
     if record.repository != identity.repository:
-        raise ReviewInputError("session comment repository does not match")
+        raise SessionLoadError(
+            SessionLoadReason.INTEGRITY_FAILED,
+            "session comment repository does not match",
+        )
     return record
 
 
@@ -186,15 +216,23 @@ class GitHubIssueCommentSessionLedger:
                 or not isinstance(comment_id, int)
                 or comment_id < 1
             ):
-                raise ReviewInputError("session comment id is invalid")
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "session comment id is invalid",
+                )
             record = parse_session_comment(body, identity=identity)
             if record is None:
                 continue
             if record.repository_id not in {None, repository_id}:
-                raise ReviewInputError("session comment repository_id does not match")
+                raise SessionLoadError(
+                    SessionLoadReason.CONFLICT,
+                    "session comment repository_id does not match",
+                )
             found.append((comment_id, record))
         if len(found) > 1:
-            raise ReviewInputError("multiple session comments are present")
+            raise SessionLoadError(
+                SessionLoadReason.CONFLICT, "multiple session comments are present"
+            )
         if not found:
             return None, None
         return found[0]
@@ -204,15 +242,11 @@ class GitHubIssueCommentSessionLedger:
     ) -> SessionLoadResult:
         try:
             _comment_id, record = self._discover(identity)
-        except ReviewInputError as exc:
-            if "integrity" in str(exc) or "digest" in str(exc):
-                return SessionLoadResult(status="integrity-failed")
-            if "ambiguous" in str(exc) or "multiple" in str(exc):
-                return SessionLoadResult(status="conflict")
-            raise
+        except SessionLoadError as exc:
+            return SessionLoadResult(status=exc.reason.value)
         if record is None:
             return SessionLoadResult(status="missing")
-        return _load_status_for_record(record, now=now)
+        return load_session_status(record, now=now)
 
     def initialize(
         self,

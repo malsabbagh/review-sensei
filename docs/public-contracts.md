@@ -178,9 +178,15 @@ These imports are public and stable within a major version:
 - `review_sensei.evaluate_round_admission`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`
+- `review_sensei.SessionLoadError`
+- `review_sensei.SessionLoadReason`
 - `review_sensei.SessionLoadResult`
 - `review_sensei.LocalSessionLedger`
 - `review_sensei.InMemorySessionLedger`
+- `review_sensei.load_session_status`
+- `review_sensei.mutate_reserved`
+- `review_sensei.mutate_commit`
+- `review_sensei.mutate_abort`
 - `review_sensei.prepare_session_round`
 - `review_sensei.complete_session_round`
 - `review_sensei.plan_change`

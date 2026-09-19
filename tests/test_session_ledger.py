@@ -19,7 +19,7 @@ from review_sensei.hosting.github.session_ledger import (
 )
 from review_sensei.models import ReviewResult
 from review_sensei.session import (
-    MAX_SESSION_RECORD_BYTES,
+    MAX_SESSION_COMMENT_BYTES,
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
@@ -139,6 +139,18 @@ class LocalSessionLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
             self.ledger.initialize(IDENTITY, now=FIXED_NOW)
 
+    def test_malformed_documents_return_integrity_failed(self):
+        self.ledger.initialize(IDENTITY, now=FIXED_NOW)
+        path = self.ledger._path(IDENTITY)
+        path.write_text("{", encoding="utf-8")
+        self.assertEqual(self.ledger.load(IDENTITY).status, "integrity-failed")
+        path.write_text(json.dumps({"schema_version": "2.0"}), encoding="utf-8")
+        self.assertEqual(self.ledger.load(IDENTITY).status, "integrity-failed")
+
+    def test_local_ledger_documents_single_writer_contract(self):
+        self.assertTrue(self.ledger.SINGLE_WRITER_PER_IDENTITY)
+        self.assertIn("single writer", (self.ledger.__doc__ or "").lower())
+
     def test_legacy_v01_migrates_counters(self):
         created = SessionRecord.create(
             IDENTITY, now=FIXED_NOW, completed_initial_reviews=1
@@ -250,6 +262,46 @@ class RoundPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(replayed_abort, aborted)
         self.assertEqual(replayed_abort.completed_initial_reviews, 0)
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            abort_ledger.abort(
+                IDENTITY,
+                reservation_id="ffff1234",
+                expected_generation=abort_prepared.record.generation,
+                now=FIXED_NOW,
+            )
+
+    def test_complete_session_round_rejects_a_competing_writer(self):
+        ledger = InMemorySessionLedger()
+        prepared = prepare_session_round(
+            ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="abcd1234",
+            now=FIXED_NOW,
+        )
+        aborted = ledger.abort(
+            IDENTITY,
+            reservation_id="abcd1234",
+            expected_generation=prepared.record.generation,
+            now=FIXED_NOW,
+        )
+        competing = ledger.reserve(
+            IDENTITY,
+            slot="initial",
+            reservation_id="ffff1234",
+            expected_generation=aborted.generation,
+            now=FIXED_NOW,
+        )
+        ledger.commit(
+            IDENTITY,
+            reservation_id="ffff1234",
+            expected_generation=competing.generation,
+            now=FIXED_NOW,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            complete_session_round(
+                ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+            )
 
 
 class GitHubSessionLedgerTests(unittest.TestCase):
@@ -296,12 +348,22 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(loaded.status, "conflict")
 
     def test_oversized_session_comments_are_skipped(self):
-        oversized = SESSION_MARKER_PREFIX + ("x" * (MAX_SESSION_RECORD_BYTES * 2 + 1))
+        oversized = SESSION_MARKER_PREFIX + ("x" * (MAX_SESSION_COMMENT_BYTES + 1))
         self.assertIsNone(parse_session_comment(oversized, identity=IDENTITY))
         http, _calls = make_http([json_response([{"id": 1, "body": oversized}])])
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "missing")
+
+    def test_malformed_session_comment_maps_to_integrity_failed(self):
+        body = (
+            f"{SESSION_MARKER_PREFIX} repo=99 pr=136 gen=0 "
+            f"digest={'0' * 64} -->\n```json\n{{}}\n```"
+        )
+        http, _calls = make_http([json_response([{"id": 1, "body": body}])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "integrity-failed")
 
 
 class GitHubApplicationSessionTests(unittest.TestCase):
@@ -373,10 +435,23 @@ class DiagnosticSessionTests(unittest.TestCase):
                 pull_request=136,
             )
             self.assertEqual(plan["session_record"]["status"], "ok")
-            missing = run_doctor()
-            self.assertFalse(
-                any(item["name"] == "session-ledger" for item in missing["checks"])
-            )
+            with tempfile.TemporaryDirectory() as empty_raw:
+                missing = run_doctor(
+                    session_ledger=Path(empty_raw),
+                    repository="owner/repo",
+                    pull_request=136,
+                    review_mode="merge-focused",
+                )
+                missing_check = next(
+                    item
+                    for item in missing["checks"]
+                    if item["name"] == "session-ledger"
+                )
+                self.assertEqual(missing_check["status"], "pass")
+                self.assertEqual(
+                    missing_check["detail"],
+                    "session ledger is not yet initialized",
+                )
 
 
 if __name__ == "__main__":
