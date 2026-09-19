@@ -5,6 +5,9 @@ passes reuse ADR 0042 incremental plans and ADR 0037/#40 related paths to
 cover existing concerns plus changed and impacted code. Late blockers need an
 explicit trusted reason and optional causal lineage. Omission is not a fix.
 ``legacy`` stays unscoped. Round refusal remains C5.
+
+The provider-neutral contract is recorded in
+``docs/adr/0048-baseline-aware-verification.md``.
 """
 
 from __future__ import annotations
@@ -777,23 +780,37 @@ class LaterFindingClassification:
         return value
 
 
-def match_baseline_finding(
+def _baseline_match_candidates(
     comment: ReviewComment, baseline: ReviewBaseline
-) -> BaselineFinding | None:
+) -> tuple[BaselineFinding | None, bool]:
     lifecycle = finding_lifecycle_for_comment(comment)
-    for finding in baseline.findings:
-        if finding.fingerprint == lifecycle.fingerprint:
-            return finding
-    if lifecycle.concern is not None:
-        for finding in baseline.findings:
-            if finding.concern == lifecycle.concern:
-                return finding
     key = (comment.path, comment.symbol or "", comment_defect_kind(comment))
-    matches = [
+    exact_matches = [
         finding for finding in baseline.findings if finding.identity_key() == key
     ]
-    if len(matches) == 1:
-        return matches[0]
+    if len(exact_matches) > 1:
+        return None, True
+    fingerprint_matches = [
+        finding
+        for finding in baseline.findings
+        if finding.fingerprint == lifecycle.fingerprint
+    ]
+    if len(fingerprint_matches) == 1:
+        return fingerprint_matches[0], False
+    if len(fingerprint_matches) > 1:
+        return None, True
+    if lifecycle.concern is not None:
+        concern_matches = [
+            finding
+            for finding in baseline.findings
+            if finding.concern == lifecycle.concern
+        ]
+        if len(concern_matches) == 1:
+            return concern_matches[0], False
+        if len(concern_matches) > 1:
+            return None, True
+    if len(exact_matches) == 1:
+        return exact_matches[0], False
     # A moved or reworded finding can legitimately change its symbol while
     # retaining the same path and defect kind.  Admit that fallback only when
     # the path/kind pair is unique; ambiguity must remain human-adjudicated.
@@ -805,16 +822,19 @@ def match_baseline_finding(
             if finding.path == comment.path and finding.defect_kind == comment_kind
         ]
         if len(path_kind_matches) == 1:
-            return path_kind_matches[0]
-    return None
+            return path_kind_matches[0], False
+        if len(path_kind_matches) > 1:
+            return None, False
+    return None, False
 
 
-def _match_baseline_finding(
+def match_baseline_finding(
     comment: ReviewComment, baseline: ReviewBaseline
 ) -> BaselineFinding | None:
-    """Compatibility wrapper for the former private matcher name."""
+    """Return a unique baseline match, or ``None`` when absent or ambiguous."""
 
-    return match_baseline_finding(comment, baseline)
+    matched, _ambiguous = _baseline_match_candidates(comment, baseline)
+    return matched
 
 
 def _shares_lineage_identity(comment: ReviewComment, finding: BaselineFinding) -> bool:
@@ -937,13 +957,8 @@ def classify_later_finding(
             is_duplicate=False,
             attribution="pr-change" if on_changed_path else "unattributed",
         )
-    matches = [
-        finding
-        for finding in baseline.findings
-        if finding.identity_key()
-        == (comment.path, comment.symbol or "", comment_defect_kind(comment))
-    ]
-    if len(matches) > 1:
+    matched, ambiguous = _baseline_match_candidates(comment, baseline)
+    if ambiguous:
         return LaterFindingClassification(
             fingerprint=lifecycle.fingerprint,
             classification="needs-human",
@@ -953,7 +968,8 @@ def classify_later_finding(
             lineage_reason="ambiguous-identity",
             attribution="unattributed",
         )
-    matched = match_baseline_finding(comment, baseline)
+    if matched is None and evidence_confirmed:
+        raise ReviewInputError("evidence_confirmed requires a matched baseline finding")
     if matched is not None:
         same = matched.fingerprint == lifecycle.fingerprint
         if evidence_confirmed:

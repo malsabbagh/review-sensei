@@ -747,6 +747,26 @@ class LaterFindingTests(unittest.TestCase):
         )
         self.assertEqual(classification.classification, "verified-fixed")
 
+    def test_evidence_confirmation_without_a_match_fails_closed(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        with self.assertRaisesRegex(ReviewInputError, "matched baseline"):
+            classify_later_finding(
+                _comment(defect_kind="data-loss", body="unmatched"),
+                baseline=baseline,
+                scope=scope,
+                evidence_confirmed=True,
+                evidence_criterion=DIGEST_B,
+            )
+
     def test_cross_file_regression_records_causal_parent(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         original = _comment()
@@ -1172,6 +1192,24 @@ class BaselineAdmissionTests(unittest.TestCase):
                 related_paths=(),
             )
         self.assertEqual(planner.call_args.kwargs["related_paths"], ())
+
+    def test_baseline_admission_related_overflow_fails_closed(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        changed = tuple(
+            f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
+        )
+        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
+            admit_review_result(
+                _result(_comment()),
+                policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=changed,
+                related_paths=None,  # type: ignore[arg-type]
+            )
 
     def test_explicit_candidates_precede_baseline_planning(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

@@ -43,6 +43,9 @@ Later findings are classified before C2 admission:
 - A new material defect on a changed or related path may be
   `new-regression` with a causal parent fingerprint when a baseline blocker
   sits on that change.
+- A changed-path finding without a trusted causal parent remains
+  `needs-human`; the changed path alone does not prove that the fix caused the
+  defect.
 - A substantiated defect on already-reviewed PR scope may be
   `substantiated-missed-defect`.
 - Preference on already-reviewed code stays advisory. The preference signal is
@@ -54,6 +57,9 @@ Later findings are classified before C2 admission:
 - Evidence confirmations are keyed by the stored concern digest. A baseline
   finding without that stable digest cannot be auto-confirmed; callers must
   provide an explicit evidence-backed candidate instead.
+- The related-path helper intentionally reports same-directory siblings among
+  the changed set; callers union that impact context with the changed paths in
+  the incremental plan.
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
