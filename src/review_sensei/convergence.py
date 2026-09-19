@@ -18,9 +18,9 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence, cast
 
-from .context import ReviewContextCacheKey
+from .context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from .errors import ReviewInputError
 from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
@@ -836,6 +836,8 @@ def admit_review_result(
     related_paths: Sequence[str] = (),
     current_key: ReviewContextCacheKey | None = None,
     evidence_confirmed_concerns: Sequence[str] = (),
+    authorized_dispositions: Sequence[object] = (),
+    current_head_sha: str | None = None,
 ) -> ReviewResult:
     """Apply trusted blocker admission to each finding before publication.
 
@@ -856,6 +858,24 @@ def admit_review_result(
         raise ReviewInputError("review convergence policy is invalid")
     if policy.enforcement != "publication":
         return result
+    if not isinstance(authorized_dispositions, Sequence):
+        raise ReviewInputError("authorized dispositions must be a sequence")
+    if authorized_dispositions:
+        # Keep this import lazy: disposition.py depends on the session module,
+        # which in turn imports this module's policy types.
+        from .disposition import FindingDisposition
+
+        if any(
+            not isinstance(item, FindingDisposition) for item in authorized_dispositions
+        ):
+            raise ReviewInputError(
+                "authorized dispositions must be FindingDisposition values"
+            )
+        typed_dispositions = cast(Sequence[FindingDisposition], authorized_dispositions)
+    else:
+        typed_dispositions = ()
+    if current_head_sha is not None and not isinstance(current_head_sha, str):
+        raise ReviewInputError("current review head sha is invalid")
     if candidates is not None and len(candidates) != len(result.comments):
         raise ReviewInputError("blocker candidates must align with review comments")
     verification_scope = None
@@ -948,6 +968,16 @@ def admit_review_result(
                     deleted_lines=deleted_lines,
                 ),
             )
+        if authorized_dispositions:
+            from .disposition import disposition_honors_fingerprint
+
+            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+            if disposition_honors_fingerprint(
+                typed_dispositions,
+                fingerprint,
+                head_sha=current_head_sha,
+            ):
+                candidate = replace(candidate, has_authorized_disposition=True)
         decision = evaluate_blocker_admission(candidate, policy)
         admitted.append(
             replace(

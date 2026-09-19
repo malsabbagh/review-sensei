@@ -86,6 +86,7 @@ describe("token broker authorization", () => {
   it.each([
     [undefined, "review_publish", { pull_requests: "write" }, true],
     ["review_publish", "review_publish", { pull_requests: "write" }, true],
+    ["review_status", "review_status", { pull_requests: "read" }, false],
     ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
     ["issue_reply", "issue_reply", { pull_requests: "write" }, false],
     ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false],

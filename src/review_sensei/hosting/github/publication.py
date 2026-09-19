@@ -423,7 +423,7 @@ _PUBLICATION_TO_RUN_STATUS = {
     "skipped_app_authored": "skipped_policy",
     "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
-    "handoff": "skipped_policy",
+    "handoff": "action_required",
 }
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
@@ -1119,6 +1119,7 @@ class ReviewPublisher:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        authorized_dispositions: Sequence[object] = (),
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -1168,6 +1169,8 @@ class ReviewPublisher:
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
+                authorized_dispositions=authorized_dispositions,
+                current_head_sha=head_sha,
             )
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc

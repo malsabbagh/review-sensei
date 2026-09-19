@@ -52,7 +52,7 @@ server-side repository/fork state, and server-side installation mapping. It
 performs bounded pre-auth admission before cached JWKS verification, claims
 the verified assertion before GitHub API lookups, and stores hashed replay and
 rate identities in a SQLite Durable Object. It then issues one disjoint
-capability: `review_publish`, `inline_reply`,
+capability: `review_publish`, `review_status`, `inline_reply`,
 `issue_reply`, or `learning_write`. The ledger stores no assertions, tokens,
 source, diff, prompt, result, reply, or provider credential.
 

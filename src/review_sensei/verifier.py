@@ -638,6 +638,8 @@ def _with_admission(
     related_paths: Sequence[str] = (),
     current_key: ReviewContextCacheKey | None = None,
     evidence_confirmed_concerns: Sequence[str] = (),
+    authorized_dispositions: Sequence[object] = (),
+    current_head_sha: str | None = None,
 ) -> ReviewResult:
     policy = convergence_policy or ReviewConvergencePolicy()
     return admit_review_result(
@@ -651,6 +653,8 @@ def _with_admission(
         related_paths=related_paths,
         current_key=current_key,
         evidence_confirmed_concerns=evidence_confirmed_concerns,
+        authorized_dispositions=authorized_dispositions,
+        current_head_sha=current_head_sha,
     )
 
 
@@ -672,6 +676,8 @@ def prepare_publishable_review(
     related_paths: Sequence[str] = (),
     current_key: ReviewContextCacheKey | None = None,
     evidence_confirmed_concerns: Sequence[str] = (),
+    authorized_dispositions: Sequence[object] = (),
+    current_head_sha: str | None = None,
 ) -> PublishableReview:
     """Gate findings before publication using the configured evidence policy.
 
@@ -719,6 +725,8 @@ def prepare_publishable_review(
             related_paths=related_paths,
             current_key=current_key,
             evidence_confirmed_concerns=evidence_confirmed_concerns,
+            authorized_dispositions=authorized_dispositions,
+            current_head_sha=current_head_sha,
         )
         return PublishableReview(result, (), "legacy", 0)
 
@@ -814,6 +822,8 @@ def prepare_publishable_review(
         related_paths=related_paths,
         current_key=current_key,
         evidence_confirmed_concerns=evidence_confirmed_concerns,
+        authorized_dispositions=authorized_dispositions,
+        current_head_sha=current_head_sha,
     )
     return PublishableReview(
         prepared, tuple(final_verifications), "confirmed", unpublished

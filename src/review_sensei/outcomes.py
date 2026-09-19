@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 from collections.abc import Callable
@@ -33,6 +34,7 @@ RUN_STATUSES = frozenset(
         "budget_exhausted",
         "publication_failed",
         "already_published",
+        "action_required",
     }
 )
 _SNAPSHOT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
@@ -51,7 +53,7 @@ DEFAULT_RECOVERY_TTL_SECONDS = 6 * 60 * 60
 MAX_RECOVERY_TTL_SECONDS = 24 * 60 * 60
 PUBLIC_SCHEMA_VERSION = "1.0"
 FAILURE_RUN_STATUSES = frozenset(
-    {"provider_failed", "budget_exhausted", "publication_failed"}
+    {"provider_failed", "budget_exhausted", "publication_failed", "action_required"}
 )
 PUBLIC_DIAGNOSTICS = frozenset(
     {
@@ -104,6 +106,7 @@ _ACTIONS_SUMMARY_TITLES = {
     "budget_exhausted": "Review stopped after exhausting a resource budget",
     "publication_failed": "Review publication failed",
     "already_published": "Review already published for this head",
+    "action_required": "Review requires a human decision before another automated pass",
 }
 
 
@@ -627,6 +630,12 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
             handle.write(f"outcome_status={outcome.status}\n")
             if outcome.diagnostic is not None:
                 handle.write(f"outcome_diagnostic={outcome.diagnostic}\n")
+    if outcome.status == "action_required":
+        print(
+            "::error title=ReviewSensei maintainer attention required::"
+            "A maintainer decision is required before another automated pass.",
+            file=sys.stderr,
+        )
 
 
 def recovery_expires_at(

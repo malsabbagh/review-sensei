@@ -66,7 +66,7 @@ containing `/v1/`.
 | `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and enforcement (`display-only` or `publication`) |
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
 | `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
-| `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, and expiry |
+| `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, expiry, operator pause, and bounded human dispositions |
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
@@ -229,7 +229,9 @@ These imports are public and stable within a major version:
 against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
 validate against the review-convergence schemas. `SessionRecord.to_dict()`
-validates against `session-record.schema.json`. Operator modes apply
+validates against `session-record.schema.json`. The record also carries the
+operator pause bit and bounded finding dispositions, each protected by the
+record digest. Operator modes apply
 `admit_review_result` before GitHub publication; `legacy` keeps ADR 0032/0035
 events. C3 persists PR-wide counters without refusing publication. C4 plans
 verification from a complete compatible baseline and classifies later

@@ -2,7 +2,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from review_sensei import ProviderResponse
+from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
+from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubPublicationError,
@@ -20,6 +22,7 @@ from review_sensei.models import (
     ReviewResult,
 )
 from review_sensei.outcomes import RecoveryArtifact
+from review_sensei.session import InMemorySessionLedger, SessionIdentity
 
 
 class RecordingBroker:
@@ -332,6 +335,56 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertIs(self.reviewer.calls[-1]["convergence_policy"], policy)
         self.assertIs(self.reviewer.calls[-1]["blocker_candidates"], facts)
         self.assertIsNone(self.reviewer.calls[-1]["input_blocker_candidates"])
+
+    def test_publish_review_forwards_persisted_dispositions_for_current_head(self):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="finding",
+            blocking=True,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+        command = parse_maintainer_command(
+            f"@sensei accept-risk {fingerprint} --reason accepted launch exception",
+            actor="alice",
+            head_sha="a" * 40,
+        )
+        apply_session_command(ledger, identity, command)
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(comment,),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff="diff",
+            app_slug="review-sensei[bot]",
+        )
+        self.assertEqual(outcome.status, "published")
+        forwarded = self.reviewer.calls[-1]["authorized_dispositions"]
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(forwarded[0].fingerprint, fingerprint)
 
     def test_recover_review_rejects_operator_modes(self):
         head = "b" * 40

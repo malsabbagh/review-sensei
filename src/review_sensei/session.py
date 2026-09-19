@@ -22,11 +22,11 @@ import ntpath
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Protocol, cast
+from typing import Callable, Mapping, Protocol, Sequence, cast
 
 from .convergence import (
     MAX_FAILED_ATTEMPTS,
@@ -85,6 +85,84 @@ class SessionLoadError(ReviewInputError):
 def _require_bool(value: object, *, label: str) -> None:
     if not isinstance(value, bool):
         raise ReviewInputError(f"{label} must be a boolean")
+
+
+def _operator_paused(value: object) -> bool:
+    _require_bool(value, label="operator_paused")
+    return bool(value)
+
+
+MAX_STORED_DISPOSITIONS = 4
+MAX_DISPOSITION_REASON_BYTES = 512
+MAX_DISPOSITION_ACTOR_BYTES = 256
+_DISPOSITION_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
+_DISPOSITION_HEAD_RE = re.compile(r"^[a-f0-9]{40,64}$")
+_DISPOSITION_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
+_DIGEST_SHAPES = frozenset({"current", "operator-paused", "legacy"})
+
+
+def _stored_dispositions(
+    value: object,
+) -> tuple[dict[str, object], ...]:
+    """Validate and copy persisted human finding dispositions."""
+
+    if value is None:
+        raise ReviewInputError("session dispositions must be an array")
+    if not isinstance(value, (list, tuple)):
+        raise ReviewInputError("session dispositions must be an array")
+    if len(value) > MAX_STORED_DISPOSITIONS:
+        raise ReviewInputError("session dispositions exceed the configured bound")
+    normalized: list[dict[str, object]] = []
+    allowed = {"fingerprint", "action", "reason", "actor", "head_sha", "expires_at"}
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) - allowed:
+            raise ReviewInputError("session disposition is invalid")
+        fingerprint = item.get("fingerprint")
+        if not isinstance(
+            fingerprint, str
+        ) or not _DISPOSITION_FINGERPRINT_RE.fullmatch(fingerprint):
+            raise ReviewInputError("session disposition fingerprint is invalid")
+        action = item.get("action")
+        if not isinstance(action, str) or action not in _DISPOSITION_ACTIONS:
+            raise ReviewInputError("session disposition action is invalid")
+        reason = item.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason.encode("utf-8")) > MAX_DISPOSITION_REASON_BYTES
+            or not reason.isprintable()
+        ):
+            raise ReviewInputError("session disposition reason is invalid")
+        actor = item.get("actor")
+        if (
+            not isinstance(actor, str)
+            or not actor.strip()
+            or len(actor.encode("utf-8")) > MAX_DISPOSITION_ACTOR_BYTES
+            or not actor.isprintable()
+        ):
+            raise ReviewInputError("session disposition actor is invalid")
+        head_sha = item.get("head_sha")
+        if head_sha is not None and (
+            not isinstance(head_sha, str)
+            or not _DISPOSITION_HEAD_RE.fullmatch(head_sha)
+        ):
+            raise ReviewInputError("session disposition head_sha is invalid")
+        expires_at = item.get("expires_at")
+        if expires_at is not None:
+            if not isinstance(expires_at, str):
+                raise ReviewInputError("session disposition expires_at is invalid")
+            _parse_aware_datetime(expires_at, label="session disposition expires_at")
+        normalized.append(
+            {
+                "fingerprint": fingerprint,
+                "action": action,
+                "reason": reason.strip(),
+                "actor": actor,
+                "head_sha": head_sha,
+                "expires_at": expires_at,
+            }
+        )
+    return tuple(normalized)
 
 
 def _require_bounded_int(
@@ -170,6 +248,8 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
         "created_at": created_at,
         "updated_at": value.get("updated_at", value.get("created_at")),
         "expires_at": value.get("expires_at"),
+        "operator_paused": False,
+        "dispositions": value.get("dispositions", []),
     }
     forbidden = set(value) - {
         "schema_version",
@@ -187,6 +267,7 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
         "created_at",
         "updated_at",
         "expires_at",
+        "dispositions",
     }
     if forbidden:
         raise ReviewInputError("legacy session record has unknown fields")
@@ -236,8 +317,15 @@ class SessionRecord:
     updated_at: str
     expires_at: str
     record_sha256: str
+    operator_paused: bool = False
+    dispositions: tuple[Mapping[str, object], ...] = ()
+    # The shape is selected only while loading an existing untrusted document;
+    # it is not part of the public record or its equality contract.
+    _digest_shape_input: InitVar[str] = "current"
+    _digest_shape: str = field(default="current", init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _digest_shape_input: str) -> None:
+        object.__setattr__(self, "_digest_shape", _digest_shape_input)
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -293,8 +381,23 @@ class SessionRecord:
             raise ReviewInputError("session expires_at must be after created_at")
         if expires - created > MAX_SESSION_TTL:
             raise ReviewInputError("session ttl exceeds the configured bound")
-        digest = self._payload_digest()
-        if self.record_sha256 != digest:
+        _require_bool(self.operator_paused, label="operator_paused")
+        normalized_dispositions = _stored_dispositions(self.dispositions)
+        object.__setattr__(self, "dispositions", normalized_dispositions)
+        if self._digest_shape not in _DIGEST_SHAPES:
+            raise ReviewInputError("session record digest shape is invalid")
+        if self._digest_shape == "legacy" and (
+            self.operator_paused or self.dispositions
+        ):
+            raise ReviewInputError("legacy session record has C6 fields")
+        if self._digest_shape == "operator-paused" and self.dispositions:
+            raise ReviewInputError("operator-paused session record has dispositions")
+        expected_payload = {
+            "current": self._payload,
+            "operator-paused": self._payload_without_dispositions,
+            "legacy": self._legacy_payload,
+        }[self._digest_shape]()
+        if self.record_sha256 != _digest_payload(expected_payload):
             raise ReviewInputError("session record integrity check failed")
 
     def _payload_digest(self) -> str:
@@ -302,6 +405,17 @@ class SessionRecord:
         return _digest_payload(payload)
 
     def _payload(self) -> dict[str, object]:
+        payload = self._legacy_payload()
+        payload["operator_paused"] = self.operator_paused
+        payload["dispositions"] = list(self.dispositions)
+        return payload
+
+    def _payload_without_dispositions(self) -> dict[str, object]:
+        payload = self._legacy_payload()
+        payload["operator_paused"] = self.operator_paused
+        return payload
+
+    def _legacy_payload(self) -> dict[str, object]:
         return {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "repository": self.repository,
@@ -336,7 +450,10 @@ class SessionRecord:
         created_at: str,
         updated_at: str,
         expires_at: str,
+        operator_paused: bool = False,
+        dispositions: Sequence[Mapping[str, object]] = (),
     ) -> "SessionRecord":
+        normalized_dispositions = _stored_dispositions(dispositions)
         payload = {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "repository": repository,
@@ -352,6 +469,8 @@ class SessionRecord:
             "created_at": created_at,
             "updated_at": updated_at,
             "expires_at": expires_at,
+            "operator_paused": operator_paused,
+            "dispositions": list(normalized_dispositions),
         }
         return cls(
             repository=repository,
@@ -368,10 +487,16 @@ class SessionRecord:
             updated_at=updated_at,
             expires_at=expires_at,
             record_sha256=_digest_payload(payload),
+            operator_paused=operator_paused,
+            dispositions=normalized_dispositions,
         )
 
     def to_dict(self) -> dict[str, object]:
-        payload = self._payload()
+        payload = {
+            "current": self._payload,
+            "operator-paused": self._payload_without_dispositions,
+            "legacy": self._legacy_payload,
+        }[self._digest_shape]()
         payload["record_sha256"] = self.record_sha256
         return payload
 
@@ -410,6 +535,19 @@ class SessionRecord:
     def from_dict(cls, value: Mapping[str, object]) -> "SessionRecord":
         if not isinstance(value, Mapping):
             raise ReviewInputError("session record is invalid")
+        has_operator_paused = "operator_paused" in value
+        has_dispositions = "dispositions" in value
+        if has_dispositions and not has_operator_paused:
+            raise ReviewInputError(
+                "session record dispositions require operator_paused"
+            )
+        digest_shape = (
+            "current"
+            if has_dispositions
+            else "operator-paused"
+            if has_operator_paused
+            else "legacy"
+        )
         record = cls(
             repository=str(value.get("repository", "")),
             pull_request=_require_bounded_int(
@@ -459,6 +597,9 @@ class SessionRecord:
             updated_at=str(value.get("updated_at", "")),
             expires_at=str(value.get("expires_at", "")),
             record_sha256=str(value.get("record_sha256", "")),
+            operator_paused=_operator_paused(value.get("operator_paused", False)),
+            dispositions=_stored_dispositions(value.get("dispositions", [])),
+            _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
         return record
@@ -478,6 +619,7 @@ class SessionRecord:
         reservation_id: str | None = None,
         reserved_slot: str | None = None,
         last_committed_reservation_id: str | None = None,
+        dispositions: Sequence[Mapping[str, object]] = (),
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -507,6 +649,8 @@ class SessionRecord:
             created_at=created_stamp,
             updated_at=created_stamp,
             expires_at=_format_datetime(expires),
+            operator_paused=False,
+            dispositions=dispositions,
         )
 
     def evolve(
@@ -520,6 +664,8 @@ class SessionRecord:
         reservation_id: str | None | object = ...,
         reserved_slot: str | None | object = ...,
         last_committed_reservation_id: str | None | object = ...,
+        operator_paused: bool | None = None,
+        dispositions: Sequence[Mapping[str, object]] | None = None,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -558,6 +704,10 @@ class SessionRecord:
             created_at=self.created_at,
             updated_at=updated,
             expires_at=self.expires_at,
+            operator_paused=(
+                self.operator_paused if operator_paused is None else operator_paused
+            ),
+            dispositions=(self.dispositions if dispositions is None else dispositions),
         )
 
 
@@ -608,6 +758,14 @@ class SessionLedger(Protocol):
         *,
         now: datetime | None = None,
         expires_at: datetime | str | None = None,
+    ) -> SessionRecord: ...
+
+    def replace(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
     ) -> SessionRecord: ...
 
     def reserve(
@@ -705,13 +863,23 @@ def mutate_commit(
     if record.reservation_id != reservation_id or record.reserved_slot is None:
         raise ReviewInputError("session reservation does not match")
     increments = _apply_slot(record, record.reserved_slot)
+    allowed_increments = {
+        "completed_initial_reviews",
+        "completed_verification_rounds",
+        "failed_attempts",
+    }
+    unexpected_increments = set(increments) - allowed_increments
+    if unexpected_increments:
+        raise ReviewInputError("session counter increment is unsupported")
     return record.evolve(
         now=now,
         generation=_next_generation(record),
         reservation_id=None,
         reserved_slot=None,
         last_committed_reservation_id=reservation_id,
-        **increments,
+        completed_initial_reviews=increments.get("completed_initial_reviews"),
+        completed_verification_rounds=increments.get("completed_verification_rounds"),
+        failed_attempts=increments.get("failed_attempts"),
     )
 
 
@@ -780,6 +948,8 @@ def prepare_session_round(
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     flags = dict(state_flags)
+    if record.operator_paused:
+        flags.setdefault("paused", True)
     held = record.reservation_id
     if held is not None:
         flags.setdefault("paused", True)
@@ -1014,10 +1184,10 @@ class InMemorySessionLedger:
         self._records[(identity.repository, identity.pull_request)] = record
         return record
 
-    def _replace(
+    def replace(
         self,
         identity: SessionIdentity,
-        mutate,
+        mutate: Callable[[SessionRecord], SessionRecord],
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
@@ -1028,6 +1198,17 @@ class InMemorySessionLedger:
         self._records[(identity.repository, identity.pull_request)] = updated
         return updated
 
+    # Kept as a compatibility shim for older in-process callers. New code
+    # must use the public CAS seam above.
+    def _replace(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        return self.replace(identity, mutate, now=now)
+
     def reserve(
         self,
         identity: SessionIdentity,
@@ -1037,7 +1218,7 @@ class InMemorySessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_reserved(
                 record,
@@ -1057,7 +1238,7 @@ class InMemorySessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_commit(
                 record,
@@ -1076,7 +1257,7 @@ class InMemorySessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_abort(
                 record,
@@ -1326,10 +1507,10 @@ class LocalSessionLedger:
     ) -> None:
         self._write(identity, record)
 
-    def _replace(
+    def replace(
         self,
         identity: SessionIdentity,
-        mutate,
+        mutate: Callable[[SessionRecord], SessionRecord],
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
@@ -1343,6 +1524,17 @@ class LocalSessionLedger:
         self._write(identity, updated)
         return updated
 
+    # Kept as a compatibility shim for older in-process callers. New code
+    # must use the public CAS seam above.
+    def _replace(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        return self.replace(identity, mutate, now=now)
+
     def reserve(
         self,
         identity: SessionIdentity,
@@ -1352,7 +1544,7 @@ class LocalSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_reserved(
                 record,
@@ -1372,7 +1564,7 @@ class LocalSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_commit(
                 record,
@@ -1391,7 +1583,7 @@ class LocalSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self._replace(
+        return self.replace(
             identity,
             lambda record: mutate_abort(
                 record,

@@ -1278,6 +1278,35 @@ def _github_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    command = subparsers.add_parser(
+        "command",
+        help="Apply an authenticated @sensei maintainer command to the session ledger",
+    )
+    command.add_argument("--comment-body", required=True)
+    command.add_argument("--actor", required=True)
+    command.add_argument("--actor-type", default="User")
+    command.add_argument("--association", required=True)
+    command.add_argument("--repository", required=True)
+    command.add_argument("--pull-request", type=int, required=True)
+    command.add_argument("--head-sha")
+    command.add_argument("--app-slug", default="reviewsensei[bot]")
+    command.add_argument(
+        "--session-ledger",
+        type=Path,
+        help=(
+            "Local operator directory for the durable session ledger; hosted "
+            "webhook commands use GitHubApplication and broker authorization."
+        ),
+    )
+    command.add_argument(
+        "--allow-write",
+        action="store_true",
+        help=(
+            "Required for mutating session commands and when exchanging a "
+            "GitHub capability; read-only status does not require it."
+        ),
+    )
+
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
     reply.add_argument(
@@ -1376,6 +1405,42 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .hosting.github.publication import outcome_from_publication
     from .models import ConversationReply, ReviewResult
     from .session import resolve_local_session_ledger
+
+    if args.command == "command":
+        from .disposition import (
+            apply_session_command,
+            authorized_maintainer,
+            parse_maintainer_command,
+        )
+        from .session import SessionIdentity
+
+        parsed = parse_maintainer_command(
+            args.comment_body,
+            actor=args.actor,
+            head_sha=getattr(args, "head_sha", None),
+        )
+        if parsed is None:
+            raise ReviewInputError("comment is not a supported maintainer command")
+        if not authorized_maintainer(
+            login=args.actor,
+            user_type=args.actor_type,
+            association=args.association,
+            app_slug=args.app_slug,
+        ):
+            raise ReviewInputError("maintainer command is unauthorized")
+        if parsed.action != "status" and not args.allow_write:
+            raise ReviewInputError("github writes require --allow-write")
+        ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
+        if ledger is None:
+            raise ReviewInputError("maintainer commands require a session ledger")
+        session_identity = SessionIdentity(
+            repository=args.repository, pull_request=args.pull_request
+        )
+        _record, command_result = apply_session_command(
+            ledger, session_identity, parsed
+        )
+        print(command_result.summary)
+        return 0
 
     if not args.allow_write:
         raise ReviewInputError("github writes require --allow-write")
@@ -2043,8 +2108,13 @@ def main(argv: list[str] | None = None) -> int:
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
+                status = (
+                    "action_required"
+                    if prepared_round.decision.handoff
+                    else "skipped_policy"
+                )
                 outcome = RunOutcome(
-                    "skipped_policy",
+                    status,
                     repository=args.repository,
                     pull_request_number=args.pull_request,
                     base_sha=(args.base_sha or "").strip().lower() or None,

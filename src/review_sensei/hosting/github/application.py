@@ -177,6 +177,12 @@ class GitHubApplication:
                         f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                     )
                 raise
+        authorized_dispositions: tuple[object, ...] = ()
+        if ledger is not None:
+            from ...disposition import session_dispositions
+
+            if prepared is not None:
+                authorized_dispositions = session_dispositions(prepared.record)
         try:
             publication = self.reviewer.publish(
                 token=token,
@@ -197,6 +203,7 @@ class GitHubApplication:
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
+                authorized_dispositions=authorized_dispositions,
             )
         except BaseException as publication_error:
             if ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
@@ -242,14 +249,108 @@ class GitHubApplication:
             )
         return publication
 
+    def apply_maintainer_command(
+        self,
+        *,
+        options: GitHubWriteOptions,
+        oidc_token: str | None,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        body: str,
+        actor_login: str,
+        actor_type: str = "User",
+        association: str,
+        app_slug: str,
+    ):
+        """Apply an authenticated maintainer command. Never exchanges when writes are off."""
+
+        from ...disposition import (
+            MaintainerCommandResult,
+            apply_session_command,
+            authorized_maintainer,
+            parse_maintainer_command,
+        )
+
+        command = parse_maintainer_command(body, actor=actor_login, head_sha=head_sha)
+        if command is None:
+            return MaintainerCommandResult(
+                action="status",
+                applied=False,
+                operator_paused=False,
+                summary="not-a-command",
+            )
+        if not authorized_maintainer(
+            login=actor_login,
+            user_type=actor_type,
+            association=association,
+            app_slug=app_slug,
+        ):
+            return MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=False,
+                summary="unauthorized",
+            )
+        identity = SessionIdentity(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+        )
+        # A local status read is already bounded by the injected ledger and
+        # does not need a broker capability or a GitHub write opt-in. Hosted
+        # ledgers still exchange below because the issue comment must be read
+        # through the broker-owned installation token.
+        ledger = (
+            self.session_ledger
+            if command.action == "status" and not options.github_session_ledger
+            else None
+        )
+        if ledger is None:
+            if command.action != "status" and not options.github_writes:
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="writes_disabled",
+                )
+            if command.action == "status":
+                if oidc_token is None:
+                    raise GitHubPublicationError(
+                        "hosted maintainer status requires a caller-supplied OIDC token"
+                    )
+                exchange_input = oidc_token
+                capability = "review_status"
+            else:
+                # Every hosted mutation is broker-authorized. The caller may
+                # supply the OIDC assertion, but it is never treated as a
+                # capability token or as proof of maintainer identity.
+                exchange_input = oidc_token or self.broker.request_oidc_token()
+                capability = "review_publish"
+            token = self.broker.exchange(
+                exchange_input,
+                capability=capability,
+            )
+            ledger = self._session_ledger_for_token(
+                token,
+                options=options,
+                prefer_remote=command.action == "status",
+            )
+        if ledger is None:
+            raise GitHubPublicationError("maintainer commands require a session ledger")
+        _record, result = apply_session_command(ledger, identity, command)
+        return result
+
     def _session_ledger_for_token(
         self,
         token: str,
         *,
         options: GitHubWriteOptions,
         app_slug: str | None = None,
+        prefer_remote: bool = False,
     ) -> SessionLedger | None:
-        if self.session_ledger is not None:
+        if self.session_ledger is not None and not prefer_remote:
             return self.session_ledger
         if not options.github_session_ledger:
             return None

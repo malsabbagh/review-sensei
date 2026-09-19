@@ -166,8 +166,8 @@ are cached for five minutes per Worker isolate and concurrent refreshes are
 coalesced; signature, issuer, audience, workflow, and time checks still run for
 every exchange. The ledger stores only hashed replay/rate identities and
 bounded counters.
-The endpoint issues one of four fixed disjoint capabilities (`review_publish`,
-`inline_reply`, `issue_reply`, or `learning_write`) and never stores or logs
+The endpoint issues one of five fixed disjoint capabilities (`review_publish`,
+`review_status`, `inline_reply`, `issue_reply`, or `learning_write`) and never stores or logs
 assertions, installation tokens, source, diffs, prompts, results, replies, or
 provider credentials. Responses are no-store and CORS is not supported.
 Although GitHub exposes top-level pull-request timeline comments through the
