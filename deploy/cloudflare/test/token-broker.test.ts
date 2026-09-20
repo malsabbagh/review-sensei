@@ -151,6 +151,23 @@ describe("token broker authorization", () => {
     });
   });
 
+  it("refuses a stale session head before recording a new enrollment witness", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+
+    await expect(broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: {
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+      },
+    })).rejects.toThrow("broker_session_head_rejected");
+
+    expect(ledgerFetch).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["different reusable workflow", { job_workflow_ref: `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}` }, "broker_workflow_rejected"],
     ["non-canonical public workflow tag ref", { job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${TAG}` }, "broker_workflow_rejected"],
