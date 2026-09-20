@@ -493,6 +493,8 @@ def _issue_continuation_grant(
         raise ReviewInputError("session ledger does not support CAS mutation")
 
     def mutate(current: SessionRecord) -> SessionRecord:
+        if current.generation != record.generation:
+            raise ReviewInputError("session generation conflict")
         # The command id, actor, exact head, and policy digest are rechecked
         # by the durable constructor.  Returning an equal record makes a
         # delivery replay idempotent without reviving an already-consumed grant.

@@ -210,6 +210,32 @@ class SessionCommandTests(unittest.TestCase):
         self.assertEqual(replay.generation, first.generation)
         self.assertEqual(replay.continuation_grants, first.continuation_grants)
 
+    def test_identified_continuation_uses_a_generation_guard(self):
+        class RacingLedger(InMemorySessionLedger):
+            def replace(self, identity, mutate, *, now=None):
+                loaded = self.load(identity, now=now)
+                assert loaded.record is not None
+                stale = loaded.record.evolve(
+                    now=now, generation=loaded.record.generation + 1
+                )
+                return mutate(stale)
+
+        ledger = RacingLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-race",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            apply_session_command(
+                ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+            )
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.continuation_grants, ())
+
     def test_identified_command_replay_does_not_revive_a_consumed_grant(self):
         ledger = InMemorySessionLedger()
         policy = ReviewConvergencePolicy(mode="merge-focused")
