@@ -2582,11 +2582,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         incremental = None
         current_key = None
+        verification_scope = None
         if (
             ledger is not None
             and identity is not None
             and prepared_round is not None
             and policy.mode in OPERATOR_REVIEW_MODES
+            and transaction_requested
             and prepared_round.record.completed_initial_reviews > 0
         ):
             from .baseline import plan_verification_scope
@@ -2631,7 +2633,7 @@ def main(argv: list[str] | None = None) -> int:
                     base_sha=resolved_base_sha,
                     head_sha=resolved_head_sha,
                 ),
-                provider_name=provider.name,
+                provider_name=service.provider.name,
                 stages=service.stages,
                 profile=effective_profile,
             )
@@ -2655,6 +2657,7 @@ def main(argv: list[str] | None = None) -> int:
                 emit_host_outcome(outcome, output_path=args.outcome)
                 print(outcome.status)
                 return run_outcome_exit_code(outcome.status)
+            verification_scope = scope
             incremental = scope.incremental
         try:
             run = service.run(
@@ -2784,15 +2787,21 @@ def main(argv: list[str] | None = None) -> int:
                             base_sha=resolved_base_sha,
                             head_sha=resolved_head_sha,
                         ),
-                        provider_name=provider.name,
+                        provider_name=service.provider.name,
                         stages=service.stages,
                         profile=effective_profile,
+                    )
+                    verification_related_paths = (
+                        verification_scope.related_paths
+                        if verification_scope is not None
+                        else ()
                     )
                     checkpoint_baseline = (
                         baseline_from_review(
                             result,
                             cache_key=cache_key,
                             policy=policy,
+                            related_paths=verification_related_paths,
                             generation=next_session_generation(prepared_round.record),
                         )
                         if cache_key is not None

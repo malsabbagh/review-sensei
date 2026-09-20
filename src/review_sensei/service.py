@@ -626,14 +626,32 @@ class ReviewService:
         """Execute one review and always return a structured ``RunOutcome``.
 
         When supplied, ``current_key`` must be the canonical key for this
-        request, active provider, stage configuration, and profile.  It is a
-        caller-visible identity seam used by incremental coverage, so reject a
-        mismatched key before change orchestration or any provider/cache work.
+        request, active provider, stage configuration, and profile.  The CLI
+        deliberately keeps trusted snapshot SHAs off the live inference
+        request; when both are absent, the supplied key provides that
+        checkpoint identity while all request/configuration fields are still
+        compared.  It is a caller-visible identity seam used by incremental
+        coverage, so reject a mismatched key before change orchestration or any
+        provider/cache work.
         """
 
         active_provider = provider_override or self.provider
+        key_request = request
+        if (
+            current_key is not None
+            and request.base_sha is None
+            and request.head_sha is None
+        ):
+            # F2 intentionally leaves trusted base/head SHAs off the provider
+            # request.  Complete a private identity-only copy for validation;
+            # the original request remains the one passed through inference.
+            key_request = replace(
+                request,
+                base_sha=current_key.base_sha,
+                head_sha=current_key.head_sha,
+            )
         canonical_key = build_review_context_cache_key(
-            request,
+            key_request,
             provider_name=active_provider.name,
             stages=self.stages,
             profile=profile,
@@ -642,7 +660,8 @@ class ReviewService:
             raise ReviewInputError(
                 "current_key does not match the review request or configuration"
             )
-        current_key = canonical_key
+        if current_key is None:
+            current_key = canonical_key
         if tracker is None:
             effective_budget = budget if budget is not None else self.budget
             tracker = ResourceBudgetTracker(

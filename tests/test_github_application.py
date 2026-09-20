@@ -411,6 +411,7 @@ class GitHubApplicationTests(unittest.TestCase):
             coverage_complete=True,
             generation=1,
             reviewed_paths=("src/app.py",),
+            related_paths=("src/helper.py",),
         )
         history = {
             "state": "completed",
@@ -462,6 +463,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(forwarded["baseline"], baseline)
         self.assertEqual(forwarded["current_key"], baseline.cache_key)
         self.assertEqual(forwarded["changed_paths"], ("src/app.py",))
+        self.assertEqual(forwarded["related_paths"], ("src/helper.py",))
 
     def test_publish_review_handoffs_when_durable_baseline_has_no_current_key(self):
         ledger = InMemorySessionLedger()
@@ -554,6 +556,9 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(len(legacy_reviewer.calls), 1)
         self.assertIsNone(legacy_reviewer.calls[0]["baseline"])
         self.assertIsNone(legacy_reviewer.calls[0]["current_key"])
+        self.assertIsNone(legacy_reviewer.calls[0]["changed_paths"])
+        self.assertEqual(legacy_reviewer.calls[0]["related_paths"], ())
+        self.assertEqual(legacy_reviewer.calls[0]["evidence_confirmed_concerns"], ())
 
         with patch(
             "review_sensei.hosting.github.application.baseline_from_history_document",

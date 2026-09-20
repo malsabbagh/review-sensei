@@ -298,7 +298,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
         self.assertEqual(result.diagnostic, "round-budget-exhausted")
         self.assertEqual(reviewer.calls, [])
 
-    def test_eligible_last_round_may_still_publish(self):
+    def test_prior_round_without_durable_baseline_requires_recovery(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
             IDENTITY,
@@ -335,8 +335,9 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
             convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
-        self.assertEqual(result.status, "published")
-        self.assertEqual(len(reviewer.calls), 1)
+        self.assertEqual(result.status, "handoff")
+        self.assertEqual(result.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
 
     def test_provider_failure_records_failed_attempt(self):
         class FailingReviewer:

@@ -442,6 +442,11 @@ class GitHubApplication:
                     durable_baseline is None
                     and record_for_baseline is not None
                     and record_for_baseline.completed_initial_reviews > 0
+                    # An identity-bound transaction already contains the
+                    # checkpointed result that publication is retrying.  The
+                    # durable-baseline admission gate applies to a new
+                    # prepared round, not to that crash-recovery path.
+                    and prepared is not None
                 ):
                     history = record_for_baseline.convergence_history
                     if not (
@@ -462,6 +467,12 @@ class GitHubApplication:
         # as compatible and turn stale evidence into admission authority.  Do
         # not silently downgrade to a fresh review when the caller omitted the
         # key; make the recovery requirement visible and retryable instead.
+        publication_related_paths = related_paths
+        if durable_baseline is not None and not publication_related_paths:
+            # The analysis transaction persists the verification scope in the
+            # baseline. Reuse it on the hosted publication boundary so sibling
+            # paths remain part of the same late-admission decision.
+            publication_related_paths = durable_baseline.related_paths
         try:
             publication = (
                 PublicationResult(
@@ -495,7 +506,7 @@ class GitHubApplication:
                     baseline=durable_baseline,
                     current_key=current_key,
                     changed_paths=changed_paths,
-                    related_paths=related_paths,
+                    related_paths=publication_related_paths,
                     evidence_confirmed_concerns=evidence_confirmed_concerns,
                     authorized_dispositions=authorized_dispositions,
                 )

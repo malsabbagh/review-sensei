@@ -639,7 +639,8 @@ class ReviewTransactionTests(unittest.TestCase):
             )
             self.assertEqual(malformed_outcome["base_sha"], BASE_SHA)
             self.assertEqual(malformed_outcome["head_sha"], "c" * 40)
-            self.assertEqual(provider.calls, 1)
+            malformed_provider_calls = provider.calls
+            self.assertEqual(malformed_provider_calls, 1)
             self.assertIsNone(malformed_record.reservation_id)
             self.assertEqual(malformed_record.convergence_history, initial_history)
 
@@ -679,7 +680,7 @@ class ReviewTransactionTests(unittest.TestCase):
             )
             self.assertEqual(stage_mismatch_outcome["base_sha"], BASE_SHA)
             self.assertEqual(stage_mismatch_outcome["head_sha"], stage_mismatch_head)
-            self.assertEqual(provider.calls, 1)
+            self.assertEqual(provider.calls, malformed_provider_calls)
             self.assertIsNone(stage_mismatch_record.reservation_id)
 
             LocalSessionLedger(ledger_path).replace(
@@ -699,9 +700,10 @@ class ReviewTransactionTests(unittest.TestCase):
                 self.assertNotEqual(main(second_argv), 0)
             recovery_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
             recovery_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
-            self.assertEqual(provider.calls, 1)
+            self.assertEqual(provider.calls, malformed_provider_calls)
             self.assertEqual(recovery_outcome["status"], "action_required")
             self.assertIsNone(recovery_record.reservation_id)
+            self.assertEqual(recovery_record.failed_attempts, 0)
             LocalSessionLedger(ledger_path).replace(
                 IDENTITY,
                 lambda current: current.evolve(convergence_history=initial_history),
@@ -811,25 +813,10 @@ class ReviewTransactionTests(unittest.TestCase):
             observed_incrementals = []
             original_run = ReviewService.run
 
-            def recording_run(
-                service,
-                request,
-                *,
-                incremental=None,
-                current_key=None,
-                profile="default",
-                budget=None,
-            ):
-                observed_profiles.append(profile)
-                observed_incrementals.append(incremental)
-                return original_run(
-                    service,
-                    request,
-                    incremental=incremental,
-                    current_key=current_key,
-                    profile=profile,
-                    budget=budget,
-                )
+            def recording_run(service, request, **kwargs):
+                observed_profiles.append(kwargs.get("profile", "default"))
+                observed_incrementals.append(kwargs.get("incremental"))
+                return original_run(service, request, **kwargs)
 
             with (
                 patch.dict("os.environ", {"OLLAMA_API_KEY": "test-key"}),
@@ -1041,24 +1028,9 @@ class ReviewTransactionTests(unittest.TestCase):
             live_requests: list[ReviewRequest] = []
             original_run = ReviewService.run
 
-            def recording_run(
-                self,
-                request,
-                *,
-                incremental=None,
-                current_key=None,
-                profile="default",
-                budget=None,
-            ):
+            def recording_run(self, request, **kwargs):
                 live_requests.append(request)
-                return original_run(
-                    self,
-                    request,
-                    incremental=incremental,
-                    current_key=current_key,
-                    profile=profile,
-                    budget=budget,
-                )
+                return original_run(self, request, **kwargs)
 
             with (
                 patch(

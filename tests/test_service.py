@@ -893,6 +893,23 @@ class ReviewServiceTests(unittest.TestCase):
             )
         self.assertEqual(provider.requests, [])
 
+    def test_unbound_request_validates_against_checkpoint_identity(self):
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        bound_request = self._current_request()
+        current_key = build_review_context_cache_key(
+            bound_request,
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert current_key is not None
+        unbound_request = replace(bound_request, base_sha=None, head_sha=None)
+
+        accepted = service.run(unbound_request, current_key=current_key)
+
+        self.assertIsNone(accepted.error)
+        self.assertEqual(provider.requests[0].prompt.count("Pull request: #3"), 1)
+
     @staticmethod
     def _previous_finding():
         return finding_lifecycle_for_comment(
