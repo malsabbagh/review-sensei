@@ -2567,9 +2567,66 @@ def main(argv: list[str] | None = None) -> int:
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
         )
+        incremental = None
+        if (
+            ledger is not None
+            and identity is not None
+            and prepared_round is not None
+            and policy.mode in OPERATOR_REVIEW_MODES
+            and prepared_round.record.completed_initial_reviews > 0
+        ):
+            from .baseline import (
+                baseline_from_history_document,
+                plan_verification_scope,
+            )
+            from .context import build_review_context_cache_key
+
+            history = prepared_round.record.convergence_history
+            if not isinstance(history, dict) or history.get("state") != "completed":
+                cleanup_analysis_reservation(charge_failed_attempt=False)
+                outcome = RunOutcome(
+                    "action_required",
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=request.base_sha,
+                    head_sha=request.head_sha,
+                    diagnostic="durable_baseline_recovery_required",
+                    provider_calls=0,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
+            persisted_baseline = baseline_from_history_document(history.get("baseline"))
+            current_key = build_review_context_cache_key(
+                request,
+                provider_name=provider.name,
+                stages=service.stages,
+            )
+            scope = plan_verification_scope(
+                policy=policy,
+                baseline=persisted_baseline,
+                current_key=current_key,
+                changed_paths=analysis.changed_paths,
+            )
+            if scope.status != "verify" or scope.incremental is None:
+                cleanup_analysis_reservation(charge_failed_attempt=False)
+                outcome = RunOutcome(
+                    "action_required",
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=request.base_sha,
+                    head_sha=request.head_sha,
+                    diagnostic="durable_baseline_recovery_required",
+                    provider_calls=0,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
+            incremental = scope.incremental
         try:
             run = service.run(
                 request,
+                incremental=incremental,
                 budget=ResourceBudget.for_limits(limits),
             )
         except BaseException as analysis_error:

@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-19
+Last amended: 2026-09-20
 GitHub Issue: #136
 Pull Request: [#140](https://github.com/malsabbagh/review-sensei/pull/140)
 Owners/Reviewers: Maintainers
@@ -61,6 +61,15 @@ Later findings are classified before C2 admission:
   the changed set; callers union that impact context with the changed paths in
   the incremental plan.
 
+The durable session record supplies the baseline only after transaction
+checkpointing validates a completed review. The CLI restores that serialized
+baseline before each later admitted round and passes the resulting
+`IncrementalReviewPlan` into `ReviewService.run`. Missing, incomplete, or
+incompatible durable history is an `action_required` recovery outcome before a
+provider call or a new reservation charge; it is never treated as fresh
+initial-review authority. A successful verification checkpoints the next
+baseline atomically with the validated result.
+
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
 falls back to a full bounded review. Its baseline-derived classifier returns
@@ -99,7 +108,7 @@ Out of scope:
   evaluation rollout (C7).
 - Changing `REVIEWSENSEI_AUTO_APPROVE`, GitHub permissions, or recreating
   #114/#115 gates.
-- Persisting findings inside the C3 session ledger.
+- The bounded durable baseline representation itself (delivered by #146 F2).
 
 ## Consequences
 
@@ -111,8 +120,8 @@ Positive:
 
 Tradeoffs:
 
-- A caller still has to supply a complete prior `ReviewResult` to classify
-  findings; C3 stores counters only.
+- Durable recovery depends on the completed, compatible baseline checkpoint;
+  incomplete or incompatible history requires explicit operator recovery.
 - Directory siblings are a bounded stand-in for impact when symbol-aware
   related paths are not supplied.
 
@@ -145,7 +154,7 @@ omitting `baseline=` from admission and ignoring the new plan fields.
 
 ## Follow-up work
 
-- C5: automation admission and handoff using the C3 ledger.
+- #146 F4: attested continuation grants and hosted session mutation.
 - C6–C7 as specified in issue #136.
 
 ## Links
