@@ -82,8 +82,10 @@ Negative or tradeoffs:
   publication mode; raw prompts and credentials are excluded. Publication
   receives a trusted immutable context with the same shape and recomputes both
   configuration and evidence digests.
-- The result digest is computed over the canonical review result with the
-  transaction envelope excluded, avoiding a circular digest.
+- The result digest is computed over the canonical v1 review result with the
+  transaction envelope excluded, avoiding a circular digest. Any additive or
+  semantic change to serialized result fields is a digest-contract change and
+  must be versioned with the public schema/compatibility policy.
 - The session record retains the transaction phase and result digest but never
   stores the result body.
 - Analysis failure releases the reservation through the existing failed-attempt

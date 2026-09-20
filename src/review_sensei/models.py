@@ -1201,7 +1201,12 @@ class ReviewResult:
             raise ReviewInputError("review transaction result digest does not match")
 
     def content_digest(self) -> str:
-        """Digest the canonical result without its transaction envelope."""
+        """Digest the canonical v1 result without its transaction envelope.
+
+        The serialized v1 result is the digest contract: adding, removing, or
+        changing a published result field requires an explicit schema and
+        compatibility update rather than silently changing this projection.
+        """
 
         value = self.to_dict()
         value.pop("transaction", None)
