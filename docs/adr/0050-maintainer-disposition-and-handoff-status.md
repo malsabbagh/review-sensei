@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-19
+Last amended: 2026-09-20
 GitHub Issue: #136
 Pull Request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 Owners/Reviewers: Maintainers
@@ -30,7 +30,15 @@ Support these comment commands, case-sensitive `@sensei` gate:
 - `@sensei review pause`
 - `@sensei verify`
 - `@sensei review continue --rounds 1`
+- `@sensei review reenroll`
 - `@sensei dismiss|defer|accept-risk <fingerprint> --reason <text>`
+
+`@sensei review reenroll` is the authenticated recovery command for an expired
+or witness-only session (see the amendment below). It is the only command that
+retires durable state and resets round counters, it is refused for a live,
+present-but-unreadable, or ambiguous record, and like every other mutating
+command it requires GitHub writes to be enabled (`--allow-write` on the CLI and
+`github_writes` on the hosted path).
 
 Unauthorized actors, bots, and the App itself are ignored. Dismiss,
 defer, and accept-risk require a reason and bind to a finding
@@ -54,7 +62,33 @@ does not create a missing session comment.
 
 Exact-head binding uses the command's optional head SHA against the
 current pull-request head at trigger time. Advisory mode still does not
-dismiss existing `REQUEST_CHANGES`. No new GitHub App scopes are added.
+dismiss existing `REQUEST_CHANGES`. The original C6 implementation added no
+new GitHub App scopes; the F4 amendment below defines its separately scoped
+session capability.
+
+## Amendment 2026-09-20: authenticated session authority
+
+Issue #146 F2/F4 requires a missing session marker not to reset an established
+PR's budget. The GitHub comment alone cannot distinguish deletion from first
+enrollment. The existing OIDC broker therefore owns a separate, hashed
+enrollment witness and a closed `review_session` capability. Before the
+application creates or mutates a GitHub session comment, it supplies the
+numeric repository/PR identity and exact current head to the broker. The
+broker validates those values against the authenticated OIDC repository and a
+live App-authenticated PR read, then records or finds the witness in its
+existing Durable Object. A witness combined with a missing comment is an
+authenticated recovery requirement, never a new zero-budget session.
+
+`review_session` requests only `pull_requests: write`; it is separate from
+`review_publish`, which remains the only capability able to publish a
+pull-request review. The durable session lives in one App-authored issue
+comment, so the session capability needs no further grant and the broker never
+requests `checks: write`, which ADR 0022/0006 do not register for the App. The
+witness is keyed by the verified current head and retained for 90 days from its
+most recent use, matching ADR 0047's maximum session lifetime, so both a new
+head and a long-idle pull request still enroll cleanly. The subsequent F4
+session-boundary work binds this capability to serialized workflow execution
+and an opaque, short-lived grant before every hosted mutation.
 
 ## Scope
 
@@ -69,6 +103,8 @@ Out of scope:
 
 - Sequential evaluation, shadowing, and default-mode promotion (C7).
 - Changing `REVIEWSENSEI_AUTO_APPROVE` or recreating #114/#115 gates.
+- Reusing `review_publish` as authority to create a replacement session after
+  an authenticated broker witness reports that its marker is missing.
 - A blanket `approve everything` command.
 
 ## Consequences

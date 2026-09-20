@@ -4,7 +4,11 @@ import json
 import unittest
 from pathlib import Path
 
-from review_sensei.baseline import FINDING_CLASSIFICATIONS, LINEAGE_REASONS
+from review_sensei.baseline import (
+    FINDING_CLASSIFICATIONS,
+    LINEAGE_REASONS,
+    MAX_HISTORY_FINDINGS,
+)
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS
 from review_sensei.convergence import ATTRIBUTIONS, LATE_REASONS
 from review_sensei.errors import (
@@ -257,6 +261,93 @@ class PublicSchemaTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             validate_public_document(
                 {"body": "ok", "resolve": "yes"}, "conversation-reply"
+            )
+
+    def test_session_record_history_limits_match_runtime_bounds(self) -> None:
+        schema = json.loads(
+            (SCHEMA_DIR / "session-record.schema.json").read_text(encoding="utf-8")
+        )
+        baseline = schema["properties"]["convergence_history"]["properties"][
+            "baseline"
+        ]["properties"]
+        # A Python-written envelope must never exceed these caps, or the record
+        # fails schema validation on its next read.
+        self.assertEqual(baseline["findings"]["maxItems"], MAX_HISTORY_FINDINGS)
+        self.assertEqual(
+            baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
+        )
+        self.assertEqual(baseline["related_paths"]["maxItems"], MAX_RELATED_PATHS)
+
+    def test_session_record_schema_enforces_history_baseline_presence(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests/fixtures/schemas/golden/session-record.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        baseline = {
+            "cache_key": {
+                "repository": "owner/repo",
+                "pull_request": 136,
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "engine": "fixture",
+                "model": "fixture-model",
+                "profile": "default",
+                "stage_digest": "1" * 64,
+                "context_digest": "2" * 64,
+                "learning_digest": "3" * 64,
+            },
+            "policy_digest": "4" * 64,
+            "complete": True,
+            "coverage_complete": True,
+            "generation": 1,
+            "findings": [
+                {
+                    "fingerprint": "5" * 64,
+                    "resolution_criterion": "6" * 64,
+                    "concern": None,
+                    "path": "src/app.py",
+                    "symbol": None,
+                    "defect_kind": "bug",
+                    "generation": 1,
+                    "blocking": True,
+                }
+            ],
+            "reviewed_paths": ["src/app.py"],
+            "related_paths": [],
+        }
+        history = {
+            "state": "completed",
+            "baseline": baseline,
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+        # A completed history must carry its baseline, and a non-completed one
+        # must not, so a constructor that skipped the in-process validator
+        # still cannot publish a contradictory envelope.
+        validate_public_document(
+            dict(golden, convergence_history=history), "session-record"
+        )
+        invalidated = json.loads(json.dumps(history))
+        invalidated["state"] = "invalidated"
+        del invalidated["baseline"]
+        invalidated["progress"] = [{"event": "invalidated", "generation": 1}]
+        validate_public_document(
+            dict(golden, convergence_history=invalidated), "session-record"
+        )
+        completed_without_baseline = json.loads(json.dumps(history))
+        del completed_without_baseline["baseline"]
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                dict(golden, convergence_history=completed_without_baseline),
+                "session-record",
+            )
+        invalidated_with_baseline = json.loads(json.dumps(invalidated))
+        invalidated_with_baseline["baseline"] = baseline
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                dict(golden, convergence_history=invalidated_with_baseline),
+                "session-record",
             )
 
     def test_error_categories_are_stable(self) -> None:

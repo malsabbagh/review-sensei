@@ -474,3 +474,22 @@ describe("GitHubApi capability issuance", () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+describe("GitHubApi pull-request head lookup", () => {
+  it("reports an absent pull request separately from a forbidden read", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(
+      client.pullRequestHead("acme/widgets", 7, "token"),
+    ).resolves.toBeNull();
+
+    // A 403 is a permission, installation-scope, or rate-limit problem, so it
+    // must not be reported as a missing or stale head.
+    request.mockResolvedValueOnce({ status: 403, data: null });
+    await expect(
+      client.pullRequestHead("acme/widgets", 7, "token"),
+    ).rejects.toThrow("github_pull_request_forbidden");
+  });
+});

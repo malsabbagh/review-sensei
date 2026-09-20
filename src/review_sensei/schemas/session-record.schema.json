@@ -86,6 +86,83 @@
     },
     "transaction": {
       "$ref": "https://reviewsensei.dev/schemas/v1/review-transaction.schema.json"
+    },
+    "convergence_history": {
+      "type": "object",
+      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects an envelope whose canonical UTF-8 encoding exceeds MAX_CONVERGENCE_HISTORY_BYTES (2048), which JSON Schema cannot express.",
+      "additionalProperties": false,
+      "required": ["state", "progress", "provenance"],
+      "properties": {
+        "state": {"enum": ["completed", "invalidated", "recovery-required"]},
+        "baseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cache_key", "policy_digest", "complete", "coverage_complete", "generation", "findings", "reviewed_paths", "related_paths"],
+          "properties": {
+            "cache_key": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["repository", "pull_request", "base_sha", "head_sha", "engine", "model", "profile", "stage_digest", "context_digest", "learning_digest"],
+              "properties": {
+                "repository": {"type": "string", "maxLength": 256},
+                "pull_request": {"type": "integer", "minimum": 1},
+                "base_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+                "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+                "engine": {"type": "string", "maxLength": 256},
+                "model": {"type": "string", "maxLength": 256},
+                "profile": {"type": "string", "maxLength": 256},
+                "stage_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "context_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "learning_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              }
+            },
+            "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "complete": {"type": "boolean"},
+            "coverage_complete": {"type": "boolean"},
+            "generation": {"type": "integer", "minimum": 0},
+            "findings": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["fingerprint", "resolution_criterion", "concern", "path", "symbol", "defect_kind", "generation", "blocking"],
+                "properties": {
+                  "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                  "resolution_criterion": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                  "concern": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+                  "path": {"type": ["string", "null"], "maxLength": 256},
+                  "symbol": {"type": ["string", "null"], "maxLength": 256},
+                  "defect_kind": {"type": "string", "maxLength": 128},
+                  "generation": {"type": "integer", "minimum": 0},
+                  "blocking": {"type": "boolean"}
+                }
+              }
+            },
+            "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
+            "related_paths": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}}
+          }
+        },
+        "progress": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["event", "generation"],
+            "properties": {
+              "event": {"enum": ["completed", "invalidated", "recovery-required"]},
+              "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+            }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ledger_digest"],
+          "properties": {"ledger_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+        }
+      }
     }
   },
   "allOf": [
@@ -130,6 +207,38 @@
         "properties": {
           "reservation_id": {"type": "null"},
           "reserved_slot": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"const": "completed"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"required": ["baseline"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"not": {"const": "completed"}}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"not": {"required": ["baseline"]}}
         }
       }
     }

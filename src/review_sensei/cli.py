@@ -473,6 +473,28 @@ def _provider_settings_from_args(
     )
 
 
+def _checkpoint_cache_request(
+    request: ReviewRequest,
+    *,
+    base_sha: str | None,
+    head_sha: str | None,
+) -> ReviewRequest:
+    """Return the request the durable checkpoint binds to the trusted SHAs.
+
+    The live inference request deliberately stays unbound: ADR 0053 keeps F2 off
+    the inference path, so `service.run` must never derive coverage or cache
+    identity from the trusted SHAs. Only this copy carries them, and it is used
+    solely to derive the checkpoint cache key, which keeps the invariant in one
+    place instead of depending on where a caller happens to build the key.
+    """
+
+    return replace(
+        request,
+        base_sha=(base_sha or "").strip().lower() or None,
+        head_sha=(head_sha or "").strip().lower() or None,
+    )
+
+
 def _transaction_provider_identity(
     settings: ProviderSettings,
 ) -> tuple[dict[str, object], str | None]:
@@ -2528,25 +2550,26 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
+        request = ReviewRequest(
+            diff=diff,
+            repository=args.repository,
+            pull_request_number=args.pull_request,
+            title=args.title,
+            instructions=args.instructions,
+            model=args.model,
+            learnings=learnings,
+            active_category_ids=context_selection.active_category_ids,
+            lens_contexts=context_selection.lens_contexts,
+            propose_learnings=args.propose_learnings,
+            limits=limits,
+            source_context=context_selection.source_context,
+            untrusted_head_sha=untrusted_head_sha,
+            orchestrate_large_changes=orchestrate,
+            work_budget=work_budget,
+        )
         try:
             run = service.run(
-                ReviewRequest(
-                    diff=diff,
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    title=args.title,
-                    instructions=args.instructions,
-                    model=args.model,
-                    learnings=learnings,
-                    active_category_ids=context_selection.active_category_ids,
-                    lens_contexts=context_selection.lens_contexts,
-                    propose_learnings=args.propose_learnings,
-                    limits=limits,
-                    source_context=context_selection.source_context,
-                    untrusted_head_sha=untrusted_head_sha,
-                    orchestrate_large_changes=orchestrate,
-                    work_budget=work_budget,
-                ),
+                request,
                 budget=ResourceBudget.for_limits(limits),
             )
         except BaseException as analysis_error:
@@ -2655,11 +2678,44 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         raise
                 try:
+                    from .baseline import baseline_from_review
+                    from .context import build_review_context_cache_key
+                    from .session import next_session_generation
+
+                    if prepared_round.record is None:
+                        raise ReviewInputError(
+                            "prepared review transaction has no session record"
+                        )
+                    cache_key = build_review_context_cache_key(
+                        _checkpoint_cache_request(
+                            request,
+                            base_sha=args.base_sha,
+                            head_sha=args.head_sha,
+                        ),
+                        provider_name=provider.name,
+                        stages=service.stages,
+                    )
+                    checkpoint_baseline = (
+                        baseline_from_review(
+                            result,
+                            cache_key=cache_key,
+                            policy=policy,
+                            generation=next_session_generation(prepared_round.record),
+                        )
+                        if cache_key is not None
+                        else None
+                    )
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,
                         prepared_round,
                         result,
+                        baseline=(
+                            checkpoint_baseline
+                            if checkpoint_baseline is not None
+                            and checkpoint_baseline.complete
+                            else None
+                        ),
                     )
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:

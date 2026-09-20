@@ -46,7 +46,11 @@ function harness(
 ) {
   const ledgerFetch = vi.fn(async (_url: string, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as { action?: string };
-    const state = request.action === "admit" ? "accepted" : ledgerState;
+    const state = request.action === "admit"
+      ? "accepted"
+      : request.action === "session_enroll"
+        ? "enrolled"
+        : ledgerState;
     return new Response(JSON.stringify({ state }), {
       headers: { "content-type": "application/json" },
     });
@@ -65,6 +69,7 @@ function harness(
     })),
     publicWorkflowSha: vi.fn(async () => SHA),
     repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
+    pullRequestHead: vi.fn(async () => SHA),
     installationFor: vi.fn(async () => 2468),
     installationToken: vi.fn(async () => ({
       token: "ghs_metadata_token",
@@ -108,6 +113,74 @@ describe("token broker authorization", () => {
       permissions,
       acceptReturnedContentsRead,
     );
+  });
+
+  it("issues a session capability only for the authenticated repository and current PR head", async () => {
+    const { broker, github, ledgerFetch } = harness();
+
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: {
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+      },
+    });
+
+    expect(result).toEqual({
+      token: "ghs_scoped_token",
+      capability: "review_session",
+      session_state: "enrolled",
+    });
+    expect(github.pullRequestHead).toHaveBeenCalledWith(
+      "acme/widgets",
+      7,
+      "ghs_scoped_token",
+    );
+    expect(github.capabilityToken).toHaveBeenCalledWith(
+      2468,
+      "acme/widgets",
+      { pull_requests: "write" },
+      false,
+    );
+    const enrollment = ledgerFetch.mock.calls[2][1] as RequestInit;
+    expect(JSON.parse(enrollment.body as string)).toEqual({
+      action: "session_enroll",
+      scope: `987654321:7:${SHA}`,
+    });
+  });
+
+  it("refuses a stale session head before recording a new enrollment witness", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+
+    let rejection: unknown;
+    await broker
+      .exchange({
+        oidc_token: "signed-jwt",
+        capability: "review_session",
+        session: {
+          repository_id: 987654321,
+          pull_request: 7,
+          head_sha: SHA,
+        },
+      })
+      .catch((error: unknown) => {
+        rejection = error;
+      });
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe("broker_session_head_rejected");
+    // The failure must not surface a capability token, and it must not reach
+    // the enroll endpoint at all: the head check is what makes recording the
+    // witness safe.
+    expect((rejection as Error).message).not.toContain("ghs_");
+    expect(ledgerFetch).toHaveBeenCalledTimes(2);
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_enroll");
   });
 
   it.each([

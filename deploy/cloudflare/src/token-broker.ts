@@ -13,6 +13,11 @@ const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
   review_publish: { "pull_requests": "write" },
+  // Session authority is separate from publication authority, but it asks for
+  // no extra GitHub permission: the durable session is an issue comment, so
+  // pull-request write is sufficient. ADR 0022/0006 register the App without
+  // Checks: write, and this broker never requests it.
+  review_session: { "pull_requests": "write" },
   review_status: { "pull_requests": "read" },
   inline_reply: { "pull_requests": "write" },
   issue_reply: { "pull_requests": "write" },
@@ -33,7 +38,16 @@ const CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ = new Set<Capability>(["revi
 interface BrokerBody {
   oidc_token?: unknown;
   capability?: unknown;
+  session?: unknown;
 }
+
+interface SessionScope {
+  repository_id: number;
+  pull_request: number;
+  head_sha: string;
+}
+
+type SessionState = "enrolled" | "known";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -93,6 +107,27 @@ async function claimLedger(
   throw new Error("broker_ledger_invalid");
 }
 
+async function enrollSession(
+  env: WorkerEnv,
+  scope: string,
+): Promise<SessionState> {
+  const id = env.BROKER_LEDGER.idFromName("reviewsensei-broker");
+  const stub = env.BROKER_LEDGER.get(id);
+  const response = await stub.fetch("https://broker/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "session_enroll", scope }),
+  });
+  if (!response.ok) {
+    throw new Error("broker_ledger_unavailable");
+  }
+  const value = (await response.json()) as { state?: unknown };
+  if (value.state === "enrolled" || value.state === "known") {
+    return value.state;
+  }
+  throw new Error("broker_ledger_invalid");
+}
+
 async function digest(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)]
@@ -102,6 +137,29 @@ async function digest(value: string): Promise<string> {
 
 function clientScope(value: string | undefined): string {
   return value && /^[0-9A-Fa-f:.]{1,64}$/.test(value) ? value : "unknown";
+}
+
+function sessionScope(value: unknown, repositoryId: number): SessionScope {
+  if (!isObject(value)) {
+    throw new Error("broker_session_invalid");
+  }
+  const pullRequest = value.pull_request;
+  const headSha = value.head_sha;
+  if (
+    value.repository_id !== repositoryId ||
+    typeof pullRequest !== "number" ||
+    !Number.isSafeInteger(pullRequest) ||
+    pullRequest <= 0 ||
+    typeof headSha !== "string" ||
+    !/^[a-f0-9]{40}$/.test(headSha)
+  ) {
+    throw new Error("broker_session_invalid");
+  }
+  return {
+    repository_id: repositoryId,
+    pull_request: pullRequest,
+    head_sha: headSha,
+  };
 }
 
 /** Issuance-only broker policy. It never accepts installation ids from a job. */
@@ -115,11 +173,14 @@ export class TokenBroker {
   async exchange(
     body: BrokerBody,
     sourceAddress?: string,
-  ): Promise<{ token: string; capability: Capability }> {
+  ): Promise<{ token: string; capability: Capability; session_state?: SessionState }> {
     if (!isObject(body) || typeof body.oidc_token !== "string" || body.oidc_token.length === 0) {
       throw new Error("broker_request_invalid");
     }
     const requested = capability(body.capability);
+    if (requested !== "review_session" && body.session !== undefined) {
+      throw new Error("broker_session_invalid");
+    }
     const admissionState = await claimLedger(
       this.env,
       "admit",
@@ -173,12 +234,35 @@ export class TokenBroker {
     if (info === null || info.fork || info.id !== claims.repository_id) {
       throw new Error("broker_repository_rejected");
     }
+    const requestedSession = requested === "review_session"
+      ? sessionScope(body.session, claims.repository_id)
+      : undefined;
     const token = await this.github.capabilityToken(
       installationId,
       claims.repository,
       CAPABILITIES[requested],
       CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
+    if (requestedSession !== undefined) {
+      const currentHead = await this.github.pullRequestHead(
+        claims.repository,
+        requestedSession.pull_request,
+        token,
+      );
+      if (currentHead !== requestedSession.head_sha) {
+        throw new Error("broker_session_head_rejected");
+      }
+      // The enrollment witness is keyed by the current head, which the check
+      // above just verified against the live pull request. A new head is a new
+      // enrollment, so a legitimate re-review at an advanced head cannot be
+      // mistaken for a deleted marker; the same head keeps its witness, which
+      // is what makes a missing comment detectable as deletion.
+      const enrollment = await enrollSession(
+        this.env,
+        `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`,
+      );
+      return { token, capability: requested, session_state: enrollment };
+    }
     return { token, capability: requested };
   }
 
@@ -219,4 +303,4 @@ export class TokenBroker {
   }
 }
 
-export type { BrokerBody, Capability };
+export type { BrokerBody, Capability, SessionScope, SessionState };

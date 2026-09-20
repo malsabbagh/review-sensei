@@ -47,6 +47,10 @@ SESSION_MARKER_RE = re.compile(
     r"pr=(?P<pull_request>[1-9][0-9]*) gen=(?P<generation>0|[1-9][0-9]*) "
     r"digest=(?P<digest>[a-f0-9]{64}) -->$"
 )
+# Any marker version, used only to decide whether a body is a session marker
+# document at all. Version-agnostic on purpose: a marker written by a newer
+# schema must still fail closed rather than be ignored and silently duplicated.
+SESSION_MARKER_ANY_VERSION = "<!-- reviewsensei:session:"
 _JSON_FENCE_RE = re.compile(
     r"```json\n(?P<body>\{.*\})\n```$",
     re.DOTALL,
@@ -59,6 +63,26 @@ def _within_session_comment_limit(body: str) -> bool:
         return len(body.encode("utf-8")) <= MAX_SESSION_COMMENT_BYTES
     except UnicodeError:
         return False
+
+
+def _marker_shaped(body: str) -> bool:
+    """Return True when a body is a session marker document, not a quotation.
+
+    Only a body that carries a terminal marker line may become established
+    unreadable state for the pull request. A body that merely mentions the
+    prefix while discussing something else -- an App-posted maintainer quote,
+    or prose that references the marker mid-comment -- is not marker-shaped and
+    is ignored, so it can never wedge the ledger. A terminal marker line is
+    still treated as a marker document even when it fails validation: the
+    version-agnostic prefix keeps a newer schema failing closed rather than
+    being silently duplicated, and the documented re-enrollment path recovers
+    the pull request instead of leaving it permanently stuck.
+    """
+
+    terminal_line = body.rstrip().rsplit("\n", 1)[-1].strip()
+    return terminal_line.startswith(
+        SESSION_MARKER_ANY_VERSION
+    ) and terminal_line.endswith("-->")
 
 
 def session_marker(
@@ -234,11 +258,13 @@ class GitHubIssueCommentSessionLedger:
             if not isinstance(item, dict):
                 continue
             author = item.get("user")
+            trusted_session_author = False
             if author is None and self.app_slug is None:
                 # Older test transports omitted the always-present GitHub
-                # ``user`` object. Production callers pass ``app_slug`` and
-                # therefore require an explicit bot author below.
-                pass
+                # ``user`` object. Treat it as trusted only for that legacy
+                # transport compatibility path. Production callers pass
+                # ``app_slug`` and require the explicit bot author below.
+                trusted_session_author = True
             else:
                 if not isinstance(author, dict) or author.get("type") != "Bot":
                     continue
@@ -249,11 +275,12 @@ class GitHubIssueCommentSessionLedger:
                     author_login.casefold() != self.app_slug.casefold()
                 ):
                     continue
+                trusted_session_author = True
             body = item.get("body")
             if (
                 not isinstance(body, str)
                 or not _within_session_comment_limit(body)
-                or SESSION_MARKER_PREFIX not in body
+                or not _marker_shaped(body)
             ):
                 continue
             comment_id = item.get("id")
@@ -268,7 +295,18 @@ class GitHubIssueCommentSessionLedger:
                 )
             record = parse_session_comment(body, identity=identity)
             if record is None:
-                continue
+                # Only an author that passed the trusted-app check above can
+                # turn a malformed marker into established unreadable state.
+                # Human quotes were already ignored, so they cannot block a
+                # later session initialization. The check is explicit rather
+                # than an assertion so the invariant holds under -O and reads
+                # as part of the control flow.
+                if not trusted_session_author:
+                    continue
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "session comment marker is malformed",
+                )
             if record.repository_id not in {None, repository_id}:
                 raise SessionLoadError(
                     SessionLoadReason.CONFLICT,
@@ -310,7 +348,7 @@ class GitHubIssueCommentSessionLedger:
             if loaded.record is None:
                 raise ReviewInputError("session load returned no record")
             return loaded.record
-        if loaded.status in {"integrity-failed", "conflict"}:
+        if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         repository_id = self._require_identity(identity)
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
@@ -417,6 +455,81 @@ class GitHubIssueCommentSessionLedger:
             or readback is None
             or readback.record_sha256 != updated.record_sha256
             or readback.generation != updated.generation
+        ):
+            raise ReviewInputError("session comment update lost")
+        return readback
+
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Replace an expired session marker with a freshly enrolled session.
+
+        Recovery for a hosted session is operator-driven and marker-level: the
+        App rewrites its own expired comment, so the durable artifact the
+        broker witnessed is restored rather than deleted, and the enrollment
+        witness and the marker agree again. That is why nothing has to be
+        purged in the broker alongside it -- including when the marker was
+        deleted, where recovery establishes a fresh comment rather than leaving
+        a witness that demands attention until the retention window elapses.
+        Only an expired marker or an absent marker is recovered; a live,
+        unreadable, or ambiguous marker needs investigation rather than a reset.
+        """
+
+        loaded = self.load(identity, now=now)
+        if loaded.status == "missing":
+            return self.initialize(identity, now=now)
+        if loaded.status != "expired":
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
+        comment_id, record = self._discover(identity, now=now)
+        if comment_id is None or record is None or not record.expired(now=now):
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
+        repository_id = self._require_identity(identity)
+        replacement = SessionRecord.create(identity, now=now)
+        path = self.http.repository_path(
+            identity.repository, f"/issues/comments/{comment_id}"
+        )
+        status, payload = self._request(
+            "PATCH",
+            path,
+            body={
+                "body": render_session_comment(
+                    repository_id=repository_id,
+                    pull_request=identity.pull_request,
+                    record=replacement,
+                )
+            },
+        )
+        if status != 200 or not isinstance(payload, dict):
+            if status in {409, 422, 429} or status >= 500:
+                raise GitHubPublicationTransientError(
+                    "session comment update was ambiguous"
+                )
+            raise GitHubPublicationError("session comment update failed")
+        verified = parse_session_comment(payload.get("body"), identity=identity)
+        payload_id = payload.get("id")
+        if (
+            isinstance(payload_id, bool)
+            or not isinstance(payload_id, int)
+            or payload_id != comment_id
+            or verified is None
+            or verified.record_sha256 != replacement.record_sha256
+        ):
+            raise ReviewInputError("session comment update lost")
+        # As with a reservation CAS, the PATCH response only proves what
+        # GitHub returned for that request. Re-read the marker so a concurrent
+        # writer is surfaced rather than treated as this enrollment.
+        readback_id, readback = self._discover(identity, now=now)
+        if (
+            readback_id != comment_id
+            or readback is None
+            or readback.record_sha256 != replacement.record_sha256
         ):
             raise ReviewInputError("session comment update lost")
         return readback
