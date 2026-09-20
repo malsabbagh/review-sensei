@@ -1838,6 +1838,56 @@ class LocalSessionLedger:
             / f"{identity.pull_request}.json"
         )
 
+    def _enrollment_path(self, identity: SessionIdentity) -> Path:
+        """Independent local witness that this identity was initialized once."""
+
+        return self._path(identity).with_suffix(".enrolled")
+
+    @staticmethod
+    def _enrollment_witness(identity: SessionIdentity) -> bytes:
+        return (
+            hashlib.sha256(
+                f"reviewsensei-session-v1\0{identity.repository}\0{identity.pull_request}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            + "\n"
+        ).encode("ascii")
+
+    def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
+        try:
+            raw = self._enrollment_path(identity).read_bytes()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ReviewInputError("session enrollment witness could not be read") from exc
+        if raw != self._enrollment_witness(identity):
+            raise ReviewInputError("session enrollment witness is invalid")
+        return True
+
+    def _create_enrollment_witness(self, identity: SessionIdentity) -> None:
+        path = self._enrollment_path(identity)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("xb") as handle:
+                handle.write(self._enrollment_witness(identity))
+                handle.flush()
+                os.fsync(handle.fileno())
+            if os.name != "nt":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except FileExistsError as exc:
+            if self._path(identity).exists():
+                raise ReviewInputError(
+                    "session already exists (concurrent initialization)"
+                ) from exc
+            raise ReviewInputError("session enrollment witness already exists") from exc
+        except OSError as exc:
+            raise ReviewInputError("session enrollment witness could not be written") from exc
+
     def _read_document(self, path: Path) -> Mapping[str, object] | None:
         try:
             raw = path.read_bytes()
@@ -1929,6 +1979,11 @@ class LocalSessionLedger:
         try:
             document = self._read_document(self._path(identity))
             if document is None:
+                if self._has_enrollment_witness(identity):
+                    return SessionLoadResult(
+                        status="integrity-failed",
+                        detail="session record is missing after enrollment",
+                    )
                 return SessionLoadResult(status="missing")
             if document.get("schema_version") == "0.1":
                 migrated = migrate_session_document(document)
@@ -2038,6 +2093,11 @@ class LocalSessionLedger:
         if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
+        # Install this conservative, separate witness before the mutable
+        # record. A crash after the witness but before record creation may
+        # require recovery for a first enrollment, but it cannot reset an
+        # established identity after its sole record is deleted.
+        self._create_enrollment_witness(identity)
         self._write(identity, record, exclusive=loaded.status == "missing")
         return record
 

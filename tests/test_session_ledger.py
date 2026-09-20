@@ -176,6 +176,21 @@ class LocalSessionLedgerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))
 
+    def test_deleted_record_with_enrollment_witness_fails_closed(self):
+        self.ledger.initialize(IDENTITY, now=FIXED_NOW)
+        self.ledger._path(IDENTITY).unlink()
+
+        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "integrity-failed")
+        with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
+            prepare_session_round(
+                self.ledger,
+                IDENTITY,
+                ReviewConvergencePolicy(mode="merge-focused"),
+                reservation_id="deadbeef",
+                now=FIXED_NOW,
+            )
+
     def tearDown(self):
         self.temp.cleanup()
 
