@@ -734,7 +734,8 @@ class SessionRecord:
         payload = self._legacy_payload()
         payload["operator_paused"] = self.operator_paused
         payload["dispositions"] = list(self.dispositions)
-        payload["continuation_grants"] = list(self.continuation_grants)
+        if self.continuation_grants:
+            payload["continuation_grants"] = list(self.continuation_grants)
         if self.transaction is not None:
             payload["transaction"] = self.transaction.to_dict()
         if self.convergence_history is not None:
@@ -808,8 +809,9 @@ class SessionRecord:
             "expires_at": expires_at,
             "operator_paused": operator_paused,
             "dispositions": list(normalized_dispositions),
-            "continuation_grants": list(normalized_grants),
         }
+        if normalized_grants:
+            payload["continuation_grants"] = list(normalized_grants)
         if transaction is not None:
             payload["transaction"] = transaction.to_dict()
         normalized_history = _stored_convergence_history(convergence_history)
