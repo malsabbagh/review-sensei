@@ -525,6 +525,17 @@ class GitHubApplicationTests(unittest.TestCase):
             session_ledger_for_token.call_args.args,
             ("session-token",),
         )
+        ledger_kwargs = session_ledger_for_token.call_args.kwargs
+        self.assertEqual(
+            ledger_kwargs["options"],
+            GitHubWriteOptions(github_writes=True, github_session_ledger=True),
+        )
+        self.assertEqual(ledger_kwargs["app_slug"], "reviewsensei[bot]")
+        self.assertFalse(ledger_kwargs["prefer_remote"])
+        self.assertIs(ledger_kwargs["broker"], broker)
+        self.assertEqual(ledger_kwargs["session_grant"], "opaque-one-use-grant")
+        self.assertEqual(ledger_kwargs["session_attestation"]["actor"], "alice")
+        self.assertEqual(ledger_kwargs["head_sha"], "b" * 40)
         self.assertTrue(session_ledger_for_token.called)
         record = ledger.load(
             SessionIdentity("owner/repo", 136, repository_id=99)

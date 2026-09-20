@@ -22,6 +22,7 @@ from review_sensei.disposition import apply_session_command, parse_maintainer_co
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosting.github import (
     GitHubApplication,
+    GitHubBrokerClientError,
     GitHubHttp,
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
@@ -1217,6 +1218,138 @@ class RoundPersistenceTests(unittest.TestCase):
 
 
 class GitHubSessionLedgerTests(unittest.TestCase):
+    @staticmethod
+    def _grant_attestation(**overrides):
+        attestation = {
+            "version": 1,
+            "repository": IDENTITY.repository,
+            "repository_id": IDENTITY.repository_id,
+            "pull_request": IDENTITY.pull_request,
+            "head_sha": "a" * 40,
+            "operation": "command",
+            "source_comment_id": 13579,
+            "run_id": "10000000001",
+            "issued_at": 1_700_000_000,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": (
+                "malsabbagh/review-sensei/.github/workflows/"
+                "review-sensei-run.yml@refs/tags/v5"
+            ),
+            "job_workflow_sha": "b" * 40,
+            "actor": "octocat",
+            "actor_type": "User",
+            "association": "OWNER",
+            "command_id": 13579,
+            "command_digest": "c" * 64,
+        }
+        attestation.update(overrides)
+        return attestation
+
+    class _GrantVerifier:
+        def __init__(self, returned=None, error=None):
+            self.returned = returned
+            self.error = error
+            self.calls = []
+
+        def verify_session_grant(self, grant, session_attestation):
+            self.calls.append((grant, session_attestation))
+            if self.error is not None:
+                raise self.error
+            return self.returned
+
+    def _grant_bound_ledger(self, http, verifier, attestation=None):
+        attestation = attestation or self._grant_attestation()
+        return GitHubIssueCommentSessionLedger(
+            http,
+            token="token",
+            broker=verifier,
+            session_grant="g" * 43,
+            session_attestation=attestation,
+            head_sha="a" * 40,
+        )
+
+    def test_grant_bound_mutation_verifies_before_remote_discovery(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        reserved = record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="abcd1234",
+            reserved_slot="initial",
+        )
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"id": 7, "body": reserved_body}),
+                json_response([{"id": 7, "body": reserved_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        updated = ledger.reserve(
+            IDENTITY,
+            slot="initial",
+            reservation_id="abcd1234",
+            expected_generation=0,
+            now=FIXED_NOW,
+        )
+
+        self.assertEqual(updated, reserved)
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+        )
+
+    def test_grant_bound_status_read_does_not_consume_mutation_authority(self):
+        http, calls = make_http([json_response([])])
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
+
+    def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
+        cases = (
+            ("replayed", self._GrantVerifier(error=GitHubBrokerClientError("invalid"))),
+            (
+                "mismatched",
+                self._GrantVerifier(
+                    returned=self._grant_attestation(repository_id=100)
+                ),
+            ),
+            (
+                "stale-head",
+                self._GrantVerifier(returned=self._grant_attestation(head_sha="d" * 40)),
+            ),
+        )
+        for name, verifier in cases:
+            with self.subTest(name=name):
+                http, calls = make_http([])
+                ledger = self._grant_bound_ledger(http, verifier)
+                with self.assertRaisesRegex(ReviewInputError, "session grant"):
+                    ledger.initialize(IDENTITY, now=FIXED_NOW)
+                self.assertEqual(len(verifier.calls), 1)
+                self.assertEqual(calls, [])
+
+    def test_grant_bound_ledger_rejects_absent_grant_configuration(self):
+        http, _calls = make_http([])
+        with self.assertRaisesRegex(ReviewInputError, "grant configuration"):
+            GitHubIssueCommentSessionLedger(
+                http,
+                token="token",
+                broker=self._GrantVerifier(),
+                session_attestation=self._grant_attestation(),
+                head_sha="a" * 40,
+            )
+
     def test_restart_loads_integrity_checked_convergence_history(self):
         history = SessionRecordTests._history()
         record = SessionRecord.create(

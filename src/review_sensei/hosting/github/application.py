@@ -843,7 +843,12 @@ class GitHubApplication:
             ledger = self._session_ledger_for_token(
                 token,
                 options=options,
+                app_slug=app_slug,
                 prefer_remote=command.action == "status",
+                broker=self.broker if hosted_mutation else None,
+                session_grant=session_grant,
+                session_attestation=broker_attestation,
+                head_sha=head_sha if hosted_mutation else None,
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
@@ -860,6 +865,10 @@ class GitHubApplication:
         options: GitHubWriteOptions,
         app_slug: str | None = None,
         prefer_remote: bool = False,
+        broker: BrokerClient | None = None,
+        session_grant: str | None = None,
+        session_attestation: Mapping[str, object] | None = None,
+        head_sha: str | None = None,
     ) -> SessionLedger | None:
         if self.session_ledger is not None and not prefer_remote:
             return self.session_ledger
@@ -870,7 +879,13 @@ class GitHubApplication:
         if self.http is None:
             raise GitHubPublicationError("GitHub session ledger requires HTTP")
         return GitHubIssueCommentSessionLedger(
-            self.http, token=token, app_slug=app_slug
+            self.http,
+            token=token,
+            app_slug=app_slug,
+            broker=broker,
+            session_grant=session_grant,
+            session_attestation=session_attestation,
+            head_sha=head_sha,
         )
 
     @staticmethod

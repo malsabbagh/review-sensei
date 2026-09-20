@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ...errors import ReviewInputError
 from ...session import (
@@ -33,6 +33,7 @@ from ...session import (
     mutate_reserved,
 )
 from .errors import (
+    GitHubBrokerClientError,
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
     GitHubHTTPTransientError,
@@ -195,6 +196,10 @@ class GitHubIssueCommentSessionLedger:
         *,
         token: str,
         app_slug: str | None = None,
+        broker: Any | None = None,
+        session_grant: str | None = None,
+        session_attestation: Mapping[str, object] | None = None,
+        head_sha: str | None = None,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -204,9 +209,31 @@ class GitHubIssueCommentSessionLedger:
             not isinstance(app_slug, str) or not app_slug.strip()
         ):
             raise ReviewInputError("GitHub session ledger app slug is invalid")
+        grant_arguments = (broker, session_grant, session_attestation, head_sha)
+        if any(argument is not None for argument in grant_arguments) and not all(
+            argument is not None for argument in grant_arguments
+        ):
+            raise ReviewInputError("GitHub session ledger grant configuration is incomplete")
+        if broker is not None:
+            if not callable(getattr(broker, "verify_session_grant", None)):
+                raise ReviewInputError("GitHub session ledger grant verifier is invalid")
+            if not isinstance(session_grant, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{43}", session_grant
+            ):
+                raise ReviewInputError("GitHub session ledger grant is invalid")
+            if not isinstance(session_attestation, Mapping):
+                raise ReviewInputError("GitHub session ledger attestation is invalid")
+            if not isinstance(head_sha, str) or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None:
+                raise ReviewInputError("GitHub session ledger head SHA is invalid")
         self.http = http
         self.token = token
         self.app_slug = app_slug
+        self._broker = broker
+        self._session_grant = session_grant
+        self._session_attestation = (
+            dict(session_attestation) if session_attestation is not None else None
+        )
+        self._head_sha = head_sha
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -217,6 +244,37 @@ class GitHubIssueCommentSessionLedger:
         return self.http.repository_path(
             identity.repository, f"/issues/{identity.pull_request}/comments"
         )
+
+    def _verify_mutation_grant(self, identity: SessionIdentity) -> None:
+        """Verify one hosted mutation grant before the first GitHub request.
+
+        Read-only status calls deliberately do not consume this authority.  A
+        broker-bound instance is created only for an attested maintainer
+        command, so identity and head checks here prevent its token from being
+        replayed against a different pull request before the broker is asked.
+        """
+
+        if self._broker is None:
+            return
+        assert self._session_grant is not None
+        assert self._session_attestation is not None
+        assert self._head_sha is not None
+        attestation = self._session_attestation
+        if (
+            attestation.get("repository") != identity.repository
+            or attestation.get("repository_id") != identity.repository_id
+            or attestation.get("pull_request") != identity.pull_request
+            or attestation.get("head_sha") != self._head_sha
+        ):
+            raise ReviewInputError("session grant scope does not match the mutation")
+        try:
+            verified = self._broker.verify_session_grant(
+                self._session_grant, attestation
+            )
+        except GitHubBrokerClientError as exc:
+            raise ReviewInputError("session grant verification failed") from exc
+        if not isinstance(verified, Mapping) or dict(verified) != attestation:
+            raise ReviewInputError("session grant verification failed")
 
     def _request(
         self,
@@ -339,6 +397,7 @@ class GitHubIssueCommentSessionLedger:
         now: datetime | None = None,
         expires_at: datetime | str | None = None,
     ) -> SessionRecord:
+        self._verify_mutation_grant(identity)
         loaded = self.load(identity, now=now)
         if loaded.status in {"ok", "migrated"}:
             # Initialization is an idempotent ensure operation. A caller can
@@ -399,6 +458,7 @@ class GitHubIssueCommentSessionLedger:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
+        self._verify_mutation_grant(identity)
         comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None:
             raise ReviewInputError("session record is missing")
