@@ -47,6 +47,7 @@ from review_sensei.session import (
     SessionLoadResult,
     SessionRecord,
     complete_session_round,
+    issue_continuation_grant,
     migrate_session_document,
     prepare_session_round,
     record_session_failed_attempt,
@@ -85,6 +86,65 @@ class SessionRecordTests(unittest.TestCase):
         # oracle isolates the paired state rather than an integrity mismatch.
         with self.assertRaisesRegex(ReviewInputError, "continuation grant"):
             SessionRecord.from_dict(record)
+
+    def test_continuation_grant_cannot_outlive_session(self):
+        def grant(*, command_id: str, expires_at: str) -> dict[str, object]:
+            return {
+                "command_id": command_id,
+                "actor": "alice",
+                "head_sha": "a" * 40,
+                "policy_digest": "b" * 64,
+                "issued_at": "2026-09-19T12:00:00Z",
+                "expires_at": expires_at,
+                "consumed_reservation_id": None,
+                "consumed_generation": None,
+            }
+
+        session_expires_at = "2026-09-19T13:00:00Z"
+        with self.assertRaisesRegex(ReviewInputError, "exceeds session expiry"):
+            SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                expires_at=session_expires_at,
+                continuation_grants=[
+                    grant(
+                        command_id="grant-after-session",
+                        expires_at="2026-09-19T14:00:00Z",
+                    )
+                ],
+            )
+
+        for command_id, grant_expires_at in (
+            ("grant-at-session", session_expires_at),
+            ("grant-before-session", "2026-09-19T12:30:00Z"),
+        ):
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                expires_at=session_expires_at,
+                continuation_grants=[
+                    grant(command_id=command_id, expires_at=grant_expires_at)
+                ],
+            )
+            self.assertEqual(
+                record.continuation_grants[0]["expires_at"], grant_expires_at
+            )
+
+    def test_continuation_grant_rejects_an_expired_session(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            expires_at="2026-09-19T13:00:00Z",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "continuation grant expiry"):
+            issue_continuation_grant(
+                record,
+                command_id="grant-expired-session",
+                actor="alice",
+                head_sha="a" * 40,
+                policy_digest="b" * 64,
+                now=datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc),
+            )
 
     @staticmethod
     def _history() -> dict[str, object]:

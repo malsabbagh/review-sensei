@@ -246,6 +246,65 @@ describe("token broker authorization", () => {
     ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
   });
 
+  it("binds grant verification to the attestation operation", async () => {
+    const { broker, ledgerFetch } = harness();
+    const commandAttestation = {
+      version: 1,
+      repository: "acme/widgets",
+      repository_id: 987654321,
+      pull_request: 7,
+      head_sha: SHA,
+      operation: "command",
+      source_comment_id: 13579,
+      run_id: "10000000001",
+      issued_at: Math.floor(Date.now() / 1000),
+      concurrency_group: "reviewsensei-session-987654321-7",
+      job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+      job_workflow_sha: SHA,
+    };
+
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: commandAttestation,
+    });
+    const issueRequest = JSON.parse(
+      String((ledgerFetch.mock.calls[3][1] as RequestInit).body),
+    ) as { attestation_digest: string };
+
+    ledgerFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as {
+        action?: string;
+        attestation_digest?: string;
+      };
+      const state = request.action === "session_verify"
+        ? request.attestation_digest === issueRequest.attestation_digest
+          ? "verified"
+          : "invalid"
+        : request.action === "session_issue"
+          ? "issued"
+          : "accepted";
+      return new Response(JSON.stringify({ state }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const mismatchedOperation = {
+      ...result.session_attestation!,
+      operation: "review" as const,
+      source_comment_id: null,
+      actor: null,
+      actor_type: null,
+      association: null,
+      command_id: null,
+      command_digest: null,
+    };
+    await expect(
+      broker.verifySessionGrant(result.session_grant, mismatchedOperation),
+    ).rejects.toThrow("broker_session_grant_invalid");
+  });
+
   it("refuses command authority when the current GitHub comment actor is not the OIDC actor", async () => {
     const { broker, github } = harness();
     github.issueComment.mockResolvedValue({
