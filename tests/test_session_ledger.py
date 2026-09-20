@@ -1392,6 +1392,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([{"id": 7, "body": body}]),
                 json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": reserved_body}),
                 json_response([{"id": 7, "body": reserved_body}]),
             ]
@@ -1411,7 +1412,8 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(updated, reserved)
         self.assertEqual(verifier.calls, [("g" * 43, attestation)])
         self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "PATCH", "GET"],
         )
 
     def test_missing_grant_bound_session_applies_command_in_one_remote_create(self):
@@ -1428,6 +1430,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([]),
                 json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": paused_body}, status=201),
                 json_response([{"id": 7, "body": paused_body}]),
             ]
@@ -1444,7 +1447,8 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertTrue(result.applied)
         self.assertEqual(verifier.calls, [("g" * 43, attestation)])
         self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "GET", "POST", "GET"]
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "POST", "GET"],
         )
 
     def test_grant_bound_status_read_does_not_consume_mutation_authority(self):
@@ -1461,6 +1465,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         http, calls = make_http(
             [
                 json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"error": "upstream"}, status=500),
                 json_response([]),
             ]
@@ -1479,7 +1484,53 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
         self.assertEqual(len(verifier.calls), 2)
         self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "POST", "GET"]
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "POST", "GET"],
+        )
+
+    def test_grant_bound_initialize_rejects_a_stale_live_head_before_post(self):
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response({"head": {"sha": "d" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
+
+    def test_grant_bound_replace_rejects_a_stale_live_head_before_patch(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "d" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
+            ledger.reserve(
+                IDENTITY,
+                slot="initial",
+                reservation_id="abcd1234",
+                expected_generation=0,
+                now=FIXED_NOW,
+            )
+
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "GET"]
         )
 
     def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
@@ -1881,6 +1932,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 json_response([{"id": 7, "body": expired_body}]),
                 json_response([{"id": 7, "body": expired_body}]),
                 json_response([{"id": 7, "body": expired_body}]),
+                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": replacement_body}),
                 json_response([{"id": 7, "body": replacement_body}]),
             ]
@@ -1897,7 +1949,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(verifier.calls, [("g" * 43, attestation)])
         self.assertEqual(
             [method for method, _url, _data in calls],
-            ["GET", "GET", "GET", "PATCH", "GET"],
+            ["GET", "GET", "GET", "GET", "PATCH", "GET"],
         )
 
     def test_hosted_reenroll_recreates_a_deleted_marker(self):

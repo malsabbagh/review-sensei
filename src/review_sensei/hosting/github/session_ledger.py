@@ -286,6 +286,34 @@ class GitHubIssueCommentSessionLedger:
         if not isinstance(verified, Mapping) or dict(verified) != attestation:
             raise ReviewInputError("session grant verification failed")
 
+    def _verify_live_head(self, identity: SessionIdentity) -> None:
+        """Re-read the PR head immediately before a grant-authorized write.
+
+        The broker binds a grant to the head observed at issuance, but the
+        short-lived grant can outlive that commit if the PR advances. GitHub
+        has no conditional comment-write primitive, so this bounded preflight
+        closes the stale-grant window as tightly as the REST API permits.
+        """
+
+        if self._broker is None:
+            return
+        assert self._head_sha is not None
+        path = self.http.repository_path(
+            identity.repository, f"/pulls/{identity.pull_request}"
+        )
+        status, payload = self._request("GET", path)
+        if status == 429 or status >= 500:
+            raise GitHubPublicationTransientError(
+                "session head preflight failed temporarily"
+            )
+        if status < 200 or status >= 300 or not isinstance(payload, dict):
+            raise GitHubPublicationError("session head preflight failed")
+        head = payload.get("head")
+        if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
+            raise GitHubPublicationError("session head preflight was invalid")
+        if head["sha"] != self._head_sha:
+            raise ReviewInputError("session grant head is stale")
+
     def _request(
         self,
         method: str,
@@ -455,6 +483,7 @@ class GitHubIssueCommentSessionLedger:
         now: datetime | None,
     ) -> SessionRecord:
         repository_id = self._require_identity(identity)
+        self._verify_live_head(identity)
         status, payload = self._request(
             "POST",
             self._comments_path(identity),
@@ -518,6 +547,7 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session generation conflict")
         record = latest_record
         updated = mutate(record)
+        self._verify_live_head(identity)
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
@@ -599,6 +629,7 @@ class GitHubIssueCommentSessionLedger:
             )
         repository_id = self._require_identity(identity)
         replacement = SessionRecord.create(identity, now=now)
+        self._verify_live_head(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
         )

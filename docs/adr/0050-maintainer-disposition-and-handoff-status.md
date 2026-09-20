@@ -89,6 +89,9 @@ most recent use, matching ADR 0047's maximum session lifetime, so both a new
 head and a long-idle pull request still enroll cleanly. The subsequent F4
 session-boundary work binds this capability to serialized workflow execution
 and an opaque, short-lived grant before every hosted mutation.
+Once a record adopts the continuation-grant protocol, the transition is
+one-way for that record: legacy caller-supplied `--continue-rounds` remains
+disabled until authenticated `reenroll` creates a fresh record.
 
 ## Scope
 

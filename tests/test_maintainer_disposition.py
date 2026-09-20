@@ -533,6 +533,44 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(result.summary, "writes_disabled")
         self.assertEqual(application.broker.exchanges, [])
 
+    def test_hosted_disabled_mutation_does_not_authorize_a_session_grant(self):
+        class Broker:
+            def __init__(self):
+                self.calls = []
+
+            def request_oidc_token(self):
+                self.calls.append("request_oidc_token")
+                raise AssertionError("writes-disabled mutation must not request OIDC")
+
+            def authorize_session_mutation(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                raise AssertionError(
+                    "writes-disabled mutation must not authorize a session grant"
+                )
+
+        broker = Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        result = application.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=False, github_session_ledger=True),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="b" * 40,
+            body="@sensei review pause",
+            actor_login="alice",
+            association="MEMBER",
+            app_slug="reviewsensei[bot]",
+        )
+        self.assertEqual(result.summary, "writes_disabled")
+        self.assertEqual(broker.calls, [])
+
     def test_local_status_does_not_exchange_write_capability(self):
         class Broker:
             def __init__(self):
