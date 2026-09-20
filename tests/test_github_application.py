@@ -2,7 +2,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from review_sensei import ProviderResponse
-from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.baseline import ReviewBaseline, baseline_history_document
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.hosting.github import (
@@ -385,6 +386,77 @@ class GitHubApplicationTests(unittest.TestCase):
         forwarded = self.reviewer.calls[-1]["authorized_dispositions"]
         self.assertEqual(len(forwarded), 1)
         self.assertEqual(forwarded[0].fingerprint, fingerprint)
+
+    def test_publish_review_restores_durable_baseline_for_admission(self):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
+            reviewed_paths=("src/app.py",),
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+        ledger.initialize(identity)
+        ledger.replace(
+            identity,
+            lambda record: record.evolve(
+                completed_initial_reviews=1,
+                generation=1,
+                convergence_history=history,
+            ),
+        )
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+
+        application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="Summary.", comments=(), provider="fixture", review_status="complete"
+            ),
+            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            app_slug="review-sensei[bot]",
+            convergence_policy=policy,
+            current_key=baseline.cache_key,
+            changed_paths=("src/app.py",),
+        )
+
+        forwarded = self.reviewer.calls[-1]
+        self.assertEqual(forwarded["baseline"], baseline)
+        self.assertEqual(forwarded["current_key"], baseline.cache_key)
+        self.assertEqual(forwarded["changed_paths"], ("src/app.py",))
 
     def test_recover_review_rejects_operator_modes(self):
         head = "b" * 40
