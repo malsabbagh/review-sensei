@@ -18,6 +18,7 @@ from ...convergence import (
 from ...conversation import ConversationService
 from ...coverage import coverage_approval_state
 from ...diff import analyze_diff
+from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
 from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
