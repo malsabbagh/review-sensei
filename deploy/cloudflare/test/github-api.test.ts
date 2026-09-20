@@ -222,6 +222,21 @@ describe("GitHubApi capability issuance", () => {
     );
   });
 
+  it("distinguishes a missing issue comment from a forbidden lookup", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(
+      client.issueComment("acme/widgets", 7, 13579, "ghs_token"),
+    ).resolves.toBeNull();
+
+    request.mockResolvedValueOnce({ status: 403, data: null });
+    await expect(
+      client.issueComment("acme/widgets", 7, 13579, "ghs_token"),
+    ).rejects.toThrow("github_issue_comment_forbidden");
+  });
+
   it("accepts contents read only when the capability opts in", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({

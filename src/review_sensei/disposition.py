@@ -287,21 +287,67 @@ def apply_session_command(
                 "expired or witness-only state was retired"
             ),
         )
+    initialized_with_mutation = False
+    disposition: FindingDisposition | None = None
+    if command.action in FINDING_ACTIONS:
+        disposition = FindingDisposition(
+            fingerprint=command.finding_fingerprint or "",
+            action=command.action,
+            reason=command.reason or "",
+            actor=command.actor,
+            head_sha=command.head_sha,
+        )
     if loaded.status in {"missing", "expired"} or loaded.record is None:
         # Status is a read-only command: do not create a hosted issue comment
         # merely to report that no durable session exists.
-        record = (
-            SessionRecord.create(identity, now=now)
-            if command.action == "status"
-            else ledger.initialize(identity, now=now)
-        )
+        if command.action == "status":
+            record = SessionRecord.create(identity, now=now)
+        else:
+            initialize_with_mutation = getattr(ledger, "initialize_with_mutation", None)
+            if callable(initialize_with_mutation):
+
+                def mutate_initial(initial: SessionRecord) -> SessionRecord:
+                    if command.action == "pause":
+                        return _evolve_operator_paused(initial, paused=True, now=now)
+                    if command.action == "continue":
+                        if command.command_id is not None:
+                            if not isinstance(policy, ReviewConvergencePolicy):
+                                raise ReviewInputError(
+                                    "identified continuation requires a review policy"
+                                )
+                            if command.head_sha is None:
+                                raise ReviewInputError(
+                                    "identified continuation requires an exact head_sha"
+                                )
+                            return issue_continuation_grant(
+                                initial,
+                                command_id=command.command_id,
+                                actor=command.actor,
+                                head_sha=command.head_sha,
+                                policy_digest=policy.digest(),
+                                now=now,
+                            )
+                        return _evolve_operator_paused(initial, paused=False, now=now)
+                    if command.action in FINDING_ACTIONS:
+                        if disposition is None:
+                            raise ReviewInputError("finding disposition is invalid")
+                        return _evolve_disposition(initial, disposition, now=now)
+                    return initial
+
+                record = initialize_with_mutation(identity, mutate_initial, now=now)
+                initialized_with_mutation = True
+            else:
+                record = ledger.initialize(identity, now=now)
     elif loaded.status in {"ok", "migrated"}:
         record = loaded.record
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     paused = bool(getattr(record, "operator_paused", False))
     if command.action == "pause":
-        record = _set_operator_paused(ledger, identity, record, paused=True, now=now)
+        if not initialized_with_mutation:
+            record = _set_operator_paused(
+                ledger, identity, record, paused=True, now=now
+            )
         return record, MaintainerCommandResult(
             action="pause",
             applied=True,
@@ -328,14 +374,15 @@ def apply_session_command(
                 raise ReviewInputError(
                     "identified continuation requires an exact head_sha"
                 )
-            record = _issue_continuation_grant(
-                ledger,
-                identity,
-                record,
-                command=command,
-                policy=policy,
-                now=now,
-            )
+            if not initialized_with_mutation:
+                record = _issue_continuation_grant(
+                    ledger,
+                    identity,
+                    record,
+                    command=command,
+                    policy=policy,
+                    now=now,
+                )
             return record, MaintainerCommandResult(
                 action="continue",
                 applied=True,
@@ -343,7 +390,10 @@ def apply_session_command(
                 continuation_rounds=0,
                 summary="one-use continuation grant issued for the exact head and policy",
             )
-        record = _set_operator_paused(ledger, identity, record, paused=False, now=now)
+        if not initialized_with_mutation:
+            record = _set_operator_paused(
+                ledger, identity, record, paused=False, now=now
+            )
         return record, MaintainerCommandResult(
             action="continue",
             applied=True,
@@ -364,20 +414,46 @@ def apply_session_command(
                 f"paused={paused}{head_suffix}"
             ),
         )
-    disposition = FindingDisposition(
-        fingerprint=command.finding_fingerprint or "",
-        action=command.action,
-        reason=command.reason or "",
-        actor=command.actor,
-        head_sha=command.head_sha,
-    )
-    record = _append_disposition(ledger, identity, record, disposition, now=now)
+    if disposition is None:
+        raise ReviewInputError("finding disposition is invalid")
+    if not initialized_with_mutation:
+        record = _append_disposition(ledger, identity, record, disposition, now=now)
     return record, MaintainerCommandResult(
         action=command.action,
         applied=True,
         operator_paused=paused,
         summary="human disposition recorded; not an independently verified fix",
         disposition=disposition,
+    )
+
+
+def _evolve_operator_paused(
+    record: SessionRecord,
+    *,
+    paused: bool,
+    now: datetime | None,
+) -> SessionRecord:
+    if bool(getattr(record, "operator_paused", False)) == paused:
+        return record
+    return record.evolve(
+        now=now,
+        generation=record.generation + 1,
+        operator_paused=paused,
+    )
+
+
+def _evolve_disposition(
+    record: SessionRecord,
+    disposition: FindingDisposition,
+    *,
+    now: datetime | None,
+) -> SessionRecord:
+    if len(record.dispositions) >= MAX_STORED_DISPOSITIONS:
+        raise ReviewInputError("session disposition limit reached")
+    return record.evolve(
+        now=now,
+        generation=record.generation + 1,
+        dispositions=(*record.dispositions, disposition.to_dict()),
     )
 
 
@@ -398,11 +474,7 @@ def _set_operator_paused(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return current.evolve(
-            now=now,
-            generation=current.generation + 1,
-            operator_paused=paused,
-        )
+        return _evolve_operator_paused(current, paused=paused, now=now)
 
     return replace(identity, mutate, now=now)
 
@@ -453,11 +525,7 @@ def _append_disposition(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return current.evolve(
-            now=now,
-            generation=current.generation + 1,
-            dispositions=(*current.dispositions, disposition.to_dict()),
-        )
+        return _evolve_disposition(current, disposition, now=now)
 
     return replace(identity, mutate, now=now)
 

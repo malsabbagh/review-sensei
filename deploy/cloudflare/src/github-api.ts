@@ -546,8 +546,11 @@ export class GitHubApi {
       `${repositoryPath(repository)}/issues/comments/${commentId}`,
       token,
     );
-    if (response.status === 404 || response.status === 403) {
+    if (response.status === 404) {
       return null;
+    }
+    if (response.status === 403) {
+      throw new Error("github_issue_comment_forbidden");
     }
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
       throw new Error("github_issue_comment_lookup_failed");

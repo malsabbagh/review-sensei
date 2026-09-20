@@ -416,8 +416,42 @@ class GitHubIssueCommentSessionLedger:
             return loaded.record
         if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
-        repository_id = self._require_identity(identity)
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
+        return self._create_initial_record(identity, record, now=now)
+
+    def initialize_with_mutation(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+        expires_at: datetime | str | None = None,
+    ) -> SessionRecord:
+        """Create a missing marker with its first command mutation applied.
+
+        A hosted command may need to enroll a missing marker and persist its
+        requested disposition. Keeping that in one POST means the one-use
+        broker grant authorizes one logical command, not two independent
+        remote writes.
+        """
+
+        self._verify_mutation_grant(identity)
+        loaded = self.load(identity, now=now)
+        if loaded.status in {"ok", "migrated"}:
+            raise ReviewInputError("session already exists")
+        if loaded.status in {"integrity-failed", "conflict", "expired"}:
+            raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+        record = mutate(SessionRecord.create(identity, now=now, expires_at=expires_at))
+        return self._create_initial_record(identity, record, now=now)
+
+    def _create_initial_record(
+        self,
+        identity: SessionIdentity,
+        record: SessionRecord,
+        *,
+        now: datetime | None,
+    ) -> SessionRecord:
+        repository_id = self._require_identity(identity)
         status, payload = self._request(
             "POST",
             self._comments_path(identity),
@@ -547,11 +581,14 @@ class GitHubIssueCommentSessionLedger:
 
         loaded = self.load(identity, now=now)
         if loaded.status == "missing":
-            return self.initialize(identity, now=now)
+            return self.initialize_with_mutation(
+                identity, lambda record: record, now=now
+            )
         if loaded.status != "expired":
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        self._verify_mutation_grant(identity)
         comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None or not record.expired(now=now):
             raise ReviewInputError(

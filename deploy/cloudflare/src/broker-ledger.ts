@@ -233,20 +233,38 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           return { state: "issued" } as BrokerReply;
         }
         const rows = [
-          ...this.sql.exec<{ scope_hash: string; attestation_hash: string; audience_hash: string }>(
-            "SELECT scope_hash, attestation_hash, audience_hash FROM broker_session_grants WHERE grant_hash = ?",
+          ...this.sql.exec<{
+            scope_hash: string;
+            attestation_hash: string;
+            audience_hash: string;
+          }>(
+            "SELECT scope_hash, attestation_hash, audience_hash FROM broker_session_grants WHERE grant_hash = ? AND expires_at >= ?",
             grantHash,
+            now,
           ),
         ];
         const record = rows[0];
         if (record === undefined) {
           return { state: "invalid" } as BrokerReply;
         }
-        return record.scope_hash === scopeHash &&
+        const matches = record.scope_hash === scopeHash &&
           record.attestation_hash === attestationHash &&
-          record.audience_hash === audienceHash
-          ? { state: "verified" } as BrokerReply
-          : { state: "invalid" } as BrokerReply;
+          record.audience_hash === audienceHash;
+        if (!matches) {
+          return { state: "invalid" } as BrokerReply;
+        }
+        // A session grant is one-use authority. The SELECT and DELETE run in
+        // the same Durable Object transaction, so a second verification can
+        // never observe the consumed row after the first exact match.
+        this.sql.exec(
+          "DELETE FROM broker_session_grants WHERE grant_hash = ? AND scope_hash = ? AND attestation_hash = ? AND audience_hash = ? AND expires_at >= ?",
+          grantHash,
+          scopeHash,
+          attestationHash,
+          audienceHash,
+          now,
+        );
+        return { state: "verified" } as BrokerReply;
       });
       return json(result);
     }

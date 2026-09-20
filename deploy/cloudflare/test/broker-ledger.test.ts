@@ -112,9 +112,29 @@ class MemorySql {
     }
     if (normalized.startsWith("SELECT scope_hash, attestation_hash, audience_hash FROM broker_session_grants")) {
       const row = this.grants.get(args[0] as string);
-      return (row
+      return (row && row.expiresAt >= (args[1] as number)
         ? [{ scope_hash: row.scopeHash, attestation_hash: row.attestationHash, audience_hash: row.audienceHash }]
         : []) as T[];
+    }
+    if (normalized.startsWith("DELETE FROM broker_session_grants WHERE grant_hash")) {
+      const [grantHash, scopeHash, attestationHash, audienceHash, now] = args as [
+        string,
+        string,
+        string,
+        string,
+        number,
+      ];
+      const row = this.grants.get(grantHash);
+      if (
+        row &&
+        row.scopeHash === scopeHash &&
+        row.attestationHash === attestationHash &&
+        row.audienceHash === audienceHash &&
+        row.expiresAt >= now
+      ) {
+        this.grants.delete(grantHash);
+      }
+      return [];
     }
     if (normalized.startsWith("INSERT INTO broker_session_grants")) {
       this.grants.set(args[0] as string, {
@@ -374,18 +394,27 @@ describe("broker replay and rate ledger", () => {
     expect(sql.enrollments.size).toBe(2);
   });
 
-  it("stores only hashes for a reusable, bounded session grant and verifies its exact scope", async () => {
+  it("stores only hashes for a one-use, bounded session grant and verifies its exact scope", async () => {
     vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
     const { ledger, sql } = ledgerHarness();
 
     expect(await (await issueGrant(ledger)).json()).toEqual({ state: "issued" });
     expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "verified" });
+    expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "invalid" });
     expect(await (await verifyGrant(ledger, "a".repeat(43), "987654321:8:" + "a".repeat(40))).json()).toEqual({
       state: "invalid",
     });
-    expect([...sql.grants.keys()]).toHaveLength(1);
-    expect([...sql.grants.keys()][0]).toMatch(/^[0-9a-f]{64}$/);
+    expect([...sql.grants.keys()]).toHaveLength(0);
     expect(sql.observedArguments).not.toContain("a".repeat(43));
+  });
+
+  it("rejects an expired session grant even when cleanup has not run", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger } = ledgerHarness();
+
+    expect(await (await issueGrant(ledger)).json()).toEqual({ state: "issued" });
+    clock.mockReturnValue(1_700_000_600_001);
+    expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "invalid" });
   });
 
   it("rejects malformed and non-POST requests without persisting them", async () => {
