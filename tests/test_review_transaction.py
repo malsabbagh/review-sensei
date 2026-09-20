@@ -1849,6 +1849,52 @@ class PublicationTransactionTests(unittest.TestCase):
         self.assertEqual(record.completed_initial_reviews, 1)
         self.assertEqual(record.transaction.phase, "publication_succeeded")
 
+    def test_application_handoffs_later_transaction_without_prior_admission_inputs(
+        self,
+    ):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(completed_verification_rounds=1),
+            now=NOW,
+        )
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=result,
+            diff="diff",
+            app_slug="review-sensei[bot]",
+            convergence_policy=POLICY,
+            configuration_context=CONFIGURATION,
+            evidence_context=EVIDENCE,
+        )
+
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, 0)
+        self.assertEqual(
+            ledger.load(IDENTITY).record.transaction.phase,
+            "publication_failed",
+        )
+
     def test_application_keyboard_interrupt_leaves_transaction_pending(self):
         ledger = InMemorySessionLedger()
         result = _checkpoint(ledger)

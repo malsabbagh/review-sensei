@@ -444,6 +444,17 @@ class GitHubApplication:
         baseline_admission_required = (
             operator_baseline_requested and not validated_transaction_recovery
         )
+        # A validated transaction is enough to replay an initial checkpoint,
+        # but it does not carry the *prior* baseline needed to classify a later
+        # verification result.  Once a verification round has already been
+        # completed, publishing without both trusted admission inputs would
+        # silently downgrade the result to a fresh review.
+        verification_transaction_recovery_required = (
+            validated_transaction_recovery
+            and transaction_record is not None
+            and transaction_record.completed_verification_rounds > 0
+            and (baseline is None or current_key is None)
+        )
         authorized_dispositions: tuple[object, ...] = ()
         durable_baseline = baseline
         baseline_recovery_required = False
@@ -502,6 +513,7 @@ class GitHubApplication:
                 and (
                     (baseline_admission_required and baseline_recovery_required)
                     or (durable_baseline is not None and current_key is None)
+                    or verification_transaction_recovery_required
                 )
                 else self.reviewer.publish(
                     token=token,
