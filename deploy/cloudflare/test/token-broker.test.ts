@@ -244,6 +244,12 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, result.session_attestation),
     ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
+    const verifyRequests = ledgerFetch.mock.calls.filter(
+      (call) =>
+        (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action ===
+        "session_verify",
+    );
+    expect(verifyRequests).toHaveLength(1);
   });
 
   it.each([

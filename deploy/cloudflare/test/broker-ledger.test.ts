@@ -399,6 +399,7 @@ describe("broker replay and rate ledger", () => {
     const { ledger, sql } = ledgerHarness();
 
     expect(await (await issueGrant(ledger)).json()).toEqual({ state: "issued" });
+    expect(await (await issueGrant(ledger)).json()).toEqual({ state: "replay" });
     expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "verified" });
     expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "invalid" });
     expect(await (await verifyGrant(ledger, "a".repeat(43), "987654321:8:" + "a".repeat(40))).json()).toEqual({

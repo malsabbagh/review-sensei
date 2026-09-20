@@ -1344,21 +1344,36 @@ def issue_continuation_grant(
             return record
         raise ReviewInputError("continuation command_id conflicts with persisted grant")
     now_value = _aware_now(now)
+    pending = tuple(
+        item
+        for item in existing
+        if item.consumed_reservation_id is None
+        and _parse_aware_datetime(
+            item.expires_at, label="continuation grant expires_at"
+        )
+        > now_value
+    )
     if any(
         item.consumed_reservation_id is None
         and _parse_aware_datetime(
             item.expires_at, label="continuation grant expires_at"
         )
         > now_value
+        and item.head_sha == grant.head_sha
+        and item.policy_digest == grant.policy_digest
         for item in existing
     ):
         raise ReviewInputError("continuation grant is already pending")
+    # A grant for a prior head or policy cannot ever become active again. A
+    # newly authenticated command may supersede that stale pending grant so a
+    # head advance does not strand the session until the old TTL expires.
     retained = tuple(
         item
         for item in existing
         if item.consumed_reservation_id is not None
         or _parse_aware_datetime(item.expires_at, label="continuation grant expires_at")
         > now_value
+        and item not in pending
     )
     if len(retained) >= MAX_STORED_CONTINUATION_GRANTS:
         raise ReviewInputError("continuation grant history limit reached")

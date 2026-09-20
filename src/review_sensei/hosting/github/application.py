@@ -1214,6 +1214,17 @@ def _command_from_broker_attestation(
     actor = attestation.get("actor")
     if not isinstance(actor, str) or not actor.strip():
         raise GitHubPublicationError("broker command attestation actor was invalid")
+    actor_type = attestation.get("actor_type")
+    association = attestation.get("association")
+    if (
+        not isinstance(actor_type, str)
+        or actor_type.lower() != "user"
+        or not isinstance(association, str)
+        or association.upper() not in {"OWNER", "MEMBER", "COLLABORATOR"}
+    ):
+        raise GitHubPublicationError(
+            "broker command attestation authorization fields were invalid"
+        )
     command_id = attestation.get("command_id")
     if (
         isinstance(command_id, bool)
@@ -1238,8 +1249,8 @@ def _command_from_broker_attestation(
         )
     if not authorized_maintainer(
         login=actor,
-        user_type=attestation.get("actor_type"),
-        association=attestation.get("association"),
+        user_type=actor_type,
+        association=association,
         app_slug=app_slug,
     ):
         raise GitHubPublicationError("broker command attestation was unauthorized")

@@ -210,6 +210,69 @@ class SessionCommandTests(unittest.TestCase):
         self.assertEqual(replay.generation, first.generation)
         self.assertEqual(replay.continuation_grants, first.continuation_grants)
 
+    def test_new_scope_supersedes_an_unconsumed_continuation_grant(self):
+        ledger = InMemorySessionLedger()
+        first_policy = ReviewConvergencePolicy(mode="merge-focused")
+        first = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-old",
+        )
+        initial, _ = apply_session_command(
+            ledger, IDENTITY, first, now=FIXED_NOW, policy=first_policy
+        )
+        same_scope = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-same-scope",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "already pending"):
+            apply_session_command(
+                ledger, IDENTITY, same_scope, now=FIXED_NOW, policy=first_policy
+            )
+
+        changed_head = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="b" * 40,
+            command_id="issue-comment-new-head",
+        )
+        replaced, _ = apply_session_command(
+            ledger, IDENTITY, changed_head, now=FIXED_NOW, policy=first_policy
+        )
+        self.assertEqual(
+            [grant["command_id"] for grant in replaced.continuation_grants],
+            ["issue-comment-new-head"],
+        )
+        from review_sensei.session import active_continuation_grant
+
+        self.assertIsNone(
+            active_continuation_grant(
+                replaced,
+                head_sha="a" * 40,
+                policy_digest=first_policy.digest(),
+                now=FIXED_NOW,
+            )
+        )
+
+        changed_policy = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="b" * 40,
+            command_id="issue-comment-new-policy",
+        )
+        second_policy = ReviewConvergencePolicy(mode="strict")
+        replaced_again, _ = apply_session_command(
+            ledger, IDENTITY, changed_policy, now=FIXED_NOW, policy=second_policy
+        )
+        self.assertEqual(
+            [grant["command_id"] for grant in replaced_again.continuation_grants],
+            ["issue-comment-new-policy"],
+        )
+        self.assertIsNone(initial.continuation_grants[0].get("consumed_reservation_id"))
+
     def test_identified_continuation_uses_a_generation_guard(self):
         class RacingLedger(InMemorySessionLedger):
             def replace(self, identity, mutate, *, now=None):

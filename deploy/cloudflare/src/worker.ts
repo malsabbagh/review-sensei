@@ -229,6 +229,14 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
   }
   try {
     const values = body as Record<string, unknown>;
+    const bodyKeys = Object.keys(values);
+    if (
+      bodyKeys.length !== 2 ||
+      !Object.hasOwn(values, "session_grant") ||
+      !Object.hasOwn(values, "session_attestation")
+    ) {
+      return response({ error: "invalid_request" }, 400, true);
+    }
     const attestation = await new TokenBroker(env).verifySessionGrant(
       values.session_grant,
       values.session_attestation,

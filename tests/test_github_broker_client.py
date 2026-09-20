@@ -45,6 +45,8 @@ class BrokerClientTests(unittest.TestCase):
         with self.assertRaises(GitHubBrokerClientError):
             BrokerClient(broker_url="http://broker.reviewsensei.dev/token")
         with self.assertRaises(GitHubBrokerClientError):
+            BrokerClient(broker_url="https://broker.reviewsensei.dev/api/github")
+        with self.assertRaises(GitHubBrokerClientError):
             BrokerClient(timeout=0)
 
         client, _ = self.make_client((b"{}", 200))
@@ -236,6 +238,8 @@ class BrokerClientTests(unittest.TestCase):
         )
         self.assertEqual(grant.attestation["actor"], "octocat")
         self.assertEqual(grant.attestation["command_id"], 13579)
+        self.assertNotIn("ghs_session", repr(grant))
+        self.assertNotIn("c" * 43, repr(grant))
         payload = json.loads(calls[0][3].decode("utf-8"))
         self.assertNotIn("actor", payload["session_attestation"])
 

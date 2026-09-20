@@ -608,6 +608,17 @@ class GitHubApplicationTests(unittest.TestCase):
                 source_comment_id=71,
                 app_slug="reviewsensei[bot]",
             )
+        with self.assertRaisesRegex(GitHubPublicationError, "authorization fields"):
+            _command_from_broker_attestation(
+                body=body,
+                attestation={**attestation, "actor_type": None},
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                source_comment_id=71,
+                app_slug="reviewsensei[bot]",
+            )
 
     def test_hosted_command_rejects_an_injected_local_ledger(self):
         application = GitHubApplication(

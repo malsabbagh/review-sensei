@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -22,17 +22,21 @@ Opener = Callable[..., Any]
 class BrokerSession:
     """One broker-attested, current-head session capability."""
 
-    token: str
+    token: str = field(repr=False)
     state: str
 
 
 @dataclass(frozen=True)
 class BrokerSessionGrant:
-    """Opaque, expiring authority for one serialized hosted session writer."""
+    """Opaque credential for one serialized hosted session writer.
 
-    token: str
+    The installation token and one-use grant are intentionally omitted from
+    the dataclass repr so routine diagnostics cannot log bearer credentials.
+    """
+
+    token: str = field(repr=False)
     state: str
-    grant: str
+    grant: str = field(repr=False)
     attestation: dict[str, object]
 
 
@@ -71,8 +75,12 @@ class BrokerClient:
         opener: Opener = urlopen,
         timeout: int = 30,
     ) -> None:
-        if not isinstance(broker_url, str) or not broker_url.startswith("https://"):
-            raise GitHubBrokerClientError("Broker URL must be HTTPS")
+        if (
+            not isinstance(broker_url, str)
+            or not broker_url.startswith("https://")
+            or not broker_url.endswith("/token")
+        ):
+            raise GitHubBrokerClientError("Broker URL must be an HTTPS /token endpoint")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise GitHubBrokerClientError("Broker timeout must be positive")
         self.broker_url = broker_url

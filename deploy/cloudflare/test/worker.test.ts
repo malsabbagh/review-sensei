@@ -104,6 +104,20 @@ describe("session-grant verification route", () => {
     expect(broker.verifySessionGrant).not.toHaveBeenCalled();
   });
 
+  it("rejects unknown session-grant request fields", async () => {
+    const result = await worker.fetch(
+      grantRequest({
+        session_grant: "a".repeat(43),
+        session_attestation: { version: 1 },
+        unexpected: true,
+      }),
+      env,
+    );
+    expect(result.status).toBe(400);
+    expect(await result.json()).toEqual({ error: "invalid_request" });
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+  });
+
   it("maps a broker-ledger outage to a retryable response", async () => {
     broker.verifySessionGrant.mockRejectedValue(new Error("broker_ledger_unavailable"));
     const result = await worker.fetch(grantRequest(), env);
