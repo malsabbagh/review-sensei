@@ -31,6 +31,7 @@ const SESSION_GRANT_AUDIENCE = "reviewsensei-session-ledger";
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const RUN_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
 const ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const MAX_COMMAND_REASON_BYTES = 512;
 
 type Capability = keyof typeof CAPABILITIES;
 
@@ -419,12 +420,30 @@ function recognizedCommand(value: string): boolean {
   const match = /(?:^|\s)@sensei\s+([\s\S]*?)\s*$/.exec(value);
   if (match === null) return false;
   const command = match[1];
+  const finding = /^(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+(\S[\s\S]*)$/i.exec(command);
   return (
     /^review\s+(?:status|pause)$/i.test(command) ||
+    /^review\s+reenroll$/i.test(command) ||
     /^verify$/i.test(command) ||
     /^review\s+continue(?:\s+--rounds\s+(?:0|1))?$/i.test(command) ||
-    /^(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S[\s\S]*$/i.test(command)
+    (finding !== null && validCommandReason(finding[1]))
   );
+}
+
+function validCommandReason(value: string): boolean {
+  const reason = value.trim().replace(/^["']+|["']+$/g, "").trim();
+  if (reason.length === 0 || new TextEncoder().encode(reason).byteLength > MAX_COMMAND_REASON_BYTES) {
+    return false;
+  }
+  for (const character of reason) {
+    // Match Python str.isprintable(): ASCII space is allowed, while control,
+    // format, surrogate, private-use, unassigned, and separator characters
+    // are not valid durable command reasons.
+    if (character !== " " && /[\p{C}\p{Z}]/u.test(character)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** Issuance-only broker policy. It never accepts installation ids from a job. */

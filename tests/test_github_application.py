@@ -461,6 +461,7 @@ class GitHubApplicationTests(unittest.TestCase):
                     token="session-token",
                     grant="opaque-one-use-grant",
                     attestation={
+                        "repository": "owner/repo",
                         "repository_id": 99,
                         "pull_request": 136,
                         "head_sha": "b" * 40,
@@ -569,6 +570,7 @@ class GitHubApplicationTests(unittest.TestCase):
     def test_broker_attestation_rejects_cross_pull_request_and_head_scope(self):
         body = "@sensei review pause"
         attestation = {
+            "repository": "owner/repo",
             "repository_id": 99,
             "pull_request": 136,
             "head_sha": "b" * 40,
@@ -588,12 +590,24 @@ class GitHubApplicationTests(unittest.TestCase):
                     _command_from_broker_attestation(
                         body=body,
                         attestation=attestation,
+                        repository="owner/repo",
                         repository_id=99,
                         pull_request=pull_request,
                         head_sha=head_sha,
                         source_comment_id=71,
                         app_slug="reviewsensei[bot]",
                     )
+        with self.assertRaisesRegex(GitHubPublicationError, "attestation scope"):
+            _command_from_broker_attestation(
+                body=body,
+                attestation=attestation,
+                repository="other/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                source_comment_id=71,
+                app_slug="reviewsensei[bot]",
+            )
 
     def test_hosted_command_rejects_an_injected_local_ledger(self):
         application = GitHubApplication(

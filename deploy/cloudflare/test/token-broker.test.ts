@@ -246,6 +246,52 @@ describe("token broker authorization", () => {
     ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
   });
 
+  it.each([
+    ["review reenroll", true],
+    ["dismiss abcd1234abcd1234 --reason accepted", true],
+    [`dismiss ${"a".repeat(64)} --reason accepted`, true],
+    [`dismiss ${"a".repeat(65)} --reason accepted`, false],
+    ["dismiss abcd1234abcd1234 accepted --reason", false],
+    ['dismiss abcd1234abcd1234 --reason ""', false],
+    [`dismiss abcd1234abcd1234 --reason ${"x".repeat(513)}`, false],
+    ["dismiss abcd1234abcd1234 --reason accepted\ncontrol", false],
+  ])("keeps the broker command grammar aligned with Python for %s", async (command, accepted) => {
+    const { broker, github } = harness();
+    github.issueComment.mockResolvedValue({
+      id: 13579,
+      body: `@sensei ${command}`,
+      login: "octocat",
+      userType: "User",
+      association: "OWNER",
+    });
+    const exchange = broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: {
+        version: 1,
+        repository: "acme/widgets",
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+        operation: "command",
+        source_comment_id: 13579,
+        run_id: "10000000001",
+        issued_at: Math.floor(Date.now() / 1000),
+        concurrency_group: "reviewsensei-session-987654321-7",
+        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+        job_workflow_sha: SHA,
+      },
+    });
+    if (accepted) {
+      await expect(exchange).resolves.toMatchObject({
+        session_grant: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      });
+    } else {
+      await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
+    }
+  });
+
   it("binds grant verification to the attestation operation", async () => {
     const { broker, ledgerFetch } = harness();
     const commandAttestation = {

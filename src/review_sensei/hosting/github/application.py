@@ -782,6 +782,7 @@ class GitHubApplication:
             command = _command_from_broker_attestation(
                 body=body,
                 attestation=broker_attestation,
+                repository=repository,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
@@ -1181,6 +1182,7 @@ def _command_from_broker_attestation(
     *,
     body: str,
     attestation: object,
+    repository: str,
     repository_id: int,
     pull_request: int,
     head_sha: str,
@@ -1194,7 +1196,8 @@ def _command_from_broker_attestation(
     if not isinstance(attestation, Mapping):
         raise GitHubPublicationError("broker command attestation was invalid")
     if (
-        attestation.get("repository_id") != repository_id
+        attestation.get("repository") != repository
+        or attestation.get("repository_id") != repository_id
         or attestation.get("pull_request") != pull_request
         or attestation.get("head_sha") != head_sha
         or attestation.get("operation") != "command"

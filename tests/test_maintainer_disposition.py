@@ -655,6 +655,7 @@ class DisabledWriteTests(unittest.TestCase):
                         "token": "capability-token",
                         "grant": "opaque-grant",
                         "attestation": {
+                            "repository": "owner/repo",
                             "repository_id": 99,
                             "pull_request": 136,
                             "head_sha": "b" * 40,
