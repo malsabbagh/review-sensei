@@ -9,6 +9,7 @@ and records human dispositions without claiming an independently verified fix.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, cast
@@ -40,19 +41,28 @@ FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
 MAX_ACTOR_BYTES = 256
+# The Cloudflare broker mirrors this parser before it issues a one-use grant.
+# Keep command separators deliberately ASCII so Python and JavaScript cannot
+# disagree about control/Unicode whitespace at the trust boundary.
+_COMMAND_WHITESPACE = " \t\r\n"
+_COMMAND_WS = r"[ \t\r\n]"
+_COMMAND_NON_WS = r"[^ \t\r\n]"
 # A command mention must start at the beginning of a line or after whitespace.
 # This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
 # text such as ``!@sensei`` and ``(@sensei``.
-_SENSEI = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
+_SENSEI = re.compile(r"(?m)(?<![^ \t\r\n])@sensei(?=[ \t\r\n]+)")
 _CONTINUE_ROUNDS = re.compile(
-    r"^review\s+continue(?:\s+--rounds\s+(0|1))?\s*$", re.IGNORECASE
+    rf"^review{_COMMAND_WS}+continue(?:{_COMMAND_WS}+--rounds{_COMMAND_WS}+(0|1))?{_COMMAND_WS}*$",
+    re.IGNORECASE,
 )
-_REVIEW_STATUS = re.compile(r"^review\s+status\s*$", re.IGNORECASE)
-_REVIEW_PAUSE = re.compile(r"^review\s+pause\s*$", re.IGNORECASE)
-_VERIFY = re.compile(r"^verify\s*$", re.IGNORECASE)
-_REENROLL = re.compile(r"^review\s+reenroll\s*$", re.IGNORECASE)
+_REVIEW_STATUS = re.compile(
+    rf"^review{_COMMAND_WS}+status{_COMMAND_WS}*$", re.IGNORECASE
+)
+_REVIEW_PAUSE = re.compile(rf"^review{_COMMAND_WS}+pause{_COMMAND_WS}*$", re.IGNORECASE)
+_VERIFY = re.compile(rf"^verify{_COMMAND_WS}*$", re.IGNORECASE)
+_REENROLL = re.compile(rf"^review{_COMMAND_WS}+reenroll{_COMMAND_WS}*$", re.IGNORECASE)
 _FINDING = re.compile(
-    r"^(dismiss|defer|accept-risk)\s+([a-f0-9]{16,64})\s+--reason\s+(\S.*)$",
+    rf"^(dismiss|defer|accept-risk){_COMMAND_WS}+([a-f0-9]{{16,64}}){_COMMAND_WS}+--reason{_COMMAND_WS}+({_COMMAND_NON_WS}.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 _FINGERPRINT = re.compile(r"^[a-f0-9]{16,64}$")
@@ -69,8 +79,16 @@ def _aware_now(now: datetime | None = None) -> datetime:
 def _require_reason(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReviewInputError("maintainer disposition requires a reason")
-    reason = value.strip()
-    if len(reason.encode("utf-8")) > MAX_REASON_BYTES or not reason.isprintable():
+    reason = value.strip(_COMMAND_WHITESPACE)
+    if (
+        len(reason.encode("utf-8")) > MAX_REASON_BYTES
+        or not reason
+        or not reason.isprintable()
+        or any(
+            character != " " and unicodedata.category(character).startswith("Z")
+            for character in reason
+        )
+    ):
         raise ReviewInputError("maintainer disposition reason exceeds the bound")
     return reason
 
@@ -148,7 +166,7 @@ def parse_maintainer_command(
     match = _SENSEI.search(body)
     if match is None:
         return None
-    remainder = body[match.end() :].strip()
+    remainder = body[match.end() :].strip(_COMMAND_WHITESPACE)
     if _REVIEW_STATUS.fullmatch(remainder):
         return MaintainerCommand(action="status", actor=actor, head_sha=head_sha)
     if _REVIEW_PAUSE.fullmatch(remainder):
@@ -173,7 +191,7 @@ def parse_maintainer_command(
             action=finding.group(1).lower(),
             actor=actor,
             finding_fingerprint=finding.group(2).lower(),
-            reason=finding.group(3).strip().strip('"').strip("'"),
+            reason=finding.group(3).strip(_COMMAND_WHITESPACE).strip('"').strip("'"),
             head_sha=head_sha,
         )
     return None

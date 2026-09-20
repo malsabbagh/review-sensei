@@ -6,6 +6,7 @@ vi.mock("../src/oidc", () => ({ verifyOidcAssertion: oidc.verify }));
 
 import type { WorkerEnv } from "../src/env";
 import { TokenBroker } from "../src/token-broker";
+import commandParityCases from "../../../tests/fixtures/maintainer-command-parity.json";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
@@ -36,6 +37,24 @@ function claims(overrides: Record<string, unknown> = {}) {
     run_number: "42",
     run_attempt: "1",
     runner_environment: "github-hosted",
+    ...overrides,
+  };
+}
+
+function commandAttestation(overrides: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    repository: "acme/widgets",
+    repository_id: 987654321,
+    pull_request: 7,
+    head_sha: SHA,
+    operation: "command",
+    source_comment_id: 13579,
+    run_id: "10000000001",
+    issued_at: Math.floor(Date.now() / 1000),
+    concurrency_group: "reviewsensei-session-987654321-7",
+    job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+    job_workflow_sha: SHA,
     ...overrides,
   };
 }
@@ -299,6 +318,46 @@ describe("token broker authorization", () => {
     }
   });
 
+  it.each(commandParityCases)(
+    "matches the shared command grammar fixture for $body",
+    async ({ body, accepted }) => {
+      const { broker, github } = harness();
+      github.issueComment.mockResolvedValue({
+        id: 13579,
+        body,
+        login: "octocat",
+        userType: "User",
+        association: "OWNER",
+      });
+      const exchange = broker.exchange({
+        oidc_token: "signed-jwt",
+        capability: "review_session",
+        session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+        session_attestation: {
+          version: 1,
+          repository: "acme/widgets",
+          repository_id: 987654321,
+          pull_request: 7,
+          head_sha: SHA,
+          operation: "command",
+          source_comment_id: 13579,
+          run_id: "10000000001",
+          issued_at: Math.floor(Date.now() / 1000),
+          concurrency_group: "reviewsensei-session-987654321-7",
+          job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+          job_workflow_sha: SHA,
+        },
+      });
+      if (accepted) {
+        await expect(exchange).resolves.toMatchObject({
+          session_grant: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+        });
+      } else {
+        await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
+      }
+    },
+  );
+
   it("binds grant verification to the attestation operation", async () => {
     const { broker, ledgerFetch } = harness();
     const commandAttestation = {
@@ -388,6 +447,50 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, forgedAttestation),
     ).rejects.toThrow("broker_workflow_rejected");
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_verify");
+  });
+
+  it("revalidates the attested workflow SHA before consuming a grant", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: commandAttestation(),
+    });
+    github.publicWorkflowRuntimeShas.mockResolvedValue({
+      commitSha: "c".repeat(40),
+      refSha: "d".repeat(40),
+    });
+
+    await expect(
+      broker.verifySessionGrant(result.session_grant, result.session_attestation),
+    ).rejects.toThrow("broker_workflow_rejected");
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_verify");
+  });
+
+  it("rejects an expired attestation before consuming a grant", async () => {
+    const { broker, ledgerFetch } = harness();
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: commandAttestation(),
+    });
+    const expired = {
+      ...result.session_attestation!,
+      issued_at: Math.floor(Date.now() / 1000) - 631,
+    };
+
+    await expect(
+      broker.verifySessionGrant(result.session_grant, expired),
+    ).rejects.toThrow("broker_session_attestation_invalid");
     const actions = ledgerFetch.mock.calls.map(
       (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
     );

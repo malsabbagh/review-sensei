@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -115,6 +116,23 @@ class MaintainerCommandParseTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.assertIsNone(parse_maintainer_command(body, actor="alice"))
+
+    def test_command_parser_matches_shared_cross_runtime_fixture(self):
+        fixture_path = (
+            Path(__file__).parents[1]
+            / "tests"
+            / "fixtures"
+            / "maintainer-command-parity.json"
+        )
+        cases = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for case in cases:
+            body = case["body"]
+            try:
+                parsed = parse_maintainer_command(body, actor="alice")
+            except ReviewInputError:
+                parsed = None
+            with self.subTest(body=body):
+                self.assertEqual(parsed is not None, case["accepted"])
 
     def test_finding_disposition_requires_reason(self):
         self.assertIsNone(

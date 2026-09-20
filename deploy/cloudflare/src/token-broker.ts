@@ -32,6 +32,32 @@ const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const RUN_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
 const ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const MAX_COMMAND_REASON_BYTES = 512;
+// Keep this command grammar in lockstep with Python's parser. The explicit
+// ASCII set rejects control and Unicode separators instead of letting the two
+// runtimes disagree about whether a mention is command-shaped.
+const COMMAND_WHITESPACE = "[ \\t\\r\\n]";
+const COMMAND_WHITESPACE_RUN = `${COMMAND_WHITESPACE}+`;
+const COMMAND_TRIM = /^[ \t\r\n]+|[ \t\r\n]+$/g;
+const RECOGNIZED_COMMAND = new RegExp(
+  `(?:^|${COMMAND_WHITESPACE})@sensei${COMMAND_WHITESPACE_RUN}([\\s\\S]*?)${COMMAND_WHITESPACE}*$`,
+);
+const RECOGNIZED_FINDING = new RegExp(
+  `^(?:dismiss|defer|accept-risk)${COMMAND_WHITESPACE_RUN}[a-f0-9]{16,64}${COMMAND_WHITESPACE_RUN}--reason${COMMAND_WHITESPACE_RUN}([^ \\t\\r\\n][\\s\\S]*)$`,
+  "i",
+);
+const RECOGNIZED_REVIEW_STATUS = new RegExp(
+  `^review${COMMAND_WHITESPACE_RUN}(?:status|pause)${COMMAND_WHITESPACE}*$`,
+  "i",
+);
+const RECOGNIZED_REENROLL = new RegExp(
+  `^review${COMMAND_WHITESPACE_RUN}reenroll${COMMAND_WHITESPACE}*$`,
+  "i",
+);
+const RECOGNIZED_VERIFY = new RegExp(`^verify${COMMAND_WHITESPACE}*$`, "i");
+const RECOGNIZED_CONTINUE = new RegExp(
+  `^review${COMMAND_WHITESPACE_RUN}continue(?:${COMMAND_WHITESPACE_RUN}--rounds${COMMAND_WHITESPACE_RUN}(?:0|1))?${COMMAND_WHITESPACE}*$`,
+  "i",
+);
 
 type Capability = keyof typeof CAPABILITIES;
 
@@ -150,6 +176,15 @@ function authorizeObservedWorkflowTag(
     throw new Error("broker_workflow_rejected");
   }
   return observedTag;
+}
+
+function authorizeWorkflowRuntimeSha(
+  jobWorkflowSha: string,
+  runtime: PublicWorkflowRuntimeShas,
+): void {
+  if (jobWorkflowSha !== runtime.commitSha && jobWorkflowSha !== runtime.refSha) {
+    throw new Error("broker_workflow_rejected");
+  }
 }
 
 async function claimLedger(
@@ -377,14 +412,15 @@ function canonicalAttestation(value: SessionAttestation): string {
 function sessionAttestationForVerification(
   value: Record<string, unknown>,
   scope: SessionScope,
-  configuredTag: string,
+  runtime: PublicWorkflowRuntimeShas,
 ): SessionAttestation {
   const operation = value.operation;
   const sourceCommentId = value.source_comment_id;
+  const issuedAt = value.issued_at;
+  const now = Date.now();
   if (typeof value.job_workflow_ref !== "string") {
     throw new Error("broker_session_attestation_invalid");
   }
-  authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
   if (
     value.version !== SESSION_ATTESTATION_VERSION ||
     typeof value.repository !== "string" ||
@@ -399,8 +435,10 @@ function sessionAttestationForVerification(
     (operation === "command" && sourceCommentId === null) ||
     typeof value.run_id !== "string" ||
     !RUN_ID_PATTERN.test(value.run_id) ||
-    typeof value.issued_at !== "number" ||
-    !Number.isSafeInteger(value.issued_at) ||
+    typeof issuedAt !== "number" ||
+    !Number.isSafeInteger(issuedAt) ||
+    issuedAt * 1000 > now + SESSION_ATTESTATION_SKEW_MS ||
+    now - issuedAt * 1000 > SESSION_ATTESTATION_TTL_MS + SESSION_ATTESTATION_SKEW_MS ||
     typeof value.concurrency_group !== "string" ||
     value.concurrency_group !== `reviewsensei-session-${scope.repository_id}-${scope.pull_request}` ||
     typeof value.job_workflow_sha !== "string" ||
@@ -426,6 +464,7 @@ function sessionAttestationForVerification(
   ) {
     throw new Error("broker_session_attestation_invalid");
   }
+  authorizeWorkflowRuntimeSha(value.job_workflow_sha as string, runtime);
   return {
     version: SESSION_ATTESTATION_VERSION,
     repository: value.repository,
@@ -435,7 +474,7 @@ function sessionAttestationForVerification(
     operation,
     source_comment_id: sourceCommentId as number | null,
     run_id: value.run_id,
-    issued_at: value.issued_at as number,
+    issued_at: issuedAt as number,
     concurrency_group: value.concurrency_group,
     job_workflow_ref: value.job_workflow_ref,
     job_workflow_sha: value.job_workflow_sha,
@@ -456,21 +495,21 @@ function newSessionGrant(): string {
 }
 
 function recognizedCommand(value: string): boolean {
-  const match = /(?:^|\s)@sensei\s+([\s\S]*?)\s*$/.exec(value);
+  const match = RECOGNIZED_COMMAND.exec(value);
   if (match === null) return false;
   const command = match[1];
-  const finding = /^(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+(\S[\s\S]*)$/i.exec(command);
+  const finding = RECOGNIZED_FINDING.exec(command);
   return (
-    /^review\s+(?:status|pause)$/i.test(command) ||
-    /^review\s+reenroll$/i.test(command) ||
-    /^verify$/i.test(command) ||
-    /^review\s+continue(?:\s+--rounds\s+(?:0|1))?$/i.test(command) ||
+    RECOGNIZED_REVIEW_STATUS.test(command) ||
+    RECOGNIZED_REENROLL.test(command) ||
+    RECOGNIZED_VERIFY.test(command) ||
+    RECOGNIZED_CONTINUE.test(command) ||
     (finding !== null && validCommandReason(finding[1]))
   );
 }
 
 function validCommandReason(value: string): boolean {
-  const reason = value.trim().replace(/^["']+|["']+$/g, "").trim();
+  const reason = value.replace(COMMAND_TRIM, "").replace(/^["']+|["']+$/g, "").replace(COMMAND_TRIM, "");
   if (reason.length === 0 || new TextEncoder().encode(reason).byteLength > MAX_COMMAND_REASON_BYTES) {
     return false;
   }
@@ -649,7 +688,12 @@ export class TokenBroker {
     }
     const scope = sessionScope(value, repositoryId);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
-    const parsed = sessionAttestationForVerification(value, scope, configuredTag);
+    if (typeof value.job_workflow_ref !== "string") {
+      throw new Error("broker_session_attestation_invalid");
+    }
+    const observedTag = authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
+    const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
+    const parsed = sessionAttestationForVerification(value, scope, runtime);
     const state = await sessionGrantLedger(this.env, "session_verify", {
       grant,
       scope: `${scope.repository_id}:${scope.pull_request}:${scope.head_sha}`,
@@ -673,15 +717,10 @@ export class TokenBroker {
     // tag ref and a runtime SHA bound to that tag. GitHub Actions emits the
     // peeled commit for lightweight tags and the tag object SHA for annotated
     // tags; accept either when it matches the resolved tag.
-    const workflowShaAuthorized =
-      claims.job_workflow_sha === runtime.commitSha ||
-      claims.job_workflow_sha === runtime.refSha;
-    const workflowAuthorized =
-      claims.job_workflow_ref === workflowRef(PUBLIC_REPOSITORY, publicWorkflowTag) &&
-      workflowShaAuthorized;
-    if (!workflowAuthorized) {
+    if (claims.job_workflow_ref !== workflowRef(PUBLIC_REPOSITORY, publicWorkflowTag)) {
       throw new Error("broker_workflow_rejected");
     }
+    authorizeWorkflowRuntimeSha(claims.job_workflow_sha, runtime);
     if (
       !["pull_request", "workflow_dispatch", "issue_comment", "pull_request_review_comment"].includes(
         claims.event_name,
