@@ -16,9 +16,12 @@ from ...convergence import (
 )
 from ...conversation import ConversationService
 from ...coverage import coverage_approval_state
+from ...diff import analyze_diff
+from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
 from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
+from ...planning import related_paths_for_change
 from ...providers.base import ReviewProvider
 from ...session import (
     SessionIdentity,
@@ -495,10 +498,26 @@ class GitHubApplication:
         # key; make the recovery requirement visible and retryable instead.
         publication_related_paths: Sequence[str]
         if related_paths is None and durable_baseline is not None:
-            # The analysis transaction persists the verification scope in the
-            # baseline. Reuse it on the hosted publication boundary so sibling
-            # paths remain part of the same late-admission decision.
-            publication_related_paths = durable_baseline.related_paths
+            # An omitted scope must be derived from the current head. The
+            # publisher separately unions this fresh impact set with the
+            # persisted baseline scope; borrowing the old scope here would
+            # make a stale publication input look current at the boundary.
+            current_changed_paths = changed_paths
+            if current_changed_paths is None:
+                try:
+                    current_changed_paths = analyze_diff(diff).changed_paths
+                except ReviewInputError as exc:
+                    raise GitHubPublicationError(
+                        "review diff failed validation"
+                    ) from exc
+            try:
+                publication_related_paths = related_paths_for_change(
+                    current_changed_paths
+                )
+            except ReviewInputError as exc:
+                raise GitHubPublicationError(
+                    "review related-path scope failed validation"
+                ) from exc
         else:
             # An explicit empty tuple is a deliberate narrow scope. Do not
             # silently widen it with paths persisted for an earlier head.

@@ -463,7 +463,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(forwarded["baseline"], baseline)
         self.assertEqual(forwarded["current_key"], baseline.cache_key)
         self.assertEqual(forwarded["changed_paths"], ("src/app.py",))
-        self.assertEqual(forwarded["related_paths"], ("src/helper.py",))
+        self.assertEqual(forwarded["related_paths"], ())
 
         explicit_reviewer = RecordingReviewer()
         explicit_application = GitHubApplication(
