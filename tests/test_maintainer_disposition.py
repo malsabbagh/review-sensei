@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -584,14 +585,49 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(broker.exchanges, [])
         self.assertEqual(broker.oidc_requests, 0)
 
-    def test_hosted_mutation_always_exchanges_caller_oidc(self):
+    def test_hosted_mutation_requires_broker_attested_command_grant(self):
+        body = "@sensei review pause"
+        request_attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "run_id": "42",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
+            "job_workflow_sha": "c" * 40,
+        }
+
         class Broker:
             def __init__(self):
-                self.exchanges = []
+                self.authorizations = []
 
-            def exchange(self, token, *, capability=None):
-                self.exchanges.append((token, capability))
-                return "capability-token"
+            def authorize_session_mutation(self, token, **kwargs):
+                self.authorizations.append((token, kwargs))
+                return type(
+                    "SessionGrant",
+                    (),
+                    {
+                        "token": "capability-token",
+                        "grant": "opaque-grant",
+                        "attestation": {
+                            "repository_id": 99,
+                            "pull_request": 136,
+                            "head_sha": "b" * 40,
+                            "operation": "command",
+                            "source_comment_id": 501,
+                            "actor": "alice",
+                            "actor_type": "User",
+                            "association": "MEMBER",
+                            "command_id": 501,
+                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+                        },
+                    },
+                )()
 
         broker = Broker()
         application = GitHubApplication(
@@ -615,13 +651,28 @@ class DisabledWriteTests(unittest.TestCase):
                 repository_id=99,
                 pull_request=136,
                 head_sha="b" * 40,
-                body="@sensei review pause",
+                body=body,
                 actor_login="alice",
                 association="MEMBER",
                 app_slug="reviewsensei[bot]",
+                source_comment_id=501,
+                session_attestation=request_attestation,
             )
         self.assertTrue(result.applied)
-        self.assertEqual(broker.exchanges, [("caller-oidc", "review_publish")])
+        self.assertEqual(
+            broker.authorizations,
+            [
+                (
+                    "caller-oidc",
+                    {
+                        "repository_id": 99,
+                        "pull_request": 136,
+                        "head_sha": "b" * 40,
+                        "session_attestation": request_attestation,
+                    },
+                )
+            ],
+        )
 
 
 class SummaryTests(unittest.TestCase):

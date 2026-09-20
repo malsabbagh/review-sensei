@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
@@ -692,8 +693,16 @@ class GitHubApplication:
         actor_type: str = "User",
         association: str,
         app_slug: str,
+        source_comment_id: int | None = None,
+        session_attestation: Mapping[str, object] | None = None,
     ):
-        """Apply an authenticated maintainer command. Never exchanges when writes are off."""
+        """Apply a maintainer command through its applicable authority boundary.
+
+        A local injected ledger retains the existing operator-facing command
+        seam.  In contrast, a hosted mutation must be reconstructed from the
+        broker's current GitHub attestation: workflow event actor metadata is
+        only an untrusted routing hint and never authorizes a remote write.
+        """
 
         from ...disposition import (
             MaintainerCommandResult,
@@ -702,26 +711,90 @@ class GitHubApplication:
             parse_maintainer_command,
         )
 
-        command = parse_maintainer_command(body, actor=actor_login, head_sha=head_sha)
-        if command is None:
+        # Parse only the command spelling before choosing an authority path.
+        # This placeholder deliberately prevents untrusted event actor/head
+        # values from becoming persisted command identity in the hosted path.
+        parsed_command = parse_maintainer_command(body, actor="untrusted")
+        if parsed_command is None:
             return MaintainerCommandResult(
                 action="status",
                 applied=False,
                 operator_paused=False,
                 summary="not-a-command",
             )
-        if not authorized_maintainer(
-            login=actor_login,
-            user_type=actor_type,
-            association=association,
-            app_slug=app_slug,
-        ):
-            return MaintainerCommandResult(
-                action=command.action,
-                applied=False,
-                operator_paused=False,
-                summary="unauthorized",
+        hosted_mutation = (
+            parsed_command.action != "status"
+            and options.github_session_ledger
+            and self.session_ledger is None
+        )
+        session_grant: str | None = None
+        broker_attestation: Mapping[str, object] | None = None
+        if hosted_mutation:
+            if not options.github_writes:
+                return MaintainerCommandResult(
+                    action=parsed_command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="writes_disabled",
+                )
+            if (
+                isinstance(source_comment_id, bool)
+                or not isinstance(source_comment_id, int)
+                or source_comment_id <= 0
+            ):
+                raise GitHubPublicationError(
+                    "hosted maintainer command requires a source comment identity"
+                )
+            if not isinstance(session_attestation, Mapping):
+                raise GitHubPublicationError(
+                    "hosted maintainer command requires a session attestation"
+                )
+            grant = self.broker.authorize_session_mutation(
+                oidc_token or self.broker.request_oidc_token(),
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                session_attestation=session_attestation,
             )
+            session_grant = getattr(grant, "grant", None)
+            broker_attestation = getattr(grant, "attestation", None)
+            returned_token = getattr(grant, "token", None)
+            if not isinstance(returned_token, str) or not returned_token.strip():
+                raise GitHubPublicationError(
+                    "broker command authorization returned an invalid token"
+                )
+            token = returned_token
+            if not isinstance(session_grant, str) or not session_grant.strip():
+                raise GitHubPublicationError(
+                    "broker command authorization returned an invalid grant"
+                )
+            command = _command_from_broker_attestation(
+                body=body,
+                attestation=broker_attestation,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                source_comment_id=source_comment_id,
+                app_slug=app_slug,
+            )
+        else:
+            command = parse_maintainer_command(
+                body, actor=actor_login, head_sha=head_sha
+            )
+            if command is None:
+                raise GitHubPublicationError("maintainer command parsing was unstable")
+            if not authorized_maintainer(
+                login=actor_login,
+                user_type=actor_type,
+                association=association,
+                app_slug=app_slug,
+            ):
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="unauthorized",
+                )
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -751,16 +824,22 @@ class GitHubApplication:
                     )
                 exchange_input = oidc_token
                 capability = "review_status"
+            elif hosted_mutation:
+                # The broker-issued session grant is both the GitHub token and
+                # the one-use authority for the following ledger mutation.
+                # It is intentionally distinct from review_publish.
+                capability = None
             else:
                 # Every hosted mutation is broker-authorized. The caller may
                 # supply the OIDC assertion, but it is never treated as a
                 # capability token or as proof of maintainer identity.
                 exchange_input = oidc_token or self.broker.request_oidc_token()
                 capability = "review_publish"
-            token = self.broker.exchange(
-                exchange_input,
-                capability=capability,
-            )
+            if not hosted_mutation:
+                token = self.broker.exchange(
+                    exchange_input,
+                    capability=capability,
+                )
             ledger = self._session_ledger_for_token(
                 token,
                 options=options,
@@ -768,7 +847,10 @@ class GitHubApplication:
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
-        _record, result = apply_session_command(ledger, identity, command)
+        command_policy = ReviewConvergencePolicy() if hosted_mutation else None
+        _record, result = apply_session_command(
+            ledger, identity, command, policy=command_policy
+        )
         return result
 
     def _session_ledger_for_token(
@@ -1065,6 +1147,58 @@ class GitHubApplication:
                 source_kind=prepared.source_kind,
                 reaction_id=reaction.reaction_id,
             )
+
+
+def _command_from_broker_attestation(
+    *,
+    body: str,
+    attestation: object,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    source_comment_id: int,
+    app_slug: str,
+):
+    """Build a persisted command only from broker-attested GitHub identity."""
+
+    from ...disposition import authorized_maintainer, parse_maintainer_command
+
+    if not isinstance(attestation, Mapping):
+        raise GitHubPublicationError("broker command attestation was invalid")
+    if (
+        attestation.get("repository_id") != repository_id
+        or attestation.get("pull_request") != pull_request
+        or attestation.get("head_sha") != head_sha
+        or attestation.get("operation") != "command"
+        or attestation.get("source_comment_id") != source_comment_id
+    ):
+        raise GitHubPublicationError("broker command attestation scope was invalid")
+    actor = attestation.get("actor", attestation.get("login"))
+    login = attestation.get("login", actor)
+    if actor != login:
+        raise GitHubPublicationError("broker command attestation actor was invalid")
+    command_id = attestation.get("command_id")
+    if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
+        raise GitHubPublicationError("broker command attestation command identity was invalid")
+    command_digest = attestation.get("command_digest")
+    if (
+        not isinstance(command_digest, str)
+        or command_digest != sha256(body.encode("utf-8")).hexdigest()
+    ):
+        raise GitHubPublicationError("broker command attestation command was stale")
+    command = parse_maintainer_command(
+        body, actor=actor, head_sha=head_sha, command_id=str(command_id)
+    )
+    if command is None:
+        raise GitHubPublicationError("broker command attestation did not bind a command")
+    if not authorized_maintainer(
+        login=actor,
+        user_type=attestation.get("actor_type"),
+        association=attestation.get("association"),
+        app_slug=app_slug,
+    ):
+        raise GitHubPublicationError("broker command attestation was unauthorized")
+    return command
 
 
 def _shadow_state(prepared: object, flags: Mapping[str, bool]) -> RoundSessionState:
