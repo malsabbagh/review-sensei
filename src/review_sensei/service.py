@@ -336,6 +336,7 @@ class ReviewService:
         tracker: ResourceBudgetTracker,
         stage_summary: dict[str, str],
         incremental: IncrementalReviewPlan | None,
+        current_key: ReviewContextCacheKey | None,
         profile: str,
     ) -> ReviewRun:
         """Run bounded chunk orchestration against one shared resource budget."""
@@ -389,6 +390,7 @@ class ReviewService:
                 chunk_run = self.run(
                     chunk_request,
                     incremental=incremental,
+                    current_key=current_key,
                     profile=profile,
                     tracker=tracker,
                     provider_override=budgeted,
@@ -578,6 +580,7 @@ class ReviewService:
         request: ReviewRequest,
         *,
         incremental: IncrementalReviewPlan | None = None,
+        current_key: ReviewContextCacheKey | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
         monotonic: Callable[[], float] | None = None,
@@ -592,6 +595,7 @@ class ReviewService:
         run = self.run(
             request,
             incremental=incremental,
+            current_key=current_key,
             profile=profile,
             budget=budget,
             monotonic=monotonic,
@@ -610,6 +614,7 @@ class ReviewService:
         request: ReviewRequest,
         *,
         incremental: IncrementalReviewPlan | None = None,
+        current_key: ReviewContextCacheKey | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
         tracker: ResourceBudgetTracker | None = None,
@@ -658,6 +663,7 @@ class ReviewService:
                 tracker=tracker,
                 stage_summary=stage_summary,
                 incremental=incremental,
+                current_key=current_key,
                 profile=profile,
             )
         analysis = change_plan.analysis
@@ -669,7 +675,10 @@ class ReviewService:
                 "active review category ids must be declared by a configured stage"
             )
         coverage = self._coverage_decision(
-            request, incremental=incremental, profile=profile
+            request,
+            incremental=incremental,
+            current_key=current_key,
+            profile=profile,
         )
 
         if coverage.skip_provider:
@@ -1140,6 +1149,7 @@ class ReviewService:
         request: ReviewRequest,
         *,
         incremental: IncrementalReviewPlan | None,
+        current_key: ReviewContextCacheKey | None,
         profile: str,
     ) -> _CoverageDecision:
         """Resolve the coverage mode and the prior findings that stay in scope.
@@ -1154,12 +1164,13 @@ class ReviewService:
         because their identities cannot be tied to this snapshot.
         """
 
-        current_key = build_review_context_cache_key(
-            request,
-            provider_name=self.provider.name,
-            stages=self.stages,
-            profile=profile,
-        )
+        if current_key is None:
+            current_key = build_review_context_cache_key(
+                request,
+                provider_name=self.provider.name,
+                stages=self.stages,
+                profile=profile,
+            )
         mode = "full"
         skip_provider = False
         reviewed_paths: tuple[str, ...] | None = None

@@ -2568,6 +2568,7 @@ def main(argv: list[str] | None = None) -> int:
             work_budget=work_budget,
         )
         incremental = None
+        current_key = None
         if (
             ledger is not None
             and identity is not None
@@ -2598,7 +2599,11 @@ def main(argv: list[str] | None = None) -> int:
                 return run_outcome_exit_code(outcome.status)
             persisted_baseline = baseline_from_history_document(history.get("baseline"))
             current_key = build_review_context_cache_key(
-                request,
+                _checkpoint_cache_request(
+                    request,
+                    base_sha=args.base_sha,
+                    head_sha=args.head_sha,
+                ),
                 provider_name=provider.name,
                 stages=service.stages,
             )
@@ -2627,6 +2632,7 @@ def main(argv: list[str] | None = None) -> int:
             run = service.run(
                 request,
                 incremental=incremental,
+                current_key=current_key,
                 budget=ResourceBudget.for_limits(limits),
             )
         except BaseException as analysis_error:
