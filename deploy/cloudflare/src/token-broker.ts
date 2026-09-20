@@ -377,9 +377,14 @@ function canonicalAttestation(value: SessionAttestation): string {
 function sessionAttestationForVerification(
   value: Record<string, unknown>,
   scope: SessionScope,
+  configuredTag: string,
 ): SessionAttestation {
   const operation = value.operation;
   const sourceCommentId = value.source_comment_id;
+  if (typeof value.job_workflow_ref !== "string") {
+    throw new Error("broker_session_attestation_invalid");
+  }
+  authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
   if (
     value.version !== SESSION_ATTESTATION_VERSION ||
     typeof value.repository !== "string" ||
@@ -398,7 +403,6 @@ function sessionAttestationForVerification(
     !Number.isSafeInteger(value.issued_at) ||
     typeof value.concurrency_group !== "string" ||
     value.concurrency_group !== `reviewsensei-session-${scope.repository_id}-${scope.pull_request}` ||
-    typeof value.job_workflow_ref !== "string" ||
     typeof value.job_workflow_sha !== "string" ||
     !SHA_PATTERN.test(value.job_workflow_sha) ||
     (operation === "review" &&
@@ -644,7 +648,8 @@ export class TokenBroker {
       throw new Error("broker_session_attestation_invalid");
     }
     const scope = sessionScope(value, repositoryId);
-    const parsed = sessionAttestationForVerification(value, scope);
+    const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
+    const parsed = sessionAttestationForVerification(value, scope, configuredTag);
     const state = await sessionGrantLedger(this.env, "session_verify", {
       grant,
       scope: `${scope.repository_id}:${scope.pull_request}:${scope.head_sha}`,

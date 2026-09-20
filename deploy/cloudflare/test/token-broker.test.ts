@@ -358,6 +358,42 @@ describe("token broker authorization", () => {
     ).rejects.toThrow("broker_session_grant_invalid");
   });
 
+  it("rejects a grant attestation whose workflow ref is not an accepted public workflow", async () => {
+    const { broker, ledgerFetch } = harness();
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: {
+        version: 1,
+        repository: "acme/widgets",
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+        operation: "command",
+        source_comment_id: 13579,
+        run_id: "10000000001",
+        issued_at: Math.floor(Date.now() / 1000),
+        concurrency_group: "reviewsensei-session-987654321-7",
+        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+        job_workflow_sha: SHA,
+      },
+    });
+    const forgedAttestation = {
+      ...result.session_attestation!,
+      job_workflow_ref:
+        `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+    };
+
+    await expect(
+      broker.verifySessionGrant(result.session_grant, forgedAttestation),
+    ).rejects.toThrow("broker_workflow_rejected");
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_verify");
+  });
+
   it.each([
     [
       "string repository id",
