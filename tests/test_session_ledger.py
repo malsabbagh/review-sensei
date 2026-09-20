@@ -47,6 +47,7 @@ from review_sensei.session import (
     complete_session_round,
     migrate_session_document,
     prepare_session_round,
+    record_session_failed_attempt,
     resolve_local_session_ledger,
     session_reservation_id,
 )
@@ -62,6 +63,27 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
 class SessionRecordTests(unittest.TestCase):
+    def test_continuation_grant_requires_paired_consumption_state(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW).to_dict()
+        record["operator_paused"] = False
+        record["dispositions"] = []
+        record["continuation_grants"] = [
+            {
+                "command_id": "comment-1",
+                "actor": "alice",
+                "head_sha": "a" * 40,
+                "policy_digest": "b" * 64,
+                "issued_at": "2026-09-19T12:00:00Z",
+                "expires_at": "2026-09-20T12:00:00Z",
+                "consumed_reservation_id": "abcd1234",
+                "consumed_generation": None,
+            }
+        ]
+        # Rebuild the digest through the public constructor so the validation
+        # oracle isolates the paired state rather than an integrity mismatch.
+        with self.assertRaisesRegex(ReviewInputError, "continuation grant"):
+            SessionRecord.from_dict(record)
+
     @staticmethod
     def _history() -> dict[str, object]:
         baseline = ReviewBaseline(
@@ -366,6 +388,148 @@ class SessionRecordTests(unittest.TestCase):
 
 
 class LocalSessionLedgerTests(unittest.TestCase):
+    def test_restart_retains_consumed_continuation_grant(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue",
+                actor="alice",
+                head_sha="a" * 40,
+                command_id="comment-restart",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        prepared = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        self.assertIsNotNone(prepared.reservation_id)
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        loaded = restarted.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.record.continuation_grants[0]["consumed_reservation_id"], "abcd1234")
+
+    def test_grant_scope_mismatch_and_direct_rounds_cannot_consume_it(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue", actor="alice", head_sha="a" * 40,
+                command_id="comment-scope",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW, completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        rejected = prepare_session_round(
+            self.ledger, IDENTITY, policy, reservation_id="abcd1234", head_sha="b" * 40,
+            continuation_rounds=1, now=FIXED_NOW, coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        self.assertFalse(rejected.decision.admit)
+        self.assertEqual(rejected.decision.handoff_reason, "round-budget-exhausted")
+        self.assertIsNone(rejected.reservation_id)
+        self.assertIsNone(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0]["consumed_reservation_id"]
+        )
+
+    def test_competing_reservations_consume_a_grant_once(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue", actor="alice", head_sha="a" * 40,
+                command_id="comment-race",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW, completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        winner = prepare_session_round(
+            self.ledger, IDENTITY, policy, reservation_id="abcd1234", head_sha="a" * 40,
+            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+        )
+        loser = prepare_session_round(
+            self.ledger, IDENTITY, policy, reservation_id="ffff1234", head_sha="a" * 40,
+            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+        )
+        self.assertIsNotNone(winner.reservation_id)
+        self.assertIsNone(loser.reservation_id)
+        self.assertEqual(loser.decision.handoff_reason, "paused")
+        self.assertEqual(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0]["consumed_reservation_id"],
+            "abcd1234",
+        )
+
+    def test_failed_continuation_attempt_keeps_the_grant_consumed(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue", actor="alice", head_sha="a" * 40,
+                command_id="comment-failure",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW, completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        prepared = prepare_session_round(
+            self.ledger, IDENTITY, policy, reservation_id="abcd1234", head_sha="a" * 40,
+            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+        )
+        record_session_failed_attempt(
+            self.ledger, IDENTITY, reservation_id=prepared.reservation_id, now=FIXED_NOW
+        )
+        replay = prepare_session_round(
+            self.ledger, IDENTITY, policy, reservation_id="ffff1234", head_sha="a" * 40,
+            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+        )
+        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW).record
+        self.assertEqual(loaded.failed_attempts, 1)
+        self.assertEqual(loaded.continuation_grants[0]["consumed_reservation_id"], "abcd1234")
+        self.assertFalse(replay.decision.admit)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))

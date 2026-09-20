@@ -13,12 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, cast
 
+from .convergence import ReviewConvergencePolicy
 from .errors import ReviewInputError
 from .session import (
     MAX_STORED_DISPOSITIONS,
     SessionIdentity,
     SessionLedger,
     SessionRecord,
+    issue_continuation_grant,
 )
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -103,6 +105,7 @@ class MaintainerCommand:
     finding_fingerprint: str | None = None
     continuation_rounds: int = 0
     head_sha: str | None = None
+    command_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.action not in MAINTAINER_ACTIONS:
@@ -115,6 +118,12 @@ class MaintainerCommand:
             not isinstance(self.head_sha, str) or not _HEAD_SHA.fullmatch(self.head_sha)
         ):
             raise ReviewInputError("maintainer head_sha is invalid")
+        if self.command_id is not None and (
+            not isinstance(self.command_id, str) or not self.command_id
+        ):
+            raise ReviewInputError("maintainer command_id is invalid")
+        if self.command_id is not None and self.action != "continue":
+            raise ReviewInputError("maintainer command_id only applies to continuation")
         if self.action in FINDING_ACTIONS:
             if self.finding_fingerprint is None or not _FINGERPRINT.fullmatch(
                 self.finding_fingerprint
@@ -130,6 +139,7 @@ def parse_maintainer_command(
     *,
     actor: str,
     head_sha: str | None = None,
+    command_id: str | None = None,
 ) -> MaintainerCommand | None:
     """Parse a bounded ``@sensei`` command. Unknown text is not a command."""
 
@@ -155,6 +165,7 @@ def parse_maintainer_command(
             actor=actor,
             continuation_rounds=rounds,
             head_sha=head_sha,
+            command_id=command_id,
         )
     finding = _FINDING.fullmatch(remainder)
     if finding is not None:
@@ -256,6 +267,7 @@ def apply_session_command(
     command: MaintainerCommand,
     *,
     now: datetime | None = None,
+    policy: ReviewConvergencePolicy | None = None,
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
@@ -307,6 +319,26 @@ def apply_session_command(
             ),
         )
     if command.action == "continue":
+        if command.command_id is not None:
+            if not isinstance(policy, ReviewConvergencePolicy):
+                raise ReviewInputError("identified continuation requires a review policy")
+            if command.head_sha is None:
+                raise ReviewInputError("identified continuation requires an exact head_sha")
+            record = _issue_continuation_grant(
+                ledger,
+                identity,
+                record,
+                command=command,
+                policy=policy,
+                now=now,
+            )
+            return record, MaintainerCommandResult(
+                action="continue",
+                applied=True,
+                operator_paused=False,
+                continuation_rounds=0,
+                summary="one-use continuation grant issued for the exact head and policy",
+            )
         record = _set_operator_paused(ledger, identity, record, paused=False, now=now)
         return record, MaintainerCommandResult(
             action="continue",
@@ -366,6 +398,35 @@ def _set_operator_paused(
             now=now,
             generation=current.generation + 1,
             operator_paused=paused,
+        )
+
+    return replace(identity, mutate, now=now)
+
+
+def _issue_continuation_grant(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    *,
+    command: MaintainerCommand,
+    policy: ReviewConvergencePolicy,
+    now: datetime | None,
+) -> SessionRecord:
+    replace = getattr(ledger, "replace", None)
+    if not callable(replace):
+        raise ReviewInputError("session ledger does not support CAS mutation")
+
+    def mutate(current: SessionRecord) -> SessionRecord:
+        # The command id, actor, exact head, and policy digest are rechecked
+        # by the durable constructor.  Returning an equal record makes a
+        # delivery replay idempotent without reviving an already-consumed grant.
+        return issue_continuation_grant(
+            current,
+            command_id=command.command_id or "",
+            actor=command.actor,
+            head_sha=command.head_sha or "",
+            policy_digest=policy.digest(),
+            now=now,
         )
 
     return replace(identity, mutate, now=now)

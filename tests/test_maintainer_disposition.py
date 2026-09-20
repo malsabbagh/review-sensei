@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -160,6 +160,79 @@ class MaintainerCommandParseTests(unittest.TestCase):
 
 
 class SessionCommandTests(unittest.TestCase):
+    def test_identified_continuation_creates_an_integrity_covered_grant(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-101",
+        )
+        record, result = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+
+        self.assertTrue(result.applied)
+        self.assertEqual(result.continuation_rounds, 0)
+        self.assertEqual(len(record.continuation_grants), 1)
+        grant = record.continuation_grants[0]
+        self.assertEqual(grant["command_id"], "issue-comment-101")
+        self.assertEqual(grant["actor"], "alice")
+        self.assertEqual(grant["head_sha"], "a" * 40)
+        self.assertEqual(grant["policy_digest"], policy.digest())
+        self.assertIsNone(grant["consumed_reservation_id"])
+        tampered = record.to_dict()
+        tampered["continuation_grants"][0]["actor"] = "mallory"  # type: ignore[index]
+        with self.assertRaisesRegex(ReviewInputError, "integrity"):
+            type(record).from_dict(tampered)
+
+    def test_identified_continuation_command_is_idempotent(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-102",
+        )
+        first, _ = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+        replay, _ = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW + timedelta(minutes=1), policy=policy
+        )
+        self.assertEqual(replay.generation, first.generation)
+        self.assertEqual(replay.continuation_grants, first.continuation_grants)
+
+    def test_identified_command_replay_does_not_revive_a_consumed_grant(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue", actor="alice", head_sha="a" * 40,
+            command_id="issue-comment-103",
+        )
+        apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW, policy=policy)
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        from review_sensei.session import prepare_session_round
+
+        prepare_session_round(
+            ledger, IDENTITY, policy, reservation_id="abcd1234", head_sha="a" * 40,
+            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+        )
+        replay, _ = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+        self.assertEqual(replay.continuation_grants[0]["consumed_reservation_id"], "abcd1234")
+
     def test_pause_and_continue_mutate_operator_paused(self):
         ledger = InMemorySessionLedger()
         pause = parse_maintainer_command("@sensei review pause", actor="alice")

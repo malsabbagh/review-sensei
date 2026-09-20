@@ -84,6 +84,34 @@
         }
       }
     },
+    "continuation_grants": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_id",
+          "actor",
+          "head_sha",
+          "policy_digest",
+          "issued_at",
+          "expires_at",
+          "consumed_reservation_id",
+          "consumed_generation"
+        ],
+        "properties": {
+          "command_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+          "actor": {"type": "string", "minLength": 1, "maxLength": 256},
+          "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+          "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "issued_at": {"type": "string", "format": "date-time"},
+          "expires_at": {"type": "string", "format": "date-time"},
+          "consumed_reservation_id": {"type": ["string", "null"], "pattern": "^[a-f0-9]{8,64}$"},
+          "consumed_generation": {"type": ["integer", "null"], "minimum": 1, "maximum": 2147483647}
+        }
+      }
+    },
     "transaction": {
       "$ref": "https://reviewsensei.dev/schemas/v1/review-transaction.schema.json"
     },
