@@ -433,9 +433,7 @@ class GitHubApplication:
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
             record_for_baseline = (
-                prepared.record
-                if prepared is not None
-                else transaction_record
+                prepared.record if prepared is not None else transaction_record
             )
             if durable_baseline is None and record_for_baseline is not None:
                 history = record_for_baseline.convergence_history
