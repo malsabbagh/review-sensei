@@ -98,6 +98,22 @@ _TRANSACTION_OPENROUTER_POLICY_KEYS = frozenset(
 _TRANSACTION_PUBLICATION_MODES = frozenset(
     {"legacy", "advisory", "merge-focused", "strict"}
 )
+_TRANSACTION_POLICY_KEYS = frozenset(
+    {
+        "schema_version",
+        "mode",
+        "enforcement",
+        "max_completed_initial_reviews",
+        "max_completed_verification_rounds",
+        "max_failed_attempts",
+        "automatic_github_review_events",
+        "inline_advisory_threads",
+    }
+)
+_TRANSACTION_POLICY_MODES = frozenset({"legacy", "advisory", "merge-focused", "strict"})
+_TRANSACTION_POLICY_ENFORCEMENTS = frozenset({"display-only", "publication"})
+_TRANSACTION_EVIDENCE_KEYS = frozenset({"evidence_policy", "snapshot_sha256"})
+_TRANSACTION_EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 
 # This is intentionally frozen separately from ``to_dict``.  A future runtime
 # field must not silently become part of the durable result identity; adding a
@@ -267,6 +283,64 @@ def _validate_configuration_context(value: Mapping[str, object]) -> None:
     publication_mode = value.get("publication_mode")
     if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
         raise ReviewInputError("review transaction publication_mode is invalid")
+
+
+def _validate_policy_context(value: Mapping[str, object]) -> None:
+    """Validate the closed convergence-policy identity used for a digest."""
+
+    if set(value) != _TRANSACTION_POLICY_KEYS:
+        raise ReviewInputError(
+            "review transaction policy must contain the documented identity fields"
+        )
+    if value.get("schema_version") != "1.0":
+        raise ReviewInputError("review transaction policy schema_version is invalid")
+    if value.get("mode") not in _TRANSACTION_POLICY_MODES:
+        raise ReviewInputError("review transaction policy mode is invalid")
+    if value.get("enforcement") not in _TRANSACTION_POLICY_ENFORCEMENTS:
+        raise ReviewInputError("review transaction policy enforcement is invalid")
+    for label, minimum, maximum in (
+        ("max_completed_initial_reviews", 1, 8),
+        ("max_completed_verification_rounds", 0, 8),
+        ("max_failed_attempts", 1, 32),
+    ):
+        number = value.get(label)
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < minimum
+            or number > maximum
+        ):
+            raise ReviewInputError(f"review transaction policy {label} is invalid")
+    for label in ("automatic_github_review_events", "inline_advisory_threads"):
+        if not isinstance(value.get(label), bool):
+            raise ReviewInputError(f"review transaction policy {label} is invalid")
+
+
+def _validate_evidence_context(value: Mapping[str, object]) -> None:
+    """Validate the closed evidence identity used for publication admission."""
+
+    if set(value) != _TRANSACTION_EVIDENCE_KEYS:
+        raise ReviewInputError(
+            "review transaction evidence must contain evidence_policy and snapshot_sha256"
+        )
+    evidence_policy = value.get("evidence_policy")
+    snapshot_sha256 = value.get("snapshot_sha256")
+    if evidence_policy not in _TRANSACTION_EVIDENCE_POLICIES:
+        raise ReviewInputError("review transaction evidence_policy is invalid")
+    if snapshot_sha256 is not None and (
+        not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256)
+    ):
+        raise ReviewInputError(
+            "review transaction snapshot_sha256 must be a SHA-256 digest or null"
+        )
+    if evidence_policy == "legacy" and snapshot_sha256 is not None:
+        raise ReviewInputError(
+            "legacy review transaction evidence must not include a snapshot digest"
+        )
+    if evidence_policy == "confirmed" and snapshot_sha256 is None:
+        raise ReviewInputError(
+            "confirmed review transaction evidence requires a snapshot digest"
+        )
 
 
 def _validate_learning_scope(scope: tuple[str, ...]) -> None:
@@ -1099,12 +1173,14 @@ class ReviewTransaction:
     def compute_policy_digest(value: Mapping[str, object]) -> str:
         if not isinstance(value, Mapping):
             raise ReviewInputError("review transaction policy must be a mapping")
+        _validate_policy_context(value)
         return ReviewTransaction._digest(dict(value))
 
     @staticmethod
     def compute_evidence_digest(value: Mapping[str, object]) -> str:
         if not isinstance(value, Mapping):
             raise ReviewInputError("review transaction evidence must be a mapping")
+        _validate_evidence_context(value)
         return ReviewTransaction._digest(dict(value))
 
     def to_dict(self) -> dict[str, object]:

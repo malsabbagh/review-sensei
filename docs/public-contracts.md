@@ -272,6 +272,10 @@ as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
 partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
 transport retries, structural retries, prompt/output bytes, and elapsed time.
+For an identity-bound result whose local ledger already records
+`publication_succeeded`, `github review` may return `already_published`
+before broker exchange; this is an idempotent local-ledger recovery signal,
+not a fresh publication.
 Closed diagnostic tokens are enumerated by `PUBLIC_DIAGNOSTICS` in
 `review_sensei.outcomes`; `cancelled` is reserved for host-layer cancellation
 and is not emitted by `ReviewService` today. Structural correction remains one
@@ -290,6 +294,18 @@ Only their canonical digests are persisted in the session ledger. Review
 limits and stage prompt/source details are intentionally not part of the
 configuration digest because publication does not re-run analysis; the
 canonical result digest binds the bounded output instead.
+The evidence context is a closed two-field identity (`evidence_policy` and
+`snapshot_sha256`): `legacy` requires a null snapshot, while `confirmed`
+requires the reviewed snapshot SHA-256. Unknown fields and inconsistent
+policy/snapshot pairs are rejected before publication admission.
+
+The analysis CLI keeps the existing `--session-ledger` reservation path
+compatible by default. Pass `--transaction` to opt into the identity-bound
+checkpoint independently of filesystem artifact export. Passing
+`--configuration-context-output` also opts into that transaction and writes the
+secret-free context artifact; omitting it is supported when the later
+publisher can obtain the same trusted context through another operator
+boundary.
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
@@ -494,6 +510,7 @@ The command is `review-sensei`. Supported flags are:
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
 | `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger`. Protect the emitted file because it becomes trusted admission input for the later `github review` command |
+| `--transaction` | none | Explicitly opt into the identity-bound analysis/publication checkpoint without requiring a local configuration-context file; requires an operator `--review-mode`, an explicit `--session-ledger`, and exact repository/PR/base/head identity |
 
 Stage and category catalogs are trusted operator configuration. Hosted reviews
 read them only from the reviewed trusted base checkout (the validated base

@@ -92,6 +92,15 @@ Negative or tradeoffs:
   from the authenticated workflow/operator boundary, not untrusted request
   data; integrations crossing that boundary must derive it from their own
   trusted checkout and effective settings.
+- The analysis CLI preserves the existing ledger reservation behavior unless
+  the caller explicitly passes `--transaction` (or the artifact-producing
+  `--configuration-context-output`, which implies it). This keeps the F1
+  transaction opt-in independent from whether the current host can write a
+  context file; publication still requires the equivalent trusted context at
+  its boundary.
+- Policy and evidence digest inputs use closed, versioned identity shapes.
+  Caller-supplied context keys outside those shapes are rejected before any
+  digest is accepted for publication admission.
 - The result digest is computed over an explicit frozen projection of the
   canonical v1 review result with the transaction envelope excluded, avoiding
   a circular digest. Runtime-only additions to `to_dict()` are ignored; any

@@ -1239,8 +1239,11 @@ def load_review_transaction_for_publication(
     advanced the durable phase.  The durable result digest and identity are
     authoritative in that case: publication rebinds the result to the current
     record, and the application short-circuits a terminal success as
-    ``already_published``.  The analysis-phase recovery path still requires an
-    exact durable generation and reservation owner.
+    ``already_published``.  Possession of that older result artifact is not
+    standalone authorization: the caller must still reach the identity-bound
+    ledger selected for publication and pass the expected policy, configuration,
+    evidence, head/base, and result-digest checks. The analysis-phase recovery
+    path still requires an exact durable generation and reservation owner.
     """
 
     if result.transaction is None:

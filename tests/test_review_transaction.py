@@ -162,6 +162,26 @@ class ReviewTransactionTests(unittest.TestCase):
             with self.subTest(malformed=malformed), self.assertRaises(ReviewInputError):
                 ReviewTransaction.compute_configuration_digest(malformed)
 
+    def test_policy_and_evidence_digests_reject_untrusted_shapes(self):
+        policy = POLICY.identity_fields()
+        self.assertEqual(
+            ReviewTransaction.compute_policy_digest(policy), POLICY.digest()
+        )
+        malformed_policy = {**policy, "caller_supplied": "secret"}
+        with self.assertRaises(ReviewInputError):
+            ReviewTransaction.compute_policy_digest(malformed_policy)
+
+        self.assertEqual(
+            ReviewTransaction.compute_evidence_digest(EVIDENCE), EVIDENCE_DIGEST
+        )
+        malformed_evidence = {**EVIDENCE, "caller_supplied": "unbounded"}
+        with self.assertRaises(ReviewInputError):
+            ReviewTransaction.compute_evidence_digest(malformed_evidence)
+        with self.assertRaises(ReviewInputError):
+            ReviewTransaction.compute_evidence_digest(
+                {"evidence_policy": "confirmed", "snapshot_sha256": None}
+            )
+
     def test_content_digest_ignores_runtime_only_serialized_fields(self):
         result = _result()
         baseline = result.content_digest()
@@ -579,6 +599,77 @@ class ReviewTransactionTests(unittest.TestCase):
             record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertIsNone(record.transaction)
             self.assertIsNotNone(record.reservation_id)
+
+    def test_cli_transaction_opt_in_does_not_require_context_file(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--transaction",
+                "--output",
+                str(output_path),
+                "--no-learning-proposals",
+            ]
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(rendered["transaction"]["phase"], "publication_pending")
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(record.transaction.phase, "publication_pending")
+            self.assertIsNone(record.reservation_id)
 
     def test_cli_context_write_failure_does_not_persist_transaction(self):
         class RecordingProvider:
@@ -1268,6 +1359,40 @@ class PublicationTransactionTests(unittest.TestCase):
                 convergence_policy=POLICY,
                 configuration_context=malformed_configuration,
                 evidence_context=EVIDENCE,
+            )
+        self.assertEqual(broker.exchanges, 0)
+
+    def test_application_classifies_malformed_evidence_before_broker(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        broker = _Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=_Reviewer(),
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        malformed_evidence = {**EVIDENCE, "caller_supplied": "unbounded"}
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "evidence validation failed"
+        ):
+            application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=result,
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                convergence_policy=POLICY,
+                configuration_context=CONFIGURATION,
+                evidence_context=malformed_evidence,
             )
         self.assertEqual(broker.exchanges, 0)
 

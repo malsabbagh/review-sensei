@@ -188,9 +188,14 @@ class GitHubApplication:
                     "evidence_policy": evidence_policy,
                     "snapshot_sha256": snapshot_sha256,
                 }
-            expected_evidence_digest = ReviewTransaction.compute_evidence_digest(
-                evidence_context
-            )
+            try:
+                expected_evidence_digest = ReviewTransaction.compute_evidence_digest(
+                    evidence_context
+                )
+            except ReviewInputError as exc:
+                raise GitHubPublicationError(
+                    "review transaction evidence validation failed"
+                ) from exc
             if self.session_ledger is not None:
                 transaction_ledger = self.session_ledger
                 transaction_record = load_transaction(self.session_ledger)

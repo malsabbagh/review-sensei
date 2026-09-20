@@ -730,13 +730,23 @@ def _parser() -> argparse.ArgumentParser:
         "--output", type=Path, help="Write JSON to a file instead of stdout"
     )
     parser.add_argument(
+        "--transaction",
+        action="store_true",
+        help=(
+            "Opt into the identity-bound analysis/publication transaction; "
+            "use --configuration-context-output when the later publisher "
+            "needs a serialized trusted configuration context"
+        ),
+    )
+    parser.add_argument(
         "--configuration-context-output",
         type=Path,
         help=(
             "Write the trusted, secret-free configuration context needed to "
-            "publish an identity-bound result; requires an operator review mode "
-            "and an explicit session ledger. Protect the emitted file: it becomes "
-            "trusted admission input for the later github review command"
+            "publish an identity-bound result; this also opts into the "
+            "transaction and requires an operator review mode plus an explicit "
+            "session ledger. Protect the emitted file: it becomes trusted "
+            "admission input for the later github review command"
         ),
     )
     parser.add_argument(
@@ -2180,8 +2190,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         _validate_live_profile_gates(args, args_list)
-        transaction_context_requested = args.configuration_context_output is not None
-        if transaction_context_requested:
+        transaction_requested = bool(getattr(args, "transaction", False)) or (
+            args.configuration_context_output is not None
+        )
+        if transaction_requested:
             from .convergence import (
                 OPERATOR_REVIEW_MODES,
                 resolve_review_convergence_policy,
@@ -2193,9 +2205,7 @@ def main(argv: list[str] | None = None) -> int:
                 ).mode
                 not in OPERATOR_REVIEW_MODES
             ):
-                raise ReviewInputError(
-                    "--configuration-context-output requires an operator review mode"
-                )
+                raise ReviewInputError("--transaction requires an operator review mode")
             if (
                 args.session_ledger is None
                 or not args.repository
@@ -2212,8 +2222,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ):
                 raise ReviewInputError(
-                    "--configuration-context-output requires an explicit session "
-                    "ledger, repository/PR identity, and 40-character base/head SHAs"
+                    "--transaction requires an explicit session ledger, "
+                    "repository/PR identity, and 40-character base/head SHAs"
                 )
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
@@ -2385,7 +2395,7 @@ def main(argv: list[str] | None = None) -> int:
                 head_sha=head_sha,
                 kind="publish",
             )
-            if transaction_context_requested:
+            if transaction_requested:
                 effective_base_sha = (args.base_sha or "").strip().lower()
                 stage_identity = [
                     {
@@ -2597,6 +2607,18 @@ def main(argv: list[str] | None = None) -> int:
                 cleanup_analysis_reservation(charge_failed_attempt=True)
                 prepared_round = None
                 prepared_transaction = None
+            elif result.evidence_policy != "legacy":
+                # The analysis CLI currently produces only the compatible
+                # single-pass evidence contract. Confirmed evidence requires
+                # a reviewed snapshot and candidate verification at the
+                # publication boundary; do not checkpoint a misleading legacy
+                # digest for a future result shape.
+                cleanup_analysis_reservation(charge_failed_attempt=True)
+                prepared_round = None
+                prepared_transaction = None
+                raise ReviewInputError(
+                    "identity-bound analysis currently supports only legacy evidence"
+                )
             else:
                 if args.configuration_context_output is not None:
                     try:
