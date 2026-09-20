@@ -28,9 +28,26 @@ The envelope contains only closed metadata:
 
 The history participates in `record_sha256`. A malformed, oversized, or
 tampered history therefore fails ledger parsing rather than permitting a fresh
-initialization. The F3 slice will translate this persisted envelope into the
-runtime baseline used by the review service; F2 deliberately does not change
-the live inference path.
+initialization. Only the current digest payload carries the envelope: a record
+holding one is rejected under the legacy or operator-paused digest shape, so an
+in-place upgrade can never keep a digest computed without it. The F3 slice will
+translate this persisted envelope into the runtime baseline used by the review
+service; F2 deliberately does not change the live inference path.
+
+## Session witness
+
+Durable history is only meaningful while the record it describes exists, so F2
+also closes the "a deleted marker looks like a first enrollment" gap. The
+broker owns a hashed enrollment witness keyed by repository, pull request, and
+the verified current head, reached through the closed `review_session`
+capability (which requests only `pull_requests: write`). That witness is
+retained for 90 days from its most recent use, matching the maximum session
+lifetime, and is pruned in the same transaction that records it. The
+GitHub-backed ledger treats an App-authored comment as a marker document only
+when it carries a terminal marker line, so a quoted prefix cannot wedge a pull
+request. A witness combined with a missing marker fails closed and names the
+recovery command (`@sensei review reenroll`), the only operation allowed to
+retire an expired or witness-only session.
 
 ## Consequences
 

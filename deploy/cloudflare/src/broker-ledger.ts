@@ -7,6 +7,13 @@ const SCOPE_PATTERN = /^[\x21-\x7e]{1,512}$/;
 const RETENTION_MS = 10 * 60 * 1000;
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT = 10;
+// An enrollment witness is only meaningful while the session it guards can
+// still exist. Session records expire at 90 days at the latest (ADR 0047), so
+// the witness is pruned on the same schedule: the table stays bounded, the
+// Durable Object does not permanently record that a pull request ever had a
+// session, and a session that outlived its own record cannot demand recovery
+// forever.
+const ENROLLMENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 interface BrokerRequest {
   action?: unknown;
@@ -38,21 +45,33 @@ async function digest(value: string): Promise<string> {
     .join("");
 }
 
-function validRequest(
-  value: BrokerRequest,
-): value is BrokerRequest & {
-  action: "claim" | "admit" | "session_enroll";
-  jti?: string;
+/** A replay/rate assertion. Only these actions carry a JTI. */
+type AssertionRequest = BrokerRequest & {
+  action: "claim" | "admit";
+  jti: string;
   scope: string;
-} {
+};
+
+/** A session enrollment. It intentionally has no JTI to assert. */
+type SessionRequest = BrokerRequest & {
+  action: "session_enroll";
+  scope: string;
+};
+
+const VALID_SCOPES = (value: unknown): value is string =>
+  typeof value === "string" && SCOPE_PATTERN.test(value);
+
+function validAssertionRequest(value: BrokerRequest): value is AssertionRequest {
   return (
-    (value.action === "claim" || value.action === "admit" || value.action === "session_enroll") &&
-    (value.action === "session_enroll" || (
-      typeof value.jti === "string" && JTI_PATTERN.test(value.jti)
-    )) &&
-    typeof value.scope === "string" &&
-    SCOPE_PATTERN.test(value.scope)
+    (value.action === "claim" || value.action === "admit") &&
+    typeof value.jti === "string" &&
+    JTI_PATTERN.test(value.jti) &&
+    VALID_SCOPES(value.scope)
   );
+}
+
+function validSessionRequest(value: BrokerRequest): value is SessionRequest {
+  return value.action === "session_enroll" && VALID_SCOPES(value.scope);
 }
 
 /**
@@ -97,7 +116,7 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
     } catch {
       return json({ error: "invalid_request" }, 400);
     }
-    if (!validRequest(data)) {
+    if (!validAssertionRequest(data) && !validSessionRequest(data)) {
       return json({ error: "invalid_request" }, 400);
     }
 
@@ -105,6 +124,24 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
     const now = Date.now();
     if (data.action === "session_enroll") {
       const result = this.ctx.storage.transactionSync(() => {
+        this.sql.exec(
+          "DELETE FROM broker_replays WHERE expires_at < ?",
+          now,
+        );
+        this.sql.exec(
+          "DELETE FROM broker_rates WHERE window_started < ?",
+          now - RATE_WINDOW_MS,
+        );
+        this.sql.exec(
+          "DELETE FROM broker_session_enrollments WHERE enrolled_at < ?",
+          now - ENROLLMENT_RETENTION_MS,
+        );
+        // Enrollment refreshes the sliding retention window, so it spends the
+        // same per-scope budget as an assertion: without it a caller could
+        // keep any number of witnesses alive by re-enrolling in a loop.
+        if (!this.admitScope(scopeHash, now)) {
+          return { state: "rate_limited" } as BrokerReply;
+        }
         const rows = [
           ...this.sql.exec(
             "SELECT scope_hash FROM broker_session_enrollments WHERE scope_hash = ?",
@@ -112,6 +149,16 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           ),
         ];
         if (rows.length > 0) {
+          // Retention is a sliding window anchored to the most recent use, not
+          // to the first enrollment. A pull request can extend its session up
+          // to the 90-day maximum while it stays active, and a witness that
+          // expired mid-session would report a live marker as a first
+          // enrollment.
+          this.sql.exec(
+            "UPDATE broker_session_enrollments SET enrolled_at = ? WHERE scope_hash = ?",
+            now,
+            scopeHash,
+          );
           return { state: "known" } as BrokerReply;
         }
         this.sql.exec(
@@ -151,16 +198,7 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
         }
       }
 
-      const rateRows = [
-        ...this.sql.exec<{ window_started: number; count: number }>(
-          "SELECT window_started, count FROM broker_rates WHERE scope_hash = ?",
-          scopeHash,
-        ),
-      ];
-      const rate = rateRows[0];
-      const windowStarted = rate?.window_started ?? now;
-      const count = rate && now - windowStarted < RATE_WINDOW_MS ? rate.count : 0;
-      if (count >= RATE_LIMIT) {
+      if (!this.admitScope(scopeHash, now)) {
         return { state: "rate_limited" } as BrokerReply;
       }
       if (data.action === "claim") {
@@ -170,21 +208,45 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           now + RETENTION_MS,
         );
       }
-      if (count === 0 || !rate || now - windowStarted >= RATE_WINDOW_MS) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO broker_rates (scope_hash, window_started, count) VALUES (?, ?, 1)",
-          scopeHash,
-          now,
-        );
-      } else {
-        this.sql.exec(
-          "UPDATE broker_rates SET count = ? WHERE scope_hash = ?",
-          count + 1,
-          scopeHash,
-        );
-      }
       return { state: "accepted" } as BrokerReply;
     });
     return json(result);
+  }
+
+  /**
+   * Admit one call for a scope and advance its fixed-window counter.
+   *
+   * Replay and rate claims admit their assertion scope; session enrollment
+   * admits its head-bound scope with the same budget, so a caller cannot keep
+   * a witness alive indefinitely by refreshing it in a loop. Returns false when
+   * the scope has already spent its window.
+   */
+  private admitScope(scopeHash: string, now: number): boolean {
+    const rateRows = [
+      ...this.sql.exec<{ window_started: number; count: number }>(
+        "SELECT window_started, count FROM broker_rates WHERE scope_hash = ?",
+        scopeHash,
+      ),
+    ];
+    const rate = rateRows[0];
+    const windowStarted = rate?.window_started ?? now;
+    const count = rate && now - windowStarted < RATE_WINDOW_MS ? rate.count : 0;
+    if (count >= RATE_LIMIT) {
+      return false;
+    }
+    if (count === 0 || !rate || now - windowStarted >= RATE_WINDOW_MS) {
+      this.sql.exec(
+        "INSERT OR REPLACE INTO broker_rates (scope_hash, window_started, count) VALUES (?, ?, 1)",
+        scopeHash,
+        now,
+      );
+    } else {
+      this.sql.exec(
+        "UPDATE broker_rates SET count = ? WHERE scope_hash = ?",
+        count + 1,
+        scopeHash,
+      );
+    }
+    return true;
   }
 }

@@ -89,6 +89,7 @@
     },
     "convergence_history": {
       "type": "object",
+      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects an envelope whose canonical UTF-8 encoding exceeds MAX_CONVERGENCE_HISTORY_BYTES (2048), which JSON Schema cannot express.",
       "additionalProperties": false,
       "required": ["state", "progress", "provenance"],
       "properties": {
@@ -138,7 +139,7 @@
                 }
               }
             },
-            "reviewed_paths": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}},
+            "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
             "related_paths": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}}
           }
         },
@@ -206,6 +207,38 @@
         "properties": {
           "reservation_id": {"type": "null"},
           "reserved_slot": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"const": "completed"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"required": ["baseline"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"not": {"const": "completed"}}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"not": {"required": ["baseline"]}}
         }
       }
     }

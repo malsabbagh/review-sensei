@@ -99,8 +99,13 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# The verification-scope schema mirrors these bounds; update its parity test
-# whenever the shared metadata budget changes.
+# ADR 0053 bounds the persisted convergence envelope to "at most three stable
+# concern and resolution-criterion digests". The session-record schema mirrors
+# that bound; the runtime baseline keeps the wider shared metadata budget, so
+# only the persisted projection is narrowed here.
+MAX_HISTORY_FINDINGS = 3
+# The verification-scope and session-record schemas mirror these bounds; update
+# their parity tests whenever the shared metadata budget changes.
 
 
 def _require_bool(value: object, *, label: str) -> None:
@@ -302,10 +307,28 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
 
     This is deliberately identity and evidence metadata only: it never carries
     review prompts, diffs, provider output, or rendered finding text.
+
+    The bounds enforced here are the ones the published session-record schema
+    enforces on the persisted envelope. Checking them before serialization
+    keeps a checkpoint that Python accepts from becoming a record the schema
+    rejects on the next read, which would strand the pull request in an
+    unreadable session state.
     """
 
     if not isinstance(baseline, ReviewBaseline):
         raise ReviewInputError("review baseline is invalid")
+    if len(baseline.reviewed_paths) > MAX_CACHE_METADATA_ITEMS:
+        raise ReviewInputError("baseline reviewed paths exceed the persisted bound")
+    if len(baseline.related_paths) > MAX_RELATED_PATHS:
+        raise ReviewInputError("baseline related paths exceed the persisted bound")
+    # The envelope carries a bounded finding set. Selecting by fingerprint is
+    # deterministic and content-derived, so the persisted history does not
+    # depend on provider ordering or on how many retries a run took, and a
+    # review with more findings than the envelope allows still checkpoints
+    # instead of writing a document the schema rejects on the next read.
+    findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
+        :MAX_HISTORY_FINDINGS
+    ]
     key = baseline.cache_key
     return {
         "cache_key": {
@@ -335,11 +358,39 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
                 "generation": finding.generation,
                 "blocking": finding.blocking,
             }
-            for finding in baseline.findings
+            for finding in findings
         ],
         "reviewed_paths": list(baseline.reviewed_paths),
         "related_paths": list(baseline.related_paths),
     }
+
+
+_BASELINE_CACHE_KEY_FIELDS = frozenset(
+    {
+        "repository",
+        "pull_request",
+        "base_sha",
+        "head_sha",
+        "engine",
+        "model",
+        "profile",
+        "stage_digest",
+        "context_digest",
+        "learning_digest",
+    }
+)
+_BASELINE_FINDING_FIELDS = frozenset(
+    {
+        "fingerprint",
+        "resolution_criterion",
+        "concern",
+        "path",
+        "symbol",
+        "defect_kind",
+        "generation",
+        "blocking",
+    }
+)
 
 
 def baseline_from_history_document(value: object) -> ReviewBaseline:
@@ -359,9 +410,20 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
     }
     if set(value) != required or not isinstance(value["cache_key"], dict):
         raise ReviewInputError("persisted baseline has an invalid shape")
+    # F3 trusts this reconstruction, so the persisted shape must be provably
+    # closed: an extra key is never silently dropped and a missing key is
+    # never silently coerced to a BaselineFinding default.
+    if set(value["cache_key"]) != _BASELINE_CACHE_KEY_FIELDS:
+        raise ReviewInputError("persisted baseline has an invalid shape")
+    findings_value = value["findings"]
+    if not isinstance(findings_value, list):
+        raise ReviewInputError("persisted baseline has an invalid shape")
+    for item in findings_value:
+        if not isinstance(item, dict) or set(item) != _BASELINE_FINDING_FIELDS:
+            raise ReviewInputError("persisted baseline has an invalid shape")
     try:
         key = ReviewContextCacheKey(**value["cache_key"])
-        findings = tuple(BaselineFinding(**item) for item in value["findings"])
+        findings = tuple(BaselineFinding(**item) for item in findings_value)
         return ReviewBaseline(
             cache_key=key,
             policy_digest=value["policy_digest"],
@@ -1249,6 +1311,7 @@ __all__ = [
     "INVALIDATION_REASONS",
     "LaterFindingClassification",
     "LINEAGE_REASONS",
+    "MAX_HISTORY_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "ReviewBaseline",

@@ -141,13 +141,13 @@ describe("token broker authorization", () => {
     expect(github.capabilityToken).toHaveBeenCalledWith(
       2468,
       "acme/widgets",
-      { pull_requests: "write", checks: "write" },
+      { pull_requests: "write" },
       false,
     );
     const enrollment = ledgerFetch.mock.calls[2][1] as RequestInit;
     expect(JSON.parse(enrollment.body as string)).toEqual({
       action: "session_enroll",
-      scope: "987654321:7",
+      scope: `987654321:7:${SHA}`,
     });
   });
 
@@ -155,17 +155,32 @@ describe("token broker authorization", () => {
     const { broker, github, ledgerFetch } = harness();
     github.pullRequestHead.mockResolvedValue("c".repeat(40));
 
-    await expect(broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: {
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-      },
-    })).rejects.toThrow("broker_session_head_rejected");
+    let rejection: unknown;
+    await broker
+      .exchange({
+        oidc_token: "signed-jwt",
+        capability: "review_session",
+        session: {
+          repository_id: 987654321,
+          pull_request: 7,
+          head_sha: SHA,
+        },
+      })
+      .catch((error: unknown) => {
+        rejection = error;
+      });
 
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toBe("broker_session_head_rejected");
+    // The failure must not surface a capability token, and it must not reach
+    // the enroll endpoint at all: the head check is what makes recording the
+    // witness safe.
+    expect((rejection as Error).message).not.toContain("ghs_");
     expect(ledgerFetch).toHaveBeenCalledTimes(2);
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_enroll");
   });
 
   it.each([

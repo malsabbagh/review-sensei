@@ -41,6 +41,13 @@ class MemorySql {
       }
       return [];
     }
+    if (normalized.startsWith("DELETE FROM broker_session_enrollments WHERE enrolled_at")) {
+      const threshold = args[0] as number;
+      for (const [key, row] of this.enrollments) {
+        if (row.enrolledAt < threshold) this.enrollments.delete(key);
+      }
+      return [];
+    }
     if (normalized.startsWith("SELECT jti_hash")) {
       return (this.replays.has(args[0] as string)
         ? [{ jti_hash: args[0] }]
@@ -73,6 +80,13 @@ class MemorySql {
     }
     if (normalized.startsWith("INSERT INTO broker_session_enrollments")) {
       this.enrollments.set(args[0] as string, { enrolledAt: args[1] as number });
+      return [];
+    }
+    if (normalized.startsWith("UPDATE broker_session_enrollments SET enrolled_at")) {
+      const existing = this.enrollments.get(args[1] as string);
+      if (existing) {
+        this.enrollments.set(args[1] as string, { enrolledAt: args[0] as number });
+      }
       return [];
     }
     throw new Error(`unexpected SQL: ${normalized}`);
@@ -176,6 +190,108 @@ describe("broker replay and rate ledger", () => {
     expect([...sql.enrollments.keys()]).toHaveLength(1);
     expect([...sql.enrollments.keys()][0]).toMatch(/^[0-9a-f]{64}$/);
     expect(sql.observedArguments).not.toContain("987654321:7");
+  });
+
+  it("rejects malformed session enrollments without persisting rows", async () => {
+    const { ledger, sql } = ledgerHarness();
+
+    const missingScope = await ledger.fetch(
+      new Request("https://broker/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "session_enroll" }),
+      }),
+    );
+    expect(missingScope.status).toBe(400);
+    expect(await missingScope.json()).toEqual({ error: "invalid_request" });
+
+    const nonStringScope = await ledger.fetch(
+      new Request("https://broker/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "session_enroll", scope: 123 }),
+      }),
+    );
+    expect(nonStringScope.status).toBe(400);
+    expect(await nonStringScope.json()).toEqual({ error: "invalid_request" });
+
+    const outOfPatternScope = await enroll(ledger, "has a space");
+    expect(outOfPatternScope.status).toBe(400);
+    expect(await outOfPatternScope.json()).toEqual({ error: "invalid_request" });
+
+    expect(sql.enrollments.size).toBe(0);
+  });
+
+  it("reuses the retention cleanup inside the session enrollment transaction", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    // Stale replay and rate rows from a previous claim must be reclaimed by
+    // the enrollment transaction, while a still-retained replay survives.
+    sql.replays.set("a".repeat(64), { expiresAt: 1_699_999_000_000 });
+    sql.replays.set("b".repeat(64), { expiresAt: 1_700_000_100_000 });
+    sql.rates.set("c".repeat(64), { windowStarted: 1_699_999_000_000, count: 3 });
+
+    expect(await (await enroll(ledger)).json()).toEqual({ state: "enrolled" });
+
+    expect([...sql.replays.keys()]).toEqual(["b".repeat(64)]);
+    // The stale rate row is reclaimed; the only row left is this enrollment's
+    // own admission counter, which now spends the shared per-scope budget.
+    expect([...sql.rates.keys()]).not.toContain("c".repeat(64));
+    expect(sql.rates.size).toBe(1);
+    expect(sql.enrollments.size).toBe(1);
+  });
+
+  it("slides the enrollment retention window on every known lookup", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger } = ledgerHarness();
+    const scope = `987654321:7:${"a".repeat(40)}`;
+
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "enrolled" });
+
+    // An active pull request can keep extending its session, so a known lookup
+    // moves the witness window instead of letting it expire mid-session.
+    clock.mockReturnValue(1_700_000_000_000 + 89 * day);
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "known" });
+
+    clock.mockReturnValue(1_700_000_000_000 + 95 * day);
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "known" });
+  });
+
+  it("bounds how often one scope can refresh its enrollment witness", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    const scope = `987654321:7:${"a".repeat(40)}`;
+
+    for (let index = 1; index <= 10; index += 1) {
+      expect(await (await enroll(ledger, scope)).json()).toEqual({
+        state: index === 1 ? "enrolled" : "known",
+      });
+    }
+    // The sliding retention window cannot be refreshed without bound.
+    expect(await (await enroll(ledger, scope)).json()).toEqual({
+      state: "rate_limited",
+    });
+    expect(sql.enrollments.size).toBe(1);
+  });
+
+  it("prunes enrollment witnesses past the session retention window", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    const retention = 90 * 24 * 60 * 60 * 1000;
+    sql.enrollments.set("expired".padEnd(64, "0"), {
+      enrolledAt: 1_700_000_000_000 - retention - 1,
+    });
+    sql.enrollments.set("retained".padEnd(64, "0"), {
+      enrolledAt: 1_700_000_000_000 - retention + 1,
+    });
+
+    expect(await (await enroll(ledger, "987654321:7:" + "a".repeat(40))).json()).toEqual({
+      state: "enrolled",
+    });
+
+    expect([...sql.enrollments.keys()]).not.toContain("expired".padEnd(64, "0"));
+    expect(sql.enrollments.size).toBe(2);
   });
 
   it("rejects malformed and non-POST requests without persisting them", async () => {

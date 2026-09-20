@@ -473,6 +473,28 @@ def _provider_settings_from_args(
     )
 
 
+def _checkpoint_cache_request(
+    request: ReviewRequest,
+    *,
+    base_sha: str | None,
+    head_sha: str | None,
+) -> ReviewRequest:
+    """Return the request the durable checkpoint binds to the trusted SHAs.
+
+    The live inference request deliberately stays unbound: ADR 0053 keeps F2 off
+    the inference path, so `service.run` must never derive coverage or cache
+    identity from the trusted SHAs. Only this copy carries them, and it is used
+    solely to derive the checkpoint cache key, which keeps the invariant in one
+    place instead of depending on where a caller happens to build the key.
+    """
+
+    return replace(
+        request,
+        base_sha=(base_sha or "").strip().lower() or None,
+        head_sha=(head_sha or "").strip().lower() or None,
+    )
+
+
 def _transaction_provider_identity(
     settings: ProviderSettings,
 ) -> tuple[dict[str, object], str | None]:
@@ -2532,8 +2554,6 @@ def main(argv: list[str] | None = None) -> int:
             diff=diff,
             repository=args.repository,
             pull_request_number=args.pull_request,
-            base_sha=(args.base_sha or "").strip().lower() or None,
-            head_sha=(args.head_sha or "").strip().lower() or None,
             title=args.title,
             instructions=args.instructions,
             model=args.model,
@@ -2717,9 +2737,18 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     from .baseline import baseline_from_review
                     from .context import build_review_context_cache_key
+                    from .session import next_session_generation
 
+                    if prepared_round.record is None:
+                        raise ReviewInputError(
+                            "prepared review transaction has no session record"
+                        )
                     cache_key = build_review_context_cache_key(
-                        request,
+                        _checkpoint_cache_request(
+                            request,
+                            base_sha=args.base_sha,
+                            head_sha=args.head_sha,
+                        ),
                         provider_name=provider.name,
                         stages=service.stages,
                     )
@@ -2728,7 +2757,7 @@ def main(argv: list[str] | None = None) -> int:
                             result,
                             cache_key=cache_key,
                             policy=policy,
-                            generation=prepared_round.record.generation + 1,
+                            generation=next_session_generation(prepared_round.record),
                         )
                         if cache_key is not None
                         else None

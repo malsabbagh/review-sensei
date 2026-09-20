@@ -138,11 +138,7 @@ def _stored_convergence_history(
     if state not in _CONVERGENCE_HISTORY_STATES:
         raise ReviewInputError("session convergence history state is invalid")
     baseline = normalized.get("baseline")
-    if state == "completed" and not isinstance(baseline, Mapping):
-        raise ReviewInputError("completed session history requires a baseline")
     if baseline is not None:
-        if not isinstance(baseline, dict):
-            raise ReviewInputError("session history baseline is invalid")
         # Keep the in-process constructor as strict as the public schema.  A
         # record can be constructed without an untrusted-document round trip,
         # so schema validation alone cannot protect this boundary.
@@ -170,6 +166,31 @@ def _stored_convergence_history(
     if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
         raise ReviewInputError("session history ledger_digest is invalid")
     return cast(dict[str, object], normalized)
+
+
+def _validate_convergence_history_baseline(
+    value: Mapping[str, object] | None,
+) -> None:
+    """Enforce the state/baseline presence rule on an integrity-checked record.
+
+    The rule runs after ``record_sha256`` verification so a tampered envelope
+    still reports the integrity failure, while a forged-but-consistent
+    document cannot smuggle a baseline through a non-completed state.
+    """
+
+    if value is None:
+        return
+    state = value.get("state")
+    baseline = value.get("baseline")
+    if state == "completed" and not isinstance(baseline, Mapping):
+        raise ReviewInputError("completed session history requires a baseline")
+    if state != "completed" and "baseline" in value:
+        # The persisted history is closed: only a completed review may carry a
+        # baseline, mirroring the public schema's presence rule so an
+        # invalidated or recovery-required state cannot smuggle one through.
+        raise ReviewInputError(
+            "session history baseline is only valid for a completed state"
+        )
 
 
 def _stored_dispositions(
@@ -496,6 +517,15 @@ class SessionRecord:
             raise ReviewInputError("legacy session record has C6 fields")
         if self._digest_shape == "operator-paused" and self.dispositions:
             raise ReviewInputError("operator-paused session record has dispositions")
+        if self._digest_shape != "current" and self.convergence_history is not None:
+            # Only the current payload covers the convergence history, so a
+            # record carrying one must never be written under the legacy or
+            # operator-paused digest shape. Otherwise an in-place upgrade of an
+            # older record would re-serialize the envelope while keeping a
+            # digest computed without it.
+            raise ReviewInputError(
+                "session convergence history requires the current digest shape"
+            )
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -503,6 +533,7 @@ class SessionRecord:
         }[self._digest_shape]()
         if self.record_sha256 != _digest_payload(expected_payload):
             raise ReviewInputError("session record integrity check failed")
+        _validate_convergence_history_baseline(self.convergence_history)
         if (
             len(
                 json.dumps(
@@ -964,6 +995,15 @@ class SessionLedger(Protocol):
         now: datetime | None = None,
     ) -> SessionRecord: ...
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Recover an expired or witness-only session so a new one can enroll."""
+        ...
+
 
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
     if slot == "initial":
@@ -983,6 +1023,18 @@ def _next_generation(record: SessionRecord) -> int:
     if record.generation >= MAX_GENERATION:
         raise ReviewInputError("session generation is exhausted")
     return record.generation + 1
+
+
+def next_session_generation(record: SessionRecord) -> int:
+    """Return the generation the next checkpoint will advance this record to.
+
+    Callers that build a baseline envelope for a checkpoint need this value
+    before the session layer verifies it. Recomputing ``generation + 1`` at the
+    call site would duplicate an invariant this module owns, so the caller asks
+    for it here instead.
+    """
+
+    return _next_generation(record)
 
 
 def mutate_reserved(
@@ -1123,8 +1175,13 @@ def prepare_session_round(
     if loaded.status == "missing":
         record = ledger.initialize(identity, now=now)
     elif loaded.status == "expired":
+        # An expired budget stays authoritative instead of being silently
+        # reinitialized. Name the operator recovery step so hosted and CLI
+        # runs surface an actionable message rather than an internal error.
         raise ReviewInputError(
-            "session ledger load failed: expired; authenticated recovery is required"
+            "session ledger load failed: expired; authenticated recovery is "
+            "required: re-enroll the session or explicitly replace the "
+            "expired session marker"
         )
     elif loaded.status in {"ok", "migrated"} and loaded.record is not None:
         record = loaded.record
@@ -1749,6 +1806,22 @@ class InMemorySessionLedger:
         self._records[(identity.repository, identity.pull_request)] = record
         return record
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Recover an expired or absent in-memory session and enroll a fresh one."""
+
+        loaded = self.load(identity, now=now)
+        if loaded.status not in {"expired", "missing"}:
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
+        self._records.pop((identity.repository, identity.pull_request), None)
+        return self.initialize(identity, now=now)
+
     def replace(
         self,
         identity: SessionIdentity,
@@ -1848,6 +1921,11 @@ class LocalSessionLedger:
     claim inter-process locking; concurrent hosted jobs should use the
     GitHub-backed adapter instead, whose hosted checks are also best-effort
     unless the deployment serializes writers.
+
+    Recovery from an expired session is explicit: ``reenroll`` is the only
+    operation that may retire an expired record and its enrollment witness, and
+    it refuses every other load status. No admission path re-creates a session
+    that merely expired.
     """
 
     SINGLE_WRITER_PER_IDENTITY = True
@@ -1877,6 +1955,38 @@ class LocalSessionLedger:
         # an established local session into a fresh enrollment.
         return self.root / ".enrollments" / f"{digest}.v1"
 
+    def _enrollment_directory(self) -> Path:
+        """Return the witness directory after containment and symlink checks.
+
+        The witness is read on every load and written on every enrollment, so
+        it gets the same discipline as the record path: a pre-existing symlink
+        or a directory that resolves outside the operator-supplied root must
+        never let that read or write escape the ledger.
+        """
+
+        root = self.root.resolve()
+        directory = self.root / ".enrollments"
+        if directory.is_symlink():
+            raise ReviewInputError("session enrollment directory is invalid")
+        resolved = directory.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ReviewInputError(
+                "session enrollment directory is outside the ledger root"
+            )
+        if resolved.exists() and not resolved.is_dir():
+            raise ReviewInputError("session enrollment directory is invalid")
+        return resolved
+
+    def _validated_enrollment_path(self, identity: SessionIdentity) -> Path:
+        """Return the witness path after rejecting symlinks and non-files."""
+
+        path = self._enrollment_directory() / self._enrollment_path(identity).name
+        if path.is_symlink():
+            raise ReviewInputError("session enrollment witness is invalid")
+        if path.exists() and not path.is_file():
+            raise ReviewInputError("session enrollment witness is invalid")
+        return path
+
     @staticmethod
     def _enrollment_witness(identity: SessionIdentity) -> bytes:
         return (
@@ -1890,7 +2000,7 @@ class LocalSessionLedger:
 
     def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
         try:
-            raw = self._enrollment_path(identity).read_bytes()
+            raw = self._validated_enrollment_path(identity).read_bytes()
         except FileNotFoundError:
             return False
         except OSError as exc:
@@ -1901,8 +2011,56 @@ class LocalSessionLedger:
             raise ReviewInputError("session enrollment witness is invalid")
         return True
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Recover this identity from an expired or witness-only session.
+
+        Authenticated recovery covers exactly two states: a record that expired,
+        and the enrollment witness without a record, which is the deleted-record
+        state the witness exists to detect. Any other status -- a live session,
+        an ambiguous marker, or a record that is present but unreadable -- needs
+        investigation rather than a reset, and resetting one would trade a
+        recoverable problem for a fresh session budget. The witness is removed
+        first so an interrupted recovery leaves a loadable expired record
+        instead of a witness with no record.
+        """
+
+        # An expired load deliberately withholds the record, so recovery keys
+        # off the status and the on-disk record rather than off a record this
+        # adapter refuses to hand back.
+        loaded = self.load(identity, now=now)
+        witness_only = (
+            loaded.status == "integrity-failed" and not self._path(identity).exists()
+        )
+        if loaded.status != "expired" and not witness_only:
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
+        witness = self._validated_enrollment_path(identity)
+        try:
+            witness.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ReviewInputError(
+                "session enrollment witness could not be retired"
+            ) from exc
+        try:
+            self._path(identity).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ReviewInputError(
+                "expired session record could not be retired"
+            ) from exc
+        return self.initialize(identity, now=now)
+
     def _create_enrollment_witness(self, identity: SessionIdentity) -> None:
-        path = self._enrollment_path(identity)
+        path = self._validated_enrollment_path(identity)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb") as handle:
@@ -1920,7 +2078,13 @@ class LocalSessionLedger:
                 raise ReviewInputError(
                     "session already exists (concurrent initialization)"
                 ) from exc
-            raise ReviewInputError("session enrollment witness already exists") from exc
+            # The witness is present but no record exists yet: another
+            # initializer won the race before writing its record, or the
+            # record was deleted after enrollment. Fail closed either way.
+            raise ReviewInputError(
+                "session enrollment witness already exists without a session "
+                "record; concurrent initialization may be in progress"
+            ) from exc
         except OSError as exc:
             raise ReviewInputError(
                 "session enrollment witness could not be written"

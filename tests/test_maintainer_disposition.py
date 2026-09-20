@@ -24,6 +24,7 @@ from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    prepare_session_round,
 )
 
 FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
@@ -59,6 +60,8 @@ class MaintainerCommandParseTests(unittest.TestCase):
         )
         self.assertEqual(dismissed.action, "dismiss")
         self.assertEqual(dismissed.reason, "accepted architecture")
+        reenroll = parse_maintainer_command("@sensei review reenroll", actor="alice")
+        self.assertEqual(reenroll.action, "reenroll")
 
     def test_unknown_or_bot_self_commands_are_ignored(self):
         self.assertIsNone(
@@ -198,6 +201,37 @@ class SessionCommandTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         self.assertTrue(committed.operator_paused)
+
+    def test_reenroll_recovers_an_expired_session_and_refuses_live_ones(self):
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalSessionLedger(Path(temp_dir))
+            ledger.initialize(IDENTITY, now=FIXED_NOW - timedelta(days=31))
+            command = parse_maintainer_command("@sensei review reenroll", actor="alice")
+            record, result = apply_session_command(
+                ledger, IDENTITY, command, now=FIXED_NOW
+            )
+            self.assertTrue(result.applied)
+            self.assertEqual(result.action, "reenroll")
+            self.assertEqual(record.generation, 0)
+            self.assertIn("session re-enrolled", result.summary)
+            # The recovered session admits a round again, which is what makes
+            # this the documented operator path out of an expired budget.
+            prepared = prepare_session_round(
+                ledger,
+                IDENTITY,
+                ReviewConvergencePolicy(mode="merge-focused"),
+                reservation_id="abcd1234",
+                now=FIXED_NOW,
+            )
+            self.assertTrue(prepared.decision.admit)
+            # A live session is not silently re-enrolled: recovery is only for
+            # state an operator has confirmed is expired.
+            with self.assertRaisesRegex(
+                ReviewInputError, "only an expired or witness-only session"
+            ):
+                apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
 
     def test_verify_does_not_unpause_without_evidence(self):
         ledger = InMemorySessionLedger()
