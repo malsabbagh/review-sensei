@@ -623,9 +623,26 @@ class ReviewService:
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
-        """Execute one review and always return a structured ``RunOutcome``."""
+        """Execute one review and always return a structured ``RunOutcome``.
+
+        When supplied, ``current_key`` must be the canonical key for this
+        request, active provider, stage configuration, and profile.  It is a
+        caller-visible identity seam used by incremental coverage, so reject a
+        mismatched key before change orchestration or any provider/cache work.
+        """
 
         active_provider = provider_override or self.provider
+        canonical_key = build_review_context_cache_key(
+            request,
+            provider_name=active_provider.name,
+            stages=self.stages,
+            profile=profile,
+        )
+        if current_key is not None and current_key != canonical_key:
+            raise ReviewInputError(
+                "current_key does not match the review request or configuration"
+            )
+        current_key = canonical_key
         if tracker is None:
             effective_budget = budget if budget is not None else self.budget
             tracker = ResourceBudgetTracker(

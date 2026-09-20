@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 
 from review_sensei import ReviewCategory, ReviewDocument, ReviewLensContext, Stage
 from review_sensei.context import (
@@ -845,6 +846,52 @@ class ReviewServiceTests(unittest.TestCase):
             head_sha="c" * 40,
             model="fake-model",
         )
+
+    def test_explicit_current_key_must_match_canonical_review_identity(self):
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        request = self._current_request()
+        current_key = build_review_context_cache_key(
+            request,
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert current_key is not None
+
+        accepted = service.run(request, current_key=current_key)
+        self.assertIsNone(accepted.error)
+
+        mismatches = {
+            "provider": replace(current_key, engine="other-provider"),
+            "model": replace(current_key, model="other-model"),
+            "profile": replace(current_key, profile="other-profile"),
+            "stage": replace(current_key, stage_digest="a" * 64),
+            "context": replace(current_key, context_digest="b" * 64),
+            "learning": replace(current_key, learning_digest="c" * 64),
+            "repository": replace(current_key, repository="other/repo"),
+            "head": replace(current_key, head_sha="d" * 40),
+        }
+        for label, mismatched in mismatches.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ReviewInputError, "current_key"):
+                    service.run(request, current_key=mismatched)
+
+    def test_current_key_mismatch_is_rejected_before_chunk_orchestration(self):
+        provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
+        service = ReviewService(provider)
+        request = replace(self._current_request(), orchestrate_large_changes=True)
+        current_key = build_review_context_cache_key(
+            request,
+            provider_name=provider.name,
+            stages=service.stages,
+        )
+        assert current_key is not None
+        with self.assertRaisesRegex(ReviewInputError, "current_key"):
+            service.run(
+                request,
+                current_key=replace(current_key, head_sha="e" * 40),
+            )
+        self.assertEqual(provider.requests, [])
 
     @staticmethod
     def _previous_finding():

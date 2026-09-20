@@ -565,6 +565,53 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(reviewer.calls, [])
         self.assertIsNone(ledger.load(identity).record.reservation_id)
 
+    def test_publish_review_handoffs_when_prior_operator_record_lacks_history(self):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        ledger.initialize(identity)
+        ledger.replace(
+            identity,
+            lambda record: record.evolve(
+                completed_initial_reviews=1,
+                generation=1,
+            ),
+        )
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        reviewer = RecordingReviewer()
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            app_slug="review-sensei[bot]",
+            convergence_policy=policy,
+        )
+
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
+        self.assertIsNone(ledger.load(identity).record.reservation_id)
+
     def test_recover_review_rejects_operator_modes(self):
         head = "b" * 40
         result = ReviewResult(

@@ -438,12 +438,18 @@ class GitHubApplication:
                 record_for_baseline = (
                     prepared.record if prepared is not None else transaction_record
                 )
-                if durable_baseline is None and record_for_baseline is not None:
+                if (
+                    durable_baseline is None
+                    and record_for_baseline is not None
+                    and record_for_baseline.completed_initial_reviews > 0
+                ):
                     history = record_for_baseline.convergence_history
-                    if (
+                    if not (
                         isinstance(history, Mapping)
                         and history.get("state") == "completed"
                     ):
+                        baseline_recovery_required = True
+                    else:
                         try:
                             durable_baseline = baseline_from_history_document(
                                 history.get("baseline")
