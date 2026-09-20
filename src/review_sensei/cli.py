@@ -2532,8 +2532,6 @@ def main(argv: list[str] | None = None) -> int:
             diff=diff,
             repository=args.repository,
             pull_request_number=args.pull_request,
-            base_sha=(args.base_sha or "").strip().lower() or None,
-            head_sha=(args.head_sha or "").strip().lower() or None,
             title=args.title,
             instructions=args.instructions,
             model=args.model,
@@ -2661,8 +2659,20 @@ def main(argv: list[str] | None = None) -> int:
                     from .baseline import baseline_from_review
                     from .context import build_review_context_cache_key
 
+                    if prepared_round.record is None:
+                        raise ReviewInputError(
+                            "prepared review transaction has no session record"
+                        )
+                    # The live inference request deliberately stays unbound to
+                    # the trusted SHAs (ADR 0053 keeps F2 off the inference
+                    # path). Only the durable checkpoint binds the identity
+                    # the transaction already carries.
                     cache_key = build_review_context_cache_key(
-                        request,
+                        replace(
+                            request,
+                            base_sha=(args.base_sha or "").strip().lower() or None,
+                            head_sha=(args.head_sha or "").strip().lower() or None,
+                        ),
                         provider_name=provider.name,
                         stages=service.stages,
                     )

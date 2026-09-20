@@ -5,13 +5,16 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei.baseline import ReviewBaseline, baseline_from_history_document
 from review_sensei.cli import _parser, _transaction_provider_identity, main
-from review_sensei.context import ReviewContextCacheKey
+from review_sensei.context import (
+    ReviewContextCacheKey,
+    build_review_context_cache_key,
+)
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
@@ -36,6 +39,11 @@ from review_sensei.session import (
     reclaim_abandoned_review_transaction,
     session_reservation_id,
 )
+
+try:
+    from fake_github_http import json_response, make_http
+except ImportError:
+    from tests.fake_github_http import json_response, make_http
 
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 IDENTITY = SessionIdentity("owner/repo", 146, repository_id=99)
@@ -587,6 +595,266 @@ class ReviewTransactionTests(unittest.TestCase):
                 record.transaction.result_sha256,
                 ReviewResult.from_dict(rendered).content_digest(),
             )
+
+    def test_cli_checkpoint_completes_without_a_cache_key(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def create(self, settings):
+                return self.provider
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            provider = RecordingProvider()
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(provider),
+                ),
+                patch(
+                    "review_sensei.context.build_review_context_cache_key",
+                    return_value=None,
+                ),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(provider.calls, 1)
+            # The durable checkpoint still runs when no cache key can be
+            # derived; the transaction simply advances without a baseline
+            # envelope instead of failing on the prepared round.
+            self.assertEqual(rendered["transaction"]["phase"], "publication_pending")
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(record.completed_initial_reviews, 1)
+            self.assertIsNone(record.reservation_id)
+            self.assertIsNone(record.convergence_history)
+
+    def test_cli_transaction_checkpoint_binds_shas_off_the_live_request(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def create(self, settings):
+                return self.provider
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            provider = RecordingProvider()
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(provider),
+                ),
+                patch(
+                    "review_sensei.service.build_review_context_cache_key",
+                    side_effect=build_review_context_cache_key,
+                ) as live_key,
+                patch(
+                    "review_sensei.context.build_review_context_cache_key",
+                    side_effect=build_review_context_cache_key,
+                ) as checkpoint_key,
+            ):
+                self.assertEqual(main(argv), 0)
+
+            # ADR 0053 keeps F2 off the live inference path: the request the
+            # service derives its coverage decision from stays unbound to the
+            # trusted SHAs.
+            self.assertTrue(live_key.called)
+            for call in live_key.call_args_list:
+                self.assertIsNone(call.args[0].base_sha)
+                self.assertIsNone(call.args[0].head_sha)
+            # Only the durable checkpoint binds the identity the transaction
+            # already carries.
+            self.assertEqual(len(checkpoint_key.call_args_list), 1)
+            checkpoint_request = checkpoint_key.call_args_list[0].args[0]
+            self.assertEqual(checkpoint_request.base_sha, BASE_SHA)
+            self.assertEqual(checkpoint_request.head_sha, HEAD_SHA)
+
+    def test_cli_expired_ledger_names_the_recovery_action(self):
+        class UnconstructedProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+        class RecordingRegistry:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def create(self, settings):
+                raise AssertionError(
+                    "an expired session ledger must fail before inference"
+                )
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            LocalSessionLedger(ledger_path).initialize(
+                IDENTITY, now=NOW - timedelta(days=31)
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--no-learning-proposals",
+            ]
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(UnconstructedProvider()),
+                ),
+                redirect_stderr(stderr),
+            ):
+                self.assertEqual(main(argv), 1)
+
+            message = stderr.getvalue()
+            self.assertIn("review-sensei:", message)
+            self.assertIn("expired", message)
+            self.assertIn("recovery is required", message)
+            self.assertIn("re-enroll", message)
 
     def test_cli_ledger_without_context_output_keeps_non_transaction_path(self):
         class RecordingProvider:
@@ -1196,6 +1464,60 @@ class PublicationTransactionTests(unittest.TestCase):
                 evidence_context=EVIDENCE,
             )
         self.assertEqual(broker.exchanges, 0)
+
+    def test_application_refuses_a_deleted_hosted_marker_before_recreation(self):
+        result = _checkpoint(InMemorySessionLedger())
+
+        class Broker:
+            def open_session(self, exchange_input, **kwargs):
+                return type(
+                    "Session", (), {"token": "session-token", "state": "known"}
+                )()
+
+            def exchange(self, exchange_input, *, capability=None):
+                return "publish-token"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                raise AssertionError(
+                    "a deleted session marker must stop before publish"
+                )
+
+        http, calls = make_http([json_response([])])
+        application = GitHubApplication(
+            broker=Broker(),
+            http=http,
+            reviewer=Reviewer(),
+            learner=_Noop(),
+            replier=_Noop(),
+        )
+        with self.assertRaisesRegex(
+            GitHubPublicationError,
+            "marker is missing; authenticated recovery is required",
+        ):
+            application.publish_review(
+                options=GitHubWriteOptions(
+                    auto_review=True,
+                    github_writes=True,
+                    github_session_ledger=True,
+                ),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=result,
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                convergence_policy=POLICY,
+                configuration_context=CONFIGURATION,
+                evidence_context=EVIDENCE,
+            )
+        # The identity-bound flow must fail closed on the read-only load
+        # before any ledger call can re-create the deleted session comment.
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
 
     def test_application_reuses_checkpoint_without_reservation_or_inference(self):
         ledger = InMemorySessionLedger()

@@ -211,10 +211,15 @@ class GitHubApplication:
         exchange_input = oidc_token or self.broker.request_oidc_token()
         session_token: str | None = None
         session_state: str | None = None
+        hosted_session_ledger = (
+            options.github_session_ledger and self.session_ledger is None
+        )
         # Session mutation is separate authority from review publication. A
         # hosted comment ledger first obtains a broker-attested, current-head
         # session token, while the publisher receives review_publish below.
-        if options.github_session_ledger and self.session_ledger is None:
+        # The ledger adapter is never allowed to fall back to the publication
+        # capability token.
+        if hosted_session_ledger:
             session = self.broker.open_session(
                 exchange_input,
                 repository_id=repository_id,
@@ -223,10 +228,27 @@ class GitHubApplication:
             )
             session_token = session.token
             session_state = session.state
+            if not isinstance(session_token, str) or not session_token.strip():
+                raise GitHubPublicationError(
+                    "hosted session ledger requires a broker-attested session token"
+                )
         token = self.broker.exchange(exchange_input, capability="review_publish")
         ledger = self._session_ledger_for_token(
-            session_token or token, options=options, app_slug=app_slug
+            session_token if session_token is not None else token,
+            options=options,
+            app_slug=app_slug,
         )
+        if (
+            ledger is not None
+            and session_state == "known"
+            and ledger.load(identity).status == "missing"
+        ):
+            # The broker's authenticated witness says this session already
+            # exists, so a missing marker means the comment was deleted. Fail
+            # closed before any ledger call below can re-create it.
+            raise GitHubPublicationError(
+                "session ledger marker is missing; authenticated recovery is required"
+            )
         if (
             transaction_record is None
             and ledger is not None
@@ -316,10 +338,6 @@ class GitHubApplication:
             if not isinstance(head_sha, str) or not head_sha.strip():
                 raise GitHubPublicationError(
                     "session ledger requires a non-empty head_sha"
-                )
-            if session_state == "known" and ledger.load(identity).status == "missing":
-                raise GitHubPublicationError(
-                    "session ledger marker is missing; authenticated recovery is required"
                 )
             try:
                 prepared = prepare_session_round(

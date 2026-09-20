@@ -342,6 +342,34 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     }
 
 
+_BASELINE_CACHE_KEY_FIELDS = frozenset(
+    {
+        "repository",
+        "pull_request",
+        "base_sha",
+        "head_sha",
+        "engine",
+        "model",
+        "profile",
+        "stage_digest",
+        "context_digest",
+        "learning_digest",
+    }
+)
+_BASELINE_FINDING_FIELDS = frozenset(
+    {
+        "fingerprint",
+        "resolution_criterion",
+        "concern",
+        "path",
+        "symbol",
+        "defect_kind",
+        "generation",
+        "blocking",
+    }
+)
+
+
 def baseline_from_history_document(value: object) -> ReviewBaseline:
     """Rebuild one bounded baseline after a fresh durable-ledger load."""
 
@@ -359,9 +387,20 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
     }
     if set(value) != required or not isinstance(value["cache_key"], dict):
         raise ReviewInputError("persisted baseline has an invalid shape")
+    # F3 trusts this reconstruction, so the persisted shape must be provably
+    # closed: an extra key is never silently dropped and a missing key is
+    # never silently coerced to a BaselineFinding default.
+    if set(value["cache_key"]) != _BASELINE_CACHE_KEY_FIELDS:
+        raise ReviewInputError("persisted baseline has an invalid shape")
+    findings_value = value["findings"]
+    if not isinstance(findings_value, list):
+        raise ReviewInputError("persisted baseline has an invalid shape")
+    for item in findings_value:
+        if not isinstance(item, dict) or set(item) != _BASELINE_FINDING_FIELDS:
+            raise ReviewInputError("persisted baseline has an invalid shape")
     try:
         key = ReviewContextCacheKey(**value["cache_key"])
-        findings = tuple(BaselineFinding(**item) for item in value["findings"])
+        findings = tuple(BaselineFinding(**item) for item in findings_value)
         return ReviewBaseline(
             cache_key=key,
             policy_digest=value["policy_digest"],

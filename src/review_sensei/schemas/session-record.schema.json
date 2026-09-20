@@ -208,6 +208,38 @@
           "reserved_slot": {"type": "null"}
         }
       }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"const": "completed"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"required": ["baseline"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence_history"],
+        "properties": {
+          "convergence_history": {
+            "required": ["state"],
+            "properties": {"state": {"not": {"const": "completed"}}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "convergence_history": {"not": {"required": ["baseline"]}}
+        }
+      }
     }
   ]
 }

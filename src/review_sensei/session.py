@@ -138,11 +138,7 @@ def _stored_convergence_history(
     if state not in _CONVERGENCE_HISTORY_STATES:
         raise ReviewInputError("session convergence history state is invalid")
     baseline = normalized.get("baseline")
-    if state == "completed" and not isinstance(baseline, Mapping):
-        raise ReviewInputError("completed session history requires a baseline")
     if baseline is not None:
-        if not isinstance(baseline, dict):
-            raise ReviewInputError("session history baseline is invalid")
         # Keep the in-process constructor as strict as the public schema.  A
         # record can be constructed without an untrusted-document round trip,
         # so schema validation alone cannot protect this boundary.
@@ -170,6 +166,31 @@ def _stored_convergence_history(
     if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
         raise ReviewInputError("session history ledger_digest is invalid")
     return cast(dict[str, object], normalized)
+
+
+def _validate_convergence_history_baseline(
+    value: Mapping[str, object] | None,
+) -> None:
+    """Enforce the state/baseline presence rule on an integrity-checked record.
+
+    The rule runs after ``record_sha256`` verification so a tampered envelope
+    still reports the integrity failure, while a forged-but-consistent
+    document cannot smuggle a baseline through a non-completed state.
+    """
+
+    if value is None:
+        return
+    state = value.get("state")
+    baseline = value.get("baseline")
+    if state == "completed" and not isinstance(baseline, Mapping):
+        raise ReviewInputError("completed session history requires a baseline")
+    if state != "completed" and "baseline" in value:
+        # The persisted history is closed: only a completed review may carry a
+        # baseline, mirroring the public schema's presence rule so an
+        # invalidated or recovery-required state cannot smuggle one through.
+        raise ReviewInputError(
+            "session history baseline is only valid for a completed state"
+        )
 
 
 def _stored_dispositions(
@@ -503,6 +524,7 @@ class SessionRecord:
         }[self._digest_shape]()
         if self.record_sha256 != _digest_payload(expected_payload):
             raise ReviewInputError("session record integrity check failed")
+        _validate_convergence_history_baseline(self.convergence_history)
         if (
             len(
                 json.dumps(
@@ -1123,8 +1145,13 @@ def prepare_session_round(
     if loaded.status == "missing":
         record = ledger.initialize(identity, now=now)
     elif loaded.status == "expired":
+        # An expired budget stays authoritative instead of being silently
+        # reinitialized. Name the operator recovery step so hosted and CLI
+        # runs surface an actionable message rather than an internal error.
         raise ReviewInputError(
-            "session ledger load failed: expired; authenticated recovery is required"
+            "session ledger load failed: expired; authenticated recovery is "
+            "required: re-enroll the session or explicitly replace the "
+            "expired session marker"
         )
     elif loaded.status in {"ok", "migrated"} and loaded.record is not None:
         record = loaded.record
@@ -1920,7 +1947,13 @@ class LocalSessionLedger:
                 raise ReviewInputError(
                     "session already exists (concurrent initialization)"
                 ) from exc
-            raise ReviewInputError("session enrollment witness already exists") from exc
+            # The witness is present but no record exists yet: another
+            # initializer won the race before writing its record, or the
+            # record was deleted after enrollment. Fail closed either way.
+            raise ReviewInputError(
+                "session enrollment witness already exists without a session "
+                "record; concurrent initialization may be in progress"
+            ) from exc
         except OSError as exc:
             raise ReviewInputError(
                 "session enrollment witness could not be written"

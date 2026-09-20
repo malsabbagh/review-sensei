@@ -178,6 +178,52 @@ describe("broker replay and rate ledger", () => {
     expect(sql.observedArguments).not.toContain("987654321:7");
   });
 
+  it("rejects malformed session enrollments without persisting rows", async () => {
+    const { ledger, sql } = ledgerHarness();
+
+    const missingScope = await ledger.fetch(
+      new Request("https://broker/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "session_enroll" }),
+      }),
+    );
+    expect(missingScope.status).toBe(400);
+    expect(await missingScope.json()).toEqual({ error: "invalid_request" });
+
+    const nonStringScope = await ledger.fetch(
+      new Request("https://broker/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "session_enroll", scope: 123 }),
+      }),
+    );
+    expect(nonStringScope.status).toBe(400);
+    expect(await nonStringScope.json()).toEqual({ error: "invalid_request" });
+
+    const outOfPatternScope = await enroll(ledger, "has a space");
+    expect(outOfPatternScope.status).toBe(400);
+    expect(await outOfPatternScope.json()).toEqual({ error: "invalid_request" });
+
+    expect(sql.enrollments.size).toBe(0);
+  });
+
+  it("reuses the retention cleanup inside the session enrollment transaction", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    // Stale replay and rate rows from a previous claim must be reclaimed by
+    // the enrollment transaction, while a still-retained replay survives.
+    sql.replays.set("a".repeat(64), { expiresAt: 1_699_999_000_000 });
+    sql.replays.set("b".repeat(64), { expiresAt: 1_700_000_100_000 });
+    sql.rates.set("c".repeat(64), { windowStarted: 1_699_999_000_000, count: 3 });
+
+    expect(await (await enroll(ledger)).json()).toEqual({ state: "enrolled" });
+
+    expect([...sql.replays.keys()]).toEqual(["b".repeat(64)]);
+    expect(sql.rates.size).toBe(0);
+    expect(sql.enrollments.size).toBe(1);
+  });
+
   it("rejects malformed and non-POST requests without persisting them", async () => {
     const { ledger, sql } = ledgerHarness();
     const method = await ledger.fetch(new Request("https://broker/claim"));

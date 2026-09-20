@@ -130,6 +130,59 @@ class SessionRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "unknown fields"):
             SessionRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
 
+    def test_completed_convergence_history_requires_a_baseline(self):
+        history = self._history()
+        del history["baseline"]
+        with self.assertRaisesRegex(ReviewInputError, "requires a baseline"):
+            SessionRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
+
+    def test_non_completed_convergence_history_rejects_a_baseline(self):
+        invalidated = self._history()
+        invalidated["state"] = "invalidated"
+        with self.assertRaisesRegex(
+            ReviewInputError, "only valid for a completed state"
+        ):
+            SessionRecord.create(
+                IDENTITY, now=FIXED_NOW, convergence_history=invalidated
+            )
+        recovery = self._history()
+        recovery["state"] = "recovery-required"
+        recovery["baseline"] = None
+        with self.assertRaisesRegex(
+            ReviewInputError, "only valid for a completed state"
+        ):
+            SessionRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=recovery)
+
+    def test_baseline_reconstruction_rejects_unclosed_shapes(self):
+        document = self._history()["baseline"]
+        assert isinstance(document, dict)
+        # An extra cache_key field must not be silently dropped.
+        broken = json.loads(json.dumps(document))
+        broken["cache_key"]["engine_extra"] = "field"
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            baseline_from_history_document(broken)
+        # A missing cache_key field must not be silently coerced.
+        broken = json.loads(json.dumps(document))
+        del broken["cache_key"]["model"]
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            baseline_from_history_document(broken)
+        # An unexpected extra finding-level field must not be dropped either.
+        broken = json.loads(json.dumps(document))
+        broken["findings"][0]["resolution_criterion_extra"] = "field"
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            baseline_from_history_document(broken)
+        # A missing finding field must not fall back to a BaselineFinding default.
+        broken = json.loads(json.dumps(document))
+        del broken["findings"][0]["blocking"]
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            baseline_from_history_document(broken)
+        # Findings are only durable as a JSON array; a tuple is not the
+        # persisted shape even though BaselineFinding would accept its items.
+        broken = json.loads(json.dumps(document))
+        broken["findings"] = tuple(broken["findings"])
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            baseline_from_history_document(broken)
+
     def test_create_round_trips_and_rejects_tampering(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         restored = SessionRecord.from_dict(record.to_dict())
@@ -417,6 +470,22 @@ class LocalSessionLedgerTests(unittest.TestCase):
             second, "load", return_value=SessionLoadResult(status="missing")
         ):
             with self.assertRaisesRegex(ReviewInputError, "concurrent initialization"):
+                second.initialize(IDENTITY, now=FIXED_NOW)
+
+    def test_initialize_reports_a_witness_race_without_a_record(self):
+        # Run A wins the enrollment witness but has not yet written its
+        # record. Run B loses the exclusive create and must fail closed with
+        # the actual on-disk state instead of claiming a finished session.
+        self.ledger._create_enrollment_witness(IDENTITY)
+        self.assertFalse(self.ledger._path(IDENTITY).exists())
+        second = LocalSessionLedger(Path(self.temp.name))
+        with patch.object(
+            second, "load", return_value=SessionLoadResult(status="missing")
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "witness already exists without a session record",
+            ):
                 second.initialize(IDENTITY, now=FIXED_NOW)
 
     def test_legacy_short_expiry_is_floored(self):
@@ -1189,7 +1258,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                     "a deleted session marker must stop before publish"
                 )
 
-        http, _calls = make_http([json_response([])])
+        http, calls = make_http([json_response([])])
         application = GitHubApplication(
             broker=Broker(),
             http=http,
@@ -1219,6 +1288,59 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 app_slug="reviewsensei[bot]",
                 convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
             )
+        # The fail-closed check must run before any ledger call can re-create
+        # the deleted session comment.
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET"],
+        )
+
+    def test_hosted_session_ledger_requires_a_broker_attested_session_token(self):
+        for token in ("", "   ", None):
+            with self.subTest(token=token):
+
+                class Broker:
+                    def open_session(self, exchange_input, **kwargs):
+                        return type("Session", (), {"token": token, "state": "known"})()
+
+                    def exchange(self, exchange_input, *, capability=None):
+                        raise AssertionError(
+                            "the publication capability must not be requested"
+                        )
+
+                application = GitHubApplication(
+                    broker=Broker(),
+                    http=object(),
+                    reviewer=object(),
+                    learner=object(),
+                    replier=object(),
+                )
+                with self.assertRaisesRegex(
+                    ReviewSenseiError,
+                    "hosted session ledger requires a broker-attested session token",
+                ):
+                    application.publish_review(
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            github_writes=True,
+                            github_session_ledger=True,
+                        ),
+                        oidc_token="oidc",
+                        repository=IDENTITY.repository,
+                        repository_id=99,
+                        pull_request=IDENTITY.pull_request,
+                        head_sha="a" * 40,
+                        base_branch="main",
+                        base_sha="b" * 40,
+                        result=ReviewResult(
+                            summary="ok", comments=(), provider="fixture"
+                        ),
+                        diff="diff",
+                        app_slug="reviewsensei[bot]",
+                        convergence_policy=ReviewConvergencePolicy(
+                            mode="merge-focused"
+                        ),
+                    )
 
     def test_preparation_failure_releases_a_reservation(self):
         class Broker:

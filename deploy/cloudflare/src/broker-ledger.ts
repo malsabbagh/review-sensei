@@ -105,6 +105,14 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
     const now = Date.now();
     if (data.action === "session_enroll") {
       const result = this.ctx.storage.transactionSync(() => {
+        this.sql.exec(
+          "DELETE FROM broker_replays WHERE expires_at < ?",
+          now,
+        );
+        this.sql.exec(
+          "DELETE FROM broker_rates WHERE window_started < ?",
+          now - RATE_WINDOW_MS,
+        );
         const rows = [
           ...this.sql.exec(
             "SELECT scope_hash FROM broker_session_enrollments WHERE scope_hash = ?",
