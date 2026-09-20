@@ -201,7 +201,11 @@ class SessionCommandTests(unittest.TestCase):
             ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
         )
         replay, _ = apply_session_command(
-            ledger, IDENTITY, command, now=FIXED_NOW + timedelta(minutes=1), policy=policy
+            ledger,
+            IDENTITY,
+            command,
+            now=FIXED_NOW + timedelta(minutes=1),
+            policy=policy,
         )
         self.assertEqual(replay.generation, first.generation)
         self.assertEqual(replay.continuation_grants, first.continuation_grants)
@@ -210,7 +214,9 @@ class SessionCommandTests(unittest.TestCase):
         ledger = InMemorySessionLedger()
         policy = ReviewConvergencePolicy(mode="merge-focused")
         command = parse_maintainer_command(
-            "@sensei review continue", actor="alice", head_sha="a" * 40,
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
             command_id="issue-comment-103",
         )
         apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW, policy=policy)
@@ -226,13 +232,21 @@ class SessionCommandTests(unittest.TestCase):
         from review_sensei.session import prepare_session_round
 
         prepare_session_round(
-            ledger, IDENTITY, policy, reservation_id="abcd1234", head_sha="a" * 40,
-            now=FIXED_NOW, coverage_complete=True, latest_head_reviewed=True,
+            ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
         )
         replay, _ = apply_session_command(
             ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
         )
-        self.assertEqual(replay.continuation_grants[0]["consumed_reservation_id"], "abcd1234")
+        self.assertEqual(
+            replay.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
+        )
 
     def test_pause_and_continue_mutate_operator_paused(self):
         ledger = InMemorySessionLedger()

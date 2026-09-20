@@ -244,7 +244,10 @@ class BrokerClient:
     ) -> dict[str, object]:
         """Verify the opaque grant immediately before a remote ledger write."""
 
-        if not isinstance(grant, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None:
+        if (
+            not isinstance(grant, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None
+        ):
             raise GitHubBrokerClientError("Broker session grant is invalid")
         attestation = self._validated_attestation_grant(session_attestation)
         parsed = self._post(
@@ -274,7 +277,10 @@ class BrokerClient:
 
     @staticmethod
     def _validated_attestation_request(value: object) -> dict[str, object]:
-        if not isinstance(value, Mapping) or set(value) != _SESSION_ATTESTATION_REQUEST_KEYS:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _SESSION_ATTESTATION_REQUEST_KEYS
+        ):
             raise GitHubBrokerClientError("Broker session attestation is invalid")
         result = dict(value)
         if (
@@ -299,7 +305,9 @@ class BrokerClient:
                     or result["source_comment_id"] <= 0
                 )
             )
-            or (result["operation"] == "command" and result["source_comment_id"] is None)
+            or (
+                result["operation"] == "command" and result["source_comment_id"] is None
+            )
             or not isinstance(result["run_id"], str)
             or re.fullmatch(r"[1-9][0-9]{0,18}", result["run_id"]) is None
             or isinstance(result["issued_at"], bool)
@@ -314,7 +322,10 @@ class BrokerClient:
 
     @classmethod
     def _validated_attestation_grant(cls, value: object) -> dict[str, object]:
-        if not isinstance(value, Mapping) or set(value) != _SESSION_ATTESTATION_GRANT_KEYS:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _SESSION_ATTESTATION_GRANT_KEYS
+        ):
             raise GitHubBrokerClientError("Broker session attestation is invalid")
         result = dict(value)
         request = {key: result[key] for key in _SESSION_ATTESTATION_REQUEST_KEYS}
@@ -346,7 +357,9 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session attestation is invalid")
         return result
 
-    def _post(self, payload: dict[str, Any], *, url: str | None = None) -> dict[str, Any]:
+    def _post(
+        self, payload: dict[str, Any], *, url: str | None = None
+    ) -> dict[str, Any]:
         """Post one bounded capability request and return a validated object."""
 
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

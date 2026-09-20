@@ -213,17 +213,24 @@ class GitHubIssueCommentSessionLedger:
         if any(argument is not None for argument in grant_arguments) and not all(
             argument is not None for argument in grant_arguments
         ):
-            raise ReviewInputError("GitHub session ledger grant configuration is incomplete")
+            raise ReviewInputError(
+                "GitHub session ledger grant configuration is incomplete"
+            )
         if broker is not None:
             if not callable(getattr(broker, "verify_session_grant", None)):
-                raise ReviewInputError("GitHub session ledger grant verifier is invalid")
+                raise ReviewInputError(
+                    "GitHub session ledger grant verifier is invalid"
+                )
             if not isinstance(session_grant, str) or not re.fullmatch(
                 r"[A-Za-z0-9_-]{43}", session_grant
             ):
                 raise ReviewInputError("GitHub session ledger grant is invalid")
             if not isinstance(session_attestation, Mapping):
                 raise ReviewInputError("GitHub session ledger attestation is invalid")
-            if not isinstance(head_sha, str) or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None:
+            if (
+                not isinstance(head_sha, str)
+                or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+            ):
                 raise ReviewInputError("GitHub session ledger head SHA is invalid")
         self.http = http
         self.token = token

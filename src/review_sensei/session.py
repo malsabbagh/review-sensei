@@ -147,8 +147,12 @@ class ContinuationGrant:
             self.policy_digest
         ):
             raise ReviewInputError("continuation grant policy_digest is invalid")
-        issued = _parse_aware_datetime(self.issued_at, label="continuation grant issued_at")
-        expires = _parse_aware_datetime(self.expires_at, label="continuation grant expires_at")
+        issued = _parse_aware_datetime(
+            self.issued_at, label="continuation grant issued_at"
+        )
+        expires = _parse_aware_datetime(
+            self.expires_at, label="continuation grant expires_at"
+        )
         if expires <= issued or expires - issued > MAX_CONTINUATION_GRANT_TTL:
             raise ReviewInputError("continuation grant expiry is invalid")
         consumed_id = _reservation_id(
@@ -178,7 +182,11 @@ class ContinuationGrant:
         expires_at: datetime | None = None,
     ) -> "ContinuationGrant":
         issued = _aware_now(now)
-        expires = _aware_now(expires_at) if expires_at is not None else issued + DEFAULT_CONTINUATION_GRANT_TTL
+        expires = (
+            _aware_now(expires_at)
+            if expires_at is not None
+            else issued + DEFAULT_CONTINUATION_GRANT_TTL
+        )
         return cls(
             command_id=command_id,
             actor=actor,
@@ -227,12 +235,17 @@ class ContinuationGrant:
             "consumed_generation": self.consumed_generation,
         }
 
-    def active_for(self, *, head_sha: str, policy_digest: str, now: datetime | None = None) -> bool:
+    def active_for(
+        self, *, head_sha: str, policy_digest: str, now: datetime | None = None
+    ) -> bool:
         return (
             self.consumed_reservation_id is None
             and self.head_sha == head_sha
             and self.policy_digest == policy_digest
-            and _parse_aware_datetime(self.expires_at, label="continuation grant expires_at") > _aware_now(now)
+            and _parse_aware_datetime(
+                self.expires_at, label="continuation grant expires_at"
+            )
+            > _aware_now(now)
         )
 
     def consume(self, *, reservation_id: str, generation: int) -> "ContinuationGrant":
@@ -248,7 +261,10 @@ class ContinuationGrant:
 def _stored_continuation_grants(value: object) -> tuple[dict[str, object], ...]:
     if value is None:
         raise ReviewInputError("continuation grants must be an array")
-    if not isinstance(value, (list, tuple)) or len(value) > MAX_STORED_CONTINUATION_GRANTS:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) > MAX_STORED_CONTINUATION_GRANTS
+    ):
         raise ReviewInputError("continuation grants exceed the configured bound")
     grants = tuple(ContinuationGrant.from_dict(item) for item in value)
     if len({grant.command_id for grant in grants}) != len(grants):
@@ -634,9 +650,12 @@ class SessionRecord:
         object.__setattr__(self, "continuation_grants", normalized_grants)
         for grant_data in normalized_grants:
             grant = ContinuationGrant.from_dict(grant_data)
-            if _parse_aware_datetime(
-                grant.expires_at, label="continuation grant expires_at"
-            ) > expires:
+            if (
+                _parse_aware_datetime(
+                    grant.expires_at, label="continuation grant expires_at"
+                )
+                > expires
+            ):
                 raise ReviewInputError("continuation grant exceeds session expiry")
         object.__setattr__(
             self,
@@ -1304,9 +1323,14 @@ def issue_continuation_grant(
         now=now,
     )
     session_expires = _parse_aware_datetime(record.expires_at, label="expires_at")
-    if _parse_aware_datetime(grant.expires_at, label="continuation grant expires_at") > session_expires:
+    if (
+        _parse_aware_datetime(grant.expires_at, label="continuation grant expires_at")
+        > session_expires
+    ):
         grant = replace(grant, expires_at=record.expires_at)
-    existing = tuple(ContinuationGrant.from_dict(raw) for raw in record.continuation_grants)
+    existing = tuple(
+        ContinuationGrant.from_dict(raw) for raw in record.continuation_grants
+    )
     for item in existing:
         if item.command_id != grant.command_id:
             continue
@@ -1320,7 +1344,9 @@ def issue_continuation_grant(
     now_value = _aware_now(now)
     if any(
         item.consumed_reservation_id is None
-        and _parse_aware_datetime(item.expires_at, label="continuation grant expires_at")
+        and _parse_aware_datetime(
+            item.expires_at, label="continuation grant expires_at"
+        )
         > now_value
         for item in existing
     ):
@@ -1493,9 +1519,7 @@ def prepare_session_round(
     # caller-controlled compatibility integer.  This prevents an old host
     # parameter from bypassing a scoped command while preserving its behavior
     # for legacy/non-hosted callers whose records predate grants.
-    direct_continuation = (
-        0 if record.continuation_grants else continuation_rounds
-    )
+    direct_continuation = 0 if record.continuation_grants else continuation_rounds
     effective_continuation = 1 if grant is not None else direct_continuation
     decision = evaluate_round_admission(
         record.to_round_state(**flags),

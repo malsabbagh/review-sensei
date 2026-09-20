@@ -434,10 +434,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(forwarded[0].fingerprint, fingerprint)
 
     def test_hosted_command_reconstructs_identity_from_broker_attestation(self):
-        body = (
-            "@sensei accept-risk abcd1234abcd1234 "
-            "--reason accepted launch exception"
-        )
+        body = "@sensei accept-risk abcd1234abcd1234 --reason accepted launch exception"
         request_attestation = {
             "version": 1,
             "repository": "owner/repo",

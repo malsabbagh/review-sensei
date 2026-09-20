@@ -321,9 +321,13 @@ def apply_session_command(
     if command.action == "continue":
         if command.command_id is not None:
             if not isinstance(policy, ReviewConvergencePolicy):
-                raise ReviewInputError("identified continuation requires a review policy")
+                raise ReviewInputError(
+                    "identified continuation requires a review policy"
+                )
             if command.head_sha is None:
-                raise ReviewInputError("identified continuation requires an exact head_sha")
+                raise ReviewInputError(
+                    "identified continuation requires an exact head_sha"
+                )
             record = _issue_continuation_grant(
                 ledger,
                 identity,

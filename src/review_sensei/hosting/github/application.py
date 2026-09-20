@@ -1193,8 +1193,14 @@ def _command_from_broker_attestation(
     if actor != login:
         raise GitHubPublicationError("broker command attestation actor was invalid")
     command_id = attestation.get("command_id")
-    if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
-        raise GitHubPublicationError("broker command attestation command identity was invalid")
+    if (
+        isinstance(command_id, bool)
+        or not isinstance(command_id, int)
+        or command_id <= 0
+    ):
+        raise GitHubPublicationError(
+            "broker command attestation command identity was invalid"
+        )
     command_digest = attestation.get("command_digest")
     if (
         not isinstance(command_digest, str)
@@ -1205,7 +1211,9 @@ def _command_from_broker_attestation(
         body, actor=actor, head_sha=head_sha, command_id=str(command_id)
     )
     if command is None:
-        raise GitHubPublicationError("broker command attestation did not bind a command")
+        raise GitHubPublicationError(
+            "broker command attestation did not bind a command"
+        )
     if not authorized_maintainer(
         login=actor,
         user_type=attestation.get("actor_type"),
