@@ -22,6 +22,7 @@ from review_sensei.errors import (
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.planning import MAX_RELATED_PATHS
 from review_sensei.schemas import SCHEMA_DIR, validate_public_document
+from review_sensei.session import MAX_STORED_CONTINUATION_GRANTS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
@@ -277,6 +278,10 @@ class PublicSchemaTests(unittest.TestCase):
             baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
         )
         self.assertEqual(baseline["related_paths"]["maxItems"], MAX_RELATED_PATHS)
+        self.assertEqual(
+            schema["properties"]["continuation_grants"]["maxItems"],
+            MAX_STORED_CONTINUATION_GRANTS,
+        )
 
     def test_session_record_schema_enforces_history_baseline_presence(self) -> None:
         golden = json.loads(

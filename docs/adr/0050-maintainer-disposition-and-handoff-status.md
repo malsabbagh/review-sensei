@@ -92,6 +92,13 @@ and an opaque, short-lived grant before every hosted mutation.
 Once a record adopts the continuation-grant protocol, the transition is
 one-way for that record: legacy caller-supplied `--continue-rounds` remains
 disabled until authenticated `reenroll` creates a fresh record.
+Consumed continuation command IDs remain in the bounded session record as
+replay tombstones. The record permits at most four continuation grants; a
+fifth authenticated continuation is refused rather than pruning a consumed
+command ID and reviving its one-use authority. The bound is a storage and
+replay-safety limit, not an approval or review-round budget; expiry or
+authenticated re-enrollment establishes a fresh record when that bound is
+reached.
 
 ## Scope
 

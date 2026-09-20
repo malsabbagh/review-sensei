@@ -161,6 +161,16 @@ class MaintainerCommandParseTests(unittest.TestCase):
 
 
 class SessionCommandTests(unittest.TestCase):
+    def test_grant_bound_ledger_without_atomic_initialization_fails_closed(self):
+        ledger = InMemorySessionLedger()
+        ledger._broker = object()  # type: ignore[attr-defined]
+        command = parse_maintainer_command("@sensei review pause", actor="alice")
+        assert command is not None
+
+        with self.assertRaisesRegex(ReviewInputError, "atomic initialization"):
+            apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+
     def test_identified_continuation_creates_an_integrity_covered_grant(self):
         ledger = InMemorySessionLedger()
         policy = ReviewConvergencePolicy(mode="merge-focused")

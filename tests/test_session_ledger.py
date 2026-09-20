@@ -40,6 +40,7 @@ from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_TTL,
+    MAX_STORED_CONTINUATION_GRANTS,
     MIN_SESSION_TTL,
     InMemorySessionLedger,
     LocalSessionLedger,
@@ -145,6 +146,43 @@ class SessionRecordTests(unittest.TestCase):
                 policy_digest="b" * 64,
                 now=datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc),
             )
+
+    def test_continuation_grant_history_bound_is_explicit_and_preserves_replay_tombstones(
+        self,
+    ):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        for index in range(MAX_STORED_CONTINUATION_GRANTS):
+            record = issue_continuation_grant(
+                record,
+                command_id=f"grant-{index + 1}",
+                actor="alice",
+                head_sha=f"{index + 1:040x}",
+                policy_digest="b" * 64,
+                now=FIXED_NOW,
+            )
+            pending = dict(record.continuation_grants[-1])
+            pending["consumed_reservation_id"] = f"{index + 1:08x}"
+            pending["consumed_generation"] = record.generation + 1
+            record = record.evolve(
+                now=FIXED_NOW,
+                generation=record.generation + 1,
+                continuation_grants=(
+                    *record.continuation_grants[:-1],
+                    pending,
+                ),
+            )
+
+        before = record.to_dict()
+        with self.assertRaisesRegex(ReviewInputError, "history limit"):
+            issue_continuation_grant(
+                record,
+                command_id="grant-over-bound",
+                actor="alice",
+                head_sha="f" * 40,
+                policy_digest="b" * 64,
+                now=FIXED_NOW,
+            )
+        self.assertEqual(record.to_dict(), before)
 
     @staticmethod
     def _history() -> dict[str, object]:

@@ -271,6 +271,14 @@ def apply_session_command(
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
+    if (
+        command.action not in {"status", "verify"}
+        and getattr(ledger, "_broker", None) is not None
+        and not callable(getattr(ledger, "initialize_with_mutation", None))
+    ):
+        raise ReviewInputError(
+            "grant-bound session ledger requires atomic initialization"
+        )
     loaded = ledger.load(identity, now=now)
     if command.action == "reenroll":
         # Expired-session recovery is the one path allowed to retire durable
