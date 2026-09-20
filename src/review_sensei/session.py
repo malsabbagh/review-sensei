@@ -1841,7 +1841,15 @@ class LocalSessionLedger:
     def _enrollment_path(self, identity: SessionIdentity) -> Path:
         """Independent local witness that this identity was initialized once."""
 
-        return self._path(identity).with_suffix(".enrolled")
+        digest = hashlib.sha256(
+            f"reviewsensei-session-v1\0{identity.repository}\0{identity.pull_request}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        # Keep the witness outside the mutable identity directory. Deleting
+        # ``<repository>/<pr>.json`` (or that whole directory) must not turn
+        # an established local session into a fresh enrollment.
+        return self.root / ".enrollments" / f"{digest}.v1"
 
     @staticmethod
     def _enrollment_witness(identity: SessionIdentity) -> bytes:

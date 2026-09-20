@@ -176,9 +176,11 @@ class LocalSessionLedgerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))
 
-    def test_deleted_record_with_enrollment_witness_fails_closed(self):
+    def test_deleted_identity_directory_with_enrollment_witness_fails_closed(self):
         self.ledger.initialize(IDENTITY, now=FIXED_NOW)
-        self.ledger._path(IDENTITY).unlink()
+        record_path = self.ledger._path(IDENTITY)
+        record_path.unlink()
+        record_path.parent.rmdir()
 
         loaded = self.ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "integrity-failed")
