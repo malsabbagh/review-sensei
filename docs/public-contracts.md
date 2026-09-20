@@ -315,6 +315,10 @@ The evidence context is a closed two-field identity (`evidence_policy` and
 `snapshot_sha256`): `legacy` requires a null snapshot, while `confirmed`
 requires the reviewed snapshot SHA-256. Unknown fields and inconsistent
 policy/snapshot pairs are rejected before publication admission.
+Hosted integrations that restore a durable baseline must also construct the
+`current_key` for the exact repository, pull request, base/head pair, and
+effective provider/model/profile/stage settings used by that request; the
+GitHub application rejects a key bound to a different publication identity.
 
 The analysis CLI keeps the existing `--session-ledger` reservation path
 compatible by default. Pass `--transaction` to opt into the identity-bound

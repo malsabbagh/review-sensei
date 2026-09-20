@@ -339,6 +339,47 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertIs(self.reviewer.calls[-1]["blocker_candidates"], facts)
         self.assertIsNone(self.reviewer.calls[-1]["input_blocker_candidates"])
 
+    def test_publish_review_rejects_current_key_for_different_publication_identity(
+        self,
+    ):
+        current_key = ReviewContextCacheKey(
+            repository="other/repo",
+            pull_request=1,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="1" * 64,
+            context_digest="2" * 64,
+            learning_digest="3" * 64,
+        )
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "does not match publication identity"
+        ):
+            self.application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token=None,
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha="a" * 40,
+                base_branch="main",
+                base_sha="b" * 40,
+                result=ReviewResult(
+                    summary="Summary.",
+                    comments=(),
+                    provider="fixture",
+                    review_status="complete",
+                ),
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                current_key=current_key,
+            )
+        self.assertEqual(self.broker.requested, 0)
+        self.assertEqual(self.broker.exchanges, [])
+        self.assertEqual(self.reviewer.calls, [])
+
     def test_publish_review_forwards_persisted_dispositions_for_current_head(self):
         ledger = InMemorySessionLedger()
         identity = SessionIdentity("owner/repo", 1, repository_id=1)

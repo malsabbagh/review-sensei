@@ -118,6 +118,18 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
             )
+        if current_key is not None:
+            if not isinstance(current_key, ReviewContextCacheKey):
+                raise GitHubPublicationError("review current cache key is invalid")
+            if (
+                current_key.repository != repository
+                or current_key.pull_request != pull_request
+                or current_key.base_sha != base_sha
+                or current_key.head_sha != head_sha
+            ):
+                raise GitHubPublicationError(
+                    "review current cache key does not match publication identity"
+                )
         if evidence_policy not in {"legacy", "confirmed"}:
             raise GitHubPublicationError("evidence policy is unsupported")
         if evidence_policy == "confirmed" and (

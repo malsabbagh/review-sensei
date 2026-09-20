@@ -72,7 +72,12 @@ initial-review authority. A successful verification on that CLI path
 checkpoints the next baseline atomically with the validated result. In this F3
 slice the GitHub application only restores and forwards the baseline for
 hosted admission; hosted write-through checkpointing remains follow-up F5
-work.
+work. Hosted callers restoring that baseline must supply a `current_key`
+constructed from the same effective provider, model, profile, stages, and
+exact repository/PR/base/head identity; the application rejects a key bound
+to a different publication identity. The recovery branch releases its
+reservation without charging a failed-attempt slot; operators must repair or
+re-enroll the session before a later round can proceed.
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
