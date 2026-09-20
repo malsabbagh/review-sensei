@@ -722,10 +722,20 @@ class GitHubApplication:
                 operator_paused=False,
                 summary="not-a-command",
             )
-        hosted_mutation = (
+        if (
             parsed_command.action != "status"
             and options.github_session_ledger
-            and self.session_ledger is None
+            and self.session_ledger is not None
+        ):
+            # An injected ledger is the explicit local authority seam. It must
+            # never coexist with the hosted grant boundary, otherwise caller
+            # supplied actor fields could reach a local mutation while the
+            # caller claims to have selected broker-backed mode.
+            raise GitHubPublicationError(
+                "hosted maintainer mutations cannot use an injected local session ledger"
+            )
+        hosted_mutation = (
+            parsed_command.action != "status" and options.github_session_ledger
         )
         command: MaintainerCommand | None = None
         session_grant: str | None = None
