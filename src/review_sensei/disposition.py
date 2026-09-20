@@ -271,8 +271,8 @@ def apply_session_command(
             applied=True,
             operator_paused=bool(getattr(record, "operator_paused", False)),
             summary=(
-                "expired session re-enrolled with fresh round counters; "
-                "prior convergence history was retired"
+                "session re-enrolled with fresh round counters; the previous "
+                "expired or witness-only state was retired"
             ),
         )
     if loaded.status in {"missing", "expired"} or loaded.record is None:

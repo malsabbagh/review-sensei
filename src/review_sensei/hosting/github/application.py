@@ -254,9 +254,12 @@ class GitHubApplication:
         ):
             # The broker's authenticated witness says this session already
             # exists, so a missing marker means the comment was deleted. Fail
-            # closed before any ledger call below can re-create it.
+            # closed before any ledger call below can re-create it, and name
+            # the recovery command so an operator does not have to infer it.
             raise GitHubPublicationError(
-                "session ledger marker is missing; authenticated recovery is required"
+                "session ledger marker is missing; authenticated recovery is "
+                "required: a maintainer must comment `@sensei review reenroll` "
+                "to re-establish this session"
             )
         if (
             transaction_record is None

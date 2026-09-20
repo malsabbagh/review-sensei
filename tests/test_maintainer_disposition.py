@@ -215,7 +215,7 @@ class SessionCommandTests(unittest.TestCase):
             self.assertTrue(result.applied)
             self.assertEqual(result.action, "reenroll")
             self.assertEqual(record.generation, 0)
-            self.assertIn("expired session re-enrolled", result.summary)
+            self.assertIn("session re-enrolled", result.summary)
             # The recovered session admits a round again, which is what makes
             # this the documented operator path out of an expired budget.
             prepared = prepare_session_round(
@@ -229,7 +229,7 @@ class SessionCommandTests(unittest.TestCase):
             # A live session is not silently re-enrolled: recovery is only for
             # state an operator has confirmed is expired.
             with self.assertRaisesRegex(
-                ReviewInputError, "only an expired session can be re-enrolled"
+                ReviewInputError, "only an expired or witness-only session"
             ):
                 apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
 

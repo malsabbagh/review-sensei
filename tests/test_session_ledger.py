@@ -14,7 +14,7 @@ from review_sensei.baseline import (
     baseline_from_history_document,
     baseline_history_document,
 )
-from review_sensei.context import ReviewContextCacheKey
+from review_sensei.context import MAX_CACHE_METADATA_ITEMS, ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
@@ -35,6 +35,7 @@ from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
+    MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_TTL,
     MIN_SESSION_TTL,
     InMemorySessionLedger,
@@ -521,6 +522,88 @@ class LocalSessionLedgerTests(unittest.TestCase):
                 )
                 self.assertEqual(ledger.root, (Path(raw) / "ledger").resolve())
 
+    def test_largest_storable_record_still_loads(self):
+        # The constructor bound (MAX_SESSION_RECORD_BYTES) is now enforced on
+        # every load, so the largest record the bounds still allow has to keep
+        # loading: a record that was storable before the check must not be
+        # stranded by it. Dispositions supply the bulk and the convergence
+        # envelope fills the rest until one of the bounds refuses.
+        dispositions = tuple(
+            {
+                "fingerprint": f"{index:016x}" + "0" * 48,
+                "action": "defer",
+                "reason": f"reason {index} " + "r" * 500,
+                "actor": "maintainer",
+                "head_sha": None,
+                "expires_at": None,
+            }
+            for index in range(4)
+        )
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=136,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                engine="ollama",
+                model="test",
+                profile="default",
+                stage_digest="c" * 64,
+                context_digest="d" * 64,
+                learning_digest="e" * 64,
+            ),
+            policy_digest="f" * 64,
+            complete=True,
+            coverage_complete=True,
+            reviewed_paths=(),
+        )
+        record = None
+        paths: list[str] = []
+        for index in range(MAX_CACHE_METADATA_ITEMS):
+            paths.append(f"src/example_{index:03d}.py")
+            candidate = ReviewBaseline(
+                cache_key=baseline.cache_key,
+                policy_digest=baseline.policy_digest,
+                complete=True,
+                coverage_complete=True,
+                reviewed_paths=tuple(paths),
+            )
+            try:
+                candidate_record = SessionRecord.create(
+                    IDENTITY,
+                    now=FIXED_NOW,
+                    dispositions=dispositions,
+                    convergence_history={
+                        "state": "completed",
+                        "baseline": baseline_history_document(candidate),
+                        "progress": [{"event": "completed", "generation": 1}],
+                        "provenance": {"ledger_digest": "0" * 64},
+                    },
+                )
+            except ReviewInputError:
+                # One of the two component bounds refused; the previous
+                # candidate is the largest storable record.
+                break
+            record = candidate_record
+        assert record is not None
+        size = len(
+            json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        self.assertLessEqual(size, MAX_SESSION_RECORD_BYTES)
+        self.assertGreater(size, MAX_SESSION_RECORD_BYTES - 1024)
+
+        self.ledger._write(IDENTITY, record)
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        loaded = restarted.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "ok")
+        self.assertIsNotNone(loaded.record)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.record_sha256, record.record_sha256)
+        self.assertEqual(loaded.record.convergence_history, record.convergence_history)
+        self.assertEqual(loaded.record.dispositions, record.dispositions)
+
     def test_initialize_uses_exclusive_create_for_a_stale_missing_read(self):
         first = self.ledger.initialize(IDENTITY, now=FIXED_NOW)
         del first
@@ -571,21 +654,31 @@ class LocalSessionLedgerTests(unittest.TestCase):
         restarted = LocalSessionLedger(Path(self.temp.name))
         self.assertEqual(restarted.load(IDENTITY, now=FIXED_NOW).status, "ok")
 
+    def test_reenroll_recovers_a_witness_only_session(self):
+        # The record was deleted after enrollment: the witness is the only
+        # durable evidence, and an explicit maintainer recovery re-establishes
+        # the session instead of leaving the identity wedged.
+        self.ledger._create_enrollment_witness(IDENTITY)
+        self.assertEqual(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed"
+        )
+        record = self.ledger.reenroll(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(record.generation, 0)
+        self.assertEqual(self.ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        self.assertEqual(restarted.load(IDENTITY, now=FIXED_NOW).status, "ok")
+
     def test_reenroll_refuses_every_other_load_status(self):
+        # No witness and no record: nothing to recover, so the ordinary
+        # enrollment path stays the only way to create a session.
         with self.assertRaisesRegex(
-            ReviewInputError, "only an expired session can be re-enrolled"
+            ReviewInputError, "only an expired or witness-only session"
         ):
             self.ledger.reenroll(IDENTITY, now=FIXED_NOW)
+        # A live session is never reset by recovery.
         self.ledger.initialize(IDENTITY, now=FIXED_NOW)
         with self.assertRaisesRegex(
-            ReviewInputError, "only an expired session can be re-enrolled"
-        ):
-            self.ledger.reenroll(IDENTITY, now=FIXED_NOW)
-
-    def test_reenroll_reports_a_missing_record_after_enrollment(self):
-        self.ledger._create_enrollment_witness(IDENTITY)
-        with self.assertRaisesRegex(
-            ReviewInputError, "only an expired session can be re-enrolled"
+            ReviewInputError, "only an expired or witness-only session"
         ):
             self.ledger.reenroll(IDENTITY, now=FIXED_NOW)
 
@@ -1232,9 +1325,55 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
         self.assertEqual(record.generation, 0)
         # Recovery rewrites the App's own expired comment instead of creating a
-        # second marker, so the artifact the broker witnessed is restored.
+        # second marker, so the artifact the broker witnessed is restored. The
+        # leading reads are the load and discovery; only the PATCH mutates.
         self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "PATCH", "GET"]
+            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+        )
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
+
+    def test_hosted_reenroll_recreates_a_deleted_marker(self):
+        # The broker witness says this head was enrolled, so the operator
+        # command establishes a fresh marker instead of leaving the pull
+        # request blocked until the retention window elapses.
+        posted = {"body": None}
+        calls: list[tuple[str, str, bytes | None]] = []
+
+        def opener(request, timeout):
+            del timeout
+            calls.append((request.method, request.full_url, request.data))
+            if request.method == "POST":
+                posted["body"] = json.loads(request.data.decode("utf-8"))["body"]
+                return FakeHTTPResponse(
+                    json.dumps({"id": 7, "body": posted["body"]}).encode("utf-8"),
+                    status=201,
+                )
+            comments = (
+                []
+                if posted["body"] is None
+                else [
+                    {
+                        "id": 7,
+                        "body": posted["body"],
+                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                    }
+                ]
+            )
+            return FakeHTTPResponse(json.dumps(comments).encode("utf-8"), status=200)
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="reviewsensei[bot]"
+        )
+
+        record = ledger.reenroll(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(record.generation, 0)
+        # Only the POST mutates: the marker is created through the ordinary
+        # initialization path once the operator has authenticated recovery.
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "POST", "GET"],
         )
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
 
@@ -1248,7 +1387,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         )
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
         with self.assertRaisesRegex(
-            ReviewInputError, "only an expired session can be re-enrolled"
+            ReviewInputError, "only an expired or witness-only session"
         ):
             ledger.reenroll(IDENTITY, now=FIXED_NOW)
 

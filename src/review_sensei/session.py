@@ -992,7 +992,7 @@ class SessionLedger(Protocol):
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
-        """Explicitly retire an expired session so a new one can be enrolled."""
+        """Recover an expired or witness-only session so a new one can enroll."""
         ...
 
 
@@ -1791,12 +1791,14 @@ class InMemorySessionLedger:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
-        """Retire an expired in-memory session and enroll a fresh one."""
+        """Recover an expired or absent in-memory session and enroll a fresh one."""
 
         loaded = self.load(identity, now=now)
-        if loaded.status != "expired":
-            raise ReviewInputError("only an expired session can be re-enrolled")
-        del self._records[(identity.repository, identity.pull_request)]
+        if loaded.status not in {"expired", "missing"}:
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
+        self._records.pop((identity.repository, identity.pull_request), None)
         return self.initialize(identity, now=now)
 
     def replace(
@@ -1994,22 +1996,29 @@ class LocalSessionLedger:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
-        """Retire an expired local session and enroll a fresh one.
+        """Recover this identity from an expired or witness-only session.
 
-        Only an expired record may be retired. A missing, live, unreadable, or
-        conflicting record needs investigation rather than a reset, and
-        replacing one would let a deleted record or a tampered ledger turn into
-        a fresh session budget. The witness is removed first so an interrupted
-        recovery leaves a loadable expired record instead of a witness with no
-        record, which is the state that demands manual reconciliation.
+        Authenticated recovery covers exactly two states: a record that expired,
+        and the enrollment witness without a record, which is the deleted-record
+        state the witness exists to detect. Any other status -- a live session,
+        an ambiguous marker, or a record that is present but unreadable -- needs
+        investigation rather than a reset, and resetting one would trade a
+        recoverable problem for a fresh session budget. The witness is removed
+        first so an interrupted recovery leaves a loadable expired record
+        instead of a witness with no record.
         """
 
         # An expired load deliberately withholds the record, so recovery keys
-        # off the status alone rather than off a record this adapter refuses to
-        # hand back.
+        # off the status and the on-disk record rather than off a record this
+        # adapter refuses to hand back.
         loaded = self.load(identity, now=now)
-        if loaded.status != "expired":
-            raise ReviewInputError("only an expired session can be re-enrolled")
+        witness_only = (
+            loaded.status == "integrity-failed" and not self._path(identity).exists()
+        )
+        if loaded.status != "expired" and not witness_only:
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
         witness = self._validated_enrollment_path(identity)
         try:
             witness.unlink()

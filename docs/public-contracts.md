@@ -265,20 +265,23 @@ The legacy `mutate_commit` / `complete_session_round` reservation APIs reject a
 transaction-bearing record; transaction callers must use
 `checkpoint_review_analysis` and `complete_review_publication` so the result
 digest and publication phase remain bound.
-An expired session is recovered explicitly, never silently reinitialized.
-Ledger loading reports `expired` and every admission path fails closed with the
-recovery instruction; only `SessionLedger.reenroll` may retire an expired
-record, reachable as the authenticated maintainer command
+An expired or witness-only session is recovered explicitly, never silently
+reinitialized. Ledger loading reports `expired`, or reports unreadable state
+when the enrollment witness has no record; every admission path then fails
+closed with the recovery instruction. Only `SessionLedger.reenroll` may retire
+that state, reachable as the authenticated maintainer command
 `@sensei review reenroll` (a write command, so it requires `--allow-write`).
 The local ledger removes its enrollment witness before the record, so an
-interrupted recovery leaves an expired record rather than a witness without a
-record. The GitHub-backed ledger rewrites its own expired marker comment in
-place, so the artifact the broker witnessed is restored rather than deleted and
-no broker enrollment has to be purged alongside it; deleting that comment by
-hand instead leaves a witness that keeps demanding recovery until the broker's
-90-day enrollment retention elapses. A missing, live, unreadable, or
-conflicting record is never re-enrolled, and a run that never obtained the
-publication capability never records an enrollment witness at all.
+interrupted recovery leaves a loadable expired record rather than a witness
+without a record. The GitHub-backed ledger rewrites its own expired marker
+comment in place and re-creates the marker when it is absent, so the artifact
+the broker witnessed is restored rather than left missing; no broker enrollment
+has to be purged alongside it. A live, unreadable-but-present, or ambiguous
+record is never re-enrolled, and a run that never obtained the publication
+capability never records an enrollment witness at all. The broker's witness is
+keyed by the verified head and its 90-day retention slides with each use, so an
+active pull request that keeps extending its session is never mistaken for a
+first enrollment.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface

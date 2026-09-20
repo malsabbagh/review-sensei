@@ -82,6 +82,13 @@ class MemorySql {
       this.enrollments.set(args[0] as string, { enrolledAt: args[1] as number });
       return [];
     }
+    if (normalized.startsWith("UPDATE broker_session_enrollments SET enrolled_at")) {
+      const existing = this.enrollments.get(args[1] as string);
+      if (existing) {
+        this.enrollments.set(args[1] as string, { enrolledAt: args[0] as number });
+      }
+      return [];
+    }
     throw new Error(`unexpected SQL: ${normalized}`);
   }
 }
@@ -229,6 +236,23 @@ describe("broker replay and rate ledger", () => {
     expect([...sql.replays.keys()]).toEqual(["b".repeat(64)]);
     expect(sql.rates.size).toBe(0);
     expect(sql.enrollments.size).toBe(1);
+  });
+
+  it("slides the enrollment retention window on every known lookup", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger } = ledgerHarness();
+    const scope = `987654321:7:${"a".repeat(40)}`;
+
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "enrolled" });
+
+    // An active pull request can keep extending its session, so a known lookup
+    // moves the witness window instead of letting it expire mid-session.
+    clock.mockReturnValue(1_700_000_000_000 + 89 * day);
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "known" });
+
+    clock.mockReturnValue(1_700_000_000_000 + 95 * day);
+    expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "known" });
   });
 
   it("prunes enrollment witnesses past the session retention window", async () => {

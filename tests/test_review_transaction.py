@@ -10,11 +10,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei.baseline import ReviewBaseline, baseline_from_history_document
-from review_sensei.cli import _parser, _transaction_provider_identity, main
-from review_sensei.context import (
-    ReviewContextCacheKey,
-    build_review_context_cache_key,
+from review_sensei.cli import (
+    _checkpoint_cache_request,
+    _parser,
+    _transaction_provider_identity,
+    main,
 )
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
@@ -759,21 +761,11 @@ class ReviewTransactionTests(unittest.TestCase):
                 "--no-learning-proposals",
             ]
             live_requests: list[ReviewRequest] = []
-            key_requests: list[ReviewRequest] = []
             original_run = ReviewService.run
 
             def recording_run(self, request, budget=None):
                 live_requests.append(request)
                 return original_run(self, request, budget=budget)
-
-            def recording_key(request, *, provider_name, stages, profile="default"):
-                key_requests.append(request)
-                return build_review_context_cache_key(
-                    request,
-                    provider_name=provider_name,
-                    stages=stages,
-                    profile=profile,
-                )
 
             with (
                 patch(
@@ -781,24 +773,35 @@ class ReviewTransactionTests(unittest.TestCase):
                     return_value=RecordingRegistry(provider),
                 ),
                 patch("review_sensei.service.ReviewService.run", recording_run),
-                patch(
-                    "review_sensei.context.build_review_context_cache_key",
-                    side_effect=recording_key,
-                ),
             ):
                 self.assertEqual(main(argv), 0)
 
             # ADR 0053 keeps F2 off the live inference path: the request the
-            # service actually receives stays unbound to the trusted SHAs.
+            # service receives carries no trusted SHAs, while the durable
+            # transaction still records the identity the checkpoint bound.
             self.assertEqual(len(live_requests), 1)
             self.assertIsNone(live_requests[0].base_sha)
             self.assertIsNone(live_requests[0].head_sha)
-            # Only the dedicated checkpoint copy binds the identity the
-            # transaction already carries.
-            self.assertEqual(len(key_requests), 1)
-            self.assertEqual(key_requests[0].base_sha, BASE_SHA)
-            self.assertEqual(key_requests[0].head_sha, HEAD_SHA)
-            self.assertIsNot(key_requests[0], live_requests[0])
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(record.transaction.base_sha, BASE_SHA)
+            self.assertEqual(record.transaction.head_sha, HEAD_SHA)
+
+    def test_checkpoint_cache_request_binds_shas_without_touching_the_request(self):
+        request = ReviewRequest(
+            diff="diff",
+            repository=IDENTITY.repository,
+            pull_request_number=IDENTITY.pull_request,
+        )
+        bound = _checkpoint_cache_request(
+            request,
+            base_sha=f" {BASE_SHA.upper()}",
+            head_sha=HEAD_SHA,
+        )
+        self.assertEqual(bound.base_sha, BASE_SHA)
+        self.assertEqual(bound.head_sha, HEAD_SHA)
+        # The live request stays unbound: the checkpoint copy is separate.
+        self.assertIsNone(request.base_sha)
+        self.assertIsNone(request.head_sha)
 
     def test_cli_expired_ledger_names_the_recovery_action(self):
         class UnconstructedProvider:

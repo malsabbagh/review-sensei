@@ -468,19 +468,25 @@ class GitHubIssueCommentSessionLedger:
         App rewrites its own expired comment, so the durable artifact the
         broker witnessed is restored rather than deleted, and the enrollment
         witness and the marker agree again. That is why nothing has to be
-        purged in the broker alongside it -- an operator who deletes the
-        comment instead must wait out the enrollment retention window, because
-        a witness with no marker is exactly the deleted-marker state the
-        application refuses to re-create. Only an expired marker is retired; a
-        missing, live, unreadable, or conflicting marker needs investigation
-        rather than a reset.
+        purged in the broker alongside it -- including when the marker was
+        deleted, where recovery establishes a fresh comment rather than leaving
+        a witness that demands attention until the retention window elapses.
+        Only an expired marker or an absent marker is recovered; a live,
+        unreadable, or ambiguous marker needs investigation rather than a reset.
         """
 
+        loaded = self.load(identity, now=now)
+        if loaded.status == "missing":
+            return self.initialize(identity, now=now)
+        if loaded.status != "expired":
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
         comment_id, record = self._discover(identity, now=now)
-        if comment_id is None or record is None:
-            raise ReviewInputError("session record is missing")
-        if not record.expired(now=now):
-            raise ReviewInputError("only an expired session can be re-enrolled")
+        if comment_id is None or record is None or not record.expired(now=now):
+            raise ReviewInputError(
+                "only an expired or witness-only session can be re-enrolled"
+            )
         repository_id = self._require_identity(identity)
         replacement = SessionRecord.create(identity, now=now)
         path = self.http.repository_path(

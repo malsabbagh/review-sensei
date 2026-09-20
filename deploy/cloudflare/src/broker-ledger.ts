@@ -45,21 +45,33 @@ async function digest(value: string): Promise<string> {
     .join("");
 }
 
-function validRequest(
-  value: BrokerRequest,
-): value is BrokerRequest & {
-  action: "claim" | "admit" | "session_enroll";
-  jti?: string;
+/** A replay/rate assertion. Only these actions carry a JTI. */
+type AssertionRequest = BrokerRequest & {
+  action: "claim" | "admit";
+  jti: string;
   scope: string;
-} {
+};
+
+/** A session enrollment. It intentionally has no JTI to assert. */
+type SessionRequest = BrokerRequest & {
+  action: "session_enroll";
+  scope: string;
+};
+
+const VALID_SCOPES = (value: unknown): value is string =>
+  typeof value === "string" && SCOPE_PATTERN.test(value);
+
+function validAssertionRequest(value: BrokerRequest): value is AssertionRequest {
   return (
-    (value.action === "claim" || value.action === "admit" || value.action === "session_enroll") &&
-    (value.action === "session_enroll" || (
-      typeof value.jti === "string" && JTI_PATTERN.test(value.jti)
-    )) &&
-    typeof value.scope === "string" &&
-    SCOPE_PATTERN.test(value.scope)
+    (value.action === "claim" || value.action === "admit") &&
+    typeof value.jti === "string" &&
+    JTI_PATTERN.test(value.jti) &&
+    VALID_SCOPES(value.scope)
   );
+}
+
+function validSessionRequest(value: BrokerRequest): value is SessionRequest {
+  return value.action === "session_enroll" && VALID_SCOPES(value.scope);
 }
 
 /**
@@ -104,7 +116,7 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
     } catch {
       return json({ error: "invalid_request" }, 400);
     }
-    if (!validRequest(data)) {
+    if (!validAssertionRequest(data) && !validSessionRequest(data)) {
       return json({ error: "invalid_request" }, 400);
     }
 
@@ -131,6 +143,16 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           ),
         ];
         if (rows.length > 0) {
+          // Retention is a sliding window anchored to the most recent use, not
+          // to the first enrollment. A pull request can extend its session up
+          // to the 90-day maximum while it stays active, and a witness that
+          // expired mid-session would report a live marker as a first
+          // enrollment.
+          this.sql.exec(
+            "UPDATE broker_session_enrollments SET enrolled_at = ? WHERE scope_hash = ?",
+            now,
+            scopeHash,
+          );
           return { state: "known" } as BrokerReply;
         }
         this.sql.exec(

@@ -493,7 +493,14 @@ export class GitHubApi {
       `${repositoryPath(repository)}/pulls/${pullRequest}`,
       token,
     );
-    if (response.status === 404 || response.status === 403) {
+    // A 403 on this read is a permission, installation-scope, or rate-limit
+    // problem, not a missing or stale pull request. Reporting it as an absent
+    // head would send the operator after the wrong failure, so it keeps its
+    // own diagnosis instead of collapsing into the 404 result.
+    if (response.status === 403) {
+      throw new Error("github_pull_request_forbidden");
+    }
+    if (response.status === 404) {
       return null;
     }
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {

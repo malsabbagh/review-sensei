@@ -71,11 +71,16 @@ live App-authenticated PR read, then records or finds the witness in its
 existing Durable Object. A witness combined with a missing comment is an
 authenticated recovery requirement, never a new zero-budget session.
 
-`review_session` requests only `pull_requests: write` and `checks: write`; it
-is separate from `review_publish`, which remains the only capability able to
-publish a pull-request review. The subsequent F4 session-boundary work binds
-this capability to serialized workflow execution and an opaque, short-lived
-grant before every hosted mutation.
+`review_session` requests only `pull_requests: write`; it is separate from
+`review_publish`, which remains the only capability able to publish a
+pull-request review. The durable session lives in one App-authored issue
+comment, so the session capability needs no further grant and the broker never
+requests `checks: write`, which ADR 0022/0006 do not register for the App. The
+witness is keyed by the verified current head and retained for 90 days from its
+most recent use, matching ADR 0047's maximum session lifetime, so both a new
+head and a long-idle pull request still enroll cleanly. The subsequent F4
+session-boundary work binds this capability to serialized workflow execution
+and an opaque, short-lived grant before every hosted mutation.
 
 ## Scope
 
