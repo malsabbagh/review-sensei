@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
+from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...context import ReviewContextCacheKey
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
@@ -98,6 +100,11 @@ class GitHubApplication:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] = (),
+        evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
         no_progress: bool = False,
         configuration_context: Mapping[str, object] | None = None,
@@ -382,6 +389,7 @@ class GitHubApplication:
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
         authorized_dispositions: tuple[object, ...] = ()
+        durable_baseline = baseline
         if ledger is not None:
             from ...disposition import session_dispositions
 
@@ -389,6 +397,23 @@ class GitHubApplication:
                 authorized_dispositions = session_dispositions(prepared.record)
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
+            record_for_baseline = (
+                prepared.record
+                if prepared is not None
+                else transaction_record
+            )
+            if durable_baseline is None and record_for_baseline is not None:
+                history = record_for_baseline.convergence_history
+                if isinstance(history, Mapping) and history.get("state") == "completed":
+                    durable_baseline = baseline_from_history_document(
+                        history.get("baseline")
+                    )
+        # A persisted baseline is not self-authenticating for a new head: the
+        # caller must supply the independently constructed current context key.
+        # Falling back to the prior key would treat an unknown head/configuration
+        # as compatible and turn stale evidence into admission authority.
+        if durable_baseline is not None and current_key is None:
+            durable_baseline = None
         try:
             publication = self.reviewer.publish(
                 token=token,
@@ -409,6 +434,11 @@ class GitHubApplication:
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
+                baseline=durable_baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                related_paths=related_paths,
+                evidence_confirmed_concerns=evidence_confirmed_concerns,
                 authorized_dispositions=authorized_dispositions,
             )
         except BaseException as publication_error:
