@@ -248,6 +248,7 @@ describe("token broker authorization", () => {
 
   it.each([
     ["review reenroll", true],
+    [`dismiss ${"a".repeat(15)} --reason accepted`, false],
     ["dismiss abcd1234abcd1234 --reason accepted", true],
     [`dismiss ${"a".repeat(64)} --reason accepted`, true],
     [`dismiss ${"a".repeat(65)} --reason accepted`, false],
@@ -349,6 +350,63 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, mismatchedOperation),
     ).rejects.toThrow("broker_session_grant_invalid");
+  });
+
+  it.each([
+    [
+      "string repository id",
+      (attestation: Record<string, unknown>) => ({
+        ...attestation,
+        repository_id: "987654321",
+      }),
+    ],
+    [
+      "boolean repository id",
+      (attestation: Record<string, unknown>) => ({
+        ...attestation,
+        repository_id: true,
+      }),
+    ],
+    [
+      "missing required key",
+      ({ repository_id: _repositoryId, ...attestation }: Record<string, unknown>) => attestation,
+    ],
+    [
+      "unknown extra key",
+      (attestation: Record<string, unknown>) => ({
+        ...attestation,
+        unexpected: true,
+      }),
+    ],
+  ])("rejects malformed session-grant attestation: %s", async (_label, mutate) => {
+    const { broker, ledgerFetch } = harness();
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: {
+        version: 1,
+        repository: "acme/widgets",
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+        operation: "command",
+        source_comment_id: 13579,
+        run_id: "10000000001",
+        issued_at: Math.floor(Date.now() / 1000),
+        concurrency_group: "reviewsensei-session-987654321-7",
+        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+        job_workflow_sha: SHA,
+      },
+    });
+    const attestation = mutate(result.session_attestation as Record<string, unknown>);
+    await expect(
+      broker.verifySessionGrant(result.session_grant, attestation),
+    ).rejects.toThrow(/broker_session_(?:attestation_invalid|grant_invalid)/);
+    const actions = ledgerFetch.mock.calls.map(
+      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
+    );
+    expect(actions).not.toContain("session_verify");
   });
 
   it("refuses command authority when the current GitHub comment actor is not the OIDC actor", async () => {

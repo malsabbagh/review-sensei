@@ -84,10 +84,41 @@ interface SessionGrant {
   attestation: SessionAttestation;
 }
 
+const SESSION_ATTESTATION_REQUEST_KEYS = [
+  "version",
+  "repository",
+  "repository_id",
+  "pull_request",
+  "head_sha",
+  "operation",
+  "source_comment_id",
+  "run_id",
+  "issued_at",
+  "concurrency_group",
+  "job_workflow_ref",
+  "job_workflow_sha",
+] as const;
+const SESSION_ATTESTATION_GRANT_KEYS = [
+  ...SESSION_ATTESTATION_REQUEST_KEYS,
+  "actor",
+  "actor_type",
+  "association",
+  "command_id",
+  "command_digest",
+] as const;
+
 type SessionState = "enrolled" | "known";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function capability(value: unknown): Capability {
@@ -216,7 +247,11 @@ function clientScope(value: string | undefined): string {
 }
 
 function sessionScope(value: unknown, repositoryId: number): SessionScope {
-  if (!isObject(value)) {
+  if (
+    !isObject(value) ||
+    !Number.isSafeInteger(repositoryId) ||
+    repositoryId <= 0
+  ) {
     throw new Error("broker_session_invalid");
   }
   const pullRequest = value.pull_request;
@@ -243,7 +278,7 @@ function sessionAttestation(
   claims: OidcClaims,
   scope: SessionScope,
 ): SessionAttestationRequest {
-  if (!isObject(value) || Object.keys(value).length !== 12) {
+  if (!isObject(value) || !hasExactKeys(value, SESSION_ATTESTATION_REQUEST_KEYS)) {
     throw new Error("broker_session_attestation_invalid");
   }
   const attestation = value as Record<string, unknown>;
@@ -596,11 +631,19 @@ export class TokenBroker {
     if (typeof grant !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(grant)) {
       throw new Error("broker_session_grant_invalid");
     }
-    if (!isObject(attestation) || Object.keys(attestation).length !== 17) {
+    if (!isObject(attestation) || !hasExactKeys(attestation, SESSION_ATTESTATION_GRANT_KEYS)) {
       throw new Error("broker_session_attestation_invalid");
     }
     const value = attestation as Record<string, unknown>;
-    const scope = sessionScope(value, value.repository_id as number);
+    const repositoryId = value.repository_id;
+    if (
+      typeof repositoryId !== "number" ||
+      !Number.isSafeInteger(repositoryId) ||
+      repositoryId <= 0
+    ) {
+      throw new Error("broker_session_attestation_invalid");
+    }
+    const scope = sessionScope(value, repositoryId);
     const parsed = sessionAttestationForVerification(value, scope);
     const state = await sessionGrantLedger(this.env, "session_verify", {
       grant,

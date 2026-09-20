@@ -715,6 +715,81 @@ class DisabledWriteTests(unittest.TestCase):
             ],
         )
 
+    def test_hosted_mutation_rejects_a_non_atomic_grant_ledger(self):
+        body = "@sensei review pause"
+        request_attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "run_id": "42",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
+            "job_workflow_sha": "c" * 40,
+        }
+
+        class Broker:
+            def authorize_session_mutation(self, token, **kwargs):
+                del token, kwargs
+                return type(
+                    "SessionGrant",
+                    (),
+                    {
+                        "token": "capability-token",
+                        "grant": "opaque-grant",
+                        "attestation": {
+                            "repository": "owner/repo",
+                            "repository_id": 99,
+                            "pull_request": 136,
+                            "head_sha": "b" * 40,
+                            "operation": "command",
+                            "source_comment_id": 501,
+                            "actor": "alice",
+                            "actor_type": "User",
+                            "association": "MEMBER",
+                            "command_id": 501,
+                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+                        },
+                    },
+                )()
+
+        class NonAtomicGrantLedger(InMemorySessionLedger):
+            _broker = object()
+
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        with patch.object(
+            application,
+            "_session_ledger_for_token",
+            return_value=NonAtomicGrantLedger(),
+        ):
+            with self.assertRaisesRegex(GitHubPublicationError, "atomic session"):
+                application.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=True, github_session_ledger=True
+                    ),
+                    oidc_token="caller-oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="b" * 40,
+                    body=body,
+                    actor_login="mallory",
+                    association="CONTRIBUTOR",
+                    app_slug="reviewsensei[bot]",
+                    source_comment_id=501,
+                    session_attestation=request_attestation,
+                )
+
 
 class SummaryTests(unittest.TestCase):
     def test_handoff_summary_asks_for_human_review(self):

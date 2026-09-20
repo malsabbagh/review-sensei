@@ -240,7 +240,11 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
       error_code: brokerErrorCode(error),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
-    return response({ error: "session_grant_not_verified" }, 403, true);
+    const status =
+      error instanceof Error && error.message === "broker_ledger_unavailable"
+        ? 503
+        : 403;
+    return response({ error: "session_grant_not_verified" }, status, true);
   }
 }
 

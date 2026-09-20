@@ -866,6 +866,13 @@ class GitHubApplication:
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
+        grant_bound_ledger = getattr(ledger, "_broker", None) is not None
+        if grant_bound_ledger and not callable(
+            getattr(ledger, "initialize_with_mutation", None)
+        ):
+            raise GitHubPublicationError(
+                "hosted maintainer mutations require atomic session initialization"
+            )
         command_policy = ReviewConvergencePolicy() if hosted_mutation else None
         _record, result = apply_session_command(
             ledger, identity, command, policy=command_policy
