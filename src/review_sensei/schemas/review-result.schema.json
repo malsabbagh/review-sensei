@@ -76,6 +76,9 @@
     "coverage": {
       "$ref": "https://reviewsensei.dev/schemas/v1/coverage-manifest.schema.json"
     },
+    "transaction": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/review-transaction.schema.json"
+    },
     "model": {
       "anyOf": [
         {"type": "string", "minLength": 1},

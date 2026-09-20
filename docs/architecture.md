@@ -682,6 +682,17 @@ and plan can display. Until later slices wire it into publication, GitHub
 review events continue to use the explicit finding `blocking` bit described
 above. `REVIEWSENSEI_AUTO_APPROVE=false` remains the comment-only opt-out.
 
+F1 of issue #146 adds an identity-bound `ReviewTransaction` handoff for
+operator-ledger runs. Analysis reserves once, checkpoints the validated result
+and increments the logical round once, then GitHub publication advances the
+same durable transaction through pending, failed, or succeeded phases without
+another provider call or counter increment. The result and ledger carry only
+bounded repository/PR/base/head, policy/configuration/evidence digests,
+reservation, generation, phase, and result-digest metadata; publication
+recomputes the trusted context before any broker or publisher write. Legacy and
+no-ledger callers remain on their existing compatibility path until the later
+issue #146 workflow/default slices.
+
 Conversation turns are authorized before capability exchange or provider
 execution. The reply capability adds an App-authored `eyes` reaction to the
 source comment, the provider receives the already-bounded thread/diff/findings/

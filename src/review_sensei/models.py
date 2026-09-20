@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Mapping, cast
+from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
@@ -34,6 +36,311 @@ MAX_CONVERSATION_CONTEXT_BYTES = 64 * 1024
 MAX_CONVERSATION_REPLY_BYTES = 16 * 1024
 MAX_CONVERSATION_PR_BODY_BYTES = 8 * 1024
 MAX_CONVERSATION_DIFF_BYTES = 16 * 1024
+TRANSACTION_PHASES = frozenset(
+    {
+        "analysis",
+        "analysis_failed",
+        "publication_pending",
+        "publication_failed",
+        "publication_succeeded",
+    }
+)
+_TRANSACTION_PHASE_TRANSITIONS = {
+    "analysis": frozenset({"analysis", "analysis_failed", "publication_pending"}),
+    "analysis_failed": frozenset({"analysis_failed"}),
+    "publication_pending": frozenset(
+        {"publication_pending", "publication_failed", "publication_succeeded"}
+    ),
+    "publication_failed": frozenset(
+        {"publication_failed", "publication_pending", "publication_succeeded"}
+    ),
+    "publication_succeeded": frozenset({"publication_succeeded"}),
+}
+_TRANSACTION_REPOSITORY = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"
+)
+_TRANSACTION_CONFIGURATION_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "stages",
+        "category_policy",
+        "orchestration",
+        "publication_mode",
+    }
+)
+_TRANSACTION_PROVIDER_KEYS = frozenset(
+    {
+        "name",
+        "profile",
+        "base_url",
+        "timeout_seconds",
+        "max_output_tokens",
+        "allow_custom_endpoint",
+        "openrouter_policy",
+    }
+)
+_TRANSACTION_STAGE_KEYS = frozenset(
+    {"name", "outputs", "categories", "provider_profile"}
+)
+_TRANSACTION_ORCHESTRATION_KEYS = frozenset({"enabled", "continue_rounds"})
+_TRANSACTION_OPENROUTER_POLICY_KEYS = frozenset(
+    {
+        "schema_version",
+        "order",
+        "allow_fallbacks",
+        "require_parameters",
+        "data_collection",
+        "zdr",
+        "upstream_provider",
+    }
+)
+_TRANSACTION_PUBLICATION_MODES = frozenset(
+    {"legacy", "advisory", "merge-focused", "strict"}
+)
+_TRANSACTION_POLICY_KEYS = frozenset(
+    {
+        "schema_version",
+        "mode",
+        "enforcement",
+        "max_completed_initial_reviews",
+        "max_completed_verification_rounds",
+        "max_failed_attempts",
+        "automatic_github_review_events",
+        "inline_advisory_threads",
+    }
+)
+_TRANSACTION_POLICY_MODES = frozenset({"legacy", "advisory", "merge-focused", "strict"})
+_TRANSACTION_POLICY_ENFORCEMENTS = frozenset({"display-only", "publication"})
+_TRANSACTION_EVIDENCE_KEYS = frozenset({"evidence_policy", "snapshot_sha256"})
+_TRANSACTION_EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
+
+# This is intentionally frozen separately from ``to_dict``.  A future runtime
+# field must not silently become part of the durable result identity; adding a
+# schema-governed result field requires an explicit update to this projection
+# and the compatibility policy.
+_CONTENT_DIGEST_FIELDS = (
+    "summary",
+    "comments",
+    "provider",
+    "model",
+    "learning_proposals",
+    "review_status",
+    "source_context",
+    "evidence_policy",
+    "coverage_mode",
+    "finding_lifecycles",
+    "coverage",
+)
+_CONTENT_DIGEST_REQUIRED_FIELDS = (
+    "summary",
+    "comments",
+    "provider",
+    "model",
+    "learning_proposals",
+    "review_status",
+    "evidence_policy",
+)
+
+
+def _configuration_text(value: object, *, label: str, allow_none: bool = False) -> None:
+    if allow_none and value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewInputError(f"review transaction configuration {label} is invalid")
+
+
+def _validate_configuration_context(value: Mapping[str, object]) -> None:
+    """Validate the closed, secret-free shape used by transaction digests."""
+
+    if set(value) != _TRANSACTION_CONFIGURATION_KEYS:
+        raise ReviewInputError(
+            "review transaction configuration must contain the documented effective fields"
+        )
+    provider = value.get("provider")
+    if not isinstance(provider, Mapping) or set(provider) != _TRANSACTION_PROVIDER_KEYS:
+        raise ReviewInputError("review transaction provider identity is invalid")
+    _configuration_text(provider.get("name"), label="provider.name")
+    _configuration_text(
+        provider.get("profile"), label="provider.profile", allow_none=True
+    )
+    base_url = provider.get("base_url")
+    _configuration_text(base_url, label="provider.base_url", allow_none=True)
+    if base_url is not None:
+        assert isinstance(base_url, str)
+        try:
+            parsed_url = urlsplit(base_url)
+            has_userinfo = (
+                parsed_url.username is not None or parsed_url.password is not None
+            )
+        except ValueError as exc:
+            raise ReviewInputError(
+                "review transaction provider.base_url is invalid"
+            ) from exc
+        if has_userinfo:
+            raise ReviewInputError(
+                "review transaction provider.base_url must not contain credentials"
+            )
+    timeout = provider.get("timeout_seconds")
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ReviewInputError("review transaction provider.timeout_seconds is invalid")
+    max_output_tokens = provider.get("max_output_tokens")
+    if max_output_tokens is not None and (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens < 1
+    ):
+        raise ReviewInputError(
+            "review transaction provider.max_output_tokens is invalid"
+        )
+    if not isinstance(provider.get("allow_custom_endpoint"), bool):
+        raise ReviewInputError(
+            "review transaction provider.allow_custom_endpoint is invalid"
+        )
+    routing_policy = provider.get("openrouter_policy")
+    if routing_policy is not None:
+        if not isinstance(routing_policy, Mapping) or set(routing_policy) != (
+            _TRANSACTION_OPENROUTER_POLICY_KEYS
+        ):
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy is invalid"
+            )
+        if routing_policy.get("schema_version") != 1:
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy schema is invalid"
+            )
+        order = routing_policy.get("order")
+        if (
+            not isinstance(order, list)
+            or not order
+            or any(not isinstance(item, str) or not item.strip() for item in order)
+        ):
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy order is invalid"
+            )
+        for key in ("allow_fallbacks", "require_parameters", "zdr"):
+            if not isinstance(routing_policy.get(key), bool):
+                raise ReviewInputError(
+                    f"review transaction provider.openrouter_policy {key} is invalid"
+                )
+        _configuration_text(
+            routing_policy.get("data_collection"),
+            label="provider.openrouter_policy.data_collection",
+        )
+        _configuration_text(
+            routing_policy.get("upstream_provider"),
+            label="provider.openrouter_policy.upstream_provider",
+        )
+    _configuration_text(value.get("model"), label="model", allow_none=True)
+    stages = value.get("stages")
+    if not isinstance(stages, list):
+        raise ReviewInputError("review transaction stages are invalid")
+    for stage in stages:
+        if not isinstance(stage, Mapping) or set(stage) != _TRANSACTION_STAGE_KEYS:
+            raise ReviewInputError("review transaction stage identity is invalid")
+        _configuration_text(stage.get("name"), label="stage.name")
+        outputs = stage.get("outputs")
+        categories = stage.get("categories")
+        if not isinstance(outputs, list) or any(
+            not isinstance(item, str) or not item.strip() for item in outputs
+        ):
+            raise ReviewInputError("review transaction stage.outputs is invalid")
+        if not isinstance(categories, list) or any(
+            not isinstance(item, str) or not item.strip() for item in categories
+        ):
+            raise ReviewInputError("review transaction stage.categories is invalid")
+        _configuration_text(
+            stage.get("provider_profile"),
+            label="stage.provider_profile",
+            allow_none=True,
+        )
+    category_policy = value.get("category_policy")
+    if not isinstance(category_policy, list) or any(
+        not isinstance(item, str) or not item.strip() for item in category_policy
+    ):
+        raise ReviewInputError("review transaction category_policy is invalid")
+    orchestration = value.get("orchestration")
+    if not isinstance(orchestration, Mapping) or set(orchestration) != (
+        _TRANSACTION_ORCHESTRATION_KEYS
+    ):
+        raise ReviewInputError("review transaction orchestration is invalid")
+    if not isinstance(orchestration.get("enabled"), bool):
+        raise ReviewInputError("review transaction orchestration.enabled is invalid")
+    continue_rounds = orchestration.get("continue_rounds")
+    if (
+        isinstance(continue_rounds, bool)
+        or not isinstance(continue_rounds, int)
+        or continue_rounds < 0
+    ):
+        raise ReviewInputError(
+            "review transaction orchestration.continue_rounds is invalid"
+        )
+    publication_mode = value.get("publication_mode")
+    if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
+        raise ReviewInputError("review transaction publication_mode is invalid")
+
+
+def _validate_policy_context(value: Mapping[str, object]) -> None:
+    """Validate the closed convergence-policy identity used for a digest."""
+
+    if set(value) != _TRANSACTION_POLICY_KEYS:
+        raise ReviewInputError(
+            "review transaction policy must contain the documented identity fields"
+        )
+    if value.get("schema_version") != "1.0":
+        raise ReviewInputError("review transaction policy schema_version is invalid")
+    if value.get("mode") not in _TRANSACTION_POLICY_MODES:
+        raise ReviewInputError("review transaction policy mode is invalid")
+    if value.get("enforcement") not in _TRANSACTION_POLICY_ENFORCEMENTS:
+        raise ReviewInputError("review transaction policy enforcement is invalid")
+    for label, minimum, maximum in (
+        ("max_completed_initial_reviews", 1, 8),
+        ("max_completed_verification_rounds", 0, 8),
+        ("max_failed_attempts", 1, 32),
+    ):
+        number = value.get(label)
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number < minimum
+            or number > maximum
+        ):
+            raise ReviewInputError(f"review transaction policy {label} is invalid")
+    for label in ("automatic_github_review_events", "inline_advisory_threads"):
+        if not isinstance(value.get(label), bool):
+            raise ReviewInputError(f"review transaction policy {label} is invalid")
+
+
+def _validate_evidence_context(value: Mapping[str, object]) -> None:
+    """Validate the closed evidence identity used for publication admission."""
+
+    if set(value) != _TRANSACTION_EVIDENCE_KEYS:
+        raise ReviewInputError(
+            "review transaction evidence must contain evidence_policy and snapshot_sha256"
+        )
+    evidence_policy = value.get("evidence_policy")
+    snapshot_sha256 = value.get("snapshot_sha256")
+    if evidence_policy not in _TRANSACTION_EVIDENCE_POLICIES:
+        raise ReviewInputError("review transaction evidence_policy is invalid")
+    if snapshot_sha256 is not None and (
+        not isinstance(snapshot_sha256, str) or not _SHA256.fullmatch(snapshot_sha256)
+    ):
+        raise ReviewInputError(
+            "review transaction snapshot_sha256 must be a SHA-256 digest or null"
+        )
+    if evidence_policy == "legacy" and snapshot_sha256 is not None:
+        raise ReviewInputError(
+            "legacy review transaction evidence must not include a snapshot digest"
+        )
+    if evidence_policy == "confirmed" and snapshot_sha256 is None:
+        raise ReviewInputError(
+            "confirmed review transaction evidence requires a snapshot digest"
+        )
 
 
 def _validate_learning_scope(scope: tuple[str, ...]) -> None:
@@ -676,6 +983,339 @@ class FindingLifecycleRecord:
 
 
 @dataclass(frozen=True)
+class ReviewTransaction:
+    """Identity-bound admission and publication state for one logical review.
+
+    The transaction carries no review source, prompt, or finding data.  Its
+    digest fields bind the validated analysis to the effective policy and
+    configuration that the publication boundary independently recomputes.
+    """
+
+    transaction_id: str
+    repository: str
+    pull_request: int
+    base_sha: str
+    head_sha: str
+    policy_digest: str
+    configuration_digest: str
+    evidence_digest: str
+    reservation_id: str
+    generation: int
+    phase: str = "analysis"
+    result_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.transaction_id, str) or not _SHA256.fullmatch(
+            self.transaction_id
+        ):
+            raise ReviewInputError("review transaction id must be a SHA-256 digest")
+        if not isinstance(
+            self.repository, str
+        ) or not _TRANSACTION_REPOSITORY.fullmatch(self.repository):
+            raise ReviewInputError("review transaction repository is invalid")
+        if (
+            isinstance(self.pull_request, bool)
+            or not isinstance(self.pull_request, int)
+            or self.pull_request < 1
+            or self.pull_request > 2_147_483_647
+        ):
+            raise ReviewInputError("review transaction pull_request is invalid")
+        for label, value in (
+            ("base_sha", self.base_sha),
+            ("head_sha", self.head_sha),
+        ):
+            if not isinstance(value, str) or not _GIT_SHA.fullmatch(value):
+                raise ReviewInputError(f"review transaction {label} is invalid")
+        for label, value in (
+            ("policy_digest", self.policy_digest),
+            ("configuration_digest", self.configuration_digest),
+            ("evidence_digest", self.evidence_digest),
+            ("reservation_id", self.reservation_id),
+        ):
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ReviewInputError(
+                    f"review transaction {label} must be a SHA-256 digest"
+                )
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 1
+            or self.generation > 2_147_483_647
+        ):
+            raise ReviewInputError("review transaction generation is invalid")
+        if self.phase not in TRANSACTION_PHASES:
+            raise ReviewInputError("review transaction phase is invalid")
+        if self.result_sha256 is not None and (
+            not isinstance(self.result_sha256, str)
+            or not _SHA256.fullmatch(self.result_sha256)
+        ):
+            raise ReviewInputError("review transaction result_sha256 is invalid")
+        if self.phase == "analysis" and self.result_sha256 is not None:
+            raise ReviewInputError(
+                "analysis transaction cannot contain a result digest"
+            )
+        if self.phase == "analysis_failed" and self.result_sha256 is not None:
+            raise ReviewInputError(
+                "failed analysis transaction cannot contain a result digest"
+            )
+        if (
+            self.phase
+            in {
+                "publication_pending",
+                "publication_failed",
+                "publication_succeeded",
+            }
+            and self.result_sha256 is None
+        ):
+            raise ReviewInputError("publication transaction requires a result digest")
+        if self.transaction_id != self.derive_id(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            policy_digest=self.policy_digest,
+            configuration_digest=self.configuration_digest,
+            evidence_digest=self.evidence_digest,
+            reservation_id=self.reservation_id,
+        ):
+            raise ReviewInputError("review transaction id does not match its identity")
+
+    @staticmethod
+    def _digest(value: Mapping[str, object]) -> str:
+        # Sort object keys at every level so independently reconstructed
+        # trusted contexts produce the same digest regardless of mapping
+        # insertion order. Array order remains meaningful for ordered stages
+        # and policies.
+        import json
+
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def derive_id(
+        cls,
+        *,
+        repository: str,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+        policy_digest: str,
+        configuration_digest: str,
+        evidence_digest: str,
+        reservation_id: str,
+    ) -> str:
+        return cls._digest(
+            {
+                "base_sha": base_sha,
+                "configuration_digest": configuration_digest,
+                "evidence_digest": evidence_digest,
+                "head_sha": head_sha,
+                "policy_digest": policy_digest,
+                "pull_request": pull_request,
+                "repository": repository,
+                "reservation_id": reservation_id,
+            }
+        )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        repository: str,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+        policy_digest: str,
+        configuration_digest: str,
+        evidence_digest: str,
+        reservation_id: str,
+        generation: int,
+    ) -> "ReviewTransaction":
+        return cls(
+            transaction_id=cls.derive_id(
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                policy_digest=policy_digest,
+                configuration_digest=configuration_digest,
+                evidence_digest=evidence_digest,
+                reservation_id=reservation_id,
+            ),
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            policy_digest=policy_digest,
+            configuration_digest=configuration_digest,
+            evidence_digest=evidence_digest,
+            reservation_id=reservation_id,
+            generation=generation,
+        )
+
+    @staticmethod
+    def compute_configuration_digest(value: Mapping[str, object]) -> str:
+        """Digest only the documented, non-secret effective configuration."""
+
+        if not isinstance(value, Mapping):
+            raise ReviewInputError(
+                "review transaction configuration must contain the documented effective fields"
+            )
+        _validate_configuration_context(value)
+        return ReviewTransaction._digest(dict(value))
+
+    @staticmethod
+    def compute_policy_digest(value: Mapping[str, object]) -> str:
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("review transaction policy must be a mapping")
+        _validate_policy_context(value)
+        return ReviewTransaction._digest(dict(value))
+
+    @staticmethod
+    def compute_evidence_digest(value: Mapping[str, object]) -> str:
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("review transaction evidence must be a mapping")
+        _validate_evidence_context(value)
+        return ReviewTransaction._digest(dict(value))
+
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "transaction_id": self.transaction_id,
+            "repository": self.repository,
+            "pull_request": self.pull_request,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "policy_digest": self.policy_digest,
+            "configuration_digest": self.configuration_digest,
+            "evidence_digest": self.evidence_digest,
+            "reservation_id": self.reservation_id,
+            "generation": self.generation,
+            "phase": self.phase,
+        }
+        if self.result_sha256 is not None:
+            value["result_sha256"] = self.result_sha256
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "ReviewTransaction":
+        if not isinstance(value, Mapping):
+            raise ReviewInputError("review transaction must be an object")
+        required = {
+            "transaction_id",
+            "repository",
+            "pull_request",
+            "base_sha",
+            "head_sha",
+            "policy_digest",
+            "configuration_digest",
+            "evidence_digest",
+            "reservation_id",
+            "generation",
+            "phase",
+        }
+        if set(value) - required - {"result_sha256"} or not required <= set(value):
+            raise ReviewInputError("review transaction has an invalid shape")
+        return cls(
+            transaction_id=value["transaction_id"],  # type: ignore[arg-type]
+            repository=value["repository"],  # type: ignore[arg-type]
+            pull_request=value["pull_request"],  # type: ignore[arg-type]
+            base_sha=value["base_sha"],  # type: ignore[arg-type]
+            head_sha=value["head_sha"],  # type: ignore[arg-type]
+            policy_digest=value["policy_digest"],  # type: ignore[arg-type]
+            configuration_digest=value["configuration_digest"],  # type: ignore[arg-type]
+            evidence_digest=value["evidence_digest"],  # type: ignore[arg-type]
+            reservation_id=value["reservation_id"],  # type: ignore[arg-type]
+            generation=value["generation"],  # type: ignore[arg-type]
+            phase=value["phase"],  # type: ignore[arg-type]
+            result_sha256=value.get("result_sha256"),  # type: ignore[arg-type]
+        )
+
+    def with_result(self, result_sha256: str) -> "ReviewTransaction":
+        if not isinstance(result_sha256, str) or not _SHA256.fullmatch(result_sha256):
+            raise ReviewInputError("review transaction result digest is invalid")
+        if "publication_pending" not in _TRANSACTION_PHASE_TRANSITIONS[self.phase]:
+            raise ReviewInputError(
+                f"review transaction phase transition {self.phase}->publication_pending is invalid"
+            )
+        return ReviewTransaction(
+            transaction_id=self.transaction_id,
+            repository=self.repository,
+            pull_request=self.pull_request,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            policy_digest=self.policy_digest,
+            configuration_digest=self.configuration_digest,
+            evidence_digest=self.evidence_digest,
+            reservation_id=self.reservation_id,
+            generation=self.generation,
+            phase="publication_pending",
+            result_sha256=result_sha256,
+        )
+
+    def with_phase(self, phase: str) -> "ReviewTransaction":
+        if phase not in _TRANSACTION_PHASE_TRANSITIONS[self.phase]:
+            raise ReviewInputError(
+                f"review transaction phase transition {self.phase}->{phase} is invalid"
+            )
+        return ReviewTransaction(
+            transaction_id=self.transaction_id,
+            repository=self.repository,
+            pull_request=self.pull_request,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            policy_digest=self.policy_digest,
+            configuration_digest=self.configuration_digest,
+            evidence_digest=self.evidence_digest,
+            reservation_id=self.reservation_id,
+            generation=self.generation,
+            phase=phase,
+            result_sha256=self.result_sha256,
+        )
+
+    def identity_matches(
+        self,
+        *,
+        repository: str,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+        policy_digest: str,
+        configuration_digest: str,
+        evidence_digest: str,
+    ) -> bool:
+        return (
+            self.repository == repository
+            and self.pull_request == pull_request
+            and self.base_sha == base_sha
+            and self.head_sha == head_sha
+            and self.policy_digest == policy_digest
+            and self.configuration_digest == configuration_digest
+            and self.evidence_digest == evidence_digest
+        )
+
+    def logical_identity_matches(self, other: "ReviewTransaction") -> bool:
+        """Compare the immutable transaction identity, excluding phase/CAS state."""
+
+        return (
+            isinstance(other, ReviewTransaction)
+            and self.transaction_id == other.transaction_id
+            and self.repository == other.repository
+            and self.pull_request == other.pull_request
+            and self.base_sha == other.base_sha
+            and self.head_sha == other.head_sha
+            and self.policy_digest == other.policy_digest
+            and self.configuration_digest == other.configuration_digest
+            and self.evidence_digest == other.evidence_digest
+            and self.reservation_id == other.reservation_id
+        )
+
+
+@dataclass(frozen=True)
 class ReviewResult:
     """Validated review output safe for a publisher adapter to consume."""
 
@@ -701,6 +1341,7 @@ class ReviewResult:
     # ``legacy`` is the compatible single-pass publication mode. ``confirmed``
     # means comments were selected by deterministic evidence verification.
     evidence_policy: str = "legacy"
+    transaction: ReviewTransaction | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.limits, ReviewLimits):
@@ -777,6 +1418,10 @@ class ReviewResult:
             self.coverage, CoverageManifest
         ):
             raise ReviewInputError("review coverage must be a CoverageManifest value")
+        if self.transaction is not None and not isinstance(
+            self.transaction, ReviewTransaction
+        ):
+            raise ReviewInputError("review transaction must be a ReviewTransaction")
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
@@ -826,6 +1471,34 @@ class ReviewResult:
             > self.limits.max_result_bytes
         ):
             raise ReviewInputError("review result exceeds the configured size limit")
+        if (
+            self.transaction is not None
+            and self.transaction.result_sha256 is not None
+            and self.transaction.result_sha256 != self.content_digest()
+        ):
+            raise ReviewInputError("review transaction result digest does not match")
+
+    def content_digest(self) -> str:
+        """Digest the canonical v1 result without its transaction envelope.
+
+        The explicit frozen v1 projection is the digest contract: adding,
+        removing, or changing a published result field requires an explicit
+        schema and compatibility update rather than silently changing this
+        projection.
+        """
+
+        serialized = self.to_dict()
+        missing = set(_CONTENT_DIGEST_REQUIRED_FIELDS) - set(serialized)
+        if missing:
+            raise ReviewInputError(
+                "review result is missing digest fields: " + ", ".join(sorted(missing))
+            )
+        value = {
+            field: serialized[field]
+            for field in _CONTENT_DIGEST_FIELDS
+            if field in serialized
+        }
+        return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -867,6 +1540,8 @@ class ReviewResult:
             ]
         if self.coverage is not None:
             value["coverage"] = self.coverage.to_dict()
+        if self.transaction is not None:
+            value["transaction"] = self.transaction.to_dict()
         return value
 
     @classmethod
@@ -1034,6 +1709,14 @@ class ReviewResult:
         )
         if coverage_value is not None and coverage is None:
             raise ReviewInputError("review result coverage must be an object")
+        transaction_value = value.get("transaction")
+        transaction = (
+            ReviewTransaction.from_dict(transaction_value)
+            if isinstance(transaction_value, Mapping)
+            else None
+        )
+        if transaction_value is not None and transaction is None:
+            raise ReviewInputError("review result transaction must be an object")
         return cls(
             summary=summary,
             comments=tuple(comment_values),
@@ -1046,6 +1729,7 @@ class ReviewResult:
             coverage_mode=coverage_mode,
             finding_lifecycles=tuple(parsed_lifecycles),
             coverage=coverage,
+            transaction=transaction,
         )
 
 

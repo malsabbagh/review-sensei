@@ -25,7 +25,7 @@ from .learnings import (
     load_repository_learnings,
     summarize_learning_feedback,
 )
-from .models import LearningEntry, ReviewRequest
+from .models import LearningEntry, ReviewRequest, ReviewTransaction
 from .outcomes import (
     DEFAULT_RECOVERY_TTL_SECONDS,
     RecoveryArtifact,
@@ -473,6 +473,54 @@ def _provider_settings_from_args(
     )
 
 
+def _transaction_provider_identity(
+    settings: ProviderSettings,
+) -> tuple[dict[str, object], str | None]:
+    """Return secret-free provider identity and the effective model.
+
+    ``ProviderSettings`` is the same normalized object passed to stage
+    routing. Named profiles intentionally leave omitted fields as ``None`` in
+    that object, so fill those values from the immutable profile definition
+    before hashing. Credentials are deliberately excluded.
+    """
+
+    provider_name = settings.name.strip().lower()
+    profile = get_provider_profile(settings.profile) if settings.profile else None
+    model = settings.model or (profile.model if profile is not None else None)
+    base_url = settings.base_url or (profile.base_url if profile is not None else None)
+    timeout_seconds = settings.timeout_seconds
+    max_output_tokens = settings.max_output_tokens
+    allow_custom_endpoint = settings.allow_custom_endpoint
+    routing_policy = settings.openrouter_policy
+    if profile is not None:
+        timeout_seconds = (
+            settings.timeout_seconds
+            if settings.timeout_seconds is not None
+            else profile.timeout_seconds
+        )
+        max_output_tokens = (
+            settings.max_output_tokens
+            if settings.max_output_tokens is not None
+            else profile.max_output_tokens
+        )
+        allow_custom_endpoint = settings.allow_custom_endpoint
+        routing_policy = settings.openrouter_policy or profile.openrouter_policy
+    provider_identity: dict[str, object] = {
+        "name": provider_name,
+        "profile": profile.name if profile is not None else None,
+        "base_url": base_url,
+        "timeout_seconds": timeout_seconds,
+        "max_output_tokens": max_output_tokens,
+        "allow_custom_endpoint": allow_custom_endpoint,
+        "openrouter_policy": (
+            dict(routing_policy.identity_fields())
+            if routing_policy is not None
+            else None
+        ),
+    }
+    return provider_identity, model
+
+
 class _ProviderArgumentParser(argparse.ArgumentParser):
     """Argument parser that applies adapter-specific defaults after parsing."""
 
@@ -680,6 +728,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output", type=Path, help="Write JSON to a file instead of stdout"
+    )
+    parser.add_argument(
+        "--transaction",
+        action="store_true",
+        help=(
+            "Opt into the identity-bound analysis/publication transaction; "
+            "use --configuration-context-output when the later publisher "
+            "needs a serialized trusted configuration context"
+        ),
+    )
+    parser.add_argument(
+        "--configuration-context-output",
+        type=Path,
+        help=(
+            "Write the trusted, secret-free configuration context needed to "
+            "publish an identity-bound result; this also opts into the "
+            "transaction and requires an operator review mode plus an explicit "
+            "session ledger. Protect the emitted file: it becomes trusted "
+            "admission input for the later github review command"
+        ),
     )
     parser.add_argument(
         "--outcome",
@@ -1094,6 +1162,18 @@ def _load_reproducibility(args: argparse.Namespace) -> dict[str, object]:
     return _parse_reproducibility_json(args.reproducibility_json)
 
 
+def _load_context_document(path: Path, *, label: str) -> dict[str, object]:
+    """Load a bounded trusted context document for publication admission."""
+
+    try:
+        value = json.loads(read_bounded_utf8(path, maximum=64 * 1024, label=label))
+    except json.JSONDecodeError as exc:
+        raise ReviewInputError(f"{label} must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ReviewInputError(f"{label} must be a JSON object")
+    return value
+
+
 def _promotion_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="review-sensei promotion",
@@ -1190,6 +1270,19 @@ def _github_parser() -> argparse.ArgumentParser:
     review = subparsers.add_parser("review", help="Publish a validated review result")
     publication_source = review.add_mutually_exclusive_group()
     publication_source.add_argument("--result", type=Path)
+    review.add_argument(
+        "--configuration-context",
+        type=Path,
+        help=(
+            "Trusted configuration-context JSON emitted alongside an "
+            "identity-bound analysis result"
+        ),
+    )
+    review.add_argument(
+        "--evidence-context",
+        type=Path,
+        help="Optional trusted evidence-context JSON for an identity-bound result",
+    )
     review.add_argument("--diff", type=Path, required=True)
     review.add_argument("--repository", required=True)
     review.add_argument("--repository-id", type=int, required=True)
@@ -1591,6 +1684,19 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 read_bounded_utf8(args.result, maximum=2_097_152, label="result")
             )
         )
+        configuration_context = (
+            _load_context_document(
+                args.configuration_context,
+                label="configuration context",
+            )
+            if args.configuration_context is not None
+            else None
+        )
+        evidence_context = (
+            _load_context_document(args.evidence_context, label="evidence context")
+            if args.evidence_context is not None
+            else None
+        )
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
@@ -1612,6 +1718,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 convergence_policy=convergence_policy,
                 continuation_rounds=getattr(args, "continue_rounds", 0),
                 no_progress=no_progress_reason is not None,
+                configuration_context=configuration_context,
+                evidence_context=evidence_context,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
@@ -2082,6 +2190,41 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         _validate_live_profile_gates(args, args_list)
+        transaction_requested = bool(getattr(args, "transaction", False)) or (
+            args.configuration_context_output is not None
+        )
+        if transaction_requested:
+            from .convergence import (
+                OPERATOR_REVIEW_MODES,
+                resolve_review_convergence_policy,
+            )
+
+            if (
+                resolve_review_convergence_policy(
+                    mode=getattr(args, "review_mode", None)
+                ).mode
+                not in OPERATOR_REVIEW_MODES
+            ):
+                raise ReviewInputError("--transaction requires an operator review mode")
+            if (
+                args.session_ledger is None
+                or not args.repository
+                or args.pull_request is None
+                or not isinstance(args.base_sha, str)
+                or len(args.base_sha) != 40
+                or any(
+                    character not in "0123456789abcdef" for character in args.base_sha
+                )
+                or not isinstance(args.head_sha, str)
+                or len(args.head_sha) != 40
+                or any(
+                    character not in "0123456789abcdef" for character in args.head_sha
+                )
+            ):
+                raise ReviewInputError(
+                    "--transaction requires an explicit session ledger, "
+                    "repository/PR identity, and 40-character base/head SHAs"
+                )
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
             if not args.fixture_response:
@@ -2147,6 +2290,8 @@ def main(argv: list[str] | None = None) -> int:
         from .session import (
             SessionIdentity,
             admission_diagnostic,
+            checkpoint_review_analysis,
+            prepare_review_transaction,
             prepare_session_round,
             record_session_failed_attempt,
             resolve_local_session_ledger,
@@ -2156,6 +2301,15 @@ def main(argv: list[str] | None = None) -> int:
 
         policy = resolve_review_convergence_policy(
             mode=getattr(args, "review_mode", None)
+        )
+        provider_settings = _provider_settings_from_args(
+            args,
+            api_key=api_key,
+            fixture_response=args.fixture_response,
+            argv=args_list,
+        )
+        transaction_provider_identity, transaction_model = (
+            _transaction_provider_identity(provider_settings)
         )
         ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
         no_progress_reason = getattr(args, "no_progress", None)
@@ -2172,6 +2326,54 @@ def main(argv: list[str] | None = None) -> int:
         identity = None
         reservation = None
         held_reservation: str | None = None
+        prepared_round = None
+        prepared_transaction = None
+        transaction_configuration_digest: str | None = None
+        transaction_configuration_context: dict[str, object] | None = None
+        transaction_evidence_digest: str | None = None
+
+        def cleanup_analysis_reservation(*, charge_failed_attempt: bool) -> None:
+            """Clean up only while this invocation still owns the reservation.
+
+            A ledger write can be durable even when its adapter reports an
+            exception after the replacement.  In that case checkpointing has
+            already advanced the transaction to ``publication_pending`` and
+            cleared the reservation; charging a failed attempt would both
+            obscure the committed result and risk mutating a later retry.
+            Re-read the record before cleanup and preserve any state that no
+            longer carries this reservation.
+            """
+
+            if (
+                ledger is None
+                or identity is None
+                or held_reservation is None
+                or policy.mode not in OPERATOR_REVIEW_MODES
+            ):
+                return
+            loaded = ledger.load(identity)
+            if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+                raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+            current = loaded.record
+            if current.reservation_id != held_reservation:
+                # The checkpoint may have committed despite an adapter error,
+                # or another writer may now own the identity.  Neither state
+                # is an analysis reservation this invocation may charge.
+                return
+            if charge_failed_attempt:
+                record_session_failed_attempt(
+                    ledger,
+                    identity,
+                    reservation_id=held_reservation,
+                    expected_generation=current.generation,
+                )
+            else:
+                ledger.abort(
+                    identity,
+                    reservation_id=held_reservation,
+                    expected_generation=current.generation,
+                )
+
         if (
             ledger is not None
             and args.repository
@@ -2193,14 +2395,70 @@ def main(argv: list[str] | None = None) -> int:
                 head_sha=head_sha,
                 kind="publish",
             )
-            prepared_round = prepare_session_round(
-                ledger,
-                identity,
-                policy,
-                reservation_id=reservation,
-                continuation_rounds=getattr(args, "continue_rounds", 0),
-                no_progress=no_progress_reason is not None,
-            )
+            if transaction_requested:
+                effective_base_sha = (args.base_sha or "").strip().lower()
+                stage_identity = [
+                    {
+                        "name": stage.name,
+                        "outputs": list(stage.outputs),
+                        "categories": [category.id for category in stage.categories],
+                        "provider_profile": stage.provider_profile,
+                    }
+                    for stage in (stages if stages is not None else DEFAULT_STAGES)
+                ]
+                transaction_configuration_context = {
+                    "provider": transaction_provider_identity,
+                    "model": transaction_model,
+                    "stages": stage_identity,
+                    "category_policy": sorted(
+                        {
+                            category.id
+                            for stage in (
+                                stages if stages is not None else DEFAULT_STAGES
+                            )
+                            for category in stage.categories
+                        }
+                    ),
+                    "orchestration": {
+                        "enabled": orchestrate,
+                        "continue_rounds": getattr(args, "continue_rounds", 0),
+                    },
+                    "publication_mode": policy.mode,
+                }
+                transaction_configuration_digest = (
+                    ReviewTransaction.compute_configuration_digest(
+                        transaction_configuration_context
+                    )
+                )
+                # The analysis CLI produces the compatible single-pass result
+                # contract only. Confirmed evidence is a separate publication
+                # gate and requires a reviewed snapshot plus candidate
+                # verification, so it cannot be represented by this path.
+                transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
+                    {"evidence_policy": "legacy", "snapshot_sha256": None}
+                )
+                prepared_round = prepare_review_transaction(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation,
+                    base_sha=effective_base_sha,
+                    head_sha=head_sha,
+                    configuration_digest=transaction_configuration_digest,
+                    evidence_digest=transaction_evidence_digest,
+                    continuation_rounds=getattr(args, "continue_rounds", 0),
+                    no_progress=no_progress_reason is not None,
+                )
+                prepared_transaction = prepared_round.transaction
+            else:
+                prepared_round = prepare_session_round(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation,
+                    continuation_rounds=getattr(args, "continue_rounds", 0),
+                    no_progress=no_progress_reason is not None,
+                )
             held_reservation = (
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
@@ -2224,12 +2482,7 @@ def main(argv: list[str] | None = None) -> int:
                 return run_outcome_exit_code(outcome.status)
         provider, stage_providers = bind_stage_providers(
             registry=default_registry(),
-            settings=_provider_settings_from_args(
-                args,
-                api_key=api_key,
-                fixture_response=args.fixture_response,
-                argv=args_list,
-            ),
+            settings=provider_settings,
             stages=stages if stages is not None else DEFAULT_STAGES,
         )
 
@@ -2296,16 +2549,24 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 budget=ResourceBudget.for_limits(limits),
             )
-        except Exception:
+        except BaseException as analysis_error:
             if (
                 ledger is not None
                 and identity is not None
                 and held_reservation is not None
                 and policy.mode in OPERATOR_REVIEW_MODES
             ):
-                record_session_failed_attempt(
-                    ledger, identity, reservation_id=held_reservation
-                )
+                try:
+                    if isinstance(analysis_error, (KeyboardInterrupt, SystemExit)):
+                        cleanup_analysis_reservation(charge_failed_attempt=False)
+                    else:
+                        cleanup_analysis_reservation(charge_failed_attempt=True)
+                except BaseException as cleanup_error:
+                    analysis_error.add_note(
+                        "analysis reservation cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
             raise
         if (
             run.result is None
@@ -2314,22 +2575,109 @@ def main(argv: list[str] | None = None) -> int:
             and held_reservation is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            record_session_failed_attempt(
-                ledger, identity, reservation_id=held_reservation
-            )
+            cleanup_analysis_reservation(charge_failed_attempt=True)
         outcome = replace(
             run.outcome,
             base_sha=(args.base_sha or "").strip().lower() or None,
             head_sha=(args.head_sha or "").strip().lower() or None,
         )
-        emit_host_outcome(outcome, output_path=args.outcome)
         if run.result is None:
+            emit_host_outcome(outcome, output_path=args.outcome)
             if run.error is not None:
                 print(f"review-sensei: {run.error}", file=sys.stderr)
             else:
                 print(f"review-sensei: {outcome.status}", file=sys.stderr)
             return run_outcome_exit_code(outcome.status)
-        rendered = json.dumps(run.result.to_dict(), indent=2) + "\n"
+        result = run.result
+        if (
+            prepared_transaction is not None
+            and ledger is not None
+            and identity is not None
+        ):
+            if prepared_round is None:
+                raise ReviewInputError("review transaction admission is incomplete")
+            if held_reservation is None:
+                raise ReviewInputError("review transaction reservation is missing")
+            if result.review_status != "complete":
+                # Partial coverage is a valid run outcome, but it is not a
+                # publishable transaction. Release the analysis reservation
+                # through the bounded failed-attempt path and preserve the
+                # partial result for the caller instead of turning it into a
+                # generic checkpoint error.
+                cleanup_analysis_reservation(charge_failed_attempt=True)
+                prepared_round = None
+                prepared_transaction = None
+            elif result.evidence_policy != "legacy":
+                # The analysis CLI currently produces only the compatible
+                # single-pass evidence contract. Confirmed evidence requires
+                # a reviewed snapshot and candidate verification at the
+                # publication boundary; do not checkpoint a misleading legacy
+                # digest for a future result shape.
+                cleanup_analysis_reservation(charge_failed_attempt=True)
+                prepared_round = None
+                prepared_transaction = None
+                raise ReviewInputError(
+                    "identity-bound analysis currently supports only legacy evidence"
+                )
+            else:
+                if args.configuration_context_output is not None:
+                    try:
+                        if transaction_configuration_context is None:
+                            raise ReviewInputError(
+                                "configuration context is unavailable"
+                            )
+                        if (
+                            ReviewTransaction.compute_configuration_digest(
+                                transaction_configuration_context
+                            )
+                            != prepared_transaction.configuration_digest
+                        ):
+                            raise ReviewInputError(
+                                "configuration context does not match the "
+                                "identity-bound transaction"
+                            )
+                        # Persist the context before checkpointing the ledger.
+                        # A failed write must not leave a durable transaction
+                        # that publication cannot reconstruct.
+                        args.configuration_context_output.write_text(
+                            json.dumps(transaction_configuration_context, indent=2)
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                    except BaseException as cleanup_error:
+                        try:
+                            cleanup_analysis_reservation(charge_failed_attempt=True)
+                        except BaseException as reservation_cleanup_error:
+                            cleanup_error.add_note(
+                                "analysis reservation cleanup failed: "
+                                f"{type(reservation_cleanup_error).__name__}: "
+                                f"{str(reservation_cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                        raise
+                try:
+                    result = checkpoint_review_analysis(
+                        ledger,
+                        identity,
+                        prepared_round,
+                        result,
+                    )
+                except BaseException as checkpoint_error:
+                    if held_reservation is not None:
+                        try:
+                            cleanup_analysis_reservation(charge_failed_attempt=True)
+                        except BaseException as cleanup_error:
+                            checkpoint_error.add_note(
+                                "analysis reservation cleanup failed: "
+                                f"{type(cleanup_error).__name__}: "
+                                f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                    raise
+        elif args.configuration_context_output is not None:
+            raise ReviewInputError(
+                "configuration context requires an admitted review transaction"
+            )
+        emit_host_outcome(outcome, output_path=args.outcome)
+        rendered = json.dumps(result.to_dict(), indent=2) + "\n"
         if args.output:
             args.output.write_text(rendered, encoding="utf-8")
         else:
@@ -2348,7 +2696,7 @@ def main(argv: list[str] | None = None) -> int:
                 pull_request_number=args.pull_request,
                 base_sha=outcome.base_sha,
                 head_sha=outcome.head_sha,
-                result=run.result.to_dict(),
+                result=result.to_dict(),
                 expires_at=recovery_expires_at(ttl_seconds=args.recovery_ttl_seconds),
             )
             args.recovery_artifact.write_text(

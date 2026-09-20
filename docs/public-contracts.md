@@ -67,6 +67,7 @@ containing `/v1/`.
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
 | `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
 | `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, expiry, operator pause, and bounded human dispositions |
+| `review-transaction.schema.json` | Identity-bound analysis checkpoint and publication phase metadata; no source or result body |
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
 | `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, limitations, and cap-never-approves flag |
@@ -160,6 +161,7 @@ These imports are public and stable within a major version:
 - `review_sensei.IncrementalReviewPlan`
 - `review_sensei.ReviewContextCache`
 - `review_sensei.ReviewRun`
+- `review_sensei.ReviewTransaction`
 - `review_sensei.RunOutcome`
 - `review_sensei.ResourceBudget`
 - `review_sensei.RecoveryArtifact`
@@ -198,6 +200,11 @@ These imports are public and stable within a major version:
 - `review_sensei.mutate_abort`
 - `review_sensei.prepare_session_round`
 - `review_sensei.complete_session_round`
+- `review_sensei.prepare_review_transaction`
+- `review_sensei.checkpoint_review_analysis`
+- `review_sensei.load_review_transaction_for_publication`
+- `review_sensei.complete_review_publication`
+- `review_sensei.reclaim_abandoned_review_transaction`
 - `review_sensei.plan_change`
 - `review_sensei.verify_candidate`
 - `review_sensei.verify_candidates`
@@ -244,6 +251,20 @@ events. C3 persists PR-wide counters without refusing publication. C4 plans
 verification from a complete compatible baseline and classifies later
 findings before C2 admission. C7 replays frozen sequences and may shadow an
 operator policy without changing GitHub events. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
+When an operator-ledger analysis uses the F1 handoff, `ReviewResult.to_dict()`
+may include a `transaction` envelope validated by
+`review-transaction.schema.json`. Its canonical result digest excludes that
+envelope; `SessionRecord` stores the same identity and phase metadata but never
+stores the result body. Publication must recompute and match the trusted
+policy, effective configuration (including the provider identity/profile,
+endpoint, timeout/output budget, and routing policy), evidence context, exact
+base/head, and result
+digest before broker exchange or publisher writes. Publication retries advance
+the existing transaction and never increment completed-round counters.
+The legacy `mutate_commit` / `complete_session_round` reservation APIs reject a
+transaction-bearing record; transaction callers must use
+`checkpoint_review_analysis` and `complete_review_publication` so the result
+digest and publication phase remain bound.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -251,6 +272,10 @@ as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
 partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
 transport retries, structural retries, prompt/output bytes, and elapsed time.
+For an identity-bound result whose local ledger already records
+`publication_succeeded`, `github review` may return `already_published`
+before broker exchange; this is an idempotent local-ledger recovery signal,
+not a fresh publication.
 Closed diagnostic tokens are enumerated by `PUBLIC_DIAGNOSTICS` in
 `review_sensei.outcomes`; `cancelled` is reserved for host-layer cancellation
 and is not emitted by `ReviewService` today. Structural correction remains one
@@ -259,6 +284,28 @@ bounded retry and is counted separately from transport retries via the
 `RecoveryArtifact`, revalidates
 identity, expiry, integrity, and current publication policy, and never invokes
 a model or writes trusted learnings or configuration.
+
+`github review` accepts the matching `--configuration-context` JSON emitted
+alongside an operator-ledger analysis and an optional `--evidence-context`
+JSON. These are trusted admission inputs from the authenticated workflow or
+operator boundary, not arbitrary request data; integrations crossing that
+boundary must derive them from the trusted checkout and effective settings.
+Only their canonical digests are persisted in the session ledger. Review
+limits and stage prompt/source details are intentionally not part of the
+configuration digest because publication does not re-run analysis; the
+canonical result digest binds the bounded output instead.
+The evidence context is a closed two-field identity (`evidence_policy` and
+`snapshot_sha256`): `legacy` requires a null snapshot, while `confirmed`
+requires the reviewed snapshot SHA-256. Unknown fields and inconsistent
+policy/snapshot pairs are rejected before publication admission.
+
+The analysis CLI keeps the existing `--session-ledger` reservation path
+compatible by default. Pass `--transaction` to opt into the identity-bound
+checkpoint independently of filesystem artifact export. Passing
+`--configuration-context-output` also opts into that transaction and writes the
+secret-free context artifact; omitting it is supported when the later
+publisher can obtain the same trusted context through another operator
+boundary.
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
@@ -462,6 +509,8 @@ The command is `review-sensei`. Supported flags are:
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
+| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger`. Protect the emitted file because it becomes trusted admission input for the later `github review` command |
+| `--transaction` | none | Explicitly opt into the identity-bound analysis/publication checkpoint without requiring a local configuration-context file; requires an operator `--review-mode`, an explicit `--session-ledger`, and exact repository/PR/base/head identity |
 
 Stage and category catalogs are trusted operator configuration. Hosted reviews
 read them only from the reviewed trusted base checkout (the validated base

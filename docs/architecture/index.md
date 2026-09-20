@@ -1,7 +1,7 @@
 # Architecture Index
 
 Project: ReviewSensei
-Last updated: 2026-09-07
+Last updated: 2026-09-19
 
 ## System Overview
 
@@ -56,7 +56,7 @@ transport calls; future GitHub publishers consume only validated
 | Repository-local learnings | `LearningEntry` JSON files | Repository maintainers | Loaded only from the trusted target/base checkout |
 | Learning PR provenance | v2 marker and commit trailer | ReviewSensei publisher | Binds repository/PR, pending batch, reviewed source head, latest base, exact title/body hashes, and the rendered source-title line; no provider or private review data |
 | Review configuration | Stage and category JSON files | Repository operators | Treated as trusted configuration but structurally bounded |
-| Review session ledger | `SessionRecord` JSON / GitHub issue comment | Maintainers | Bounded PR-wide round counters; no source; ADR 0047 |
+| Review session ledger | `SessionRecord` JSON / GitHub issue comment | Maintainers | Bounded PR-wide round counters plus identity-bound `ReviewTransaction` phase/digest metadata; no source/result body; ADRs 0047 and 0052 |
 | Supplemental context | Explicit Markdown/text sources and opt-in Python symbol-aware excerpts | Repository operators | Documents/learnings by default; symbol-aware selection requires trusted-base policy |
 
 
@@ -103,6 +103,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0049`](../adr/0049-automation-admission-and-handoff.md) | Proposed | Automation admission and handoff | #136 C5; cap never mints approval |
 | [`0050`](../adr/0050-maintainer-disposition-and-handoff-status.md) | Proposed | Maintainer disposition and handoff status | #136 C6; `action_required` for handoff |
 | [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` |
+| [`0052`](../adr/0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 F1; one reservation, one checkpoint, retryable publication phases |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),
