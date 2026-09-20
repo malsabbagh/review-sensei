@@ -55,6 +55,10 @@ Negative or tradeoffs:
 - The GitHub issue-comment adapter retains its existing best-effort
   cross-writer limitation; deployment serialization remains required for a
   strict distributed lock.
+- The reservation and transaction-attachment mutations are separate CAS
+  writes. The transaction-enabled and legacy writers must therefore be
+  serialized per `SessionIdentity`; running both concurrently can admit a
+  competing reservation before the transaction is attached.
 - The session record and review-result schemas gain an optional field and the
   record-size budget must continue to be enforced.
 
@@ -88,17 +92,21 @@ Negative or tradeoffs:
   from the authenticated workflow/operator boundary, not untrusted request
   data; integrations crossing that boundary must derive it from their own
   trusted checkout and effective settings.
-- The result digest is computed over the canonical v1 review result with the
-  transaction envelope excluded, avoiding a circular digest. Any additive or
-  semantic change to serialized result fields is a digest-contract change and
-  must be versioned with the public schema/compatibility policy.
+- The result digest is computed over an explicit frozen projection of the
+  canonical v1 review result with the transaction envelope excluded, avoiding
+  a circular digest. Runtime-only additions to `to_dict()` are ignored; any
+  additive or semantic change to the projected result fields is a
+  digest-contract change and must be versioned with the public
+  schema/compatibility policy.
 - The session record retains the transaction phase and result digest but never
   stores the result body.
-- Analysis failure releases the reservation through the existing failed-attempt
-  path. Cancellation and abandoned-reservation cleanup require the original
-  reservation owner and expected generation. A completed analysis transitions
-  to `publication_pending`; publication failures remain retryable and success
-  is idempotent.
+- Analysis failure clears the in-flight transaction, releases the reservation,
+  and charges the existing failed-attempt path; the `analysis_failed` schema
+  phase is reserved for a future explicit terminal record. Cancellation and
+  abandoned-reservation cleanup require the original reservation owner and
+  expected generation. A completed analysis transitions to
+  `publication_pending`; publication failures remain retryable and success is
+  idempotent.
 
 ## Validation And Rollout
 

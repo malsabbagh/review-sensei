@@ -140,6 +140,36 @@ class ReviewTransactionTests(unittest.TestCase):
             ReviewTransaction.compute_configuration_digest(changed_provider),
         )
 
+    def test_configuration_digest_rejects_untrusted_nested_shapes(self):
+        malformed_values = (
+            {
+                **CONFIGURATION,
+                "provider": {
+                    **CONFIGURATION["provider"],
+                    "api_key_preview": "sk-live-secret",
+                },
+            },
+            {**CONFIGURATION, "stages": {}},
+            {
+                **CONFIGURATION,
+                "provider": {
+                    **CONFIGURATION["provider"],
+                    "base_url": "https://user:password@example.test/api",
+                },
+            },
+        )
+        for malformed in malformed_values:
+            with self.subTest(malformed=malformed), self.assertRaises(ReviewInputError):
+                ReviewTransaction.compute_configuration_digest(malformed)
+
+    def test_content_digest_ignores_runtime_only_serialized_fields(self):
+        result = _result()
+        baseline = result.content_digest()
+        serialized = result.to_dict()
+        serialized["runtime_only"] = "not part of the v1 result identity"
+        with patch.object(ReviewResult, "to_dict", return_value=serialized):
+            self.assertEqual(result.content_digest(), baseline)
+
     def test_transaction_schema_matches_phase_digest_rules(self):
         transaction = _checkpoint(InMemorySessionLedger()).transaction
         analysis_with_digest = {
@@ -1101,7 +1131,9 @@ class PublicationTransactionTests(unittest.TestCase):
             session_ledger=ledger,
         )
         mismatched_configuration = {**CONFIGURATION, "model": "different-model"}
-        with self.assertRaisesRegex(ReviewInputError, "trusted context"):
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "transaction validation failed"
+        ):
             application.publish_review(
                 options=GitHubWriteOptions(auto_review=True, github_writes=True),
                 oidc_token="oidc",
@@ -1120,6 +1152,46 @@ class PublicationTransactionTests(unittest.TestCase):
             )
         self.assertEqual(broker.exchanges, 0)
         self.assertEqual(reviewer.calls, 0)
+
+    def test_application_classifies_malformed_configuration_before_broker(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        broker = _Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=_Reviewer(),
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        malformed_configuration = {
+            **CONFIGURATION,
+            "provider": {
+                **CONFIGURATION["provider"],
+                "api_key_preview": "sk-live-secret",
+            },
+        }
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "configuration validation failed"
+        ):
+            application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=result,
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                convergence_policy=POLICY,
+                configuration_context=malformed_configuration,
+                evidence_context=EVIDENCE,
+            )
+        self.assertEqual(broker.exchanges, 0)
 
     def test_application_rebinds_to_durable_phase_on_retry(self):
         ledger = InMemorySessionLedger()
@@ -1253,7 +1325,9 @@ class PublicationTransactionTests(unittest.TestCase):
         with patch.object(
             application, "_session_ledger_for_token", return_value=remote_ledger
         ):
-            with self.assertRaisesRegex(ReviewInputError, "durable transaction"):
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "transaction validation failed"
+            ):
                 application.publish_review(
                     options=GitHubWriteOptions(
                         auto_review=True,

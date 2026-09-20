@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Mapping, cast
+from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
@@ -67,6 +69,195 @@ _TRANSACTION_CONFIGURATION_KEYS = frozenset(
         "publication_mode",
     }
 )
+_TRANSACTION_PROVIDER_KEYS = frozenset(
+    {
+        "name",
+        "profile",
+        "base_url",
+        "timeout_seconds",
+        "max_output_tokens",
+        "allow_custom_endpoint",
+        "openrouter_policy",
+    }
+)
+_TRANSACTION_STAGE_KEYS = frozenset(
+    {"name", "outputs", "categories", "provider_profile"}
+)
+_TRANSACTION_ORCHESTRATION_KEYS = frozenset({"enabled", "continue_rounds"})
+_TRANSACTION_OPENROUTER_POLICY_KEYS = frozenset(
+    {
+        "schema_version",
+        "order",
+        "allow_fallbacks",
+        "require_parameters",
+        "data_collection",
+        "zdr",
+        "upstream_provider",
+    }
+)
+_TRANSACTION_PUBLICATION_MODES = frozenset(
+    {"legacy", "advisory", "merge-focused", "strict"}
+)
+
+# This is intentionally frozen separately from ``to_dict``.  A future runtime
+# field must not silently become part of the durable result identity; adding a
+# schema-governed result field requires an explicit update to this projection
+# and the compatibility policy.
+_CONTENT_DIGEST_FIELDS = (
+    "summary",
+    "comments",
+    "provider",
+    "model",
+    "learning_proposals",
+    "review_status",
+    "source_context",
+    "evidence_policy",
+    "coverage_mode",
+    "finding_lifecycles",
+    "coverage",
+)
+
+
+def _configuration_text(value: object, *, label: str, allow_none: bool = False) -> None:
+    if allow_none and value is None:
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewInputError(f"review transaction configuration {label} is invalid")
+
+
+def _validate_configuration_context(value: Mapping[str, object]) -> None:
+    """Validate the closed, secret-free shape used by transaction digests."""
+
+    if set(value) != _TRANSACTION_CONFIGURATION_KEYS:
+        raise ReviewInputError(
+            "review transaction configuration must contain the documented effective fields"
+        )
+    provider = value.get("provider")
+    if not isinstance(provider, Mapping) or set(provider) != _TRANSACTION_PROVIDER_KEYS:
+        raise ReviewInputError("review transaction provider identity is invalid")
+    _configuration_text(provider.get("name"), label="provider.name")
+    _configuration_text(
+        provider.get("profile"), label="provider.profile", allow_none=True
+    )
+    base_url = provider.get("base_url")
+    _configuration_text(base_url, label="provider.base_url", allow_none=True)
+    if base_url is not None:
+        assert isinstance(base_url, str)
+        try:
+            parsed_url = urlsplit(base_url)
+            has_userinfo = (
+                parsed_url.username is not None or parsed_url.password is not None
+            )
+        except ValueError as exc:
+            raise ReviewInputError(
+                "review transaction provider.base_url is invalid"
+            ) from exc
+        if has_userinfo:
+            raise ReviewInputError(
+                "review transaction provider.base_url must not contain credentials"
+            )
+    timeout = provider.get("timeout_seconds")
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ReviewInputError("review transaction provider.timeout_seconds is invalid")
+    max_output_tokens = provider.get("max_output_tokens")
+    if max_output_tokens is not None and (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens < 1
+    ):
+        raise ReviewInputError(
+            "review transaction provider.max_output_tokens is invalid"
+        )
+    if not isinstance(provider.get("allow_custom_endpoint"), bool):
+        raise ReviewInputError(
+            "review transaction provider.allow_custom_endpoint is invalid"
+        )
+    routing_policy = provider.get("openrouter_policy")
+    if routing_policy is not None:
+        if not isinstance(routing_policy, Mapping) or set(routing_policy) != (
+            _TRANSACTION_OPENROUTER_POLICY_KEYS
+        ):
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy is invalid"
+            )
+        if routing_policy.get("schema_version") != 1:
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy schema is invalid"
+            )
+        order = routing_policy.get("order")
+        if (
+            not isinstance(order, list)
+            or not order
+            or any(not isinstance(item, str) or not item.strip() for item in order)
+        ):
+            raise ReviewInputError(
+                "review transaction provider.openrouter_policy order is invalid"
+            )
+        for key in ("allow_fallbacks", "require_parameters", "zdr"):
+            if not isinstance(routing_policy.get(key), bool):
+                raise ReviewInputError(
+                    f"review transaction provider.openrouter_policy {key} is invalid"
+                )
+        _configuration_text(
+            routing_policy.get("data_collection"),
+            label="provider.openrouter_policy.data_collection",
+        )
+        _configuration_text(
+            routing_policy.get("upstream_provider"),
+            label="provider.openrouter_policy.upstream_provider",
+        )
+    _configuration_text(value.get("model"), label="model", allow_none=True)
+    stages = value.get("stages")
+    if not isinstance(stages, list):
+        raise ReviewInputError("review transaction stages are invalid")
+    for stage in stages:
+        if not isinstance(stage, Mapping) or set(stage) != _TRANSACTION_STAGE_KEYS:
+            raise ReviewInputError("review transaction stage identity is invalid")
+        _configuration_text(stage.get("name"), label="stage.name")
+        outputs = stage.get("outputs")
+        categories = stage.get("categories")
+        if not isinstance(outputs, list) or any(
+            not isinstance(item, str) or not item.strip() for item in outputs
+        ):
+            raise ReviewInputError("review transaction stage.outputs is invalid")
+        if not isinstance(categories, list) or any(
+            not isinstance(item, str) or not item.strip() for item in categories
+        ):
+            raise ReviewInputError("review transaction stage.categories is invalid")
+        _configuration_text(
+            stage.get("provider_profile"),
+            label="stage.provider_profile",
+            allow_none=True,
+        )
+    category_policy = value.get("category_policy")
+    if not isinstance(category_policy, list) or any(
+        not isinstance(item, str) or not item.strip() for item in category_policy
+    ):
+        raise ReviewInputError("review transaction category_policy is invalid")
+    orchestration = value.get("orchestration")
+    if not isinstance(orchestration, Mapping) or set(orchestration) != (
+        _TRANSACTION_ORCHESTRATION_KEYS
+    ):
+        raise ReviewInputError("review transaction orchestration is invalid")
+    if not isinstance(orchestration.get("enabled"), bool):
+        raise ReviewInputError("review transaction orchestration.enabled is invalid")
+    continue_rounds = orchestration.get("continue_rounds")
+    if (
+        isinstance(continue_rounds, bool)
+        or not isinstance(continue_rounds, int)
+        or continue_rounds < 0
+    ):
+        raise ReviewInputError(
+            "review transaction orchestration.continue_rounds is invalid"
+        )
+    publication_mode = value.get("publication_mode")
+    if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
+        raise ReviewInputError("review transaction publication_mode is invalid")
 
 
 def _validate_learning_scope(scope: tuple[str, ...]) -> None:
@@ -888,13 +1079,11 @@ class ReviewTransaction:
     def compute_configuration_digest(value: Mapping[str, object]) -> str:
         """Digest only the documented, non-secret effective configuration."""
 
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != _TRANSACTION_CONFIGURATION_KEYS
-        ):
+        if not isinstance(value, Mapping):
             raise ReviewInputError(
                 "review transaction configuration must contain the documented effective fields"
             )
+        _validate_configuration_context(value)
         return ReviewTransaction._digest(dict(value))
 
     @staticmethod
@@ -1203,13 +1392,18 @@ class ReviewResult:
     def content_digest(self) -> str:
         """Digest the canonical v1 result without its transaction envelope.
 
-        The serialized v1 result is the digest contract: adding, removing, or
-        changing a published result field requires an explicit schema and
-        compatibility update rather than silently changing this projection.
+        The explicit frozen v1 projection is the digest contract: adding,
+        removing, or changing a published result field requires an explicit
+        schema and compatibility update rather than silently changing this
+        projection.
         """
 
-        value = self.to_dict()
-        value.pop("transaction", None)
+        serialized = self.to_dict()
+        value = {
+            field: serialized[field]
+            for field in _CONTENT_DIGEST_FIELDS
+            if field in serialized
+        }
         return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
