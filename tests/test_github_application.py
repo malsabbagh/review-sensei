@@ -538,6 +538,23 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(reviewer.calls, [])
         self.assertIsNone(ledger.load(identity).record.reservation_id)
 
+        legacy_reviewer = RecordingReviewer()
+        legacy_application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=legacy_reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+        legacy_kwargs = dict(publish_kwargs)
+        legacy_kwargs.pop("convergence_policy")
+        legacy_outcome = legacy_application.publish_review(**legacy_kwargs)
+        self.assertEqual(legacy_outcome.status, "published")
+        self.assertEqual(len(legacy_reviewer.calls), 1)
+        self.assertIsNone(legacy_reviewer.calls[0]["baseline"])
+        self.assertIsNone(legacy_reviewer.calls[0]["current_key"])
+
         with patch(
             "review_sensei.hosting.github.application.baseline_from_history_document",
             side_effect=ReviewInputError("corrupt persisted baseline"),

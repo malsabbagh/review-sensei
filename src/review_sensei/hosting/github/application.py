@@ -135,6 +135,7 @@ class GitHubApplication:
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
         )
+        operator_baseline_enforced = policy.mode in OPERATOR_REVIEW_MODES
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -433,18 +434,22 @@ class GitHubApplication:
                 authorized_dispositions = session_dispositions(prepared.record)
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
-            record_for_baseline = (
-                prepared.record if prepared is not None else transaction_record
-            )
-            if durable_baseline is None and record_for_baseline is not None:
-                history = record_for_baseline.convergence_history
-                if isinstance(history, Mapping) and history.get("state") == "completed":
-                    try:
-                        durable_baseline = baseline_from_history_document(
-                            history.get("baseline")
-                        )
-                    except ReviewInputError:
-                        baseline_recovery_required = True
+            if operator_baseline_enforced:
+                record_for_baseline = (
+                    prepared.record if prepared is not None else transaction_record
+                )
+                if durable_baseline is None and record_for_baseline is not None:
+                    history = record_for_baseline.convergence_history
+                    if (
+                        isinstance(history, Mapping)
+                        and history.get("state") == "completed"
+                    ):
+                        try:
+                            durable_baseline = baseline_from_history_document(
+                                history.get("baseline")
+                            )
+                        except ReviewInputError:
+                            baseline_recovery_required = True
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
         # Falling back to the prior key would treat an unknown head/configuration
@@ -457,8 +462,11 @@ class GitHubApplication:
                     status="handoff",
                     diagnostic="durable_baseline_recovery_required",
                 )
-                if baseline_recovery_required
-                or (durable_baseline is not None and current_key is None)
+                if operator_baseline_enforced
+                and (
+                    baseline_recovery_required
+                    or (durable_baseline is not None and current_key is None)
+                )
                 else self.reviewer.publish(
                     token=token,
                     repository=repository,
