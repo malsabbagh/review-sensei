@@ -146,6 +146,11 @@ class BrokerClient:
         if parsed.get("capability") != "review_session":
             raise GitHubBrokerClientError("Broker session response was invalid")
         state = parsed.get("session_state")
+        if state == "rate_limited":
+            # Enrollment spends the same per-scope budget as an assertion, so
+            # an exhausted window is a transient broker condition the caller
+            # can retry rather than a malformed response.
+            raise GitHubHTTPTransientError("broker session enrollment is rate limited")
         if state not in {"enrolled", "known"}:
             raise GitHubBrokerClientError("Broker session response was invalid")
         return BrokerSession(token=token, state=state)

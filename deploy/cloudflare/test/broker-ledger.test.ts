@@ -234,7 +234,10 @@ describe("broker replay and rate ledger", () => {
     expect(await (await enroll(ledger)).json()).toEqual({ state: "enrolled" });
 
     expect([...sql.replays.keys()]).toEqual(["b".repeat(64)]);
-    expect(sql.rates.size).toBe(0);
+    // The stale rate row is reclaimed; the only row left is this enrollment's
+    // own admission counter, which now spends the shared per-scope budget.
+    expect([...sql.rates.keys()]).not.toContain("c".repeat(64));
+    expect(sql.rates.size).toBe(1);
     expect(sql.enrollments.size).toBe(1);
   });
 
@@ -253,6 +256,23 @@ describe("broker replay and rate ledger", () => {
 
     clock.mockReturnValue(1_700_000_000_000 + 95 * day);
     expect(await (await enroll(ledger, scope)).json()).toEqual({ state: "known" });
+  });
+
+  it("bounds how often one scope can refresh its enrollment witness", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    const scope = `987654321:7:${"a".repeat(40)}`;
+
+    for (let index = 1; index <= 10; index += 1) {
+      expect(await (await enroll(ledger, scope)).json()).toEqual({
+        state: index === 1 ? "enrolled" : "known",
+      });
+    }
+    // The sliding retention window cannot be refreshed without bound.
+    expect(await (await enroll(ledger, scope)).json()).toEqual({
+      state: "rate_limited",
+    });
+    expect(sql.enrollments.size).toBe(1);
   });
 
   it("prunes enrollment witnesses past the session retention window", async () => {

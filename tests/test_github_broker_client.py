@@ -178,6 +178,22 @@ class BrokerClientTests(unittest.TestCase):
             },
         )
 
+    def test_open_session_treats_a_rate_limited_window_as_transient(self):
+        client, _calls = self.make_client(
+            (
+                b'{"token":"ghs_session","capability":"review_session",'
+                b'"session_state":"rate_limited"}',
+                200,
+            )
+        )
+        with self.assertRaises(GitHubHTTPTransientError):
+            client.open_session(
+                "oidc.token",
+                repository_id=987654321,
+                pull_request=7,
+                head_sha="a" * 40,
+            )
+
     def test_exchange_rejects_arbitrary_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
         with self.assertRaises(GitHubBrokerClientError):

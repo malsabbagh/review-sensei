@@ -2680,6 +2680,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     from .baseline import baseline_from_review
                     from .context import build_review_context_cache_key
+                    from .session import next_session_generation
 
                     if prepared_round.record is None:
                         raise ReviewInputError(
@@ -2699,7 +2700,7 @@ def main(argv: list[str] | None = None) -> int:
                             result,
                             cache_key=cache_key,
                             policy=policy,
-                            generation=prepared_round.record.generation + 1,
+                            generation=next_session_generation(prepared_round.record),
                         )
                         if cache_key is not None
                         else None

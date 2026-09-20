@@ -517,6 +517,15 @@ class SessionRecord:
             raise ReviewInputError("legacy session record has C6 fields")
         if self._digest_shape == "operator-paused" and self.dispositions:
             raise ReviewInputError("operator-paused session record has dispositions")
+        if self._digest_shape != "current" and self.convergence_history is not None:
+            # Only the current payload covers the convergence history, so a
+            # record carrying one must never be written under the legacy or
+            # operator-paused digest shape. Otherwise an in-place upgrade of an
+            # older record would re-serialize the envelope while keeping a
+            # digest computed without it.
+            raise ReviewInputError(
+                "session convergence history requires the current digest shape"
+            )
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -1014,6 +1023,18 @@ def _next_generation(record: SessionRecord) -> int:
     if record.generation >= MAX_GENERATION:
         raise ReviewInputError("session generation is exhausted")
     return record.generation + 1
+
+
+def next_session_generation(record: SessionRecord) -> int:
+    """Return the generation the next checkpoint will advance this record to.
+
+    Callers that build a baseline envelope for a checkpoint need this value
+    before the session layer verifies it. Recomputing ``generation + 1`` at the
+    call site would duplicate an invariant this module owns, so the caller asks
+    for it here instead.
+    """
+
+    return _next_generation(record)
 
 
 def mutate_reserved(

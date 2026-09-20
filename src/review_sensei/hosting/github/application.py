@@ -218,6 +218,11 @@ class GitHubApplication:
         token = self.broker.exchange(exchange_input, capability="review_publish")
         session_token: str | None = None
         session_state: str | None = None
+        # Only a hosted run has a broker enrollment witness to consult, so the
+        # deleted-marker check below applies to exactly this branch. A caller
+        # that injects its own ledger (the in-process and test path) has no
+        # witness, so it is trusted to manage its own durability and does not
+        # receive the authenticated-deletion protection the ADR promises.
         hosted_session_ledger = (
             options.github_session_ledger and self.session_ledger is None
         )

@@ -298,8 +298,11 @@ class GitHubIssueCommentSessionLedger:
                 # Only an author that passed the trusted-app check above can
                 # turn a malformed marker into established unreadable state.
                 # Human quotes were already ignored, so they cannot block a
-                # later session initialization.
-                assert trusted_session_author
+                # later session initialization. The check is explicit rather
+                # than an assertion so the invariant holds under -O and reads
+                # as part of the control flow.
+                if not trusted_session_author:
+                    continue
                 raise SessionLoadError(
                     SessionLoadReason.INTEGRITY_FAILED,
                     "session comment marker is malformed",

@@ -30,7 +30,15 @@ Support these comment commands, case-sensitive `@sensei` gate:
 - `@sensei review pause`
 - `@sensei verify`
 - `@sensei review continue --rounds 1`
+- `@sensei review reenroll`
 - `@sensei dismiss|defer|accept-risk <fingerprint> --reason <text>`
+
+`@sensei review reenroll` is the authenticated recovery command for an expired
+or witness-only session (see the amendment below). It is the only command that
+retires durable state and resets round counters, it is refused for a live,
+present-but-unreadable, or ambiguous record, and like every other mutating
+command it requires GitHub writes to be enabled (`--allow-write` on the CLI and
+`github_writes` on the hosted path).
 
 Unauthorized actors, bots, and the App itself are ignored. Dismiss,
 defer, and accept-risk require a reason and bind to a finding

@@ -136,6 +136,12 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           "DELETE FROM broker_session_enrollments WHERE enrolled_at < ?",
           now - ENROLLMENT_RETENTION_MS,
         );
+        // Enrollment refreshes the sliding retention window, so it spends the
+        // same per-scope budget as an assertion: without it a caller could
+        // keep any number of witnesses alive by re-enrolling in a loop.
+        if (!this.admitScope(scopeHash, now)) {
+          return { state: "rate_limited" } as BrokerReply;
+        }
         const rows = [
           ...this.sql.exec(
             "SELECT scope_hash FROM broker_session_enrollments WHERE scope_hash = ?",
@@ -192,16 +198,7 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
         }
       }
 
-      const rateRows = [
-        ...this.sql.exec<{ window_started: number; count: number }>(
-          "SELECT window_started, count FROM broker_rates WHERE scope_hash = ?",
-          scopeHash,
-        ),
-      ];
-      const rate = rateRows[0];
-      const windowStarted = rate?.window_started ?? now;
-      const count = rate && now - windowStarted < RATE_WINDOW_MS ? rate.count : 0;
-      if (count >= RATE_LIMIT) {
+      if (!this.admitScope(scopeHash, now)) {
         return { state: "rate_limited" } as BrokerReply;
       }
       if (data.action === "claim") {
@@ -211,21 +208,45 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           now + RETENTION_MS,
         );
       }
-      if (count === 0 || !rate || now - windowStarted >= RATE_WINDOW_MS) {
-        this.sql.exec(
-          "INSERT OR REPLACE INTO broker_rates (scope_hash, window_started, count) VALUES (?, ?, 1)",
-          scopeHash,
-          now,
-        );
-      } else {
-        this.sql.exec(
-          "UPDATE broker_rates SET count = ? WHERE scope_hash = ?",
-          count + 1,
-          scopeHash,
-        );
-      }
       return { state: "accepted" } as BrokerReply;
     });
     return json(result);
+  }
+
+  /**
+   * Admit one call for a scope and advance its fixed-window counter.
+   *
+   * Replay and rate claims admit their assertion scope; session enrollment
+   * admits its head-bound scope with the same budget, so a caller cannot keep
+   * a witness alive indefinitely by refreshing it in a loop. Returns false when
+   * the scope has already spent its window.
+   */
+  private admitScope(scopeHash: string, now: number): boolean {
+    const rateRows = [
+      ...this.sql.exec<{ window_started: number; count: number }>(
+        "SELECT window_started, count FROM broker_rates WHERE scope_hash = ?",
+        scopeHash,
+      ),
+    ];
+    const rate = rateRows[0];
+    const windowStarted = rate?.window_started ?? now;
+    const count = rate && now - windowStarted < RATE_WINDOW_MS ? rate.count : 0;
+    if (count >= RATE_LIMIT) {
+      return false;
+    }
+    if (count === 0 || !rate || now - windowStarted >= RATE_WINDOW_MS) {
+      this.sql.exec(
+        "INSERT OR REPLACE INTO broker_rates (scope_hash, window_started, count) VALUES (?, ?, 1)",
+        scopeHash,
+        now,
+      );
+    } else {
+      this.sql.exec(
+        "UPDATE broker_rates SET count = ? WHERE scope_hash = ?",
+        count + 1,
+        scopeHash,
+      );
+    }
+    return true;
   }
 }

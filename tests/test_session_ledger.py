@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -99,6 +100,67 @@ class SessionRecordTests(unittest.TestCase):
             "progress": [{"event": "completed", "generation": 1}],
             "provenance": {"ledger_digest": "0" * 64},
         }
+
+    def test_untrusted_history_is_bounded_by_bytes_not_only_field_caps(self):
+        # The schema bounds every member of the envelope, but only the
+        # validation seam can bound its encoded size. A document whose fields
+        # all satisfy the schema must still be refused when the envelope
+        # exceeds the component bound.
+        history = self._history()
+        baseline = history["baseline"]
+        assert isinstance(baseline, dict)
+        baseline["reviewed_paths"] = [
+            f"src/{'a' * 200}_{index}.py" for index in range(40)
+        ]
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        document = record.to_dict()
+        document["convergence_history"] = history
+        with self.assertRaisesRegex(ReviewInputError, "exceeds the configured bound"):
+            SessionRecord.from_dict(document)
+
+    def test_history_is_inside_the_integrity_boundary(self):
+        history = self._history()
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        # The envelope is covered by record_sha256: changing the history alone
+        # must fail the integrity check, not silently parse.
+        tampered = record.to_dict()
+        tampered["convergence_history"]["progress"] = [  # type: ignore[index]
+            {"event": "completed", "generation": 2}
+        ]
+        with self.assertRaisesRegex(ReviewInputError, "integrity"):
+            SessionRecord.from_dict(tampered)
+        changed = self._history()
+        changed["progress"] = [{"event": "completed", "generation": 2}]
+        other = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=changed
+        )
+        self.assertNotEqual(record.record_sha256, other.record_sha256)
+
+    def test_history_requires_the_current_digest_shape(self):
+        # An upgrade path re-serializes an older record with an envelope. It
+        # must not keep the legacy or operator-paused payload, which computes a
+        # digest that does not include the history.
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=self._history()
+        )
+        # A legacy shape is already refused by the C6-field guard; the
+        # operator-paused shape is refused by the history guard added here.
+        with self.assertRaisesRegex(ReviewInputError, "has C6 fields"):
+            replace(record, _digest_shape_input="legacy")
+        with self.assertRaisesRegex(ReviewInputError, "current digest shape"):
+            replace(record, _digest_shape_input="operator-paused")
+
+    def test_legacy_record_gains_a_covered_history_in_place(self):
+        legacy = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        upgraded = legacy.evolve(now=FIXED_NOW, convergence_history=self._history())
+        restored = SessionRecord.from_dict(upgraded.to_dict())
+        self.assertEqual(restored.convergence_history, self._history())
+        tampered = upgraded.to_dict()
+        tampered["convergence_history"]["state"] = "invalidated"  # type: ignore[index]
+        with self.assertRaisesRegex(ReviewInputError, "integrity"):
+            SessionRecord.from_dict(tampered)
 
     def test_history_envelope_bounds_findings_to_the_adr_limit(self):
         findings = tuple(
