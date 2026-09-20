@@ -646,9 +646,9 @@ class ReviewTransactionTests(unittest.TestCase):
 
             stage_mismatch_history = json.loads(json.dumps(initial_history))
             stage_mismatch_head = "c" * 40
-            stage_mismatch_history["baseline"]["cache_key"]["head_sha"] = (
-                stage_mismatch_head
-            )
+            # Keep the prior head stable so this exercises the stage digest
+            # mismatch rather than a head mismatch short-circuit.
+            stage_mismatch_history["baseline"]["cache_key"]["head_sha"] = HEAD_SHA
             stage_mismatch_history["baseline"]["cache_key"]["stage_digest"] = "f" * 64
             stage_mismatch_argv = list(argv)
             stage_mismatch_argv[stage_mismatch_argv.index("--head-sha") + 1] = (
@@ -667,6 +667,7 @@ class ReviewTransactionTests(unittest.TestCase):
                 self.assertEqual(
                     main(stage_mismatch_argv), run_outcome_exit_code("action_required")
                 )
+            self.assertEqual(provider.calls, malformed_provider_calls)
             stage_mismatch_outcome = json.loads(
                 outcome_path.read_text(encoding="utf-8")
             )
@@ -943,7 +944,7 @@ class ReviewTransactionTests(unittest.TestCase):
                     return_value=RecordingRegistry(provider),
                 ),
                 patch(
-                    "review_sensei.context.build_review_context_cache_key",
+                    "review_sensei.cli.build_review_context_cache_key",
                     return_value=None,
                 ),
             ):

@@ -103,7 +103,7 @@ class GitHubApplication:
         baseline: ReviewBaseline | None = None,
         current_key: ReviewContextCacheKey | None = None,
         changed_paths: Sequence[str] | None = None,
-        related_paths: Sequence[str] = (),
+        related_paths: Sequence[str] | None = None,
         evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
         no_progress: bool = False,
@@ -482,12 +482,16 @@ class GitHubApplication:
         # as compatible and turn stale evidence into admission authority.  Do
         # not silently downgrade to a fresh review when the caller omitted the
         # key; make the recovery requirement visible and retryable instead.
-        publication_related_paths = related_paths
-        if durable_baseline is not None and not publication_related_paths:
+        publication_related_paths: Sequence[str]
+        if related_paths is None and durable_baseline is not None:
             # The analysis transaction persists the verification scope in the
             # baseline. Reuse it on the hosted publication boundary so sibling
             # paths remain part of the same late-admission decision.
             publication_related_paths = durable_baseline.related_paths
+        else:
+            # An explicit empty tuple is a deliberate narrow scope. Do not
+            # silently widen it with paths persisted for an earlier head.
+            publication_related_paths = () if related_paths is None else related_paths
         try:
             publication = (
                 PublicationResult(

@@ -9,11 +9,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
-from .baseline import baseline_from_history_document
+from .baseline import baseline_from_history_document, plan_verification_scope
 from .context import (
     ContextSnapshot,
     RepositoryContextStore,
     SymbolAwareContextPolicy,
+    build_review_context_cache_key,
     build_review_context_selection,
 )
 from .diff import analyze_diff
@@ -2429,6 +2430,21 @@ def main(argv: list[str] | None = None) -> int:
                     f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                 )
 
+        def emit_durable_baseline_recovery() -> int:
+            cleanup_analysis_reservation(charge_failed_attempt=False)
+            outcome = RunOutcome(
+                "action_required",
+                repository=args.repository,
+                pull_request_number=args.pull_request,
+                base_sha=resolved_base_sha,
+                head_sha=resolved_head_sha,
+                diagnostic="durable_baseline_recovery_required",
+                provider_calls=0,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
+
         if (
             ledger is not None
             and args.repository
@@ -2616,42 +2632,15 @@ def main(argv: list[str] | None = None) -> int:
             and baseline_enforcement_requested
             and prepared_round.record.completed_initial_reviews > 0
         ):
-            from .baseline import plan_verification_scope
-            from .context import build_review_context_cache_key
-
             history = prepared_round.record.convergence_history
             if not isinstance(history, dict) or history.get("state") != "completed":
-                cleanup_analysis_reservation(charge_failed_attempt=False)
-                outcome = RunOutcome(
-                    "action_required",
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    base_sha=resolved_base_sha,
-                    head_sha=resolved_head_sha,
-                    diagnostic="durable_baseline_recovery_required",
-                    provider_calls=0,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
+                return emit_durable_baseline_recovery()
             try:
                 persisted_baseline = baseline_from_history_document(
                     history.get("baseline")
                 )
             except (ReviewInputError, TypeError, KeyError, ValueError):
-                cleanup_analysis_reservation(charge_failed_attempt=False)
-                outcome = RunOutcome(
-                    "action_required",
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    base_sha=resolved_base_sha,
-                    head_sha=resolved_head_sha,
-                    diagnostic="durable_baseline_recovery_required",
-                    provider_calls=0,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
+                return emit_durable_baseline_recovery()
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
@@ -2669,19 +2658,7 @@ def main(argv: list[str] | None = None) -> int:
                 changed_paths=analysis.changed_paths,
             )
             if scope.status != "verify" or scope.incremental is None:
-                cleanup_analysis_reservation(charge_failed_attempt=False)
-                outcome = RunOutcome(
-                    "action_required",
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    base_sha=resolved_base_sha,
-                    head_sha=resolved_head_sha,
-                    diagnostic="durable_baseline_recovery_required",
-                    provider_calls=0,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
+                return emit_durable_baseline_recovery()
             verification_scope = scope
             incremental = scope.incremental
         try:
@@ -2788,7 +2765,6 @@ def main(argv: list[str] | None = None) -> int:
                         raise
                 try:
                     from .baseline import baseline_from_review
-                    from .context import build_review_context_cache_key
                     from .session import next_session_generation
 
                     if prepared_round.record is None:
