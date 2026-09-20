@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -17,8 +19,10 @@ from review_sensei.hosting.github import (
 )
 from review_sensei.hosting.github.errors import GitHubPublicationError
 from review_sensei.models import ProviderResponse, ReviewResult, ReviewTransaction
+from review_sensei.outcomes import RunOutcome
 from review_sensei.providers import ProviderSettings
 from review_sensei.schemas import validate_public_document
+from review_sensei.service import ReviewRun
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
@@ -410,6 +414,245 @@ class ReviewTransactionTests(unittest.TestCase):
                 ReviewResult.from_dict(rendered).content_digest(),
             )
 
+    def test_cli_ledger_without_context_output_keeps_non_transaction_path(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--no-learning-proposals",
+            ]
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertNotIn("transaction", rendered)
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNone(record.transaction)
+            self.assertIsNotNone(record.reservation_id)
+
+    def test_cli_context_write_failure_does_not_persist_transaction(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            configuration_path = root / "missing" / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(),
+            ):
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(argv), 1)
+
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNone(record.transaction)
+            self.assertIsNone(record.reservation_id)
+            self.assertEqual(record.failed_attempts, 1)
+
+    def test_cli_partial_transaction_result_is_returned_and_bounded(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        partial = ReviewResult(
+            summary="Partial.",
+            comments=(),
+            provider="fixture",
+            model="fixture-v1",
+            review_status="partial",
+        )
+        run = ReviewRun(
+            RunOutcome(
+                "partial",
+                repository=IDENTITY.repository,
+                pull_request_number=IDENTITY.pull_request,
+                diagnostic="partial_coverage",
+                provider_calls=1,
+            ),
+            result=partial,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(),
+                ),
+                patch("review_sensei.cli.ReviewService.run", return_value=run),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(rendered["review_status"], "partial")
+            self.assertNotIn("transaction", rendered)
+            self.assertFalse(configuration_path.exists())
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNone(record.transaction)
+            self.assertIsNone(record.reservation_id)
+            self.assertEqual(record.failed_attempts, 1)
+
 
 class _Broker:
     def __init__(self):
@@ -532,6 +775,40 @@ class PublicationTransactionTests(unittest.TestCase):
                 diff="diff",
                 app_slug="review-sensei[bot]",
                 convergence_policy=POLICY,
+            )
+        self.assertEqual(broker.exchanges, 0)
+        self.assertEqual(reviewer.calls, 0)
+
+    def test_application_rejects_mismatched_configuration_before_broker(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        mismatched_configuration = {**CONFIGURATION, "model": "different-model"}
+        with self.assertRaisesRegex(ReviewInputError, "trusted context"):
+            application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=result,
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                convergence_policy=POLICY,
+                configuration_context=mismatched_configuration,
+                evidence_context=EVIDENCE,
             )
         self.assertEqual(broker.exchanges, 0)
         self.assertEqual(reviewer.calls, 0)

@@ -2178,7 +2178,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         _validate_live_profile_gates(args, args_list)
-        if args.configuration_context_output is not None:
+        transaction_context_requested = args.configuration_context_output is not None
+        if transaction_context_requested:
             from .convergence import (
                 OPERATOR_REVIEW_MODES,
                 resolve_review_convergence_policy,
@@ -2193,21 +2194,25 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReviewInputError(
                     "--configuration-context-output requires an operator review mode"
                 )
-        if args.configuration_context_output is not None and (
-            args.session_ledger is None
-            or not args.repository
-            or args.pull_request is None
-            or not isinstance(args.base_sha, str)
-            or len(args.base_sha) != 40
-            or any(character not in "0123456789abcdef" for character in args.base_sha)
-            or not isinstance(args.head_sha, str)
-            or len(args.head_sha) != 40
-            or any(character not in "0123456789abcdef" for character in args.head_sha)
-        ):
-            raise ReviewInputError(
-                "--configuration-context-output requires an explicit session "
-                "ledger, repository/PR identity, and 40-character base/head SHAs"
-            )
+            if (
+                args.session_ledger is None
+                or not args.repository
+                or args.pull_request is None
+                or not isinstance(args.base_sha, str)
+                or len(args.base_sha) != 40
+                or any(
+                    character not in "0123456789abcdef" for character in args.base_sha
+                )
+                or not isinstance(args.head_sha, str)
+                or len(args.head_sha) != 40
+                or any(
+                    character not in "0123456789abcdef" for character in args.head_sha
+                )
+            ):
+                raise ReviewInputError(
+                    "--configuration-context-output requires an explicit session "
+                    "ledger, repository/PR identity, and 40-character base/head SHAs"
+                )
         provider_name = str(args.provider).strip().lower()
         if provider_name == "fixture":
             if not args.fixture_response:
@@ -2335,56 +2340,44 @@ def main(argv: list[str] | None = None) -> int:
                 head_sha=head_sha,
                 kind="publish",
             )
-            effective_base_sha = (args.base_sha or "").strip().lower()
-            stage_identity = [
-                {
-                    "name": stage.name,
-                    "outputs": list(stage.outputs),
-                    "categories": [category.id for category in stage.categories],
-                    "provider_profile": stage.provider_profile,
-                }
-                for stage in (stages if stages is not None else DEFAULT_STAGES)
-            ]
-            transaction_configuration_context = {
-                "provider": transaction_provider_identity,
-                "model": transaction_model,
-                "stages": stage_identity,
-                "category_policy": sorted(
+            if transaction_context_requested:
+                effective_base_sha = (args.base_sha or "").strip().lower()
+                stage_identity = [
                     {
-                        category.id
-                        for stage in (stages if stages is not None else DEFAULT_STAGES)
-                        for category in stage.categories
+                        "name": stage.name,
+                        "outputs": list(stage.outputs),
+                        "categories": [category.id for category in stage.categories],
+                        "provider_profile": stage.provider_profile,
                     }
-                ),
-                "orchestration": {
-                    "enabled": orchestrate,
-                    "continue_rounds": getattr(args, "continue_rounds", 0),
-                },
-                "publication_mode": policy.mode,
-            }
-            transaction_configuration_digest = (
-                ReviewTransaction.compute_configuration_digest(
-                    transaction_configuration_context
+                    for stage in (stages if stages is not None else DEFAULT_STAGES)
+                ]
+                transaction_configuration_context = {
+                    "provider": transaction_provider_identity,
+                    "model": transaction_model,
+                    "stages": stage_identity,
+                    "category_policy": sorted(
+                        {
+                            category.id
+                            for stage in (
+                                stages if stages is not None else DEFAULT_STAGES
+                            )
+                            for category in stage.categories
+                        }
+                    ),
+                    "orchestration": {
+                        "enabled": orchestrate,
+                        "continue_rounds": getattr(args, "continue_rounds", 0),
+                    },
+                    "publication_mode": policy.mode,
+                }
+                transaction_configuration_digest = (
+                    ReviewTransaction.compute_configuration_digest(
+                        transaction_configuration_context
+                    )
                 )
-            )
-            transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
-                {"evidence_policy": "legacy", "snapshot_sha256": None}
-            )
-            if args.configuration_context_output is not None and (
-                len(effective_base_sha) != 40
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in effective_base_sha
+                transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
+                    {"evidence_policy": "legacy", "snapshot_sha256": None}
                 )
-            ):
-                raise ReviewInputError(
-                    "configuration-context output requires a valid base SHA"
-                )
-            if (
-                args.configuration_context_output is not None
-                or effective_base_sha
-                and len(effective_base_sha) == 40
-            ):
                 prepared_round = prepare_review_transaction(
                     ledger,
                     identity,
@@ -2562,8 +2555,8 @@ def main(argv: list[str] | None = None) -> int:
             base_sha=(args.base_sha or "").strip().lower() or None,
             head_sha=(args.head_sha or "").strip().lower() or None,
         )
-        emit_host_outcome(outcome, output_path=args.outcome)
         if run.result is None:
+            emit_host_outcome(outcome, output_path=args.outcome)
             if run.error is not None:
                 print(f"review-sensei: {run.error}", file=sys.stderr)
             else:
@@ -2577,49 +2570,90 @@ def main(argv: list[str] | None = None) -> int:
         ):
             if prepared_round is None:
                 raise ReviewInputError("review transaction admission is incomplete")
-            try:
-                result = checkpoint_review_analysis(
+            if held_reservation is None:
+                raise ReviewInputError("review transaction reservation is missing")
+            if result.review_status != "complete":
+                # Partial coverage is a valid run outcome, but it is not a
+                # publishable transaction. Release the analysis reservation
+                # through the bounded failed-attempt path and preserve the
+                # partial result for the caller instead of turning it into a
+                # generic checkpoint error.
+                record_session_failed_attempt(
                     ledger,
                     identity,
-                    prepared_round,
-                    result,
+                    reservation_id=held_reservation,
+                    expected_generation=prepared_transaction.generation,
                 )
-            except BaseException as checkpoint_error:
-                if (
-                    ledger is not None
-                    and identity is not None
-                    and held_reservation is not None
-                ):
+                prepared_round = None
+                prepared_transaction = None
+            else:
+                if args.configuration_context_output is not None:
                     try:
-                        record_session_failed_attempt(
-                            ledger,
-                            identity,
-                            reservation_id=held_reservation,
-                            expected_generation=prepared_transaction.generation,
+                        if transaction_configuration_context is None:
+                            raise ReviewInputError(
+                                "configuration context is unavailable"
+                            )
+                        if (
+                            ReviewTransaction.compute_configuration_digest(
+                                transaction_configuration_context
+                            )
+                            != prepared_transaction.configuration_digest
+                        ):
+                            raise ReviewInputError(
+                                "configuration context does not match the "
+                                "identity-bound transaction"
+                            )
+                        # Persist the context before checkpointing the ledger.
+                        # A failed write must not leave a durable transaction
+                        # that publication cannot reconstruct.
+                        args.configuration_context_output.write_text(
+                            json.dumps(transaction_configuration_context, indent=2)
+                            + "\n",
+                            encoding="utf-8",
                         )
                     except BaseException as cleanup_error:
-                        checkpoint_error.add_note(
-                            "analysis reservation cleanup failed: "
-                            f"{type(cleanup_error).__name__}: "
-                            f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                        )
-                raise
-        if args.configuration_context_output is not None:
-            if (
-                transaction_configuration_context is None
-                or result.transaction is None
-                or ReviewTransaction.compute_configuration_digest(
-                    transaction_configuration_context
-                )
-                != result.transaction.configuration_digest
-            ):
-                raise ReviewInputError(
-                    "configuration context does not match the identity-bound result"
-                )
-            args.configuration_context_output.write_text(
-                json.dumps(transaction_configuration_context, indent=2) + "\n",
-                encoding="utf-8",
+                        try:
+                            record_session_failed_attempt(
+                                ledger,
+                                identity,
+                                reservation_id=held_reservation,
+                                expected_generation=prepared_transaction.generation,
+                            )
+                        except BaseException as reservation_cleanup_error:
+                            cleanup_error.add_note(
+                                "analysis reservation cleanup failed: "
+                                f"{type(reservation_cleanup_error).__name__}: "
+                                f"{str(reservation_cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                        raise
+                try:
+                    result = checkpoint_review_analysis(
+                        ledger,
+                        identity,
+                        prepared_round,
+                        result,
+                    )
+                except BaseException as checkpoint_error:
+                    if held_reservation is not None:
+                        try:
+                            record_session_failed_attempt(
+                                ledger,
+                                identity,
+                                reservation_id=held_reservation,
+                                expected_generation=prepared_transaction.generation,
+                            )
+                        except BaseException as cleanup_error:
+                            checkpoint_error.add_note(
+                                "analysis reservation cleanup failed: "
+                                f"{type(cleanup_error).__name__}: "
+                                f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                    raise
+        elif args.configuration_context_output is not None:
+            raise ReviewInputError(
+                "configuration context requires an admitted review transaction"
             )
+        emit_host_outcome(outcome, output_path=args.outcome)
         rendered = json.dumps(result.to_dict(), indent=2) + "\n"
         if args.output:
             args.output.write_text(rendered, encoding="utf-8")
