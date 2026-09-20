@@ -11,9 +11,14 @@ interface RateRow {
   count: number;
 }
 
+interface EnrollmentRow {
+  enrolledAt: number;
+}
+
 class MemorySql {
   readonly replays = new Map<string, ReplayRow>();
   readonly rates = new Map<string, RateRow>();
+  readonly enrollments = new Map<string, EnrollmentRow>();
   readonly observedArguments: unknown[] = [];
 
   exec<T = Record<string, unknown>>(query: string, ...args: unknown[]): Iterable<T> {
@@ -61,6 +66,15 @@ class MemorySql {
       });
       return [];
     }
+    if (normalized.startsWith("SELECT scope_hash FROM broker_session_enrollments")) {
+      return (this.enrollments.has(args[0] as string)
+        ? [{ scope_hash: args[0] }]
+        : []) as T[];
+    }
+    if (normalized.startsWith("INSERT INTO broker_session_enrollments")) {
+      this.enrollments.set(args[0] as string, { enrolledAt: args[1] as number });
+      return [];
+    }
     throw new Error(`unexpected SQL: ${normalized}`);
   }
 }
@@ -95,6 +109,16 @@ async function admit(ledger: BrokerLedger, jti: string, scope = "preauth:203.0.1
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "admit", jti, scope }),
+    }),
+  );
+}
+
+async function enroll(ledger: BrokerLedger, scope = "987654321:7"): Promise<Response> {
+  return ledger.fetch(
+    new Request("https://broker/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "session_enroll", scope }),
     }),
   );
 }
@@ -141,6 +165,17 @@ describe("broker replay and rate ledger", () => {
       state: "rate_limited",
     });
     expect(sql.replays.size).toBe(0);
+  });
+
+  it("records a first session enrollment separately from the mutable comment ledger", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+
+    expect(await (await enroll(ledger)).json()).toEqual({ state: "enrolled" });
+    expect(await (await enroll(ledger)).json()).toEqual({ state: "known" });
+    expect([...sql.enrollments.keys()]).toHaveLength(1);
+    expect([...sql.enrollments.keys()][0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(sql.observedArguments).not.toContain("987654321:7");
   });
 
   it("rejects malformed and non-POST requests without persisting them", async () => {

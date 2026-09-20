@@ -15,7 +15,7 @@ interface BrokerRequest {
 }
 
 interface BrokerReply {
-  state: "accepted" | "replay" | "rate_limited" | "invalid";
+  state: "accepted" | "replay" | "rate_limited" | "enrolled" | "known" | "invalid";
 }
 
 function json(value: unknown, status = 200): Response {
@@ -40,11 +40,16 @@ async function digest(value: string): Promise<string> {
 
 function validRequest(
   value: BrokerRequest,
-): value is BrokerRequest & { action: "claim" | "admit"; jti: string; scope: string } {
+): value is BrokerRequest & {
+  action: "claim" | "admit" | "session_enroll";
+  jti?: string;
+  scope: string;
+} {
   return (
-    (value.action === "claim" || value.action === "admit") &&
-    typeof value.jti === "string" &&
-    JTI_PATTERN.test(value.jti) &&
+    (value.action === "claim" || value.action === "admit" || value.action === "session_enroll") &&
+    (value.action === "session_enroll" || (
+      typeof value.jti === "string" && JTI_PATTERN.test(value.jti)
+    )) &&
     typeof value.scope === "string" &&
     SCOPE_PATTERN.test(value.scope)
   );
@@ -71,6 +76,10 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
         window_started INTEGER NOT NULL,
         count INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS broker_session_enrollments (
+        scope_hash TEXT PRIMARY KEY,
+        enrolled_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -92,9 +101,35 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
       return json({ error: "invalid_request" }, 400);
     }
 
-    const jtiHash = await digest(data.jti);
     const scopeHash = await digest(data.scope);
     const now = Date.now();
+    if (data.action === "session_enroll") {
+      const result = this.ctx.storage.transactionSync(() => {
+        const rows = [
+          ...this.sql.exec(
+            "SELECT scope_hash FROM broker_session_enrollments WHERE scope_hash = ?",
+            scopeHash,
+          ),
+        ];
+        if (rows.length > 0) {
+          return { state: "known" } as BrokerReply;
+        }
+        this.sql.exec(
+          "INSERT INTO broker_session_enrollments (scope_hash, enrolled_at) VALUES (?, ?)",
+          scopeHash,
+          now,
+        );
+        return { state: "enrolled" } as BrokerReply;
+      });
+      return json(result);
+    }
+    // The request validator requires a JTI for replay/rate claims. Keep this
+    // guard explicit so a future action cannot accidentally enter this path
+    // without replay identity.
+    if (typeof data.jti !== "string") {
+      return json({ error: "invalid_request" }, 400);
+    }
+    const jtiHash = await digest(data.jti);
     const result = this.ctx.storage.transactionSync(() => {
       this.sql.exec(
         "DELETE FROM broker_replays WHERE expires_at < ?",

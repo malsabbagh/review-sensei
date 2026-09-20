@@ -16,6 +16,7 @@ const IMPLICIT_METADATA_PERMISSION = "read";
 const RETURNED_CONTENTS_READ_PERMISSION = "read";
 const KNOWN_PERMISSION_NAMES = new Set([
   "contents",
+  "checks",
   "metadata",
   "pull_requests",
   "variables",
@@ -476,6 +477,33 @@ export class GitHubApi {
       throw new Error("github_repository_response_invalid");
     }
     return { id, fork };
+  }
+
+  /** Return the current immutable head for one pull request, or null when it cannot be read. */
+  async pullRequestHead(
+    repository: string,
+    pullRequest: number,
+    token: string,
+  ): Promise<string | null> {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
+      throw new Error("github_pull_request_invalid");
+    }
+    const response = await this.request(
+      "GET",
+      `${repositoryPath(repository)}/pulls/${pullRequest}`,
+      token,
+    );
+    if (response.status === 404 || response.status === 403) {
+      return null;
+    }
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error("github_pull_request_lookup_failed");
+    }
+    const head = response.data.head;
+    if (!isObject(head) || typeof head.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(head.sha)) {
+      throw new Error("github_pull_request_response_invalid");
+    }
+    return head.sha;
   }
 
   /**

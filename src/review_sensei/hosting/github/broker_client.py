@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -14,6 +16,14 @@ from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
 MAX_BROKER_BODY_BYTES = 256 * 1024
 DEFAULT_BROKER_URL = "https://github.reviewsensei.dev/github/token"
 Opener = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class BrokerSession:
+    """One broker-attested, current-head session capability."""
+
+    token: str
+    state: str
 
 
 class BrokerClient:
@@ -86,9 +96,63 @@ class BrokerClient:
                 "inline_reply",
                 "issue_reply",
                 "learning_write",
+                "review_session",
             }:
                 raise GitHubBrokerClientError("Broker capability is invalid")
             payload["capability"] = capability
+        parsed = self._post(payload)
+        token = parsed.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise GitHubBrokerClientError("Broker token response was invalid")
+        return token
+
+    def open_session(
+        self,
+        oidc_token: str,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+    ) -> BrokerSession:
+        """Obtain a current-head session capability and its enrollment verdict."""
+
+        if not isinstance(oidc_token, str) or not oidc_token.strip():
+            raise GitHubBrokerClientError("OIDC token is empty")
+        if (
+            isinstance(repository_id, bool)
+            or not isinstance(repository_id, int)
+            or repository_id <= 0
+            or isinstance(pull_request, bool)
+            or not isinstance(pull_request, int)
+            or pull_request <= 0
+            or not isinstance(head_sha, str)
+            or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+        ):
+            raise GitHubBrokerClientError("Broker session scope is invalid")
+        parsed = self._post(
+            {
+                "oidc_token": oidc_token,
+                "capability": "review_session",
+                "session": {
+                    "repository_id": repository_id,
+                    "pull_request": pull_request,
+                    "head_sha": head_sha,
+                },
+            }
+        )
+        token = parsed.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise GitHubBrokerClientError("Broker token response was invalid")
+        if parsed.get("capability") != "review_session":
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        state = parsed.get("session_state")
+        if state not in {"enrolled", "known"}:
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        return BrokerSession(token=token, state=state)
+
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Post one bounded capability request and return a validated object."""
+
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request = Request(
             self.broker_url,
@@ -114,7 +178,4 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker token request failed") from exc
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("Broker token response was invalid")
-        token = parsed.get("token")
-        if not isinstance(token, str) or not token.strip():
-            raise GitHubBrokerClientError("Broker token response was invalid")
-        return token
+        return parsed

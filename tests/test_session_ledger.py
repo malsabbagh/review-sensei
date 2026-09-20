@@ -983,6 +983,11 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             def exchange(self, token, *, capability=None):
                 return "capability-token"
 
+            def open_session(self, token, **kwargs):
+                return type(
+                    "Session", (), {"token": "session-token", "state": "enrolled"}
+                )()
+
         application = GitHubApplication(
             broker=Broker(),
             http=object(),
@@ -1016,6 +1021,11 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         class Broker:
             def exchange(self, token, *, capability=None):
                 return "capability-token"
+
+            def open_session(self, token, **kwargs):
+                return type(
+                    "Session", (), {"token": "session-token", "state": "enrolled"}
+                )()
 
         class Reviewer:
             def publish(self, **kwargs):
@@ -1097,6 +1107,51 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 "GET",
             ],
         )
+
+    def test_known_session_witness_refuses_a_deleted_comment_marker(self):
+        class Broker:
+            def open_session(self, token, **kwargs):
+                return type(
+                    "Session", (), {"token": "session-token", "state": "known"}
+                )()
+
+            def exchange(self, token, *, capability=None):
+                return "publish-token"
+
+        class Reviewer:
+            def publish(self, **kwargs):
+                raise AssertionError("a deleted session marker must stop before publish")
+
+        http, _calls = make_http([json_response([])])
+        application = GitHubApplication(
+            broker=Broker(),
+            http=http,
+            reviewer=Reviewer(),
+            learner=object(),
+            replier=object(),
+        )
+        with self.assertRaisesRegex(
+            ReviewSenseiError,
+            "marker is missing; authenticated recovery is required",
+        ):
+            application.publish_review(
+                options=GitHubWriteOptions(
+                    auto_review=True,
+                    github_writes=True,
+                    github_session_ledger=True,
+                ),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=99,
+                pull_request=IDENTITY.pull_request,
+                head_sha="a" * 40,
+                base_branch="main",
+                base_sha="b" * 40,
+                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                diff="diff",
+                app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            )
 
     def test_preparation_failure_releases_a_reservation(self):
         class Broker:

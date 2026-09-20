@@ -148,6 +148,36 @@ class BrokerClientTests(unittest.TestCase):
             {"oidc_token": "oidc.token", "capability": "review_status"},
         )
 
+    def test_open_session_requires_a_broker_attested_scope(self):
+        client, calls = self.make_client(
+            (
+                b'{"token":"ghs_session","capability":"review_session",'
+                b'"session_state":"enrolled"}',
+                200,
+            )
+        )
+        session = client.open_session(
+            "oidc.token",
+            repository_id=987654321,
+            pull_request=7,
+            head_sha="a" * 40,
+        )
+        self.assertEqual(session.token, "ghs_session")
+        self.assertEqual(session.state, "enrolled")
+        body = json.loads(calls[0][3].decode("utf-8"))
+        self.assertEqual(
+            body,
+            {
+                "oidc_token": "oidc.token",
+                "capability": "review_session",
+                "session": {
+                    "repository_id": 987654321,
+                    "pull_request": 7,
+                    "head_sha": "a" * 40,
+                },
+            },
+        )
+
     def test_exchange_rejects_arbitrary_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
         with self.assertRaises(GitHubBrokerClientError):

@@ -208,12 +208,24 @@ class GitHubApplication:
                         status="already_published",
                         diagnostic="transaction-publication-complete",
                     )
-        token = self.broker.exchange(
-            oidc_token or self.broker.request_oidc_token(),
-            capability="review_publish",
-        )
+        exchange_input = oidc_token or self.broker.request_oidc_token()
+        session_token: str | None = None
+        session_state: str | None = None
+        # Session mutation is separate authority from review publication. A
+        # hosted comment ledger first obtains a broker-attested, current-head
+        # session token, while the publisher receives review_publish below.
+        if options.github_session_ledger and self.session_ledger is None:
+            session = self.broker.open_session(
+                exchange_input,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            session_token = session.token
+            session_state = session.state
+        token = self.broker.exchange(exchange_input, capability="review_publish")
         ledger = self._session_ledger_for_token(
-            token, options=options, app_slug=app_slug
+            session_token or token, options=options, app_slug=app_slug
         )
         if (
             transaction_record is None
@@ -304,6 +316,10 @@ class GitHubApplication:
             if not isinstance(head_sha, str) or not head_sha.strip():
                 raise GitHubPublicationError(
                     "session ledger requires a non-empty head_sha"
+                )
+            if session_state == "known" and ledger.load(identity).status == "missing":
+                raise GitHubPublicationError(
+                    "session ledger marker is missing; authenticated recovery is required"
                 )
             try:
                 prepared = prepare_session_round(
