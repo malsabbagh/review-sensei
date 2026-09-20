@@ -727,6 +727,7 @@ class GitHubApplication:
             and options.github_session_ledger
             and self.session_ledger is None
         )
+        command: MaintainerCommand | None = None
         session_grant: str | None = None
         broker_attestation: Mapping[str, object] | None = None
         if hosted_mutation:
@@ -795,6 +796,8 @@ class GitHubApplication:
                     operator_paused=False,
                     summary="unauthorized",
                 )
+        if command is None:
+            raise GitHubPublicationError("maintainer command reconstruction failed")
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -1173,7 +1176,7 @@ def _command_from_broker_attestation(
     head_sha: str,
     source_comment_id: int,
     app_slug: str,
-):
+) -> MaintainerCommand:
     """Build a persisted command only from broker-attested GitHub identity."""
 
     from ...disposition import authorized_maintainer, parse_maintainer_command
@@ -1188,9 +1191,8 @@ def _command_from_broker_attestation(
         or attestation.get("source_comment_id") != source_comment_id
     ):
         raise GitHubPublicationError("broker command attestation scope was invalid")
-    actor = attestation.get("actor", attestation.get("login"))
-    login = attestation.get("login", actor)
-    if actor != login:
+    actor = attestation.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
         raise GitHubPublicationError("broker command attestation actor was invalid")
     command_id = attestation.get("command_id")
     if (

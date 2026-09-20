@@ -1781,6 +1781,35 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         )
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
 
+    def test_grant_bound_reenroll_verifies_once_before_rewriting_expired_marker(self):
+        expired = SessionRecord.create(IDENTITY, now=FIXED_NOW - timedelta(days=31))
+        replacement = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        expired_body = render_session_comment(
+            repository_id=99, pull_request=136, record=expired
+        )
+        replacement_body = render_session_comment(
+            repository_id=99, pull_request=136, record=replacement
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": expired_body}]),
+                json_response([{"id": 7, "body": expired_body}]),
+                json_response({"id": 7, "body": replacement_body}),
+                json_response([{"id": 7, "body": replacement_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        record = ledger.reenroll(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(record, replacement)
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+        )
+
     def test_hosted_reenroll_recreates_a_deleted_marker(self):
         # The broker witness says this head was enrolled, so the operator
         # command establishes a fresh marker instead of leaving the pull

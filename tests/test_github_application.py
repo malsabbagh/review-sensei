@@ -19,6 +19,7 @@ from review_sensei.hosting.github import (
     PublicationResult,
     ReplyResult,
 )
+from review_sensei.hosting.github.application import _command_from_broker_attestation
 from review_sensei.models import (
     ConversationContext,
     ConversationMessage,
@@ -565,6 +566,61 @@ class GitHubApplicationTests(unittest.TestCase):
                 app_slug="reviewsensei[bot]",
             )
 
+    def test_broker_attestation_rejects_cross_pull_request_and_head_scope(self):
+        body = "@sensei review pause"
+        attestation = {
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 71,
+            "actor": "alice",
+            "actor_type": "User",
+            "association": "MEMBER",
+            "command_id": 71,
+            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+        }
+        for pull_request, head_sha in ((137, "b" * 40), (136, "c" * 40)):
+            with self.subTest(pull_request=pull_request, head_sha=head_sha):
+                with self.assertRaisesRegex(
+                    GitHubPublicationError, "attestation scope"
+                ):
+                    _command_from_broker_attestation(
+                        body=body,
+                        attestation=attestation,
+                        repository_id=99,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        source_comment_id=71,
+                        app_slug="reviewsensei[bot]",
+                    )
+
+    def test_hosted_command_rejects_an_injected_local_ledger(self):
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=InMemorySessionLedger(),
+        )
+
+        with self.assertRaisesRegex(GitHubPublicationError, "injected local"):
+            application.apply_maintainer_command(
+                options=GitHubWriteOptions(
+                    github_writes=True, github_session_ledger=True
+                ),
+                oidc_token="caller-oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                body="@sensei review pause",
+                actor_login="mallory",
+                actor_type="User",
+                association="MEMBER",
+                app_slug="reviewsensei[bot]",
+            )
     def test_publish_review_restores_durable_baseline_for_admission(self):
         ledger = InMemorySessionLedger()
         identity = SessionIdentity("owner/repo", 1, repository_id=1)
