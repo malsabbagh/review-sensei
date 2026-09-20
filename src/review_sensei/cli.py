@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
+from .baseline import baseline_from_history_document
 from .context import (
     ContextSnapshot,
     RepositoryContextStore,
@@ -2330,6 +2331,11 @@ def main(argv: list[str] | None = None) -> int:
             fixture_response=args.fixture_response,
             argv=args_list,
         )
+        effective_profile = (
+            get_provider_profile(provider_settings.profile).name
+            if provider_settings.profile
+            else "default"
+        )
         transaction_provider_identity, transaction_model = (
             _transaction_provider_identity(provider_settings)
         )
@@ -2550,13 +2556,14 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
+        effective_model = provider_settings.model or provider.model or args.model
         request = ReviewRequest(
             diff=diff,
             repository=args.repository,
             pull_request_number=args.pull_request,
             title=args.title,
             instructions=args.instructions,
-            model=args.model,
+            model=effective_model,
             learnings=learnings,
             active_category_ids=context_selection.active_category_ids,
             lens_contexts=context_selection.lens_contexts,
@@ -2576,10 +2583,7 @@ def main(argv: list[str] | None = None) -> int:
             and policy.mode in OPERATOR_REVIEW_MODES
             and prepared_round.record.completed_initial_reviews > 0
         ):
-            from .baseline import (
-                baseline_from_history_document,
-                plan_verification_scope,
-            )
+            from .baseline import plan_verification_scope
             from .context import build_review_context_cache_key
 
             history = prepared_round.record.convergence_history
@@ -2597,7 +2601,24 @@ def main(argv: list[str] | None = None) -> int:
                 emit_host_outcome(outcome, output_path=args.outcome)
                 print(outcome.status)
                 return run_outcome_exit_code(outcome.status)
-            persisted_baseline = baseline_from_history_document(history.get("baseline"))
+            try:
+                persisted_baseline = baseline_from_history_document(
+                    history.get("baseline")
+                )
+            except ReviewInputError:
+                cleanup_analysis_reservation(charge_failed_attempt=False)
+                outcome = RunOutcome(
+                    "action_required",
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=request.base_sha,
+                    head_sha=request.head_sha,
+                    diagnostic="durable_baseline_recovery_required",
+                    provider_calls=0,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(outcome.status)
+                return run_outcome_exit_code(outcome.status)
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
@@ -2606,6 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 provider_name=provider.name,
                 stages=service.stages,
+                profile=effective_profile,
             )
             scope = plan_verification_scope(
                 policy=policy,
@@ -2633,6 +2655,7 @@ def main(argv: list[str] | None = None) -> int:
                 request,
                 incremental=incremental,
                 current_key=current_key,
+                profile=effective_profile,
                 budget=ResourceBudget.for_limits(limits),
             )
         except BaseException as analysis_error:
@@ -2757,6 +2780,7 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         provider_name=provider.name,
                         stages=service.stages,
+                        profile=effective_profile,
                     )
                     checkpoint_baseline = (
                         baseline_from_review(

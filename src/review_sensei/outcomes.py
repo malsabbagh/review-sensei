@@ -62,6 +62,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "coverage-incomplete",
         "coverage-partial",
         "deadline_exceeded",
+        "durable_baseline_recovery_required",
         "draft_pr",
         "fork_not_allowed",
         "incomplete-coverage",
