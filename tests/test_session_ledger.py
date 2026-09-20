@@ -305,6 +305,14 @@ class SessionRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
             baseline_from_history_document(broken)
 
+        # Cache-key validators raise ContextLoadError for untrusted values;
+        # baseline reconstruction must normalize that into the public input
+        # error rather than leaking a lower-level context exception.
+        broken = json.loads(json.dumps(document))
+        broken["cache_key"]["stage_digest"] = "not-a-sha256"
+        with self.assertRaisesRegex(ReviewInputError, "persisted baseline"):
+            baseline_from_history_document(broken)
+
     def test_create_round_trips_and_rejects_tampering(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         restored = SessionRecord.from_dict(record.to_dict())

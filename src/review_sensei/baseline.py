@@ -434,7 +434,7 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
             reviewed_paths=tuple(value["reviewed_paths"]),
             related_paths=tuple(value["related_paths"]),
         )
-    except (KeyError, TypeError, ValueError, ReviewInputError) as exc:
+    except (KeyError, TypeError, ContextLoadError, ReviewInputError) as exc:
         raise ReviewInputError("persisted baseline is invalid") from exc
 
 
