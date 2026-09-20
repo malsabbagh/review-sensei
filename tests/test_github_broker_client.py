@@ -194,6 +194,76 @@ class BrokerClientTests(unittest.TestCase):
                 head_sha="a" * 40,
             )
 
+    def test_session_mutation_grant_requires_broker_derived_actor_fields(self):
+        request_attestation = {
+            "version": 1,
+            "repository": "acme/widgets",
+            "repository_id": 987654321,
+            "pull_request": 7,
+            "head_sha": "a" * 40,
+            "operation": "command",
+            "source_comment_id": 13579,
+            "run_id": "10000000001",
+            "issued_at": 1_700_000_000,
+            "concurrency_group": "reviewsensei-session-987654321-7",
+            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_sha": "a" * 40,
+        }
+        returned_attestation = {
+            **request_attestation,
+            "actor": "octocat",
+            "actor_type": "User",
+            "association": "OWNER",
+            "command_id": 13579,
+            "command_digest": "b" * 64,
+        }
+        response = json.dumps(
+            {
+                "token": "ghs_session",
+                "capability": "review_session",
+                "session_state": "known",
+                "session_grant": "c" * 43,
+                "session_attestation": returned_attestation,
+            }
+        ).encode("utf-8")
+        client, calls = self.make_client((response, 200))
+        grant = client.authorize_session_mutation(
+            "oidc.token",
+            repository_id=987654321,
+            pull_request=7,
+            head_sha="a" * 40,
+            session_attestation=request_attestation,
+        )
+        self.assertEqual(grant.attestation["actor"], "octocat")
+        self.assertEqual(grant.attestation["command_id"], 13579)
+        payload = json.loads(calls[0][3].decode("utf-8"))
+        self.assertNotIn("actor", payload["session_attestation"])
+
+        missing_actor = {**returned_attestation}
+        del missing_actor["actor"]
+        client, _ = self.make_client(
+            (
+                json.dumps(
+                    {
+                        "token": "ghs_session",
+                        "capability": "review_session",
+                        "session_state": "known",
+                        "session_grant": "c" * 43,
+                        "session_attestation": missing_actor,
+                    }
+                ).encode("utf-8"),
+                200,
+            )
+        )
+        with self.assertRaises(GitHubBrokerClientError):
+            client.authorize_session_mutation(
+                "oidc.token",
+                repository_id=987654321,
+                pull_request=7,
+                head_sha="a" * 40,
+                session_attestation=request_attestation,
+            )
+
     def test_exchange_rejects_arbitrary_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
         with self.assertRaises(GitHubBrokerClientError):

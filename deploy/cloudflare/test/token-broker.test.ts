@@ -50,6 +50,10 @@ function harness(
       ? "accepted"
       : request.action === "session_enroll"
         ? "enrolled"
+        : request.action === "session_issue"
+          ? "issued"
+          : request.action === "session_verify"
+            ? "verified"
         : ledgerState;
     return new Response(JSON.stringify({ state }), {
       headers: { "content-type": "application/json" },
@@ -70,6 +74,13 @@ function harness(
     publicWorkflowSha: vi.fn(async () => SHA),
     repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
     pullRequestHead: vi.fn(async () => SHA),
+    issueComment: vi.fn(async () => ({
+      id: 13579,
+      body: "@sensei review continue --rounds 1",
+      login: "octocat",
+      userType: "User",
+      association: "OWNER",
+    })),
     installationFor: vi.fn(async () => 2468),
     installationToken: vi.fn(async () => ({
       token: "ghs_metadata_token",
@@ -181,6 +192,88 @@ describe("token broker authorization", () => {
       (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
     );
     expect(actions).not.toContain("session_enroll");
+  });
+
+  it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    const attestation = {
+      version: 1,
+      repository: "acme/widgets",
+      repository_id: 987654321,
+      pull_request: 7,
+      head_sha: SHA,
+      operation: "command",
+      source_comment_id: 13579,
+      run_id: "10000000001",
+      issued_at: Math.floor(Date.now() / 1000),
+      concurrency_group: "reviewsensei-session-987654321-7",
+      job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+      job_workflow_sha: SHA,
+    };
+
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: {
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+      },
+      session_attestation: attestation,
+    });
+
+    expect(result.session_grant).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(result.session_attestation).toMatchObject({
+      ...attestation,
+      actor: "octocat",
+      actor_type: "User",
+      association: "OWNER",
+      command_id: 13579,
+      command_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(github.issueComment).toHaveBeenCalledWith(
+      "acme/widgets", 7, 13579, "ghs_scoped_token",
+    );
+    const issue = ledgerFetch.mock.calls[3][1] as RequestInit;
+    expect(JSON.parse(issue.body as string)).toMatchObject({
+      action: "session_issue",
+      run_id: "10000000001",
+      scope: `987654321:7:${SHA}`,
+    });
+
+    await expect(
+      broker.verifySessionGrant(result.session_grant, result.session_attestation),
+    ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
+  });
+
+  it("refuses command authority when the current GitHub comment actor is not the OIDC actor", async () => {
+    const { broker, github } = harness();
+    github.issueComment.mockResolvedValue({
+      id: 13579,
+      body: "@sensei review pause",
+      login: "someone-else",
+      userType: "User",
+      association: "OWNER",
+    });
+    await expect(broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: {
+        version: 1,
+        repository: "acme/widgets",
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+        operation: "command",
+        source_comment_id: 13579,
+        run_id: "10000000001",
+        issued_at: Math.floor(Date.now() / 1000),
+        concurrency_group: "reviewsensei-session-987654321-7",
+        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
+        job_workflow_sha: SHA,
+      },
+    })).rejects.toThrow("broker_session_actor_rejected");
   });
 
   it.each([

@@ -15,10 +15,19 @@ interface EnrollmentRow {
   enrolledAt: number;
 }
 
+interface GrantRow {
+  scopeHash: string;
+  attestationHash: string;
+  audienceHash: string;
+  runIdHash: string;
+  expiresAt: number;
+}
+
 class MemorySql {
   readonly replays = new Map<string, ReplayRow>();
   readonly rates = new Map<string, RateRow>();
   readonly enrollments = new Map<string, EnrollmentRow>();
+  readonly grants = new Map<string, GrantRow>();
   readonly observedArguments: unknown[] = [];
 
   exec<T = Record<string, unknown>>(query: string, ...args: unknown[]): Iterable<T> {
@@ -45,6 +54,13 @@ class MemorySql {
       const threshold = args[0] as number;
       for (const [key, row] of this.enrollments) {
         if (row.enrolledAt < threshold) this.enrollments.delete(key);
+      }
+      return [];
+    }
+    if (normalized.startsWith("DELETE FROM broker_session_grants WHERE expires_at")) {
+      const threshold = args[0] as number;
+      for (const [key, row] of this.grants) {
+        if (row.expiresAt < threshold) this.grants.delete(key);
       }
       return [];
     }
@@ -87,6 +103,27 @@ class MemorySql {
       if (existing) {
         this.enrollments.set(args[1] as string, { enrolledAt: args[0] as number });
       }
+      return [];
+    }
+    if (normalized.startsWith("SELECT grant_hash FROM broker_session_grants")) {
+      return (this.grants.has(args[0] as string)
+        ? [{ grant_hash: args[0] }]
+        : []) as T[];
+    }
+    if (normalized.startsWith("SELECT scope_hash, attestation_hash, audience_hash FROM broker_session_grants")) {
+      const row = this.grants.get(args[0] as string);
+      return (row
+        ? [{ scope_hash: row.scopeHash, attestation_hash: row.attestationHash, audience_hash: row.audienceHash }]
+        : []) as T[];
+    }
+    if (normalized.startsWith("INSERT INTO broker_session_grants")) {
+      this.grants.set(args[0] as string, {
+        scopeHash: args[1] as string,
+        attestationHash: args[2] as string,
+        audienceHash: args[3] as string,
+        runIdHash: args[4] as string,
+        expiresAt: args[6] as number,
+      });
       return [];
     }
     throw new Error(`unexpected SQL: ${normalized}`);
@@ -133,6 +170,49 @@ async function enroll(ledger: BrokerLedger, scope = "987654321:7"): Promise<Resp
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "session_enroll", scope }),
+    }),
+  );
+}
+
+async function issueGrant(
+  ledger: BrokerLedger,
+  grant = "a".repeat(43),
+  scope = "987654321:7:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  attestationDigest = "b".repeat(64),
+): Promise<Response> {
+  return ledger.fetch(
+    new Request("https://broker/session-grant", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "session_issue",
+        grant,
+        scope,
+        attestation_digest: attestationDigest,
+        audience: "reviewsensei-session-ledger",
+        run_id: "10000000001",
+      }),
+    }),
+  );
+}
+
+async function verifyGrant(
+  ledger: BrokerLedger,
+  grant = "a".repeat(43),
+  scope = "987654321:7:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  attestationDigest = "b".repeat(64),
+): Promise<Response> {
+  return ledger.fetch(
+    new Request("https://broker/session-grant", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "session_verify",
+        grant,
+        scope,
+        attestation_digest: attestationDigest,
+        audience: "reviewsensei-session-ledger",
+      }),
     }),
   );
 }
@@ -292,6 +372,20 @@ describe("broker replay and rate ledger", () => {
 
     expect([...sql.enrollments.keys()]).not.toContain("expired".padEnd(64, "0"));
     expect(sql.enrollments.size).toBe(2);
+  });
+
+  it("stores only hashes for a reusable, bounded session grant and verifies its exact scope", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+
+    expect(await (await issueGrant(ledger)).json()).toEqual({ state: "issued" });
+    expect(await (await verifyGrant(ledger)).json()).toEqual({ state: "verified" });
+    expect(await (await verifyGrant(ledger, "a".repeat(43), "987654321:8:" + "a".repeat(40))).json()).toEqual({
+      state: "invalid",
+    });
+    expect([...sql.grants.keys()]).toHaveLength(1);
+    expect([...sql.grants.keys()][0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(sql.observedArguments).not.toContain("a".repeat(43));
   });
 
   it("rejects malformed and non-POST requests without persisting them", async () => {

@@ -44,6 +44,14 @@ export interface InstallationToken {
   permissions: Record<string, string>;
 }
 
+export interface LiveIssueComment {
+  id: number;
+  body: string;
+  login: string;
+  userType: string;
+  association: string;
+}
+
 function publicWorkflowTag(value: string): string {
   if (
     typeof value !== "string" ||
@@ -514,6 +522,62 @@ export class GitHubApi {
       throw new Error("github_pull_request_response_invalid");
     }
     return head.sha;
+  }
+
+  /**
+   * Read the command comment from GitHub immediately before broker issuance.
+   * Event payload identity is deliberately not trusted for a session mutation:
+   * a deleted, edited, bot-authored, or cross-issue comment must fail closed.
+   */
+  async issueComment(
+    repository: string,
+    pullRequest: number,
+    commentId: number,
+    token: string,
+  ): Promise<LiveIssueComment | null> {
+    if (
+      !Number.isSafeInteger(pullRequest) || pullRequest <= 0 ||
+      !Number.isSafeInteger(commentId) || commentId <= 0
+    ) {
+      throw new Error("github_issue_comment_invalid");
+    }
+    const response = await this.request(
+      "GET",
+      `${repositoryPath(repository)}/issues/comments/${commentId}`,
+      token,
+    );
+    if (response.status === 404 || response.status === 403) {
+      return null;
+    }
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error("github_issue_comment_lookup_failed");
+    }
+    const id = response.data.id;
+    const body = response.data.body;
+    const association = response.data.author_association;
+    const issueUrl = response.data.issue_url;
+    const user = response.data.user;
+    if (
+      id !== commentId ||
+      typeof body !== "string" ||
+      body.length > 4 * 1024 ||
+      typeof association !== "string" ||
+      issueUrl !== `${this.apiUrl}${repositoryPath(repository)}/issues/${pullRequest}` ||
+      !isObject(user) ||
+      typeof user.login !== "string" ||
+      user.login.length === 0 ||
+      user.login.length > 256 ||
+      typeof user.type !== "string"
+    ) {
+      throw new Error("github_issue_comment_response_invalid");
+    }
+    return {
+      id,
+      body,
+      login: user.login,
+      userType: user.type,
+      association,
+    };
   }
 
   /**

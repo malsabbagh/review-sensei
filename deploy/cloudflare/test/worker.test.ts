@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const broker = vi.hoisted(() => ({ exchange: vi.fn() }));
+const broker = vi.hoisted(() => ({ exchange: vi.fn(), verifySessionGrant: vi.fn() }));
 
 vi.mock("../src/token-broker", () => ({
   TokenBroker: class {
     exchange = broker.exchange;
+    verifySessionGrant = broker.verifySessionGrant;
   },
 }));
 
@@ -26,9 +27,43 @@ function request(body = { oidc_token: "signed-jwt" }, headers: HeadersInit = {})
   });
 }
 
+function grantRequest(
+  body = { session_grant: "a".repeat(43), session_attestation: { version: 1 } },
+): Request {
+  const encoded = JSON.stringify(body);
+  return new Request("https://github.reviewsensei.dev/github/session-grant", {
+    method: "POST",
+    headers: { "content-length": String(new TextEncoder().encode(encoded).byteLength) },
+    body: encoded,
+  });
+}
+
 beforeEach(() => {
   broker.exchange.mockReset();
+  broker.verifySessionGrant.mockReset();
   broker.exchange.mockResolvedValue({ token: "ghs_scoped_token", capability: "review_publish" });
+  broker.verifySessionGrant.mockResolvedValue({ repository_id: 987654321, pull_request: 7 });
+});
+
+describe("session-grant verification route", () => {
+  it("returns only verified immutable session fields and never echoes the grant", async () => {
+    const result = await worker.fetch(grantRequest(), env);
+    expect(result.status).toBe(200);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({
+      session_attestation: { repository_id: 987654321, pull_request: 7 },
+    });
+    expect(broker.verifySessionGrant).toHaveBeenCalledWith(
+      "a".repeat(43), { version: 1 },
+    );
+  });
+
+  it("rejects expired or invalid grants without exposing their values", async () => {
+    broker.verifySessionGrant.mockRejectedValue(new Error("broker_session_grant_invalid"));
+    const result = await worker.fetch(grantRequest(), env);
+    expect(result.status).toBe(403);
+    expect(await result.json()).toEqual({ error: "session_grant_not_verified" });
+  });
 });
 
 describe("token route response security", () => {
