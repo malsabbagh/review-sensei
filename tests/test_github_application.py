@@ -1,10 +1,13 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from review_sensei import ProviderResponse
-from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.baseline import ReviewBaseline, baseline_history_document
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubPublicationError,
@@ -385,6 +388,182 @@ class GitHubApplicationTests(unittest.TestCase):
         forwarded = self.reviewer.calls[-1]["authorized_dispositions"]
         self.assertEqual(len(forwarded), 1)
         self.assertEqual(forwarded[0].fingerprint, fingerprint)
+
+    def test_publish_review_restores_durable_baseline_for_admission(self):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
+            reviewed_paths=("src/app.py",),
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+        ledger.initialize(identity)
+        ledger.replace(
+            identity,
+            lambda record: record.evolve(
+                completed_initial_reviews=1,
+                generation=1,
+                convergence_history=history,
+            ),
+        )
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+
+        application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            app_slug="review-sensei[bot]",
+            convergence_policy=policy,
+            current_key=baseline.cache_key,
+            changed_paths=("src/app.py",),
+        )
+
+        forwarded = self.reviewer.calls[-1]
+        self.assertEqual(forwarded["baseline"], baseline)
+        self.assertEqual(forwarded["current_key"], baseline.cache_key)
+        self.assertEqual(forwarded["changed_paths"], ("src/app.py",))
+
+    def test_publish_review_handoffs_when_durable_baseline_has_no_current_key(self):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
+            reviewed_paths=("src/app.py",),
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+        ledger.initialize(identity)
+        ledger.replace(
+            identity,
+            lambda record: record.evolve(
+                completed_initial_reviews=1,
+                generation=1,
+                convergence_history=history,
+            ),
+        )
+        broker = RecordingBroker()
+        reviewer = RecordingReviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+
+        publish_kwargs = {
+            "options": GitHubWriteOptions(auto_review=True, github_writes=True),
+            "oidc_token": None,
+            "repository": "owner/repo",
+            "repository_id": 1,
+            "pull_request": 1,
+            "head_sha": "a" * 40,
+            "base_branch": "main",
+            "base_sha": "b" * 40,
+            "result": ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            "diff": "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            "app_slug": "review-sensei[bot]",
+            "convergence_policy": policy,
+        }
+        outcome = application.publish_review(**publish_kwargs)
+
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
+        self.assertIsNone(ledger.load(identity).record.reservation_id)
+
+        legacy_reviewer = RecordingReviewer()
+        legacy_application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=legacy_reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
+        )
+        legacy_kwargs = dict(publish_kwargs)
+        legacy_kwargs.pop("convergence_policy")
+        legacy_outcome = legacy_application.publish_review(**legacy_kwargs)
+        self.assertEqual(legacy_outcome.status, "published")
+        self.assertEqual(len(legacy_reviewer.calls), 1)
+        self.assertIsNone(legacy_reviewer.calls[0]["baseline"])
+        self.assertIsNone(legacy_reviewer.calls[0]["current_key"])
+
+        with patch(
+            "review_sensei.hosting.github.application.baseline_from_history_document",
+            side_effect=ReviewInputError("corrupt persisted baseline"),
+        ):
+            malformed = application.publish_review(**publish_kwargs)
+        self.assertEqual(malformed.status, "handoff")
+        self.assertEqual(malformed.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
+        self.assertIsNone(ledger.load(identity).record.reservation_id)
 
     def test_recover_review_rejects_operator_modes(self):
         head = "b" * 40

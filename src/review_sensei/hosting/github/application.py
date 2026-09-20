@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
+from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...context import ReviewContextCacheKey
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
@@ -98,6 +100,11 @@ class GitHubApplication:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] = (),
+        evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
         no_progress: bool = False,
         configuration_context: Mapping[str, object] | None = None,
@@ -128,6 +135,7 @@ class GitHubApplication:
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
         )
+        operator_baseline_enforced = policy.mode in OPERATOR_REVIEW_MODES
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -417,6 +425,8 @@ class GitHubApplication:
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
         authorized_dispositions: tuple[object, ...] = ()
+        durable_baseline = baseline
+        baseline_recovery_required = False
         if ledger is not None:
             from ...disposition import session_dispositions
 
@@ -424,27 +434,65 @@ class GitHubApplication:
                 authorized_dispositions = session_dispositions(prepared.record)
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
+            if operator_baseline_enforced:
+                record_for_baseline = (
+                    prepared.record if prepared is not None else transaction_record
+                )
+                if durable_baseline is None and record_for_baseline is not None:
+                    history = record_for_baseline.convergence_history
+                    if (
+                        isinstance(history, Mapping)
+                        and history.get("state") == "completed"
+                    ):
+                        try:
+                            durable_baseline = baseline_from_history_document(
+                                history.get("baseline")
+                            )
+                        except ReviewInputError:
+                            baseline_recovery_required = True
+        # A persisted baseline is not self-authenticating for a new head: the
+        # caller must supply the independently constructed current context key.
+        # Falling back to the prior key would treat an unknown head/configuration
+        # as compatible and turn stale evidence into admission authority.  Do
+        # not silently downgrade to a fresh review when the caller omitted the
+        # key; make the recovery requirement visible and retryable instead.
         try:
-            publication = self.reviewer.publish(
-                token=token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_branch=base_branch,
-                base_sha=base_sha,
-                result=result,
-                diff=diff,
-                app_slug=app_slug,
-                auto_approve=options.auto_approve,
-                candidates=candidates,
-                snapshot=snapshot,
-                snapshot_sha256=snapshot_sha256,
-                evidence_policy=evidence_policy,
-                convergence_policy=convergence_policy,
-                blocker_candidates=blocker_candidates,
-                input_blocker_candidates=input_blocker_candidates,
-                authorized_dispositions=authorized_dispositions,
+            publication = (
+                PublicationResult(
+                    status="handoff",
+                    diagnostic="durable_baseline_recovery_required",
+                )
+                if operator_baseline_enforced
+                and (
+                    baseline_recovery_required
+                    or (durable_baseline is not None and current_key is None)
+                )
+                else self.reviewer.publish(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    result=result,
+                    diff=diff,
+                    app_slug=app_slug,
+                    auto_approve=options.auto_approve,
+                    candidates=candidates,
+                    snapshot=snapshot,
+                    snapshot_sha256=snapshot_sha256,
+                    evidence_policy=evidence_policy,
+                    convergence_policy=convergence_policy,
+                    blocker_candidates=blocker_candidates,
+                    input_blocker_candidates=input_blocker_candidates,
+                    baseline=durable_baseline,
+                    current_key=current_key,
+                    changed_paths=changed_paths,
+                    related_paths=related_paths,
+                    evidence_confirmed_concerns=evidence_confirmed_concerns,
+                    authorized_dispositions=authorized_dispositions,
+                )
             )
         except BaseException as publication_error:
             if (
