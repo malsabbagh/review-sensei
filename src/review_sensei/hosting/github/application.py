@@ -487,7 +487,7 @@ class GitHubApplication:
                             durable_baseline = baseline_from_history_document(
                                 history.get("baseline")
                             )
-                        except (ReviewInputError, TypeError, KeyError, ValueError):
+                        except ReviewInputError:
                             baseline_recovery_required = True
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.

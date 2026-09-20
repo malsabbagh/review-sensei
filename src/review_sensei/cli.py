@@ -2639,7 +2639,7 @@ def main(argv: list[str] | None = None) -> int:
                 persisted_baseline = baseline_from_history_document(
                     history.get("baseline")
                 )
-            except (ReviewInputError, TypeError, KeyError, ValueError):
+            except ReviewInputError:
                 return emit_durable_baseline_recovery()
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(

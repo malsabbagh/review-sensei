@@ -608,6 +608,21 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(reviewer.calls, [])
         self.assertIsNone(ledger.load(identity).record.reservation_id)
 
+        recovery_history = {
+            "state": "recovery-required",
+            "progress": [{"event": "recovery-required", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+        ledger.replace(
+            identity,
+            lambda record: record.evolve(convergence_history=recovery_history),
+        )
+        recovery = application.publish_review(**publish_kwargs)
+        self.assertEqual(recovery.status, "handoff")
+        self.assertEqual(recovery.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
+        self.assertIsNone(ledger.load(identity).record.reservation_id)
+
     def test_publish_review_handoffs_when_prior_operator_record_lacks_history(self):
         ledger = InMemorySessionLedger()
         identity = SessionIdentity("owner/repo", 1, repository_id=1)
