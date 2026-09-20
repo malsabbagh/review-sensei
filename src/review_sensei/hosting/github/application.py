@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from ...convergence import (
@@ -15,14 +15,16 @@ from ...convergence import (
 from ...conversation import ConversationService
 from ...coverage import coverage_approval_state
 from ...errors import ReviewInputError
-from ...models import ReviewResult
+from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
 from ...providers.base import ReviewProvider
 from ...session import (
     SessionIdentity,
     SessionLedger,
     admission_diagnostic,
+    complete_review_publication,
     complete_session_round,
+    load_review_transaction_for_publication,
     prepare_session_round,
     record_session_failed_attempt,
     session_reservation_id,
@@ -98,6 +100,8 @@ class GitHubApplication:
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
         continuation_rounds: int = 0,
         no_progress: bool = False,
+        configuration_context: Mapping[str, object] | None = None,
+        evidence_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -119,6 +123,60 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "legacy evidence policy cannot include candidate verification inputs"
             )
+        policy = (
+            convergence_policy
+            if isinstance(convergence_policy, ReviewConvergencePolicy)
+            else ReviewConvergencePolicy()
+        )
+        identity = SessionIdentity(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+        )
+        transaction_record = None
+        expected_configuration_digest: str | None = None
+        expected_evidence_digest: str | None = None
+        if isinstance(result, ReviewResult) and result.transaction is not None:
+            if self.session_ledger is None and not options.github_session_ledger:
+                raise GitHubPublicationError(
+                    "identity-bound review publication requires a session ledger"
+                )
+            if configuration_context is None:
+                raise GitHubPublicationError(
+                    "identity-bound review publication requires trusted configuration context"
+                )
+            expected_configuration_digest = (
+                ReviewTransaction.compute_configuration_digest(configuration_context)
+            )
+            if evidence_context is None:
+                evidence_context = {
+                    "evidence_policy": evidence_policy,
+                    "snapshot_sha256": snapshot_sha256,
+                }
+            expected_evidence_digest = ReviewTransaction.compute_evidence_digest(
+                evidence_context
+            )
+            if self.session_ledger is not None:
+                assert expected_configuration_digest is not None
+                assert expected_evidence_digest is not None
+                transaction_record = load_review_transaction_for_publication(
+                    self.session_ledger,
+                    identity,
+                    result,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    policy_digest=policy.digest(),
+                    configuration_digest=expected_configuration_digest,
+                    evidence_digest=expected_evidence_digest,
+                )
+                if (
+                    transaction_record.transaction is not None
+                    and transaction_record.transaction.phase == "publication_succeeded"
+                ):
+                    return PublicationResult(
+                        status="already_published",
+                        diagnostic="transaction-publication-complete",
+                    )
         token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability="review_publish",
@@ -126,16 +184,52 @@ class GitHubApplication:
         ledger = self._session_ledger_for_token(
             token, options=options, app_slug=app_slug
         )
-        identity = SessionIdentity(
-            repository=repository,
-            pull_request=pull_request,
-            repository_id=repository_id,
-        )
-        policy = (
-            convergence_policy
-            if isinstance(convergence_policy, ReviewConvergencePolicy)
-            else ReviewConvergencePolicy()
-        )
+        if (
+            transaction_record is None
+            and ledger is not None
+            and isinstance(result, ReviewResult)
+            and result.transaction is not None
+        ):
+            if (
+                expected_configuration_digest is None
+                or expected_evidence_digest is None
+            ):
+                raise GitHubPublicationError(
+                    "identity-bound review publication context is incomplete"
+                )
+            transaction_record = load_review_transaction_for_publication(
+                ledger,
+                identity,
+                result,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                policy_digest=policy.digest(),
+                configuration_digest=expected_configuration_digest,
+                evidence_digest=expected_evidence_digest,
+            )
+            if (
+                transaction_record.transaction is not None
+                and transaction_record.transaction.phase == "publication_succeeded"
+            ):
+                return PublicationResult(
+                    status="already_published",
+                    diagnostic="transaction-publication-complete",
+                )
+        if (
+            transaction_record is not None
+            and transaction_record.transaction is not None
+            and result.transaction != transaction_record.transaction
+        ):
+            result = replace(result, transaction=transaction_record.transaction)
+        if (
+            transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.phase == "publication_succeeded"
+        ):
+            return PublicationResult(
+                status="already_published",
+                diagnostic="transaction-publication-complete",
+            )
         prepared = None
         reservation = session_reservation_id(
             repository=repository,
@@ -151,7 +245,13 @@ class GitHubApplication:
         }
         if isinstance(result, ReviewResult):
             flags = _publication_round_flags(result, no_progress=no_progress)
-        if ledger is not None:
+        if (
+            ledger is not None
+            and transaction_record is None
+            and not (
+                isinstance(result, ReviewResult) and result.transaction is not None
+            )
+        ):
             if not isinstance(head_sha, str) or not head_sha.strip():
                 raise GitHubPublicationError(
                     "session ledger requires a non-empty head_sha"
@@ -192,12 +292,47 @@ class GitHubApplication:
                         f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                     )
                 raise
+        if isinstance(result, ReviewResult) and result.transaction is not None:
+            if ledger is None:
+                raise GitHubPublicationError(
+                    "identity-bound review publication requires a session ledger"
+                )
+            if transaction_record is None:
+                if (
+                    expected_configuration_digest is None
+                    or expected_evidence_digest is None
+                ):
+                    raise GitHubPublicationError(
+                        "identity-bound review publication context is incomplete"
+                    )
+            if (
+                expected_configuration_digest is None
+                or expected_evidence_digest is None
+            ):
+                raise GitHubPublicationError(
+                    "identity-bound review publication context is incomplete"
+                )
+            if transaction_record is None:
+                transaction_record = load_review_transaction_for_publication(
+                    ledger,
+                    identity,
+                    result,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    policy_digest=policy.digest(),
+                    configuration_digest=expected_configuration_digest,
+                    evidence_digest=expected_evidence_digest,
+                )
+            if transaction_record.transaction is not None:
+                result = replace(result, transaction=transaction_record.transaction)
         authorized_dispositions: tuple[object, ...] = ()
         if ledger is not None:
             from ...disposition import session_dispositions
 
             if prepared is not None:
                 authorized_dispositions = session_dispositions(prepared.record)
+            elif transaction_record is not None:
+                authorized_dispositions = session_dispositions(transaction_record)
         try:
             publication = self.reviewer.publish(
                 token=token,
@@ -221,7 +356,25 @@ class GitHubApplication:
                 authorized_dispositions=authorized_dispositions,
             )
         except BaseException as publication_error:
-            if ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
+            if (
+                ledger is not None
+                and isinstance(result, ReviewResult)
+                and result.transaction is not None
+            ):
+                try:
+                    complete_review_publication(
+                        ledger,
+                        identity,
+                        result.transaction,
+                        published=False,
+                    )
+                except BaseException as cleanup_error:
+                    publication_error.add_note(
+                        "transaction phase cleanup failed: "
+                        f"{type(cleanup_error).__name__}: "
+                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                    )
+            elif ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
                 if isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
                     if prepared is not None:
                         try:
@@ -255,7 +408,25 @@ class GitHubApplication:
                         f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                     )
             raise
-        if ledger is not None and prepared is not None:
+        if (
+            ledger is not None
+            and isinstance(result, ReviewResult)
+            and result.transaction is not None
+        ):
+            success_statuses = {
+                "published",
+                "already_published",
+                "already_approved",
+                "already_changes_requested",
+                "auto_approval_disabled",
+            }
+            complete_review_publication(
+                ledger,
+                identity,
+                result.transaction,
+                published=publication.status in success_statuses,
+            )
+        elif ledger is not None and prepared is not None:
             complete_session_round(
                 ledger,
                 identity,

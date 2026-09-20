@@ -77,3 +77,4 @@ Create or update an ADR for changes that affect:
 - irreversible or expensive-to-reverse decisions
 
 Use `.project-ai/templates/adr.md.tmpl` as the starter template.
+| [0052-logical-review-transaction-across-analysis-and-publication](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |

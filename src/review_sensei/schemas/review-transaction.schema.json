@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-transaction.schema.json",
+  "title": "ReviewSensei logical review transaction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "transaction_id",
+    "repository",
+    "pull_request",
+    "base_sha",
+    "head_sha",
+    "policy_digest",
+    "configuration_digest",
+    "evidence_digest",
+    "reservation_id",
+    "generation",
+    "phase"
+  ],
+  "properties": {
+    "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 140},
+    "pull_request": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "base_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "configuration_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "evidence_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reservation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "generation": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "phase": {
+      "type": "string",
+      "enum": [
+        "analysis",
+        "analysis_failed",
+        "publication_pending",
+        "publication_failed",
+        "publication_succeeded"
+      ]
+    },
+    "result_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {
+          "phase": {"enum": ["analysis", "analysis_failed"]}
+        }
+      },
+      "then": {"not": {"required": ["result_sha256"]}}
+    },
+    {
+      "if": {
+        "required": ["phase"],
+        "properties": {
+          "phase": {
+            "enum": [
+              "publication_pending",
+              "publication_failed",
+              "publication_succeeded"
+            ]
+          }
+        }
+      },
+      "then": {"required": ["result_sha256"]}
+    }
+  ]
+}

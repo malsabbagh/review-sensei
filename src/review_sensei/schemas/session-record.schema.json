@@ -83,6 +83,55 @@
           "expires_at": {"type": ["string", "null"], "format": "date-time"}
         }
       }
+    },
+    "transaction": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/review-transaction.schema.json"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["transaction"],
+        "properties": {
+          "transaction": {
+            "required": ["phase"],
+            "properties": {"phase": {"const": "analysis"}}
+          }
+        }
+      },
+      "then": {
+        "required": ["reservation_id", "reserved_slot"],
+        "properties": {
+          "reservation_id": {"type": "string"},
+          "reserved_slot": {"enum": ["initial", "verification"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["transaction"],
+        "properties": {
+          "transaction": {
+            "required": ["phase"],
+            "properties": {
+              "phase": {
+                "enum": [
+                  "analysis_failed",
+                  "publication_pending",
+                  "publication_failed",
+                  "publication_succeeded"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reservation_id": {"type": "null"},
+          "reserved_slot": {"type": "null"}
+        }
+      }
+    }
+  ]
 }

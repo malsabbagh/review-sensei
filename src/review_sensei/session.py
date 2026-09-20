@@ -37,6 +37,7 @@ from .convergence import (
     evaluate_round_admission,
 )
 from .errors import ReviewInputError
+from .models import ReviewResult, ReviewTransaction
 from .schemas import validate_public_document
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -319,6 +320,7 @@ class SessionRecord:
     record_sha256: str
     operator_paused: bool = False
     dispositions: tuple[Mapping[str, object], ...] = ()
+    transaction: ReviewTransaction | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -384,6 +386,30 @@ class SessionRecord:
         _require_bool(self.operator_paused, label="operator_paused")
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
+        if self.transaction is not None:
+            if not isinstance(self.transaction, ReviewTransaction):
+                raise ReviewInputError("session transaction is invalid")
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "session transaction requires the current digest shape"
+                )
+            if (
+                self.transaction.repository != self.repository
+                or self.transaction.pull_request != self.pull_request
+            ):
+                raise ReviewInputError("session transaction identity does not match")
+            if self.transaction.phase == "analysis" and (
+                self.reservation_id != self.transaction.reservation_id
+                or self.reserved_slot is None
+            ):
+                raise ReviewInputError("analysis transaction must own its reservation")
+            if self.transaction.phase != "analysis" and (
+                self.reservation_id is not None
+                or self.last_committed_reservation_id != self.transaction.reservation_id
+            ):
+                raise ReviewInputError(
+                    "completed transaction reservation state is invalid"
+                )
         if self._digest_shape not in _DIGEST_SHAPES:
             raise ReviewInputError("session record digest shape is invalid")
         if self._digest_shape == "legacy" and (
@@ -408,11 +434,15 @@ class SessionRecord:
         payload = self._legacy_payload()
         payload["operator_paused"] = self.operator_paused
         payload["dispositions"] = list(self.dispositions)
+        if self.transaction is not None:
+            payload["transaction"] = self.transaction.to_dict()
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
         payload = self._legacy_payload()
         payload["operator_paused"] = self.operator_paused
+        if self.transaction is not None:
+            payload["transaction"] = self.transaction.to_dict()
         return payload
 
     def _legacy_payload(self) -> dict[str, object]:
@@ -452,6 +482,7 @@ class SessionRecord:
         expires_at: str,
         operator_paused: bool = False,
         dispositions: Sequence[Mapping[str, object]] = (),
+        transaction: ReviewTransaction | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         payload = {
@@ -472,6 +503,8 @@ class SessionRecord:
             "operator_paused": operator_paused,
             "dispositions": list(normalized_dispositions),
         }
+        if transaction is not None:
+            payload["transaction"] = transaction.to_dict()
         return cls(
             repository=repository,
             pull_request=pull_request,
@@ -489,6 +522,7 @@ class SessionRecord:
             record_sha256=_digest_payload(payload),
             operator_paused=operator_paused,
             dispositions=normalized_dispositions,
+            transaction=transaction,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -537,17 +571,26 @@ class SessionRecord:
             raise ReviewInputError("session record is invalid")
         has_operator_paused = "operator_paused" in value
         has_dispositions = "dispositions" in value
+        has_transaction = "transaction" in value
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
                 "session record dispositions require operator_paused"
             )
         digest_shape = (
             "current"
-            if has_dispositions
+            if has_dispositions or has_transaction
             else "operator-paused"
             if has_operator_paused
             else "legacy"
         )
+        transaction_value = value.get("transaction")
+        transaction = (
+            ReviewTransaction.from_dict(transaction_value)
+            if isinstance(transaction_value, Mapping)
+            else None
+        )
+        if transaction_value is not None and transaction is None:
+            raise ReviewInputError("session transaction is invalid")
         record = cls(
             repository=str(value.get("repository", "")),
             pull_request=_require_bounded_int(
@@ -599,6 +642,7 @@ class SessionRecord:
             record_sha256=str(value.get("record_sha256", "")),
             operator_paused=_operator_paused(value.get("operator_paused", False)),
             dispositions=_stored_dispositions(value.get("dispositions", [])),
+            transaction=transaction,
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -620,6 +664,7 @@ class SessionRecord:
         reserved_slot: str | None = None,
         last_committed_reservation_id: str | None = None,
         dispositions: Sequence[Mapping[str, object]] = (),
+        transaction: ReviewTransaction | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -651,6 +696,7 @@ class SessionRecord:
             expires_at=_format_datetime(expires),
             operator_paused=False,
             dispositions=dispositions,
+            transaction=transaction,
         )
 
     def evolve(
@@ -666,6 +712,7 @@ class SessionRecord:
         last_committed_reservation_id: str | None | object = ...,
         operator_paused: bool | None = None,
         dispositions: Sequence[Mapping[str, object]] | None = None,
+        transaction: ReviewTransaction | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -708,6 +755,11 @@ class SessionRecord:
                 self.operator_paused if operator_paused is None else operator_paused
             ),
             dispositions=(self.dispositions if dispositions is None else dispositions),
+            transaction=(
+                self.transaction
+                if transaction is ...
+                else cast(ReviewTransaction | None, transaction)
+            ),
         )
 
 
@@ -743,6 +795,7 @@ class PreparedSessionRound:
     record: SessionRecord
     decision: RoundAdmissionDecision
     reservation_id: str | None
+    transaction: ReviewTransaction | None = None
 
 
 class SessionLedger(Protocol):
@@ -835,6 +888,13 @@ def mutate_reserved(
         return record
     if record.reservation_id is not None:
         raise ReviewInputError("session reservation is already held")
+    if record.transaction is not None:
+        # A completed transaction is historical metadata.  A new admitted
+        # head gets a fresh transaction; an active analysis cannot be silently
+        # replaced by a competing reservation.
+        if record.transaction.phase == "analysis":
+            raise ReviewInputError("session analysis transaction is already active")
+        record = record.evolve(transaction=None, now=now)
     if slot not in RESERVATION_SLOTS:
         raise ReviewInputError("reserved_slot is invalid")
     _reservation_id(reservation_id, label="reservation_id")
@@ -853,6 +913,10 @@ def mutate_commit(
     expected_generation: int,
     now: datetime | None = None,
 ) -> SessionRecord:
+    if record.transaction is not None:
+        raise ReviewInputError(
+            "transaction reservations require an analysis checkpoint"
+        )
     if (
         record.last_committed_reservation_id == reservation_id
         and record.reservation_id is None
@@ -876,6 +940,7 @@ def mutate_commit(
         generation=_next_generation(record),
         reservation_id=None,
         reserved_slot=None,
+        transaction=None,
         last_committed_reservation_id=reservation_id,
         completed_initial_reviews=increments.get("completed_initial_reviews"),
         completed_verification_rounds=increments.get("completed_verification_rounds"),
@@ -915,6 +980,7 @@ def mutate_abort(
         generation=_next_generation(record),
         reservation_id=None,
         reserved_slot=None,
+        transaction=None,
     )
 
 
@@ -989,6 +1055,339 @@ def prepare_session_round(
     )
     return PreparedSessionRound(
         record=reserved, decision=decision, reservation_id=reservation_id
+    )
+
+
+def prepare_review_transaction(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    policy: ReviewConvergencePolicy,
+    *,
+    reservation_id: str,
+    base_sha: str,
+    head_sha: str,
+    configuration_digest: str,
+    evidence_digest: str,
+    now: datetime | None = None,
+    continuation_rounds: int = 0,
+    **state_flags: bool,
+) -> PreparedSessionRound:
+    """Reserve and bind one logical analysis transaction before inference."""
+
+    for label, value in (
+        ("base_sha", base_sha),
+        ("head_sha", head_sha),
+    ):
+        if (
+            not isinstance(value, str)
+            or len(value) != 40
+            or not re.fullmatch(r"[a-f0-9]{40}", value)
+        ):
+            raise ReviewInputError(f"review transaction {label} is invalid")
+    if not re.fullmatch(r"[a-f0-9]{64}", configuration_digest):
+        raise ReviewInputError("review transaction configuration digest is invalid")
+    if not re.fullmatch(r"[a-f0-9]{64}", evidence_digest):
+        raise ReviewInputError("review transaction evidence digest is invalid")
+    prepared = prepare_session_round(
+        ledger,
+        identity,
+        policy,
+        reservation_id=reservation_id,
+        now=now,
+        continuation_rounds=continuation_rounds,
+        **state_flags,
+    )
+    if prepared.reservation_id is None:
+        return prepared
+    transaction = ReviewTransaction.create(
+        repository=identity.repository,
+        pull_request=identity.pull_request,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        policy_digest=policy.digest(),
+        configuration_digest=configuration_digest,
+        evidence_digest=evidence_digest,
+        reservation_id=prepared.reservation_id,
+        generation=prepared.record.generation,
+    )
+
+    def attach(record: SessionRecord) -> SessionRecord:
+        if record.generation != prepared.record.generation:
+            raise ReviewInputError("session generation conflict")
+        if record.reservation_id != prepared.reservation_id:
+            raise ReviewInputError("session reservation does not match")
+        if record.transaction is not None:
+            if record.transaction.transaction_id == transaction.transaction_id:
+                return record
+            raise ReviewInputError("session already has a different transaction")
+        return record.evolve(transaction=transaction, now=now)
+
+    attached = ledger.replace(identity, attach, now=now)
+    return PreparedSessionRound(
+        record=attached,
+        decision=prepared.decision,
+        reservation_id=prepared.reservation_id,
+        transaction=transaction,
+    )
+
+
+def _checkpoint_transaction_record(
+    record: SessionRecord,
+    transaction: ReviewTransaction,
+    result_digest: str,
+    *,
+    now: datetime | None = None,
+) -> SessionRecord:
+    if (
+        record.transaction is None
+        or record.transaction.transaction_id != transaction.transaction_id
+    ):
+        raise ReviewInputError("session transaction does not match")
+    if record.transaction.phase in {
+        "publication_pending",
+        "publication_failed",
+        "publication_succeeded",
+    }:
+        if record.transaction.result_sha256 != result_digest:
+            raise ReviewInputError("session transaction result digest does not match")
+        return record
+    if record.transaction.phase != "analysis":
+        raise ReviewInputError("session transaction is not checkpointable")
+    if not record.transaction.logical_identity_matches(transaction):
+        raise ReviewInputError("session transaction identity does not match")
+    if record.generation != transaction.generation:
+        raise ReviewInputError("session generation conflict")
+    if (
+        record.reservation_id != transaction.reservation_id
+        or record.reserved_slot
+        not in {
+            "initial",
+            "verification",
+        }
+    ):
+        raise ReviewInputError("session analysis reservation does not match")
+    increments = _apply_slot(record, record.reserved_slot)
+    next_generation = _next_generation(record)
+    pending = ReviewTransaction(
+        transaction_id=transaction.transaction_id,
+        repository=transaction.repository,
+        pull_request=transaction.pull_request,
+        base_sha=transaction.base_sha,
+        head_sha=transaction.head_sha,
+        policy_digest=transaction.policy_digest,
+        configuration_digest=transaction.configuration_digest,
+        evidence_digest=transaction.evidence_digest,
+        reservation_id=transaction.reservation_id,
+        generation=next_generation,
+        phase="publication_pending",
+        result_sha256=result_digest,
+    )
+    return record.evolve(
+        now=now,
+        generation=next_generation,
+        reservation_id=None,
+        reserved_slot=None,
+        last_committed_reservation_id=transaction.reservation_id,
+        completed_initial_reviews=increments.get("completed_initial_reviews"),
+        completed_verification_rounds=increments.get("completed_verification_rounds"),
+        transaction=pending,
+    )
+
+
+def checkpoint_review_analysis(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    prepared: PreparedSessionRound,
+    result: ReviewResult,
+    *,
+    now: datetime | None = None,
+) -> ReviewResult:
+    """Durably commit completed analysis once and return its bound artifact."""
+
+    from dataclasses import replace
+
+    if not isinstance(result, ReviewResult):
+        raise ReviewInputError("review analysis result is invalid")
+    if result.review_status != "complete":
+        raise ReviewInputError("only a complete review can be checkpointed")
+    transaction = prepared.transaction
+    if transaction is None or prepared.reservation_id != transaction.reservation_id:
+        raise ReviewInputError("prepared review transaction is invalid")
+    result_digest = result.content_digest()
+    if result.transaction is not None and (
+        not result.transaction.logical_identity_matches(transaction)
+        or result.transaction.result_sha256 not in {None, result_digest}
+    ):
+        raise ReviewInputError("review result transaction does not match")
+
+    updated = ledger.replace(
+        identity,
+        lambda record: _checkpoint_transaction_record(
+            record, transaction, result_digest, now=now
+        ),
+        now=now,
+    )
+    bound = updated.transaction
+    if bound is None:
+        raise ReviewInputError("session checkpoint did not persist a transaction")
+    return replace(result, transaction=bound)
+
+
+def load_review_transaction_for_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    result: ReviewResult,
+    *,
+    base_sha: str,
+    head_sha: str,
+    policy_digest: str,
+    configuration_digest: str,
+    evidence_digest: str,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Validate a result against durable state, recovering a crash checkpoint."""
+
+    if result.transaction is None:
+        raise ReviewInputError(
+            "publication requires an identity-bound review transaction"
+        )
+    if result.review_status != "complete":
+        raise ReviewInputError("publication requires a complete checkpointed review")
+    transaction = result.transaction
+    if not transaction.identity_matches(
+        repository=identity.repository,
+        pull_request=identity.pull_request,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        evidence_digest=evidence_digest,
+    ):
+        raise ReviewInputError(
+            "review transaction identity or trusted context mismatches"
+        )
+    result_digest = result.content_digest()
+    if transaction.result_sha256 not in {None, result_digest}:
+        raise ReviewInputError("review result digest does not match transaction")
+    loaded = ledger.load(identity, now=now)
+    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+        raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+    record = loaded.record
+    if (
+        record.transaction is None
+        or record.transaction.transaction_id != transaction.transaction_id
+    ):
+        raise ReviewInputError("durable transaction does not match result")
+    if not record.transaction.logical_identity_matches(transaction):
+        raise ReviewInputError("durable transaction identity does not match result")
+    if transaction.generation > record.transaction.generation:
+        raise ReviewInputError("review transaction generation is stale")
+    if record.transaction.phase == "analysis":
+        if transaction.generation != record.transaction.generation:
+            raise ReviewInputError("review transaction generation does not match")
+        return ledger.replace(
+            identity,
+            lambda current: _checkpoint_transaction_record(
+                current, transaction, result_digest, now=now
+            ),
+            now=now,
+        )
+    if record.transaction.result_sha256 != result_digest:
+        raise ReviewInputError("durable result digest does not match")
+    return record
+
+
+def complete_review_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    published: bool,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Advance publication state without touching completed-round counters."""
+
+    if not isinstance(transaction, ReviewTransaction):
+        raise ReviewInputError("review transaction is invalid")
+    target = "publication_succeeded" if published else "publication_failed"
+
+    def mutate(record: SessionRecord) -> SessionRecord:
+        current = record.transaction
+        if current is None or current.transaction_id != transaction.transaction_id:
+            raise ReviewInputError("durable transaction does not match")
+        if not current.logical_identity_matches(transaction):
+            raise ReviewInputError("publication transaction identity does not match")
+        if transaction.generation > current.generation:
+            raise ReviewInputError("publication transaction generation is stale")
+        # A durable success is terminal for the publication side of the
+        # transaction. A later timeout or duplicate failure observation must
+        # not downgrade it or raise while the caller is retrying at-least-once
+        # delivery.
+        if current.phase == "publication_succeeded":
+            return record
+        if current.phase == "publication_failed" and not published:
+            return record
+        if current.phase not in {"publication_pending", "publication_failed"}:
+            raise ReviewInputError("publication phase transition is invalid")
+        if (
+            transaction.result_sha256 is None
+            or current.result_sha256 != transaction.result_sha256
+        ):
+            raise ReviewInputError("publication result digest does not match")
+        next_generation = _next_generation(record)
+        updated_transaction = ReviewTransaction(
+            transaction_id=current.transaction_id,
+            repository=current.repository,
+            pull_request=current.pull_request,
+            base_sha=current.base_sha,
+            head_sha=current.head_sha,
+            policy_digest=current.policy_digest,
+            configuration_digest=current.configuration_digest,
+            evidence_digest=current.evidence_digest,
+            reservation_id=current.reservation_id,
+            generation=next_generation,
+            phase=target,
+            result_sha256=current.result_sha256,
+        )
+        return record.evolve(
+            now=now, generation=next_generation, transaction=updated_transaction
+        )
+
+    return ledger.replace(identity, mutate, now=now)
+
+
+def reclaim_abandoned_review_transaction(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    *,
+    reservation_id: str,
+    expected_generation: int,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Release only an explicitly owned abandoned analysis reservation."""
+
+    loaded = ledger.load(identity, now=now)
+    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+        raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+    record = loaded.record
+    if (
+        record.generation != expected_generation
+        or record.reservation_id != reservation_id
+        or record.transaction is None
+        or record.transaction.reservation_id != reservation_id
+        or record.transaction.phase != "analysis"
+        or record.reserved_slot not in {"initial", "verification"}
+    ):
+        raise ReviewInputError("abandoned transaction ownership or generation mismatch")
+    return ledger.replace(
+        identity,
+        lambda current: mutate_abort(
+            current,
+            reservation_id=reservation_id,
+            expected_generation=expected_generation,
+            now=now,
+        ),
+        now=now,
     )
 
 
@@ -1105,6 +1504,7 @@ def record_session_failed_attempt(
     identity: SessionIdentity,
     *,
     reservation_id: str,
+    expected_generation: int | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
     """Abort a held round reservation and charge the failed-attempt budget."""
@@ -1116,6 +1516,14 @@ def record_session_failed_attempt(
         record = loaded.record
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+    if expected_generation is not None:
+        if (
+            record.generation != expected_generation
+            or record.reservation_id != reservation_id
+        ):
+            raise ReviewInputError(
+                "failed-attempt cleanup ownership or generation mismatch"
+            )
     if record.reservation_id == reservation_id:
         record = ledger.abort(
             identity,
