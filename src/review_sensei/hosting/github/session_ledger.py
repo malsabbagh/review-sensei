@@ -9,7 +9,10 @@ GitHub issue-comment updates do not expose a conditional generation or ETag
 precondition through this adapter. Mutations therefore use a bounded
 pre-discovery check plus a post-update readback: they are best-effort against
 cross-process writers, not a strict distributed lock. Callers that require a
-no-lost-update guarantee must serialize writers for an identity.
+no-lost-update guarantee must serialize writers for an identity. A successful
+broker verification is consumed before the first remote mutation; an ambiguous
+or failed GitHub write therefore consumes that one-attempt grant and must be
+retried with a newly issued grant rather than replaying the old one.
 """
 
 from __future__ import annotations

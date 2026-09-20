@@ -621,6 +621,35 @@ class GitHubApplicationTests(unittest.TestCase):
                 association="MEMBER",
                 app_slug="reviewsensei[bot]",
             )
+
+    def test_hosted_status_does_not_read_an_injected_local_ledger(self):
+        application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=InMemorySessionLedger(),
+        )
+
+        with self.assertRaisesRegex(GitHubPublicationError, "requires HTTP"):
+            application.apply_maintainer_command(
+                options=GitHubWriteOptions(
+                    github_writes=True, github_session_ledger=True
+                ),
+                oidc_token="caller-oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                body="@sensei review status",
+                actor_login="mallory",
+                actor_type="User",
+                association="MEMBER",
+                app_slug="reviewsensei[bot]",
+            )
+        self.assertEqual(self.broker.exchanges, [("caller-oidc", "review_status")])
+
     def test_publish_review_restores_durable_baseline_for_admission(self):
         ledger = InMemorySessionLedger()
         identity = SessionIdentity("owner/repo", 1, repository_id=1)

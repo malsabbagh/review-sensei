@@ -27,6 +27,7 @@ from review_sensei.hosting.github import (
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
 )
+from review_sensei.hosting.github.errors import GitHubPublicationTransientError
 from review_sensei.hosting.github.session_ledger import (
     SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
@@ -1396,6 +1397,31 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(verifier.calls, [])
         self.assertEqual([method for method, _url, _data in calls], ["GET"])
 
+    def test_grant_bound_initialize_failure_consumes_one_attempt(self):
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response({"error": "upstream"}, status=500),
+                json_response([]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(
+            GitHubPublicationTransientError, "could not be verified"
+        ):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+        verifier.error = GitHubBrokerClientError("grant already consumed")
+        with self.assertRaisesRegex(ReviewInputError, "session grant"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(len(verifier.calls), 2)
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "POST", "GET"]
+        )
+
     def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
         cases = (
             ("replayed", self._GrantVerifier(error=GitHubBrokerClientError("invalid"))),
@@ -1794,6 +1820,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([{"id": 7, "body": expired_body}]),
                 json_response([{"id": 7, "body": expired_body}]),
+                json_response([{"id": 7, "body": expired_body}]),
                 json_response({"id": 7, "body": replacement_body}),
                 json_response([{"id": 7, "body": replacement_body}]),
             ]
@@ -1801,13 +1828,16 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         attestation = self._grant_attestation()
         verifier = self._GrantVerifier(returned=attestation)
         ledger = self._grant_bound_ledger(http, verifier, attestation)
+        command = parse_maintainer_command("@sensei review reenroll", actor="octocat")
 
-        record = ledger.reenroll(IDENTITY, now=FIXED_NOW)
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
 
         self.assertEqual(record, replacement)
+        self.assertTrue(result.applied)
         self.assertEqual(verifier.calls, [("g" * 43, attestation)])
         self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "PATCH", "GET"],
         )
 
     def test_hosted_reenroll_recreates_a_deleted_marker(self):
