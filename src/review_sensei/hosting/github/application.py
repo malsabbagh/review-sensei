@@ -444,35 +444,42 @@ class GitHubApplication:
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
         # Falling back to the prior key would treat an unknown head/configuration
-        # as compatible and turn stale evidence into admission authority.
-        if durable_baseline is not None and current_key is None:
-            durable_baseline = None
+        # as compatible and turn stale evidence into admission authority.  Do
+        # not silently downgrade to a fresh review when the caller omitted the
+        # key; make the recovery requirement visible and retryable instead.
         try:
-            publication = self.reviewer.publish(
-                token=token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_branch=base_branch,
-                base_sha=base_sha,
-                result=result,
-                diff=diff,
-                app_slug=app_slug,
-                auto_approve=options.auto_approve,
-                candidates=candidates,
-                snapshot=snapshot,
-                snapshot_sha256=snapshot_sha256,
-                evidence_policy=evidence_policy,
-                convergence_policy=convergence_policy,
-                blocker_candidates=blocker_candidates,
-                input_blocker_candidates=input_blocker_candidates,
-                baseline=durable_baseline,
-                current_key=current_key,
-                changed_paths=changed_paths,
-                related_paths=related_paths,
-                evidence_confirmed_concerns=evidence_confirmed_concerns,
-                authorized_dispositions=authorized_dispositions,
+            publication = (
+                PublicationResult(
+                    status="handoff",
+                    diagnostic="durable_baseline_recovery_required",
+                )
+                if durable_baseline is not None and current_key is None
+                else self.reviewer.publish(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    result=result,
+                    diff=diff,
+                    app_slug=app_slug,
+                    auto_approve=options.auto_approve,
+                    candidates=candidates,
+                    snapshot=snapshot,
+                    snapshot_sha256=snapshot_sha256,
+                    evidence_policy=evidence_policy,
+                    convergence_policy=convergence_policy,
+                    blocker_candidates=blocker_candidates,
+                    input_blocker_candidates=input_blocker_candidates,
+                    baseline=durable_baseline,
+                    current_key=current_key,
+                    changed_paths=changed_paths,
+                    related_paths=related_paths,
+                    evidence_confirmed_concerns=evidence_confirmed_concerns,
+                    authorized_dispositions=authorized_dispositions,
+                )
             )
         except BaseException as publication_error:
             if (

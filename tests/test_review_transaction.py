@@ -31,7 +31,7 @@ from review_sensei.models import (
     ReviewResult,
     ReviewTransaction,
 )
-from review_sensei.outcomes import RunOutcome
+from review_sensei.outcomes import RunOutcome, run_outcome_exit_code
 from review_sensei.providers import ProviderSettings
 from review_sensei.schemas import validate_public_document
 from review_sensei.service import ReviewRun, ReviewService
@@ -627,7 +627,9 @@ class ReviewTransactionTests(unittest.TestCase):
                     return_value=RecordingRegistry(provider),
                 ),
             ):
-                self.assertNotEqual(main(malformed_argv), 0)
+                malformed_exit = main(malformed_argv)
+            self.assertEqual(malformed_exit, run_outcome_exit_code("action_required"))
+            self.assertNotEqual(malformed_exit, 0)
             malformed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
             malformed_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertEqual(malformed_outcome["status"], "action_required")
@@ -635,6 +637,8 @@ class ReviewTransactionTests(unittest.TestCase):
                 malformed_outcome["diagnostic"],
                 "durable_baseline_recovery_required",
             )
+            self.assertEqual(malformed_outcome["base_sha"], BASE_SHA)
+            self.assertEqual(malformed_outcome["head_sha"], "c" * 40)
             self.assertEqual(provider.calls, 1)
             self.assertIsNone(malformed_record.reservation_id)
             self.assertEqual(malformed_record.convergence_history, initial_history)
@@ -659,7 +663,9 @@ class ReviewTransactionTests(unittest.TestCase):
                 "review_sensei.cli.default_registry",
                 return_value=RecordingRegistry(provider),
             ):
-                self.assertNotEqual(main(stage_mismatch_argv), 0)
+                self.assertEqual(
+                    main(stage_mismatch_argv), run_outcome_exit_code("action_required")
+                )
             stage_mismatch_outcome = json.loads(
                 outcome_path.read_text(encoding="utf-8")
             )
@@ -671,6 +677,8 @@ class ReviewTransactionTests(unittest.TestCase):
                 stage_mismatch_outcome["diagnostic"],
                 "durable_baseline_recovery_required",
             )
+            self.assertEqual(stage_mismatch_outcome["base_sha"], BASE_SHA)
+            self.assertEqual(stage_mismatch_outcome["head_sha"], stage_mismatch_head)
             self.assertEqual(provider.calls, 1)
             self.assertIsNone(stage_mismatch_record.reservation_id)
 
@@ -800,6 +808,7 @@ class ReviewTransactionTests(unittest.TestCase):
                 "--no-learning-proposals",
             ]
             observed_profiles: list[str] = []
+            observed_incrementals = []
             original_run = ReviewService.run
 
             def recording_run(
@@ -812,6 +821,7 @@ class ReviewTransactionTests(unittest.TestCase):
                 budget=None,
             ):
                 observed_profiles.append(profile)
+                observed_incrementals.append(incremental)
                 return original_run(
                     service,
                     request,
@@ -862,6 +872,13 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertEqual(
                 observed_profiles,
                 ["deep-verification", "deep-verification"],
+            )
+            self.assertIsNone(observed_incrementals[0])
+            self.assertIsNotNone(observed_incrementals[1])
+            assert observed_incrementals[1] is not None
+            self.assertEqual(
+                observed_incrementals[1].reviewed_paths,
+                ("src/app.py",),
             )
 
     def test_cli_checkpoint_completes_without_a_cache_key(self):
