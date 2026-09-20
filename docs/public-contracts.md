@@ -240,7 +240,9 @@ These imports are public and stable within a major version:
 - `review_sensei.ChannelPromotionRecord`
 
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
-against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
+against `run-outcome.schema.json`; `run_outcome_exit_code` maps every
+`FAILURE_RUN_STATUSES` value, including `action_required`, to exit code 1.
+`ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
 validate against the review-convergence schemas. `SessionRecord.to_dict()`
 validates against `session-record.schema.json`. The record also carries the
