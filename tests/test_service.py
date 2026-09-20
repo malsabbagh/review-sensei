@@ -895,7 +895,8 @@ class ReviewServiceTests(unittest.TestCase):
 
     def test_unbound_request_validates_against_checkpoint_identity(self):
         provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
-        service = ReviewService(provider)
+        cache = ReviewContextCache()
+        service = ReviewService(provider, cache=cache)
         bound_request = self._current_request()
         current_key = build_review_context_cache_key(
             bound_request,
@@ -905,9 +906,18 @@ class ReviewServiceTests(unittest.TestCase):
         assert current_key is not None
         unbound_request = replace(bound_request, base_sha=None, head_sha=None)
 
-        accepted = service.run(unbound_request, current_key=current_key)
+        with self.assertRaisesRegex(ReviewInputError, "trusted"):
+            service.run(unbound_request, current_key=current_key)
+
+        accepted = service.run(
+            unbound_request,
+            current_key=current_key,
+            trusted_base_sha=current_key.base_sha,
+            trusted_head_sha=current_key.head_sha,
+        )
 
         self.assertIsNone(accepted.error)
+        self.assertIsNotNone(cache.get(current_key))
         self.assertEqual(provider.requests[0].prompt.count("Pull request: #3"), 1)
 
     @staticmethod

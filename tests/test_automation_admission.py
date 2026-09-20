@@ -281,7 +281,9 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             session_ledger=ledger,
         )
         result = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            options=GitHubWriteOptions(
+                auto_review=True, github_writes=True, github_session_ledger=True
+            ),
             oidc_token="oidc",
             repository=IDENTITY.repository,
             repository_id=99,
@@ -317,7 +319,9 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             session_ledger=ledger,
         )
         result = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            options=GitHubWriteOptions(
+                auto_review=True, github_writes=True, github_session_ledger=True
+            ),
             oidc_token="oidc",
             repository=IDENTITY.repository,
             repository_id=99,

@@ -337,6 +337,8 @@ class ReviewService:
         stage_summary: dict[str, str],
         incremental: IncrementalReviewPlan | None,
         current_key: ReviewContextCacheKey | None,
+        trusted_base_sha: str | None,
+        trusted_head_sha: str | None,
         profile: str,
     ) -> ReviewRun:
         """Run bounded chunk orchestration against one shared resource budget."""
@@ -391,6 +393,8 @@ class ReviewService:
                     chunk_request,
                     incremental=incremental,
                     current_key=current_key,
+                    trusted_base_sha=trusted_base_sha,
+                    trusted_head_sha=trusted_head_sha,
                     profile=profile,
                     tracker=tracker,
                     provider_override=budgeted,
@@ -581,6 +585,8 @@ class ReviewService:
         *,
         incremental: IncrementalReviewPlan | None = None,
         current_key: ReviewContextCacheKey | None = None,
+        trusted_base_sha: str | None = None,
+        trusted_head_sha: str | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
         monotonic: Callable[[], float] | None = None,
@@ -596,6 +602,8 @@ class ReviewService:
             request,
             incremental=incremental,
             current_key=current_key,
+            trusted_base_sha=trusted_base_sha,
+            trusted_head_sha=trusted_head_sha,
             profile=profile,
             budget=budget,
             monotonic=monotonic,
@@ -615,6 +623,8 @@ class ReviewService:
         *,
         incremental: IncrementalReviewPlan | None = None,
         current_key: ReviewContextCacheKey | None = None,
+        trusted_base_sha: str | None = None,
+        trusted_head_sha: str | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
         tracker: ResourceBudgetTracker | None = None,
@@ -628,11 +638,11 @@ class ReviewService:
         When supplied, ``current_key`` must be the canonical key for this
         request, active provider, stage configuration, and profile.  The CLI
         deliberately keeps trusted snapshot SHAs off the live inference
-        request; when both are absent, the supplied key provides that
-        checkpoint identity while all request/configuration fields are still
-        compared.  It is a caller-visible identity seam used by incremental
-        coverage, so reject a mismatched key before change orchestration or any
-        provider/cache work.
+        request; when both are absent, ``trusted_base_sha`` and
+        ``trusted_head_sha`` independently bind the supplied checkpoint key
+        while all request/configuration fields are still compared.  It is a
+        caller-visible identity seam used by incremental coverage, so reject a
+        mismatched key before change orchestration or any provider/cache work.
         """
 
         active_provider = provider_override or self.provider
@@ -643,13 +653,37 @@ class ReviewService:
             and request.head_sha is None
         ):
             # F2 intentionally leaves trusted base/head SHAs off the provider
-            # request.  Complete a private identity-only copy for validation;
-            # the original request remains the one passed through inference.
+            # request. Complete a private identity-only copy for validation,
+            # but require the independent trusted context from the caller so a
+            # key cannot authenticate its own snapshot identity.
+            if trusted_base_sha is None or trusted_head_sha is None:
+                raise ReviewInputError(
+                    "current_key requires trusted base and head SHAs for an unbound request"
+                )
+            if (
+                current_key.base_sha != trusted_base_sha
+                or current_key.head_sha != trusted_head_sha
+            ):
+                raise ReviewInputError(
+                    "current_key does not match the trusted snapshot identity"
+                )
             key_request = replace(
                 request,
-                base_sha=current_key.base_sha,
-                head_sha=current_key.head_sha,
+                base_sha=trusted_base_sha,
+                head_sha=trusted_head_sha,
             )
+        elif current_key is not None and (
+            trusted_base_sha is not None or trusted_head_sha is not None
+        ):
+            if (
+                trusted_base_sha is None
+                or trusted_head_sha is None
+                or current_key.base_sha != trusted_base_sha
+                or current_key.head_sha != trusted_head_sha
+            ):
+                raise ReviewInputError(
+                    "current_key does not match the trusted snapshot identity"
+                )
         canonical_key = build_review_context_cache_key(
             key_request,
             provider_name=active_provider.name,
@@ -700,6 +734,8 @@ class ReviewService:
                 stage_summary=stage_summary,
                 incremental=incremental,
                 current_key=current_key,
+                trusted_base_sha=trusted_base_sha,
+                trusted_head_sha=trusted_head_sha,
                 profile=profile,
             )
         analysis = change_plan.analysis

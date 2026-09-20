@@ -135,7 +135,12 @@ class GitHubApplication:
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
         )
-        operator_baseline_enforced = policy.mode in OPERATOR_REVIEW_MODES
+        operator_baseline_requested = policy.mode in OPERATOR_REVIEW_MODES and (
+            (isinstance(result, ReviewResult) and result.transaction is not None)
+            or options.github_session_ledger
+            or baseline is not None
+            or current_key is not None
+        )
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -424,6 +429,21 @@ class GitHubApplication:
                 transaction_record = load_transaction(ledger)
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
+        validated_transaction_recovery = (
+            # A pending identity-bound result has already crossed the F1
+            # checkpoint and digest gate. It is the explicit transaction
+            # recovery path, so it does not need to reconstruct F3 admission
+            # state before replaying the same publication.
+            isinstance(result, ReviewResult)
+            and result.transaction is not None
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.result_sha256 is not None
+            and result.content_digest() == transaction_record.transaction.result_sha256
+        )
+        baseline_admission_required = (
+            operator_baseline_requested and not validated_transaction_recovery
+        )
         authorized_dispositions: tuple[object, ...] = ()
         durable_baseline = baseline
         baseline_recovery_required = False
@@ -434,7 +454,7 @@ class GitHubApplication:
                 authorized_dispositions = session_dispositions(prepared.record)
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
-            if operator_baseline_enforced:
+            if baseline_admission_required:
                 record_for_baseline = (
                     prepared.record if prepared is not None else transaction_record
                 )
@@ -442,11 +462,6 @@ class GitHubApplication:
                     durable_baseline is None
                     and record_for_baseline is not None
                     and record_for_baseline.completed_initial_reviews > 0
-                    # An identity-bound transaction already contains the
-                    # checkpointed result that publication is retrying.  The
-                    # durable-baseline admission gate applies to a new
-                    # prepared round, not to that crash-recovery path.
-                    and prepared is not None
                 ):
                     history = record_for_baseline.convergence_history
                     if not (
@@ -459,7 +474,7 @@ class GitHubApplication:
                             durable_baseline = baseline_from_history_document(
                                 history.get("baseline")
                             )
-                        except ReviewInputError:
+                        except (ReviewInputError, TypeError, KeyError, ValueError):
                             baseline_recovery_required = True
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
@@ -479,9 +494,9 @@ class GitHubApplication:
                     status="handoff",
                     diagnostic="durable_baseline_recovery_required",
                 )
-                if operator_baseline_enforced
+                if operator_baseline_requested
                 and (
-                    baseline_recovery_required
+                    (baseline_admission_required and baseline_recovery_required)
                     or (durable_baseline is not None and current_key is None)
                 )
                 else self.reviewer.publish(

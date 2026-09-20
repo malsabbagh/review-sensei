@@ -465,6 +465,42 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(forwarded["changed_paths"], ("src/app.py",))
         self.assertEqual(forwarded["related_paths"], ("src/helper.py",))
 
+        explicit_reviewer = RecordingReviewer()
+        explicit_application = GitHubApplication(
+            broker=self.broker,
+            http=None,
+            reviewer=explicit_reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=None,
+        )
+        explicit_application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            app_slug="review-sensei[bot]",
+            convergence_policy=policy,
+            baseline=baseline,
+            current_key=baseline.cache_key,
+            changed_paths=("src/app.py",),
+            related_paths=("src/explicit.py",),
+        )
+        self.assertEqual(
+            explicit_reviewer.calls[-1]["related_paths"], ("src/explicit.py",)
+        )
+
     def test_publish_review_handoffs_when_durable_baseline_has_no_current_key(self):
         ledger = InMemorySessionLedger()
         identity = SessionIdentity("owner/repo", 1, repository_id=1)
@@ -515,7 +551,9 @@ class GitHubApplicationTests(unittest.TestCase):
         )
 
         publish_kwargs = {
-            "options": GitHubWriteOptions(auto_review=True, github_writes=True),
+            "options": GitHubWriteOptions(
+                auto_review=True, github_writes=True, github_session_ledger=True
+            ),
             "oidc_token": None,
             "repository": "owner/repo",
             "repository_id": 1,
@@ -593,7 +631,9 @@ class GitHubApplicationTests(unittest.TestCase):
         )
 
         outcome = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            options=GitHubWriteOptions(
+                auto_review=True, github_writes=True, github_session_ledger=True
+            ),
             oidc_token=None,
             repository="owner/repo",
             repository_id=1,

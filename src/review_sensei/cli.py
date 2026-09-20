@@ -2408,6 +2408,27 @@ def main(argv: list[str] | None = None) -> int:
                     expected_generation=current.generation,
                 )
 
+        def cleanup_analysis_error(
+            analysis_error: BaseException, *, charge_failed_attempt: bool
+        ) -> None:
+            if (
+                ledger is None
+                or identity is None
+                or held_reservation is None
+                or policy.mode not in OPERATOR_REVIEW_MODES
+            ):
+                return
+            try:
+                cleanup_analysis_reservation(
+                    charge_failed_attempt=charge_failed_attempt
+                )
+            except BaseException as cleanup_error:
+                analysis_error.add_note(
+                    "analysis reservation cleanup failed: "
+                    f"{type(cleanup_error).__name__}: "
+                    f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                )
+
         if (
             ledger is not None
             and args.repository
@@ -2583,12 +2604,16 @@ def main(argv: list[str] | None = None) -> int:
         incremental = None
         current_key = None
         verification_scope = None
+        # F3 durable-baseline enforcement is explicitly opted into by the
+        # identity-bound transaction/artifact request. Legacy operator runs
+        # keep their prior full-review behavior until that flag is selected.
+        baseline_enforcement_requested = transaction_requested
         if (
             ledger is not None
             and identity is not None
             and prepared_round is not None
             and policy.mode in OPERATOR_REVIEW_MODES
-            and transaction_requested
+            and baseline_enforcement_requested
             and prepared_round.record.completed_initial_reviews > 0
         ):
             from .baseline import plan_verification_scope
@@ -2613,7 +2638,7 @@ def main(argv: list[str] | None = None) -> int:
                 persisted_baseline = baseline_from_history_document(
                     history.get("baseline")
                 )
-            except ReviewInputError:
+            except (ReviewInputError, TypeError, KeyError, ValueError):
                 cleanup_analysis_reservation(charge_failed_attempt=False)
                 outcome = RunOutcome(
                     "action_required",
@@ -2664,27 +2689,16 @@ def main(argv: list[str] | None = None) -> int:
                 request,
                 incremental=incremental,
                 current_key=current_key,
+                trusted_base_sha=resolved_base_sha,
+                trusted_head_sha=resolved_head_sha,
                 profile=effective_profile,
                 budget=ResourceBudget.for_limits(limits),
             )
-        except BaseException as analysis_error:
-            if (
-                ledger is not None
-                and identity is not None
-                and held_reservation is not None
-                and policy.mode in OPERATOR_REVIEW_MODES
-            ):
-                try:
-                    if isinstance(analysis_error, (KeyboardInterrupt, SystemExit)):
-                        cleanup_analysis_reservation(charge_failed_attempt=False)
-                    else:
-                        cleanup_analysis_reservation(charge_failed_attempt=True)
-                except BaseException as cleanup_error:
-                    analysis_error.add_note(
-                        "analysis reservation cleanup failed: "
-                        f"{type(cleanup_error).__name__}: "
-                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                    )
+        except (KeyboardInterrupt, SystemExit) as analysis_error:
+            cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
+            raise
+        except Exception as analysis_error:
+            cleanup_analysis_error(analysis_error, charge_failed_attempt=True)
             raise
         if (
             run.result is None
