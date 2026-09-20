@@ -63,9 +63,15 @@ class SessionRecordTests(unittest.TestCase):
     def _history() -> dict[str, object]:
         baseline = ReviewBaseline(
             cache_key=ReviewContextCacheKey(
-                repository="owner/repo", pull_request=136, base_sha="a" * 40,
-                head_sha="b" * 40, engine="ollama", model="test", profile="default",
-                stage_digest="c" * 64, context_digest="d" * 64,
+                repository="owner/repo",
+                pull_request=136,
+                base_sha="a" * 40,
+                head_sha="b" * 40,
+                engine="ollama",
+                model="test",
+                profile="default",
+                stage_digest="c" * 64,
+                context_digest="d" * 64,
                 learning_digest="e" * 64,
             ),
             policy_digest="f" * 64,
@@ -73,9 +79,14 @@ class SessionRecordTests(unittest.TestCase):
             coverage_complete=True,
             findings=(
                 BaselineFinding(
-                    fingerprint="1" * 64, resolution_criterion="2" * 64,
-                    concern="3" * 64, path="src/example.py", symbol="run",
-                    defect_kind="bug", generation=1, blocking=True,
+                    fingerprint="1" * 64,
+                    resolution_criterion="2" * 64,
+                    concern="3" * 64,
+                    path="src/example.py",
+                    symbol="run",
+                    defect_kind="bug",
+                    generation=1,
+                    blocking=True,
                 ),
             ),
             reviewed_paths=("src/example.py",),
@@ -314,7 +325,9 @@ class LocalSessionLedgerTests(unittest.TestCase):
         assert loaded.record is not None
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
         self.assertEqual(
-            baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+            baseline_from_history_document(
+                loaded.record.convergence_history["baseline"]
+            ),
             baseline_from_history_document(history["baseline"]),
         )
 
@@ -709,7 +722,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         assert loaded.record is not None
         self.assertEqual(loaded.record.completed_initial_reviews, 1)
         self.assertEqual(
-            baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+            baseline_from_history_document(
+                loaded.record.convergence_history["baseline"]
+            ),
             baseline_from_history_document(history["baseline"]),
         )
 
@@ -954,7 +969,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         ledger = GitHubIssueCommentSessionLedger(
             http, token="token", app_slug="reviewsensei[bot]"
         )
-        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed")
+        self.assertEqual(
+            ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed"
+        )
         with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
             ledger.initialize(IDENTITY, now=FIXED_NOW)
 
@@ -1168,7 +1185,9 @@ class GitHubApplicationSessionTests(unittest.TestCase):
 
         class Reviewer:
             def publish(self, **kwargs):
-                raise AssertionError("a deleted session marker must stop before publish")
+                raise AssertionError(
+                    "a deleted session marker must stop before publish"
+                )
 
         http, _calls = make_http([json_response([])])
         application = GitHubApplication(

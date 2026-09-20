@@ -117,16 +117,22 @@ def _stored_convergence_history(
     if not isinstance(value, Mapping):
         raise ReviewInputError("session convergence history is invalid")
     try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         normalized = json.loads(encoded.decode("utf-8"))
     except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
         raise ReviewInputError("session convergence history is invalid") from exc
     if len(encoded) > MAX_CONVERGENCE_HISTORY_BYTES:
-        raise ReviewInputError("session convergence history exceeds the configured bound")
+        raise ReviewInputError(
+            "session convergence history exceeds the configured bound"
+        )
     if not isinstance(normalized, dict):
         raise ReviewInputError("session convergence history is invalid")
     allowed = {"state", "baseline", "progress", "provenance"}
-    if set(normalized) - allowed or not {"state", "progress", "provenance"}.issubset(normalized):
+    if set(normalized) - allowed or not {"state", "progress", "provenance"}.issubset(
+        normalized
+    ):
         raise ReviewInputError("session convergence history has unknown fields")
     state = normalized.get("state")
     if state not in _CONVERGENCE_HISTORY_STATES:
@@ -152,8 +158,10 @@ def _stored_convergence_history(
         if item.get("event") not in {"completed", "invalidated", "recovery-required"}:
             raise ReviewInputError("session history progress event is invalid")
         _require_bounded_int(
-            item.get("generation"), label="session history progress generation",
-            minimum=0, maximum=MAX_GENERATION,
+            item.get("generation"),
+            label="session history progress generation",
+            minimum=0,
+            maximum=MAX_GENERATION,
         )
     provenance = normalized.get("provenance")
     if not isinstance(provenance, Mapping) or set(provenance) != {"ledger_digest"}:
@@ -450,7 +458,9 @@ class SessionRecord:
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
         object.__setattr__(
-            self, "convergence_history", _stored_convergence_history(self.convergence_history)
+            self,
+            "convergence_history",
+            _stored_convergence_history(self.convergence_history),
         )
         if self.transaction is not None:
             if not isinstance(self.transaction, ReviewTransaction):
@@ -479,7 +489,9 @@ class SessionRecord:
         if self._digest_shape not in _DIGEST_SHAPES:
             raise ReviewInputError("session record digest shape is invalid")
         if self._digest_shape == "legacy" and (
-            self.operator_paused or self.dispositions or self.convergence_history is not None
+            self.operator_paused
+            or self.dispositions
+            or self.convergence_history is not None
         ):
             raise ReviewInputError("legacy session record has C6 fields")
         if self._digest_shape == "operator-paused" and self.dispositions:
@@ -491,7 +503,14 @@ class SessionRecord:
         }[self._digest_shape]()
         if self.record_sha256 != _digest_payload(expected_payload):
             raise ReviewInputError("session record integrity check failed")
-        if len(json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_SESSION_RECORD_BYTES:
+        if (
+            len(
+                json.dumps(
+                    self.to_dict(), sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            )
+            > MAX_SESSION_RECORD_BYTES
+        ):
             raise ReviewInputError("session record exceeds the configured size limit")
 
     def _payload_digest(self) -> str:
@@ -579,7 +598,14 @@ class SessionRecord:
         normalized_history = _stored_convergence_history(convergence_history)
         if normalized_history is not None:
             payload["convergence_history"] = normalized_history
-        if len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_SESSION_RECORD_BYTES:
+        if (
+            len(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            > MAX_SESSION_RECORD_BYTES
+        ):
             raise ReviewInputError("session record exceeds the configured size limit")
         return cls(
             repository=repository,
@@ -1868,7 +1894,9 @@ class LocalSessionLedger:
         except FileNotFoundError:
             return False
         except OSError as exc:
-            raise ReviewInputError("session enrollment witness could not be read") from exc
+            raise ReviewInputError(
+                "session enrollment witness could not be read"
+            ) from exc
         if raw != self._enrollment_witness(identity):
             raise ReviewInputError("session enrollment witness is invalid")
         return True
@@ -1894,7 +1922,9 @@ class LocalSessionLedger:
                 ) from exc
             raise ReviewInputError("session enrollment witness already exists") from exc
         except OSError as exc:
-            raise ReviewInputError("session enrollment witness could not be written") from exc
+            raise ReviewInputError(
+                "session enrollment witness could not be written"
+            ) from exc
 
     def _read_document(self, path: Path) -> Mapping[str, object] | None:
         try:

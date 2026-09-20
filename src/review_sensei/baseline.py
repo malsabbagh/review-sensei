@@ -348,16 +348,20 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
     if not isinstance(value, dict):
         raise ReviewInputError("persisted baseline is invalid")
     required = {
-        "cache_key", "policy_digest", "complete", "coverage_complete", "generation",
-        "findings", "reviewed_paths", "related_paths",
+        "cache_key",
+        "policy_digest",
+        "complete",
+        "coverage_complete",
+        "generation",
+        "findings",
+        "reviewed_paths",
+        "related_paths",
     }
     if set(value) != required or not isinstance(value["cache_key"], dict):
         raise ReviewInputError("persisted baseline has an invalid shape")
     try:
         key = ReviewContextCacheKey(**value["cache_key"])
-        findings = tuple(
-            BaselineFinding(**item) for item in value["findings"]
-        )
+        findings = tuple(BaselineFinding(**item) for item in value["findings"])
         return ReviewBaseline(
             cache_key=key,
             policy_digest=value["policy_digest"],

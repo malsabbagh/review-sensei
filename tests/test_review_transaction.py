@@ -145,7 +145,9 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertEqual(loaded.record.completed_initial_reviews, 1)
             self.assertEqual(loaded.record.convergence_history["state"], "completed")
             self.assertEqual(
-                baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+                baseline_from_history_document(
+                    loaded.record.convergence_history["baseline"]
+                ),
                 baseline,
             )
 
