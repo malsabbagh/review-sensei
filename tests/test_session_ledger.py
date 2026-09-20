@@ -8,6 +8,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei.baseline import (
+    BaselineFinding,
+    ReviewBaseline,
+    baseline_from_history_document,
+    baseline_history_document,
+)
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
@@ -52,6 +59,66 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
 class SessionRecordTests(unittest.TestCase):
+    @staticmethod
+    def _history() -> dict[str, object]:
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo", pull_request=136, base_sha="a" * 40,
+                head_sha="b" * 40, engine="ollama", model="test", profile="default",
+                stage_digest="c" * 64, context_digest="d" * 64,
+                learning_digest="e" * 64,
+            ),
+            policy_digest="f" * 64,
+            complete=True,
+            coverage_complete=True,
+            findings=(
+                BaselineFinding(
+                    fingerprint="1" * 64, resolution_criterion="2" * 64,
+                    concern="3" * 64, path="src/example.py", symbol="run",
+                    defect_kind="bug", generation=1, blocking=True,
+                ),
+            ),
+            reviewed_paths=("src/example.py",),
+        )
+        return {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "0" * 64},
+        }
+
+    def test_bounded_convergence_history_round_trips_and_is_integrity_covered(self):
+        history = self._history()
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        restored = SessionRecord.from_dict(record.to_dict())
+        self.assertEqual(restored.convergence_history, history)
+        self.assertEqual(
+            baseline_from_history_document(restored.convergence_history["baseline"]),
+            baseline_from_history_document(history["baseline"]),
+        )
+        tampered = record.to_dict()
+        tampered["convergence_history"]["state"] = "recovery-required"  # type: ignore[index]
+        with self.assertRaisesRegex(ReviewInputError, "integrity"):
+            SessionRecord.from_dict(tampered)
+
+    def test_convergence_history_rejects_unknown_nested_fields(self):
+        history = self._history()
+        baseline = history["baseline"]
+        assert isinstance(baseline, dict)
+        findings = baseline["findings"]
+        assert isinstance(findings, list)
+        findings[0]["untrusted"] = "field"
+        with self.assertRaisesRegex(ReviewInputError, "persisted baseline"):
+            SessionRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
+
+    def test_convergence_history_requires_lifecycle_and_provenance_fields(self):
+        history = self._history()
+        del history["provenance"]
+        with self.assertRaisesRegex(ReviewInputError, "unknown fields"):
+            SessionRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
+
     def test_create_round_trips_and_rejects_tampering(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         restored = SessionRecord.from_dict(record.to_dict())
@@ -163,6 +230,14 @@ class LocalSessionLedgerTests(unittest.TestCase):
         )
         self.ledger._write(IDENTITY, expired)
         self.assertEqual(self.ledger.load(IDENTITY, now=FIXED_NOW).status, "expired")
+        with self.assertRaisesRegex(ReviewInputError, "expired"):
+            self.ledger.initialize(IDENTITY, now=FIXED_NOW)
+        retained = self.ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(retained.status, "expired")
+        self.assertEqual(
+            json.loads(self.ledger._path(IDENTITY).read_text(encoding="utf-8")),
+            expired.to_dict(),
+        )
 
     def test_integrity_failed_does_not_initialize(self):
         record = self.ledger.initialize(IDENTITY, now=FIXED_NOW)
@@ -173,6 +248,27 @@ class LocalSessionLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.load(IDENTITY).status, "integrity-failed")
         with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
             self.ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+    def test_restart_loads_integrity_checked_convergence_history(self):
+        history = SessionRecordTests._history()
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=1,
+            convergence_history=history,
+        )
+        self.ledger._write(IDENTITY, record)
+
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        loaded = restarted.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "ok")
+        self.assertIsNotNone(loaded.record)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(
+            baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+            baseline_from_history_document(history["baseline"]),
+        )
 
     def test_malformed_documents_return_integrity_failed(self):
         self.ledger.initialize(IDENTITY, now=FIXED_NOW)
@@ -547,6 +643,28 @@ class RoundPersistenceTests(unittest.TestCase):
 
 
 class GitHubSessionLedgerTests(unittest.TestCase):
+    def test_restart_loads_integrity_checked_convergence_history(self):
+        history = SessionRecordTests._history()
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=1,
+            convergence_history=history,
+        )
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, _calls = make_http([json_response([{"id": 7, "body": body}])])
+        loaded = GitHubIssueCommentSessionLedger(http, token="token").load(
+            IDENTITY, now=FIXED_NOW
+        )
+        self.assertEqual(loaded.status, "ok")
+        self.assertIsNotNone(loaded.record)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.completed_initial_reviews, 1)
+        self.assertEqual(
+            baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+            baseline_from_history_document(history["baseline"]),
+        )
+
     def test_status_reads_missing_remote_session_without_creating_comment(self):
         http, calls = make_http([json_response([])])
         ledger = GitHubIssueCommentSessionLedger(http, token="token")
@@ -760,6 +878,37 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             http, token="token", app_slug="reviewsensei[bot]"
         )
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+
+    def test_malformed_trusted_marker_fails_closed_without_reinitializing(self):
+        malformed = f"{SESSION_MARKER_PREFIX} repo=99 pr=136 gen=0 digest=bad -->"
+        http, _calls = make_http(
+            [
+                json_response(
+                    [
+                        {
+                            "id": 7,
+                            "body": malformed,
+                            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        }
+                    ]
+                ),
+                json_response(
+                    [
+                        {
+                            "id": 7,
+                            "body": malformed,
+                            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        }
+                    ]
+                ),
+            ]
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="reviewsensei[bot]"
+        )
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed")
+        with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
 
     def test_marker_must_be_terminal(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)

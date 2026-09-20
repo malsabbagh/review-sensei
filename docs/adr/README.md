@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-09-19
+Last updated: 2026-09-20
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -61,6 +61,7 @@ Process: `docs/process/adr-process.md`
 | [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff |
 | [0051](0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 | Default publication stays `legacy`; shadow never skips GitHub events |
 | [0052](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |
+| [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger |
 
 ## Policy
 

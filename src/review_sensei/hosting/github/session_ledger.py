@@ -234,11 +234,13 @@ class GitHubIssueCommentSessionLedger:
             if not isinstance(item, dict):
                 continue
             author = item.get("user")
+            trusted_session_author = False
             if author is None and self.app_slug is None:
                 # Older test transports omitted the always-present GitHub
-                # ``user`` object. Production callers pass ``app_slug`` and
-                # therefore require an explicit bot author below.
-                pass
+                # ``user`` object. Treat it as trusted only for that legacy
+                # transport compatibility path. Production callers pass
+                # ``app_slug`` and require the explicit bot author below.
+                trusted_session_author = True
             else:
                 if not isinstance(author, dict) or author.get("type") != "Bot":
                     continue
@@ -249,6 +251,7 @@ class GitHubIssueCommentSessionLedger:
                     author_login.casefold() != self.app_slug.casefold()
                 ):
                     continue
+                trusted_session_author = True
             body = item.get("body")
             if (
                 not isinstance(body, str)
@@ -268,7 +271,15 @@ class GitHubIssueCommentSessionLedger:
                 )
             record = parse_session_comment(body, identity=identity)
             if record is None:
-                continue
+                # Only an author that passed the trusted-app check above can
+                # turn a malformed marker into established unreadable state.
+                # Human quotes were already ignored, so they cannot block a
+                # later session initialization.
+                assert trusted_session_author
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "session comment marker is malformed",
+                )
             if record.repository_id not in {None, repository_id}:
                 raise SessionLoadError(
                     SessionLoadReason.CONFLICT,
@@ -310,7 +321,7 @@ class GitHubIssueCommentSessionLedger:
             if loaded.record is None:
                 raise ReviewInputError("session load returned no record")
             return loaded.record
-        if loaded.status in {"integrity-failed", "conflict"}:
+        if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         repository_id = self._require_identity(identity)
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)

@@ -297,6 +297,81 @@ class ReviewBaseline:
             raise ReviewInputError("review baseline generation is invalid")
 
 
+def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
+    """Return the closed metadata needed to rebuild a completed baseline.
+
+    This is deliberately identity and evidence metadata only: it never carries
+    review prompts, diffs, provider output, or rendered finding text.
+    """
+
+    if not isinstance(baseline, ReviewBaseline):
+        raise ReviewInputError("review baseline is invalid")
+    key = baseline.cache_key
+    return {
+        "cache_key": {
+            "repository": key.repository,
+            "pull_request": key.pull_request,
+            "base_sha": key.base_sha,
+            "head_sha": key.head_sha,
+            "engine": key.engine,
+            "model": key.model,
+            "profile": key.profile,
+            "stage_digest": key.stage_digest,
+            "context_digest": key.context_digest,
+            "learning_digest": key.learning_digest,
+        },
+        "policy_digest": baseline.policy_digest,
+        "complete": baseline.complete,
+        "coverage_complete": baseline.coverage_complete,
+        "generation": baseline.generation,
+        "findings": [
+            {
+                "fingerprint": finding.fingerprint,
+                "resolution_criterion": finding.resolution_criterion,
+                "concern": finding.concern,
+                "path": finding.path,
+                "symbol": finding.symbol,
+                "defect_kind": finding.defect_kind,
+                "generation": finding.generation,
+                "blocking": finding.blocking,
+            }
+            for finding in baseline.findings
+        ],
+        "reviewed_paths": list(baseline.reviewed_paths),
+        "related_paths": list(baseline.related_paths),
+    }
+
+
+def baseline_from_history_document(value: object) -> ReviewBaseline:
+    """Rebuild one bounded baseline after a fresh durable-ledger load."""
+
+    if not isinstance(value, dict):
+        raise ReviewInputError("persisted baseline is invalid")
+    required = {
+        "cache_key", "policy_digest", "complete", "coverage_complete", "generation",
+        "findings", "reviewed_paths", "related_paths",
+    }
+    if set(value) != required or not isinstance(value["cache_key"], dict):
+        raise ReviewInputError("persisted baseline has an invalid shape")
+    try:
+        key = ReviewContextCacheKey(**value["cache_key"])
+        findings = tuple(
+            BaselineFinding(**item) for item in value["findings"]
+        )
+        return ReviewBaseline(
+            cache_key=key,
+            policy_digest=value["policy_digest"],
+            complete=value["complete"],
+            coverage_complete=value["coverage_complete"],
+            generation=value["generation"],
+            findings=findings,
+            reviewed_paths=tuple(value["reviewed_paths"]),
+            related_paths=tuple(value["related_paths"]),
+        )
+    except (KeyError, TypeError, ReviewInputError) as exc:
+        raise ReviewInputError("persisted baseline is invalid") from exc
+
+
 def baseline_from_review(
     result: ReviewResult,
     *,

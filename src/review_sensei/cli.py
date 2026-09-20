@@ -2528,25 +2528,28 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
+        request = ReviewRequest(
+            diff=diff,
+            repository=args.repository,
+            pull_request_number=args.pull_request,
+            base_sha=(args.base_sha or "").strip().lower() or None,
+            head_sha=(args.head_sha or "").strip().lower() or None,
+            title=args.title,
+            instructions=args.instructions,
+            model=args.model,
+            learnings=learnings,
+            active_category_ids=context_selection.active_category_ids,
+            lens_contexts=context_selection.lens_contexts,
+            propose_learnings=args.propose_learnings,
+            limits=limits,
+            source_context=context_selection.source_context,
+            untrusted_head_sha=untrusted_head_sha,
+            orchestrate_large_changes=orchestrate,
+            work_budget=work_budget,
+        )
         try:
             run = service.run(
-                ReviewRequest(
-                    diff=diff,
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    title=args.title,
-                    instructions=args.instructions,
-                    model=args.model,
-                    learnings=learnings,
-                    active_category_ids=context_selection.active_category_ids,
-                    lens_contexts=context_selection.lens_contexts,
-                    propose_learnings=args.propose_learnings,
-                    limits=limits,
-                    source_context=context_selection.source_context,
-                    untrusted_head_sha=untrusted_head_sha,
-                    orchestrate_large_changes=orchestrate,
-                    work_budget=work_budget,
-                ),
+                request,
                 budget=ResourceBudget.for_limits(limits),
             )
         except BaseException as analysis_error:
@@ -2655,11 +2658,35 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         raise
                 try:
+                    from .baseline import baseline_from_review
+                    from .context import build_review_context_cache_key
+
+                    cache_key = build_review_context_cache_key(
+                        request,
+                        provider_name=provider.name,
+                        stages=service.stages,
+                    )
+                    checkpoint_baseline = (
+                        baseline_from_review(
+                            result,
+                            cache_key=cache_key,
+                            policy=policy,
+                            generation=prepared_round.record.generation + 1,
+                        )
+                        if cache_key is not None
+                        else None
+                    )
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,
                         prepared_round,
                         result,
+                        baseline=(
+                            checkpoint_baseline
+                            if checkpoint_baseline is not None
+                            and checkpoint_baseline.complete
+                            else None
+                        ),
                     )
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:

@@ -48,6 +48,7 @@ DEFAULT_SESSION_TTL = timedelta(days=30)
 MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
 MAX_SESSION_RECORD_BYTES = 4096
+MAX_CONVERGENCE_HISTORY_BYTES = 2048
 # GitHub comments include a bounded intro, JSON fence, and marker around the
 # serialized record. Keep that framing allowance named and tied to the record
 # bound so the two adapters cannot drift independently.
@@ -61,6 +62,7 @@ _REPOSITORY_RE = re.compile(
 _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 LOAD_STATUSES = frozenset(
     {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
 )
@@ -100,6 +102,66 @@ _DISPOSITION_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
 _DISPOSITION_HEAD_RE = re.compile(r"^[a-f0-9]{40,64}$")
 _DISPOSITION_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 _DIGEST_SHAPES = frozenset({"current", "operator-paused", "legacy"})
+_CONVERGENCE_HISTORY_STATES = frozenset(
+    {"completed", "invalidated", "recovery-required"}
+)
+
+
+def _stored_convergence_history(
+    value: object,
+) -> dict[str, object] | None:
+    """Return one closed, bounded history envelope safe for durable storage."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ReviewInputError("session convergence history is invalid")
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        normalized = json.loads(encoded.decode("utf-8"))
+    except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReviewInputError("session convergence history is invalid") from exc
+    if len(encoded) > MAX_CONVERGENCE_HISTORY_BYTES:
+        raise ReviewInputError("session convergence history exceeds the configured bound")
+    if not isinstance(normalized, dict):
+        raise ReviewInputError("session convergence history is invalid")
+    allowed = {"state", "baseline", "progress", "provenance"}
+    if set(normalized) - allowed or not {"state", "progress", "provenance"}.issubset(normalized):
+        raise ReviewInputError("session convergence history has unknown fields")
+    state = normalized.get("state")
+    if state not in _CONVERGENCE_HISTORY_STATES:
+        raise ReviewInputError("session convergence history state is invalid")
+    baseline = normalized.get("baseline")
+    if state == "completed" and not isinstance(baseline, Mapping):
+        raise ReviewInputError("completed session history requires a baseline")
+    if baseline is not None:
+        if not isinstance(baseline, dict):
+            raise ReviewInputError("session history baseline is invalid")
+        # Keep the in-process constructor as strict as the public schema.  A
+        # record can be constructed without an untrusted-document round trip,
+        # so schema validation alone cannot protect this boundary.
+        from .baseline import baseline_from_history_document
+
+        baseline_from_history_document(baseline)
+    progress = normalized.get("progress")
+    if not isinstance(progress, list) or len(progress) > 2:
+        raise ReviewInputError("session history progress is invalid")
+    for item in progress:
+        if not isinstance(item, Mapping) or set(item) != {"event", "generation"}:
+            raise ReviewInputError("session history progress item is invalid")
+        if item.get("event") not in {"completed", "invalidated", "recovery-required"}:
+            raise ReviewInputError("session history progress event is invalid")
+        _require_bounded_int(
+            item.get("generation"), label="session history progress generation",
+            minimum=0, maximum=MAX_GENERATION,
+        )
+    provenance = normalized.get("provenance")
+    if not isinstance(provenance, Mapping) or set(provenance) != {"ledger_digest"}:
+        raise ReviewInputError("session history provenance is invalid")
+    digest = provenance.get("ledger_digest")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ReviewInputError("session history ledger_digest is invalid")
+    return cast(dict[str, object], normalized)
 
 
 def _stored_dispositions(
@@ -321,6 +383,7 @@ class SessionRecord:
     operator_paused: bool = False
     dispositions: tuple[Mapping[str, object], ...] = ()
     transaction: ReviewTransaction | None = None
+    convergence_history: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -386,6 +449,9 @@ class SessionRecord:
         _require_bool(self.operator_paused, label="operator_paused")
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
+        object.__setattr__(
+            self, "convergence_history", _stored_convergence_history(self.convergence_history)
+        )
         if self.transaction is not None:
             if not isinstance(self.transaction, ReviewTransaction):
                 raise ReviewInputError("session transaction is invalid")
@@ -413,7 +479,7 @@ class SessionRecord:
         if self._digest_shape not in _DIGEST_SHAPES:
             raise ReviewInputError("session record digest shape is invalid")
         if self._digest_shape == "legacy" and (
-            self.operator_paused or self.dispositions
+            self.operator_paused or self.dispositions or self.convergence_history is not None
         ):
             raise ReviewInputError("legacy session record has C6 fields")
         if self._digest_shape == "operator-paused" and self.dispositions:
@@ -425,6 +491,8 @@ class SessionRecord:
         }[self._digest_shape]()
         if self.record_sha256 != _digest_payload(expected_payload):
             raise ReviewInputError("session record integrity check failed")
+        if len(json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_SESSION_RECORD_BYTES:
+            raise ReviewInputError("session record exceeds the configured size limit")
 
     def _payload_digest(self) -> str:
         payload = self._payload()
@@ -436,6 +504,8 @@ class SessionRecord:
         payload["dispositions"] = list(self.dispositions)
         if self.transaction is not None:
             payload["transaction"] = self.transaction.to_dict()
+        if self.convergence_history is not None:
+            payload["convergence_history"] = dict(self.convergence_history)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -483,6 +553,7 @@ class SessionRecord:
         operator_paused: bool = False,
         dispositions: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
+        convergence_history: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         payload = {
@@ -505,6 +576,11 @@ class SessionRecord:
         }
         if transaction is not None:
             payload["transaction"] = transaction.to_dict()
+        normalized_history = _stored_convergence_history(convergence_history)
+        if normalized_history is not None:
+            payload["convergence_history"] = normalized_history
+        if len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_SESSION_RECORD_BYTES:
+            raise ReviewInputError("session record exceeds the configured size limit")
         return cls(
             repository=repository,
             pull_request=pull_request,
@@ -523,6 +599,7 @@ class SessionRecord:
             operator_paused=operator_paused,
             dispositions=normalized_dispositions,
             transaction=transaction,
+            convergence_history=normalized_history,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -572,13 +649,14 @@ class SessionRecord:
         has_operator_paused = "operator_paused" in value
         has_dispositions = "dispositions" in value
         has_transaction = "transaction" in value
+        has_history = "convergence_history" in value
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
                 "session record dispositions require operator_paused"
             )
         digest_shape = (
             "current"
-            if has_dispositions or has_transaction
+            if has_dispositions or has_transaction or has_history
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -643,6 +721,9 @@ class SessionRecord:
             operator_paused=_operator_paused(value.get("operator_paused", False)),
             dispositions=_stored_dispositions(value.get("dispositions", [])),
             transaction=transaction,
+            convergence_history=_stored_convergence_history(
+                value.get("convergence_history")
+            ),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -665,6 +746,7 @@ class SessionRecord:
         last_committed_reservation_id: str | None = None,
         dispositions: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
+        convergence_history: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -697,6 +779,7 @@ class SessionRecord:
             operator_paused=False,
             dispositions=dispositions,
             transaction=transaction,
+            convergence_history=convergence_history,
         )
 
     def evolve(
@@ -713,6 +796,7 @@ class SessionRecord:
         operator_paused: bool | None = None,
         dispositions: Sequence[Mapping[str, object]] | None = None,
         transaction: ReviewTransaction | None | object = ...,
+        convergence_history: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -759,6 +843,11 @@ class SessionRecord:
                 self.transaction
                 if transaction is ...
                 else cast(ReviewTransaction | None, transaction)
+            ),
+            convergence_history=(
+                self.convergence_history
+                if convergence_history is ...
+                else cast(Mapping[str, object] | None, convergence_history)
             ),
         )
 
@@ -1005,10 +1094,12 @@ def prepare_session_round(
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
     loaded = ledger.load(identity, now=now)
-    if loaded.status == "expired":
+    if loaded.status == "missing":
         record = ledger.initialize(identity, now=now)
-    elif loaded.status == "missing":
-        record = ledger.initialize(identity, now=now)
+    elif loaded.status == "expired":
+        raise ReviewInputError(
+            "session ledger load failed: expired; authenticated recovery is required"
+        )
     elif loaded.status in {"ok", "migrated"} and loaded.record is not None:
         record = loaded.record
     else:
@@ -1136,6 +1227,7 @@ def _checkpoint_transaction_record(
     transaction: ReviewTransaction,
     result_digest: str,
     *,
+    baseline: object | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
     if (
@@ -1168,6 +1260,30 @@ def _checkpoint_transaction_record(
         raise ReviewInputError("session analysis reservation does not match")
     increments = _apply_slot(record, record.reserved_slot)
     next_generation = _next_generation(record)
+    convergence_history: Mapping[str, object] | None = record.convergence_history
+    if baseline is not None:
+        from .baseline import ReviewBaseline, baseline_history_document
+
+        if not isinstance(baseline, ReviewBaseline) or not baseline.complete:
+            raise ReviewInputError("only a complete baseline can be checkpointed")
+        if (
+            baseline.cache_key.repository != transaction.repository
+            or baseline.cache_key.pull_request != transaction.pull_request
+            or baseline.cache_key.base_sha != transaction.base_sha
+            or baseline.cache_key.head_sha != transaction.head_sha
+            or baseline.policy_digest != transaction.policy_digest
+            or baseline.generation != next_generation
+        ):
+            raise ReviewInputError("baseline does not match the review transaction")
+        convergence_history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [{"event": "completed", "generation": next_generation}],
+            # Bind the checkpoint to the integrity-protected ledger state it
+            # advances.  It is not a self-reference to the newly computed
+            # record digest.
+            "provenance": {"ledger_digest": record.record_sha256},
+        }
     pending = replace(
         transaction.with_result(result_digest),
         generation=next_generation,
@@ -1181,6 +1297,7 @@ def _checkpoint_transaction_record(
         completed_initial_reviews=increments.get("completed_initial_reviews"),
         completed_verification_rounds=increments.get("completed_verification_rounds"),
         transaction=pending,
+        convergence_history=convergence_history,
     )
 
 
@@ -1190,6 +1307,7 @@ def checkpoint_review_analysis(
     prepared: PreparedSessionRound,
     result: ReviewResult,
     *,
+    baseline: object | None = None,
     now: datetime | None = None,
 ) -> ReviewResult:
     """Durably commit completed analysis once and return its bound artifact."""
@@ -1211,7 +1329,7 @@ def checkpoint_review_analysis(
     updated = ledger.replace(
         identity,
         lambda record: _checkpoint_transaction_record(
-            record, transaction, result_digest, now=now
+            record, transaction, result_digest, baseline=baseline, now=now
         ),
         now=now,
     )
@@ -1599,7 +1717,7 @@ class InMemorySessionLedger:
         current = self.load(identity, now=now)
         if current.status in {"ok", "migrated"}:
             raise ReviewInputError("session already exists")
-        if current.status in {"integrity-failed", "conflict"}:
+        if current.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {current.status}")
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
         self._records[(identity.repository, identity.pull_request)] = record
@@ -1917,7 +2035,7 @@ class LocalSessionLedger:
         loaded = self.load(identity, now=now)
         if loaded.status in {"ok", "migrated"}:
             raise ReviewInputError("session already exists")
-        if loaded.status in {"integrity-failed", "conflict"}:
+        if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
         self._write(identity, record, exclusive=loaded.status == "missing")

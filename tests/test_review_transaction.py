@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei.baseline import ReviewBaseline, baseline_from_history_document
 from review_sensei.cli import _parser, _transaction_provider_identity, main
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
@@ -93,6 +95,60 @@ def _checkpoint(ledger: InMemorySessionLedger) -> ReviewResult:
 
 
 class ReviewTransactionTests(unittest.TestCase):
+    def test_checkpoint_persists_completed_baseline_for_a_fresh_ledger(self):
+        reservation = session_reservation_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            kind="publish",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_root = Path(temp_dir)
+            ledger = LocalSessionLedger(ledger_root)
+            prepared = prepare_review_transaction(
+                ledger,
+                IDENTITY,
+                POLICY,
+                reservation_id=reservation,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                configuration_digest=CONFIGURATION_DIGEST,
+                evidence_digest=EVIDENCE_DIGEST,
+                now=NOW,
+            )
+            baseline = ReviewBaseline(
+                cache_key=ReviewContextCacheKey(
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    base_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest="1" * 64,
+                    context_digest="2" * 64,
+                    learning_digest="3" * 64,
+                ),
+                policy_digest=POLICY.digest(),
+                complete=True,
+                coverage_complete=True,
+                generation=prepared.record.generation + 1,
+            )
+            checkpoint_review_analysis(
+                ledger, IDENTITY, prepared, _result(), baseline=baseline, now=NOW
+            )
+
+            loaded = LocalSessionLedger(ledger_root).load(IDENTITY, now=NOW)
+            self.assertEqual(loaded.status, "ok")
+            self.assertIsNotNone(loaded.record)
+            assert loaded.record is not None
+            self.assertEqual(loaded.record.completed_initial_reviews, 1)
+            self.assertEqual(loaded.record.convergence_history["state"], "completed")
+            self.assertEqual(
+                baseline_from_history_document(loaded.record.convergence_history["baseline"]),
+                baseline,
+            )
+
     def test_transaction_model_uses_named_profile_default(self):
         args = _parser().parse_args(
             ["--provider", "ollama", "--profile", "deep-verification"]
