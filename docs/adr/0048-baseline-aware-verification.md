@@ -62,13 +62,17 @@ Later findings are classified before C2 admission:
   the incremental plan.
 
 The durable session record supplies the baseline only after transaction
-checkpointing validates a completed review. The CLI restores that serialized
-baseline before each later admitted round and passes the resulting
+checkpointing validates a completed review. The transaction-enabled CLI
+(including an explicit `--transaction`) restores that serialized baseline
+before each later admitted round and passes the resulting
 `IncrementalReviewPlan` into `ReviewService.run`. Missing, incomplete, or
 incompatible durable history is an `action_required` recovery outcome before a
 provider call or a new reservation charge; it is never treated as fresh
-initial-review authority. A successful verification checkpoints the next
-baseline atomically with the validated result.
+initial-review authority. A successful verification on that CLI path
+checkpoints the next baseline atomically with the validated result. In this F3
+slice the GitHub application only restores and forwards the baseline for
+hosted admission; hosted write-through checkpointing remains follow-up F5
+work.
 
 Rebase, base SHA, model, engine, profile, policy digest, and
 stage/context/learning digest changes invalidate the baseline. Invalidation
