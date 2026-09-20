@@ -22,7 +22,10 @@ Every `ReviewService` and GitHub publication attempt emits a versioned
 budgets are exhausted; callers that need the structured envelope should use
 `ReviewService.run` instead. Statuses are `reviewed`, `partial`, `skipped_stale`,
 `skipped_policy`, `provider_failed`, `budget_exhausted`, `publication_failed`,
-and `already_published`. Diagnostics are closed tokens enumerated by
+`already_published`, and `action_required`. `action_required` is a non-passing
+operator handoff or durable-recovery outcome: it requires a maintainer decision
+before another automated pass and must not be treated as a successful skip (see
+ADRs 0048 and 0050). Diagnostics are closed tokens enumerated by
 `PUBLIC_DIAGNOSTICS` in `src/review_sensei/outcomes.py`; the `cancelled` token
 is reserved for host-layer cancellation and is not emitted by `ReviewService`
 today. Actions summaries and

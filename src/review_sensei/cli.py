@@ -2331,6 +2331,12 @@ def main(argv: list[str] | None = None) -> int:
             fixture_response=args.fixture_response,
             argv=args_list,
         )
+        # Normalize the caller-supplied snapshot identity once.  The live
+        # inference request intentionally remains unbound; these values are
+        # the trusted identity used only for session admission, checkpoint
+        # cache keys, and public outcome metadata.
+        resolved_base_sha = (args.base_sha or "").strip().lower() or None
+        resolved_head_sha = (args.head_sha or "").strip().lower() or None
         effective_profile = (
             get_provider_profile(provider_settings.profile).name
             if provider_settings.profile
@@ -2346,7 +2352,7 @@ def main(argv: list[str] | None = None) -> int:
             or policy.mode not in OPERATOR_REVIEW_MODES
             or not args.repository
             or args.pull_request is None
-            or not (args.head_sha or "").strip()
+            or resolved_head_sha is None
         ):
             raise ReviewInputError(
                 "--no-progress requires an operator review mode and session ledger"
@@ -2408,11 +2414,11 @@ def main(argv: list[str] | None = None) -> int:
             and args.pull_request is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            head_sha = (args.head_sha or "").strip().lower()
-            if not head_sha:
+            if resolved_head_sha is None:
                 raise ReviewInputError(
                     "operator-mode session admission requires --head-sha"
                 )
+            head_sha = resolved_head_sha
             identity = SessionIdentity(
                 repository=args.repository,
                 pull_request=args.pull_request,
@@ -2424,7 +2430,7 @@ def main(argv: list[str] | None = None) -> int:
                 kind="publish",
             )
             if transaction_requested:
-                effective_base_sha = (args.base_sha or "").strip().lower()
+                effective_base_sha = resolved_base_sha or ""
                 stage_identity = [
                     {
                         "name": stage.name,
@@ -2500,7 +2506,7 @@ def main(argv: list[str] | None = None) -> int:
                     status,
                     repository=args.repository,
                     pull_request_number=args.pull_request,
-                    base_sha=(args.base_sha or "").strip().lower() or None,
+                    base_sha=resolved_base_sha,
                     head_sha=head_sha,
                     diagnostic=admission_diagnostic(prepared_round.decision),
                     provider_calls=0,
@@ -2538,14 +2544,14 @@ def main(argv: list[str] | None = None) -> int:
                 max_bytes=args.symbol_context_max_bytes,
                 max_depth=args.symbol_context_max_depth,
             )
-            base_sha = (args.base_sha or "").strip().lower()
+            base_sha = resolved_base_sha or ""
             if not base_sha:
                 raise ReviewInputError(
                     "--enable-symbol-context requires --base-sha for the trusted "
                     "base snapshot"
                 )
             snapshot = ContextSnapshot(base_sha, kind="base")
-            untrusted_head_sha = (args.head_sha or "").strip().lower() or None
+            untrusted_head_sha = resolved_head_sha
         context_selection = build_review_context_selection(
             service.review_categories,
             changed_paths=changed_paths,
@@ -2593,8 +2599,8 @@ def main(argv: list[str] | None = None) -> int:
                     "action_required",
                     repository=args.repository,
                     pull_request_number=args.pull_request,
-                    base_sha=request.base_sha,
-                    head_sha=request.head_sha,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
                     diagnostic="durable_baseline_recovery_required",
                     provider_calls=0,
                 )
@@ -2611,8 +2617,8 @@ def main(argv: list[str] | None = None) -> int:
                     "action_required",
                     repository=args.repository,
                     pull_request_number=args.pull_request,
-                    base_sha=request.base_sha,
-                    head_sha=request.head_sha,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
                     diagnostic="durable_baseline_recovery_required",
                     provider_calls=0,
                 )
@@ -2622,8 +2628,8 @@ def main(argv: list[str] | None = None) -> int:
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
-                    base_sha=args.base_sha,
-                    head_sha=args.head_sha,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
                 ),
                 provider_name=provider.name,
                 stages=service.stages,
@@ -2641,8 +2647,8 @@ def main(argv: list[str] | None = None) -> int:
                     "action_required",
                     repository=args.repository,
                     pull_request_number=args.pull_request,
-                    base_sha=request.base_sha,
-                    head_sha=request.head_sha,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
                     diagnostic="durable_baseline_recovery_required",
                     provider_calls=0,
                 )
@@ -2687,8 +2693,8 @@ def main(argv: list[str] | None = None) -> int:
             cleanup_analysis_reservation(charge_failed_attempt=True)
         outcome = replace(
             run.outcome,
-            base_sha=(args.base_sha or "").strip().lower() or None,
-            head_sha=(args.head_sha or "").strip().lower() or None,
+            base_sha=resolved_base_sha,
+            head_sha=resolved_head_sha,
         )
         if run.result is None:
             emit_host_outcome(outcome, output_path=args.outcome)
@@ -2775,8 +2781,8 @@ def main(argv: list[str] | None = None) -> int:
                     cache_key = build_review_context_cache_key(
                         _checkpoint_cache_request(
                             request,
-                            base_sha=args.base_sha,
-                            head_sha=args.head_sha,
+                            base_sha=resolved_base_sha,
+                            head_sha=resolved_head_sha,
                         ),
                         provider_name=provider.name,
                         stages=service.stages,
