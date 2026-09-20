@@ -355,6 +355,38 @@ class PublicSchemaTests(unittest.TestCase):
                 "session-record",
             )
 
+    def test_session_record_schema_pairs_continuation_consumption_state(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests/fixtures/schemas/golden/session-record.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        grant = {
+            "command_id": "comment-1",
+            "actor": "alice",
+            "head_sha": "a" * 40,
+            "policy_digest": "b" * 64,
+            "issued_at": "2026-09-19T12:00:00Z",
+            "expires_at": "2026-09-19T13:00:00Z",
+            "consumed_reservation_id": None,
+            "consumed_generation": None,
+        }
+        validate_public_document(
+            dict(golden, continuation_grants=[grant]), "session-record"
+        )
+        for field, value in (
+            ("consumed_reservation_id", "abcd1234"),
+            ("consumed_generation", 1),
+        ):
+            invalid = dict(grant)
+            invalid[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(
+                        dict(golden, continuation_grants=[invalid]),
+                        "session-record",
+                    )
+
     def test_error_categories_are_stable(self) -> None:
         self.assertEqual(ReviewSenseiError.error_category, "unknown")
         self.assertEqual(ReviewInputError.error_category, "input")

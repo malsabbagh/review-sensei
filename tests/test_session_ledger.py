@@ -1489,6 +1489,55 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             ["GET", "GET", "GET", "POST", "GET"],
         )
 
+    def test_missing_grant_bound_session_persists_disposition_in_one_remote_create(
+        self,
+    ):
+        initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        disposition = {
+            "fingerprint": "abcd1234abcd1234",
+            "action": "dismiss",
+            "reason": "accepted",
+            "actor": "octocat",
+            "head_sha": None,
+            "expires_at": None,
+        }
+        persisted = initial.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            dispositions=(disposition,),
+        )
+        persisted_body = render_session_comment(
+            repository_id=99, pull_request=136, record=persisted
+        )
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"id": 7, "body": persisted_body}, status=201),
+                json_response([{"id": 7, "body": persisted_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        command = parse_maintainer_command(
+            "@sensei dismiss abcd1234abcd1234 --reason accepted",
+            actor="octocat",
+        )
+        self.assertIsNotNone(command)
+
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+
+        self.assertEqual(record, persisted)
+        self.assertTrue(result.applied)
+        self.assertEqual(result.disposition.action, "dismiss")
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "POST", "GET"],
+        )
+
     def test_grant_bound_status_read_does_not_consume_mutation_authority(self):
         http, calls = make_http([json_response([])])
         attestation = self._grant_attestation()
