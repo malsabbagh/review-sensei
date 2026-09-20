@@ -1366,7 +1366,13 @@ def reclaim_abandoned_review_transaction(
     expected_generation: int,
     now: datetime | None = None,
 ) -> SessionRecord:
-    """Release only an explicitly owned abandoned analysis reservation."""
+    """Release an explicitly owned abandoned analysis reservation.
+
+    A crash can occur between the reservation CAS and transaction attachment,
+    leaving a reservation-only record. The owner and generation checks still
+    make that recovery bounded and safe, so reclaim both that state and a
+    fully attached analysis transaction.
+    """
 
     loaded = ledger.load(identity, now=now)
     if loaded.status not in {"ok", "migrated"} or loaded.record is None:
@@ -1375,10 +1381,12 @@ def reclaim_abandoned_review_transaction(
     if (
         record.generation != expected_generation
         or record.reservation_id != reservation_id
-        or record.transaction is None
-        or record.transaction.reservation_id != reservation_id
-        or record.transaction.phase != "analysis"
         or record.reserved_slot not in {"initial", "verification"}
+    ):
+        raise ReviewInputError("abandoned transaction ownership or generation mismatch")
+    if record.transaction is not None and (
+        record.transaction.reservation_id != reservation_id
+        or record.transaction.phase != "analysis"
     ):
         raise ReviewInputError("abandoned transaction ownership or generation mismatch")
     return ledger.replace(

@@ -353,6 +353,40 @@ class ReviewTransactionTests(unittest.TestCase):
         self.assertIsNone(reclaimed.reservation_id)
         self.assertIsNone(reclaimed.transaction)
 
+    def test_abandoned_reclaim_releases_reservation_only_record(self):
+        ledger = InMemorySessionLedger()
+        reservation = session_reservation_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            kind="publish",
+        )
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id=reservation,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        ledger.replace(
+            IDENTITY,
+            lambda record: record.evolve(transaction=None),
+            now=NOW,
+        )
+        reclaimed = reclaim_abandoned_review_transaction(
+            ledger,
+            IDENTITY,
+            reservation_id=reservation,
+            expected_generation=prepared.record.generation,
+            now=NOW,
+        )
+        self.assertIsNone(reclaimed.reservation_id)
+        self.assertIsNone(reclaimed.transaction)
+
     def test_invalid_transaction_context_does_not_reserve(self):
         ledger = InMemorySessionLedger()
         reservation = session_reservation_id(

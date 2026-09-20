@@ -104,7 +104,8 @@ Negative or tradeoffs:
   and charges the existing failed-attempt path; the `analysis_failed` schema
   phase is reserved for a future explicit terminal record. Cancellation and
   abandoned-reservation cleanup require the original reservation owner and
-  expected generation. A completed analysis transitions to
+  expected generation, including the reservation-only state left by a crash
+  between reservation and transaction attachment. A completed analysis transitions to
   `publication_pending`; publication failures remain retryable and success is
   idempotent.
 
