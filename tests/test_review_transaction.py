@@ -212,6 +212,30 @@ class ReviewTransactionTests(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_durable_result_digest_mismatch_fails_closed(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        tampered_payload = {**result.to_dict(), "summary": "Tampered."}
+        tampered_payload.pop("transaction")
+        tampered_unbound = ReviewResult.from_dict(tampered_payload)
+        tampered_payload["transaction"] = {
+            **result.transaction.to_dict(),
+            "result_sha256": tampered_unbound.content_digest(),
+        }
+        tampered = ReviewResult.from_dict(tampered_payload)
+        with self.assertRaisesRegex(ReviewInputError, "durable result digest"):
+            load_review_transaction_for_publication(
+                ledger,
+                IDENTITY,
+                tampered,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                policy_digest=POLICY.digest(),
+                configuration_digest=CONFIGURATION_DIGEST,
+                evidence_digest=EVIDENCE_DIGEST,
+                now=NOW,
+            )
+
     def test_generation_and_reservation_mismatch_fail_closed(self):
         ledger = InMemorySessionLedger()
         result = _checkpoint(ledger)
@@ -1058,6 +1082,71 @@ class PublicationTransactionTests(unittest.TestCase):
             remote_ledger.load(IDENTITY).record.transaction.phase,
             "publication_succeeded",
         )
+
+    def test_application_rejects_mismatched_token_bound_ledger(self):
+        local_ledger = InMemorySessionLedger()
+        remote_ledger = InMemorySessionLedger()
+        local_result = _checkpoint(local_ledger)
+        reservation = session_reservation_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            kind="publish",
+        )
+        remote_prepared = prepare_review_transaction(
+            remote_ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id=reservation,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest="c" * 64,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        checkpoint_review_analysis(
+            remote_ledger, IDENTITY, remote_prepared, _result(), now=NOW
+        )
+        complete_review_publication(
+            local_ledger, IDENTITY, local_result.transaction, published=True, now=NOW
+        )
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=local_ledger,
+        )
+        with patch.object(
+            application, "_session_ledger_for_token", return_value=remote_ledger
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "durable transaction"):
+                application.publish_review(
+                    options=GitHubWriteOptions(
+                        auto_review=True,
+                        github_writes=True,
+                        github_session_ledger=True,
+                    ),
+                    oidc_token="oidc",
+                    repository=IDENTITY.repository,
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD_SHA,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=local_result,
+                    diff="diff",
+                    app_slug="review-sensei[bot]",
+                    convergence_policy=POLICY,
+                    configuration_context=CONFIGURATION,
+                    evidence_context=EVIDENCE,
+                )
+
+        self.assertEqual(broker.exchanges, 1)
+        self.assertEqual(reviewer.calls, 0)
 
 
 if __name__ == "__main__":

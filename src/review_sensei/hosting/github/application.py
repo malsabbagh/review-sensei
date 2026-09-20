@@ -256,9 +256,21 @@ class GitHubApplication:
         if (
             transaction_record is not None
             and transaction_record.transaction is not None
-            and result.transaction != transaction_record.transaction
         ):
-            result = replace(result, transaction=transaction_record.transaction)
+            durable_transaction = transaction_record.transaction
+            if result.transaction is None:
+                raise GitHubPublicationError(
+                    "durable transaction requires an identity-bound result"
+                )
+            if (
+                durable_transaction.result_sha256 is None
+                or result.content_digest() != durable_transaction.result_sha256
+            ):
+                raise GitHubPublicationError(
+                    "review result digest does not match durable transaction"
+                )
+            if result.transaction != durable_transaction:
+                result = replace(result, transaction=durable_transaction)
         if (
             transaction_record is not None
             and transaction_record.transaction is not None

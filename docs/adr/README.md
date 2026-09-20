@@ -60,6 +60,7 @@ Process: `docs/process/adr-process.md`
 | [0049](0049-automation-admission-and-handoff.md) | Proposed | Enforce PR-wide round admission before inference and publication | #136 | Pause/duplicate/no-progress/continuation; cap never mints approval |
 | [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff |
 | [0051](0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 | Default publication stays `legacy`; shadow never skips GitHub events |
+| [0052](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |
 
 ## Policy
 
@@ -77,4 +78,3 @@ Create or update an ADR for changes that affect:
 - irreversible or expensive-to-reverse decisions
 
 Use `.project-ai/templates/adr.md.tmpl` as the starter template.
-| [0052-logical-review-transaction-across-analysis-and-publication](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |
