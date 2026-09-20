@@ -583,10 +583,49 @@ class ReviewTransactionTests(unittest.TestCase):
             record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertEqual(record.completed_initial_reviews, 1)
             self.assertIsNone(record.reservation_id)
+            self.assertIsNotNone(record.convergence_history)
+            assert record.convergence_history is not None
+            self.assertEqual(record.convergence_history["state"], "completed")
+            self.assertEqual(
+                baseline_from_history_document(record.convergence_history["baseline"])
+                .cache_key.head_sha,
+                HEAD_SHA,
+            )
             self.assertEqual(
                 record.transaction.result_sha256,
                 ReviewResult.from_dict(rendered).content_digest(),
             )
+            second_argv = list(argv)
+            second_argv[second_argv.index("--head-sha") + 1] = "c" * 40
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(provider),
+            ):
+                self.assertEqual(main(second_argv), 0)
+            second_rendered = json.loads(output_path.read_text(encoding="utf-8"))
+            restarted = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(provider.calls, 2)
+            self.assertEqual(second_rendered["coverage_mode"], "incremental")
+            self.assertEqual(restarted.completed_initial_reviews, 1)
+            self.assertEqual(restarted.completed_verification_rounds, 1)
+            self.assertEqual(
+                baseline_from_history_document(restarted.convergence_history["baseline"])
+                .cache_key.head_sha,
+                "c" * 40,
+            )
+            incompatible_argv = list(second_argv)
+            incompatible_argv[incompatible_argv.index("--head-sha") + 1] = "d" * 40
+            incompatible_argv[incompatible_argv.index("--model") + 1] = "fixture-v2"
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(provider),
+            ):
+                self.assertNotEqual(main(incompatible_argv), 0)
+            rejected = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(provider.calls, 2)
+            self.assertEqual(rejected.completed_initial_reviews, 1)
+            self.assertEqual(rejected.completed_verification_rounds, 1)
+            self.assertIsNone(rejected.reservation_id)
 
     def test_cli_ledger_without_context_output_keeps_non_transaction_path(self):
         class RecordingProvider:
