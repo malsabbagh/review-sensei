@@ -79,9 +79,15 @@ Negative or tradeoffs:
 - The configuration digest is canonicalized from the effective provider
   identity (provider name/profile, endpoint, timeout/output budget, and routing
   policy), model, stage identities, category policy, orchestration flags, and
-  publication mode; raw prompts and credentials are excluded. Publication
-  receives a trusted immutable context with the same shape and recomputes both
-  configuration and evidence digests.
+  publication mode; raw prompts, stage file paths/schemas, review limits, and
+  credentials are excluded because publication does not re-run analysis and
+  the canonical result digest binds the bounded output. Publication receives
+  a trusted immutable context with the same shape and recomputes both
+  configuration and evidence digests. The configuration and evidence context
+  passed to `GitHubApplication.publish_review` is a trusted admission input
+  from the authenticated workflow/operator boundary, not untrusted request
+  data; integrations crossing that boundary must derive it from their own
+  trusted checkout and effective settings.
 - The result digest is computed over the canonical v1 review result with the
   transaction envelope excluded, avoiding a circular digest. Any additive or
   semantic change to serialized result fields is a digest-contract change and

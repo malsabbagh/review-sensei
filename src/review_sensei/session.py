@@ -1245,7 +1245,15 @@ def load_review_transaction_for_publication(
     evidence_digest: str,
     now: datetime | None = None,
 ) -> SessionRecord:
-    """Validate a result against durable state, recovering a crash checkpoint."""
+    """Validate a result against durable state, recovering a crash checkpoint.
+
+    A retry may carry the transaction generation captured before publication
+    advanced the durable phase.  The durable result digest and identity are
+    authoritative in that case: publication rebinds the result to the current
+    record, and the application short-circuits a terminal success as
+    ``already_published``.  The analysis-phase recovery path still requires an
+    exact durable generation and reservation owner.
+    """
 
     if result.transaction is None:
         raise ReviewInputError(

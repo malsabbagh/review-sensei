@@ -2320,6 +2320,49 @@ def main(argv: list[str] | None = None) -> int:
         transaction_configuration_digest: str | None = None
         transaction_configuration_context: dict[str, object] | None = None
         transaction_evidence_digest: str | None = None
+
+        def cleanup_analysis_reservation(*, charge_failed_attempt: bool) -> None:
+            """Clean up only while this invocation still owns the reservation.
+
+            A ledger write can be durable even when its adapter reports an
+            exception after the replacement.  In that case checkpointing has
+            already advanced the transaction to ``publication_pending`` and
+            cleared the reservation; charging a failed attempt would both
+            obscure the committed result and risk mutating a later retry.
+            Re-read the record before cleanup and preserve any state that no
+            longer carries this reservation.
+            """
+
+            if (
+                ledger is None
+                or identity is None
+                or held_reservation is None
+                or policy.mode not in OPERATOR_REVIEW_MODES
+            ):
+                return
+            loaded = ledger.load(identity)
+            if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+                raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+            current = loaded.record
+            if current.reservation_id != held_reservation:
+                # The checkpoint may have committed despite an adapter error,
+                # or another writer may now own the identity.  Neither state
+                # is an analysis reservation this invocation may charge.
+                return
+            if charge_failed_attempt:
+                record_session_failed_attempt(
+                    ledger,
+                    identity,
+                    reservation_id=held_reservation,
+                    expected_generation=current.generation,
+                )
+            else:
+                ledger.abort(
+                    identity,
+                    reservation_id=held_reservation,
+                    expected_generation=current.generation,
+                )
+
         if (
             ledger is not None
             and args.repository
@@ -2376,6 +2419,10 @@ def main(argv: list[str] | None = None) -> int:
                         transaction_configuration_context
                     )
                 )
+                # The analysis CLI produces the compatible single-pass result
+                # contract only. Confirmed evidence is a separate publication
+                # gate and requires a reviewed snapshot plus candidate
+                # verification, so it cannot be represented by this path.
                 transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
                     {"evidence_policy": "legacy", "snapshot_sha256": None}
                 )
@@ -2500,31 +2547,9 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 try:
                     if isinstance(analysis_error, (KeyboardInterrupt, SystemExit)):
-                        expected_cleanup_generation = (
-                            prepared_round.record.generation
-                            if prepared_round is not None
-                            else None
-                        )
-                        if expected_cleanup_generation is None:
-                            raise ReviewInputError(
-                                "analysis reservation cleanup ownership is unavailable"
-                            )
-                        ledger.abort(
-                            identity,
-                            reservation_id=held_reservation,
-                            expected_generation=expected_cleanup_generation,
-                        )
+                        cleanup_analysis_reservation(charge_failed_attempt=False)
                     else:
-                        record_session_failed_attempt(
-                            ledger,
-                            identity,
-                            reservation_id=held_reservation,
-                            expected_generation=(
-                                prepared_round.record.generation
-                                if prepared_round is not None
-                                else None
-                            ),
-                        )
+                        cleanup_analysis_reservation(charge_failed_attempt=True)
                 except BaseException as cleanup_error:
                     analysis_error.add_note(
                         "analysis reservation cleanup failed: "
@@ -2539,16 +2564,7 @@ def main(argv: list[str] | None = None) -> int:
             and held_reservation is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            record_session_failed_attempt(
-                ledger,
-                identity,
-                reservation_id=held_reservation,
-                expected_generation=(
-                    prepared_round.record.generation
-                    if prepared_round is not None
-                    else None
-                ),
-            )
+            cleanup_analysis_reservation(charge_failed_attempt=True)
         outcome = replace(
             run.outcome,
             base_sha=(args.base_sha or "").strip().lower() or None,
@@ -2577,12 +2593,7 @@ def main(argv: list[str] | None = None) -> int:
                 # through the bounded failed-attempt path and preserve the
                 # partial result for the caller instead of turning it into a
                 # generic checkpoint error.
-                record_session_failed_attempt(
-                    ledger,
-                    identity,
-                    reservation_id=held_reservation,
-                    expected_generation=prepared_round.record.generation,
-                )
+                cleanup_analysis_reservation(charge_failed_attempt=True)
                 prepared_round = None
                 prepared_transaction = None
             else:
@@ -2612,12 +2623,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     except BaseException as cleanup_error:
                         try:
-                            record_session_failed_attempt(
-                                ledger,
-                                identity,
-                                reservation_id=held_reservation,
-                                expected_generation=prepared_round.record.generation,
-                            )
+                            cleanup_analysis_reservation(charge_failed_attempt=True)
                         except BaseException as reservation_cleanup_error:
                             cleanup_error.add_note(
                                 "analysis reservation cleanup failed: "
@@ -2635,12 +2641,7 @@ def main(argv: list[str] | None = None) -> int:
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:
                         try:
-                            record_session_failed_attempt(
-                                ledger,
-                                identity,
-                                reservation_id=held_reservation,
-                                expected_generation=prepared_round.record.generation,
-                            )
+                            cleanup_analysis_reservation(charge_failed_attempt=True)
                         except BaseException as cleanup_error:
                             checkpoint_error.add_note(
                                 "analysis reservation cleanup failed: "

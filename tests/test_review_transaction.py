@@ -754,6 +754,92 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertIsNone(record.reservation_id)
             self.assertEqual(record.failed_attempts, 1)
 
+    def test_cli_preserves_checkpoint_when_replace_reports_after_commit(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+
+            from review_sensei.session import checkpoint_review_analysis as checkpoint
+
+            def commit_then_raise(*args, **kwargs):
+                checkpoint(*args, **kwargs)
+                raise RuntimeError("checkpoint response lost after commit")
+
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(),
+                ),
+                patch(
+                    "review_sensei.session.checkpoint_review_analysis",
+                    side_effect=commit_then_raise,
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "response lost") as caught:
+                    main(argv)
+
+            self.assertFalse(getattr(caught.exception, "__notes__", ()))
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(record.completed_initial_reviews, 1)
+            self.assertEqual(record.failed_attempts, 0)
+            self.assertIsNone(record.reservation_id)
+            self.assertEqual(record.transaction.phase, "publication_pending")
+
     def test_cli_keyboard_interrupt_aborts_transaction_without_failed_attempt(self):
         class RecordingProvider:
             name = "fixture"
@@ -925,6 +1011,50 @@ class PublicationTransactionTests(unittest.TestCase):
         record = ledger.load(IDENTITY).record
         self.assertEqual(record.completed_initial_reviews, 1)
         self.assertEqual(record.transaction.phase, "publication_succeeded")
+
+    def test_application_replays_prepublication_result_after_success_idempotently(
+        self,
+    ):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=True, now=NOW
+        )
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=result,
+            diff="diff",
+            app_slug="review-sensei[bot]",
+            convergence_policy=POLICY,
+            configuration_context=CONFIGURATION,
+            evidence_context=EVIDENCE,
+        )
+
+        self.assertEqual(outcome.status, "already_published")
+        self.assertEqual(broker.exchanges, 0)
+        self.assertEqual(reviewer.calls, 0)
+        self.assertEqual(
+            ledger.load(IDENTITY).record.transaction.phase,
+            "publication_succeeded",
+        )
 
     def test_application_requires_trusted_configuration_before_broker(self):
         ledger = InMemorySessionLedger()

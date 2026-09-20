@@ -279,8 +279,13 @@ a model or writes trusted learnings or configuration.
 
 `github review` accepts the matching `--configuration-context` JSON emitted
 alongside an operator-ledger analysis and an optional `--evidence-context`
-JSON. These are trusted admission inputs; only their canonical digests are
-persisted in the session ledger.
+JSON. These are trusted admission inputs from the authenticated workflow or
+operator boundary, not arbitrary request data; integrations crossing that
+boundary must derive them from the trusted checkout and effective settings.
+Only their canonical digests are persisted in the session ledger. Review
+limits and stage prompt/source details are intentionally not part of the
+configuration digest because publication does not re-run analysis; the
+canonical result digest binds the bounded output instead.
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
