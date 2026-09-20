@@ -141,13 +141,13 @@ describe("token broker authorization", () => {
     expect(github.capabilityToken).toHaveBeenCalledWith(
       2468,
       "acme/widgets",
-      { pull_requests: "write", checks: "write" },
+      { pull_requests: "write" },
       false,
     );
     const enrollment = ledgerFetch.mock.calls[2][1] as RequestInit;
     expect(JSON.parse(enrollment.body as string)).toEqual({
       action: "session_enroll",
-      scope: "987654321:7",
+      scope: `987654321:7:${SHA}`,
     });
   });
 

@@ -7,6 +7,13 @@ const SCOPE_PATTERN = /^[\x21-\x7e]{1,512}$/;
 const RETENTION_MS = 10 * 60 * 1000;
 const RATE_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT = 10;
+// An enrollment witness is only meaningful while the session it guards can
+// still exist. Session records expire at 90 days at the latest (ADR 0047), so
+// the witness is pruned on the same schedule: the table stays bounded, the
+// Durable Object does not permanently record that a pull request ever had a
+// session, and a session that outlived its own record cannot demand recovery
+// forever.
+const ENROLLMENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 interface BrokerRequest {
   action?: unknown;
@@ -112,6 +119,10 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
         this.sql.exec(
           "DELETE FROM broker_rates WHERE window_started < ?",
           now - RATE_WINDOW_MS,
+        );
+        this.sql.exec(
+          "DELETE FROM broker_session_enrollments WHERE enrolled_at < ?",
+          now - ENROLLMENT_RETENTION_MS,
         );
         const rows = [
           ...this.sql.exec(

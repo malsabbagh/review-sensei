@@ -4,7 +4,11 @@ import json
 import unittest
 from pathlib import Path
 
-from review_sensei.baseline import FINDING_CLASSIFICATIONS, LINEAGE_REASONS
+from review_sensei.baseline import (
+    FINDING_CLASSIFICATIONS,
+    LINEAGE_REASONS,
+    MAX_HISTORY_FINDINGS,
+)
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS
 from review_sensei.convergence import ATTRIBUTIONS, LATE_REASONS
 from review_sensei.errors import (
@@ -258,6 +262,21 @@ class PublicSchemaTests(unittest.TestCase):
             validate_public_document(
                 {"body": "ok", "resolve": "yes"}, "conversation-reply"
             )
+
+    def test_session_record_history_limits_match_runtime_bounds(self) -> None:
+        schema = json.loads(
+            (SCHEMA_DIR / "session-record.schema.json").read_text(encoding="utf-8")
+        )
+        baseline = schema["properties"]["convergence_history"]["properties"][
+            "baseline"
+        ]["properties"]
+        # A Python-written envelope must never exceed these caps, or the record
+        # fails schema validation on its next read.
+        self.assertEqual(baseline["findings"]["maxItems"], MAX_HISTORY_FINDINGS)
+        self.assertEqual(
+            baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
+        )
+        self.assertEqual(baseline["related_paths"]["maxItems"], MAX_RELATED_PATHS)
 
     def test_session_record_schema_enforces_history_baseline_presence(self) -> None:
         golden = json.loads(

@@ -28,6 +28,7 @@ MAINTAINER_ACTIONS = frozenset(
         "pause",
         "verify",
         "continue",
+        "reenroll",
         "dismiss",
         "defer",
         "accept-risk",
@@ -47,6 +48,7 @@ _CONTINUE_ROUNDS = re.compile(
 _REVIEW_STATUS = re.compile(r"^review\s+status\s*$", re.IGNORECASE)
 _REVIEW_PAUSE = re.compile(r"^review\s+pause\s*$", re.IGNORECASE)
 _VERIFY = re.compile(r"^verify\s*$", re.IGNORECASE)
+_REENROLL = re.compile(r"^review\s+reenroll\s*$", re.IGNORECASE)
 _FINDING = re.compile(
     r"^(dismiss|defer|accept-risk)\s+([a-f0-9]{16,64})\s+--reason\s+(\S.*)$",
     re.IGNORECASE | re.DOTALL,
@@ -143,6 +145,8 @@ def parse_maintainer_command(
         return MaintainerCommand(action="pause", actor=actor, head_sha=head_sha)
     if _VERIFY.fullmatch(remainder):
         return MaintainerCommand(action="verify", actor=actor, head_sha=head_sha)
+    if _REENROLL.fullmatch(remainder):
+        return MaintainerCommand(action="reenroll", actor=actor, head_sha=head_sha)
     continued = _CONTINUE_ROUNDS.fullmatch(remainder)
     if continued is not None:
         rounds = int(continued.group(1) or "1")
@@ -256,6 +260,21 @@ def apply_session_command(
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
     loaded = ledger.load(identity, now=now)
+    if command.action == "reenroll":
+        # Expired-session recovery is the one path allowed to retire durable
+        # state, and it is only reachable through this authenticated maintainer
+        # command. Every other status needs investigation rather than a reset,
+        # which is why the ledger refuses them rather than this branch guessing.
+        record = ledger.reenroll(identity, now=now)
+        return record, MaintainerCommandResult(
+            action="reenroll",
+            applied=True,
+            operator_paused=bool(getattr(record, "operator_paused", False)),
+            summary=(
+                "expired session re-enrolled with fresh round counters; "
+                "prior convergence history was retired"
+            ),
+        )
     if loaded.status in {"missing", "expired"} or loaded.record is None:
         # Status is a read-only command: do not create a hosted issue comment
         # merely to report that no durable session exists.

@@ -265,6 +265,20 @@ The legacy `mutate_commit` / `complete_session_round` reservation APIs reject a
 transaction-bearing record; transaction callers must use
 `checkpoint_review_analysis` and `complete_review_publication` so the result
 digest and publication phase remain bound.
+An expired session is recovered explicitly, never silently reinitialized.
+Ledger loading reports `expired` and every admission path fails closed with the
+recovery instruction; only `SessionLedger.reenroll` may retire an expired
+record, reachable as the authenticated maintainer command
+`@sensei review reenroll` (a write command, so it requires `--allow-write`).
+The local ledger removes its enrollment witness before the record, so an
+interrupted recovery leaves an expired record rather than a witness without a
+record. The GitHub-backed ledger rewrites its own expired marker comment in
+place, so the artifact the broker witnessed is restored rather than deleted and
+no broker enrollment has to be purged alongside it; deleting that comment by
+hand instead leaves a witness that keeps demanding recovery until the broker's
+90-day enrollment retention elapses. A missing, live, unreadable, or
+conflicting record is never re-enrolled, and a run that never obtained the
+publication capability never records an enrollment witness at all.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface

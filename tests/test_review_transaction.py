@@ -23,11 +23,16 @@ from review_sensei.hosting.github import (
     PublicationResult,
 )
 from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.models import ProviderResponse, ReviewResult, ReviewTransaction
+from review_sensei.models import (
+    ProviderResponse,
+    ReviewRequest,
+    ReviewResult,
+    ReviewTransaction,
+)
 from review_sensei.outcomes import RunOutcome
 from review_sensei.providers import ProviderSettings
 from review_sensei.schemas import validate_public_document
-from review_sensei.service import ReviewRun
+from review_sensei.service import ReviewRun, ReviewService
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
@@ -753,35 +758,47 @@ class ReviewTransactionTests(unittest.TestCase):
                 str(configuration_path),
                 "--no-learning-proposals",
             ]
+            live_requests: list[ReviewRequest] = []
+            key_requests: list[ReviewRequest] = []
+            original_run = ReviewService.run
+
+            def recording_run(self, request, budget=None):
+                live_requests.append(request)
+                return original_run(self, request, budget=budget)
+
+            def recording_key(request, *, provider_name, stages, profile="default"):
+                key_requests.append(request)
+                return build_review_context_cache_key(
+                    request,
+                    provider_name=provider_name,
+                    stages=stages,
+                    profile=profile,
+                )
+
             with (
                 patch(
                     "review_sensei.cli.default_registry",
                     return_value=RecordingRegistry(provider),
                 ),
-                patch(
-                    "review_sensei.service.build_review_context_cache_key",
-                    side_effect=build_review_context_cache_key,
-                ) as live_key,
+                patch("review_sensei.service.ReviewService.run", recording_run),
                 patch(
                     "review_sensei.context.build_review_context_cache_key",
-                    side_effect=build_review_context_cache_key,
-                ) as checkpoint_key,
+                    side_effect=recording_key,
+                ),
             ):
                 self.assertEqual(main(argv), 0)
 
             # ADR 0053 keeps F2 off the live inference path: the request the
-            # service derives its coverage decision from stays unbound to the
-            # trusted SHAs.
-            self.assertTrue(live_key.called)
-            for call in live_key.call_args_list:
-                self.assertIsNone(call.args[0].base_sha)
-                self.assertIsNone(call.args[0].head_sha)
-            # Only the durable checkpoint binds the identity the transaction
-            # already carries.
-            self.assertEqual(len(checkpoint_key.call_args_list), 1)
-            checkpoint_request = checkpoint_key.call_args_list[0].args[0]
-            self.assertEqual(checkpoint_request.base_sha, BASE_SHA)
-            self.assertEqual(checkpoint_request.head_sha, HEAD_SHA)
+            # service actually receives stays unbound to the trusted SHAs.
+            self.assertEqual(len(live_requests), 1)
+            self.assertIsNone(live_requests[0].base_sha)
+            self.assertIsNone(live_requests[0].head_sha)
+            # Only the dedicated checkpoint copy binds the identity the
+            # transaction already carries.
+            self.assertEqual(len(key_requests), 1)
+            self.assertEqual(key_requests[0].base_sha, BASE_SHA)
+            self.assertEqual(key_requests[0].head_sha, HEAD_SHA)
+            self.assertIsNot(key_requests[0], live_requests[0])
 
     def test_cli_expired_ledger_names_the_recovery_action(self):
         class UnconstructedProvider:

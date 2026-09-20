@@ -99,8 +99,13 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# The verification-scope schema mirrors these bounds; update its parity test
-# whenever the shared metadata budget changes.
+# ADR 0053 bounds the persisted convergence envelope to "at most three stable
+# concern and resolution-criterion digests". The session-record schema mirrors
+# that bound; the runtime baseline keeps the wider shared metadata budget, so
+# only the persisted projection is narrowed here.
+MAX_HISTORY_FINDINGS = 3
+# The verification-scope and session-record schemas mirror these bounds; update
+# their parity tests whenever the shared metadata budget changes.
 
 
 def _require_bool(value: object, *, label: str) -> None:
@@ -302,10 +307,28 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
 
     This is deliberately identity and evidence metadata only: it never carries
     review prompts, diffs, provider output, or rendered finding text.
+
+    The bounds enforced here are the ones the published session-record schema
+    enforces on the persisted envelope. Checking them before serialization
+    keeps a checkpoint that Python accepts from becoming a record the schema
+    rejects on the next read, which would strand the pull request in an
+    unreadable session state.
     """
 
     if not isinstance(baseline, ReviewBaseline):
         raise ReviewInputError("review baseline is invalid")
+    if len(baseline.reviewed_paths) > MAX_CACHE_METADATA_ITEMS:
+        raise ReviewInputError("baseline reviewed paths exceed the persisted bound")
+    if len(baseline.related_paths) > MAX_RELATED_PATHS:
+        raise ReviewInputError("baseline related paths exceed the persisted bound")
+    # The envelope carries a bounded finding set. Selecting by fingerprint is
+    # deterministic and content-derived, so the persisted history does not
+    # depend on provider ordering or on how many retries a run took, and a
+    # review with more findings than the envelope allows still checkpoints
+    # instead of writing a document the schema rejects on the next read.
+    findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
+        :MAX_HISTORY_FINDINGS
+    ]
     key = baseline.cache_key
     return {
         "cache_key": {
@@ -335,7 +358,7 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
                 "generation": finding.generation,
                 "blocking": finding.blocking,
             }
-            for finding in baseline.findings
+            for finding in findings
         ],
         "reviewed_paths": list(baseline.reviewed_paths),
         "related_paths": list(baseline.related_paths),
@@ -1288,6 +1311,7 @@ __all__ = [
     "INVALIDATION_REASONS",
     "LaterFindingClassification",
     "LINEAGE_REASONS",
+    "MAX_HISTORY_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "ReviewBaseline",

@@ -986,6 +986,15 @@ class SessionLedger(Protocol):
         now: datetime | None = None,
     ) -> SessionRecord: ...
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Explicitly retire an expired session so a new one can be enrolled."""
+        ...
+
 
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
     if slot == "initial":
@@ -1776,6 +1785,20 @@ class InMemorySessionLedger:
         self._records[(identity.repository, identity.pull_request)] = record
         return record
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Retire an expired in-memory session and enroll a fresh one."""
+
+        loaded = self.load(identity, now=now)
+        if loaded.status != "expired":
+            raise ReviewInputError("only an expired session can be re-enrolled")
+        del self._records[(identity.repository, identity.pull_request)]
+        return self.initialize(identity, now=now)
+
     def replace(
         self,
         identity: SessionIdentity,
@@ -1875,6 +1898,11 @@ class LocalSessionLedger:
     claim inter-process locking; concurrent hosted jobs should use the
     GitHub-backed adapter instead, whose hosted checks are also best-effort
     unless the deployment serializes writers.
+
+    Recovery from an expired session is explicit: ``reenroll`` is the only
+    operation that may retire an expired record and its enrollment witness, and
+    it refuses every other load status. No admission path re-creates a session
+    that merely expired.
     """
 
     SINGLE_WRITER_PER_IDENTITY = True
@@ -1904,6 +1932,38 @@ class LocalSessionLedger:
         # an established local session into a fresh enrollment.
         return self.root / ".enrollments" / f"{digest}.v1"
 
+    def _enrollment_directory(self) -> Path:
+        """Return the witness directory after containment and symlink checks.
+
+        The witness is read on every load and written on every enrollment, so
+        it gets the same discipline as the record path: a pre-existing symlink
+        or a directory that resolves outside the operator-supplied root must
+        never let that read or write escape the ledger.
+        """
+
+        root = self.root.resolve()
+        directory = self.root / ".enrollments"
+        if directory.is_symlink():
+            raise ReviewInputError("session enrollment directory is invalid")
+        resolved = directory.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ReviewInputError(
+                "session enrollment directory is outside the ledger root"
+            )
+        if resolved.exists() and not resolved.is_dir():
+            raise ReviewInputError("session enrollment directory is invalid")
+        return resolved
+
+    def _validated_enrollment_path(self, identity: SessionIdentity) -> Path:
+        """Return the witness path after rejecting symlinks and non-files."""
+
+        path = self._enrollment_directory() / self._enrollment_path(identity).name
+        if path.is_symlink():
+            raise ReviewInputError("session enrollment witness is invalid")
+        if path.exists() and not path.is_file():
+            raise ReviewInputError("session enrollment witness is invalid")
+        return path
+
     @staticmethod
     def _enrollment_witness(identity: SessionIdentity) -> bytes:
         return (
@@ -1917,7 +1977,7 @@ class LocalSessionLedger:
 
     def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
         try:
-            raw = self._enrollment_path(identity).read_bytes()
+            raw = self._validated_enrollment_path(identity).read_bytes()
         except FileNotFoundError:
             return False
         except OSError as exc:
@@ -1928,8 +1988,49 @@ class LocalSessionLedger:
             raise ReviewInputError("session enrollment witness is invalid")
         return True
 
+    def reenroll(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Retire an expired local session and enroll a fresh one.
+
+        Only an expired record may be retired. A missing, live, unreadable, or
+        conflicting record needs investigation rather than a reset, and
+        replacing one would let a deleted record or a tampered ledger turn into
+        a fresh session budget. The witness is removed first so an interrupted
+        recovery leaves a loadable expired record instead of a witness with no
+        record, which is the state that demands manual reconciliation.
+        """
+
+        # An expired load deliberately withholds the record, so recovery keys
+        # off the status alone rather than off a record this adapter refuses to
+        # hand back.
+        loaded = self.load(identity, now=now)
+        if loaded.status != "expired":
+            raise ReviewInputError("only an expired session can be re-enrolled")
+        witness = self._validated_enrollment_path(identity)
+        try:
+            witness.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ReviewInputError(
+                "session enrollment witness could not be retired"
+            ) from exc
+        try:
+            self._path(identity).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ReviewInputError(
+                "expired session record could not be retired"
+            ) from exc
+        return self.initialize(identity, now=now)
+
     def _create_enrollment_witness(self, identity: SessionIdentity) -> None:
-        path = self._enrollment_path(identity)
+        path = self._validated_enrollment_path(identity)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb") as handle:

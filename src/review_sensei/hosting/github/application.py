@@ -209,16 +209,26 @@ class GitHubApplication:
                         diagnostic="transaction-publication-complete",
                     )
         exchange_input = oidc_token or self.broker.request_oidc_token()
+        # The publication capability is obtained before the session enrollment
+        # is recorded. Enrollment is a durable broker-side witness that this
+        # pull request already has a session marker, so recording it for a run
+        # that never reaches publication would leave the next run seeing a
+        # known witness with no marker, and require authenticated recovery
+        # after nothing worse than a transient broker failure.
+        token = self.broker.exchange(exchange_input, capability="review_publish")
         session_token: str | None = None
         session_state: str | None = None
         hosted_session_ledger = (
             options.github_session_ledger and self.session_ledger is None
         )
         # Session mutation is separate authority from review publication. A
-        # hosted comment ledger first obtains a broker-attested, current-head
-        # session token, while the publisher receives review_publish below.
-        # The ledger adapter is never allowed to fall back to the publication
-        # capability token.
+        # hosted comment ledger obtains a broker-attested, current-head session
+        # token, while the publisher keeps the review_publish capability above.
+        # The ledger adapter is never allowed to fall back to that capability
+        # token. Enrollment is still recorded as the last broker call before
+        # the marker is used, so only a failure that happens after enrollment
+        # (a failed marker create) can require recovery; that state is what
+        # `reenroll` and the enrollment retention window exist for.
         if hosted_session_ledger:
             session = self.broker.open_session(
                 exchange_input,
@@ -232,7 +242,6 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     "hosted session ledger requires a broker-attested session token"
                 )
-        token = self.broker.exchange(exchange_input, capability="review_publish")
         ledger = self._session_ledger_for_token(
             session_token if session_token is not None else token,
             options=options,

@@ -13,7 +13,11 @@ const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
   review_publish: { "pull_requests": "write" },
-  review_session: { "pull_requests": "write", checks: "write" },
+  // Session authority is separate from publication authority, but it asks for
+  // no extra GitHub permission: the durable session is an issue comment, so
+  // pull-request write is sufficient. ADR 0022/0006 register the App without
+  // Checks: write, and this broker never requests it.
+  review_session: { "pull_requests": "write" },
   review_status: { "pull_requests": "read" },
   inline_reply: { "pull_requests": "write" },
   issue_reply: { "pull_requests": "write" },
@@ -248,9 +252,14 @@ export class TokenBroker {
       if (currentHead !== requestedSession.head_sha) {
         throw new Error("broker_session_head_rejected");
       }
+      // The enrollment witness is keyed by the current head, which the check
+      // above just verified against the live pull request. A new head is a new
+      // enrollment, so a legitimate re-review at an advanced head cannot be
+      // mistaken for a deleted marker; the same head keeps its witness, which
+      // is what makes a missing comment detectable as deletion.
       const enrollment = await enrollSession(
         this.env,
-        `${requestedSession.repository_id}:${requestedSession.pull_request}`,
+        `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`,
       );
       return { token, capability: requested, session_state: enrollment };
     }

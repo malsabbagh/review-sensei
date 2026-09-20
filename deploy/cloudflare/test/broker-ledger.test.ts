@@ -41,6 +41,13 @@ class MemorySql {
       }
       return [];
     }
+    if (normalized.startsWith("DELETE FROM broker_session_enrollments WHERE enrolled_at")) {
+      const threshold = args[0] as number;
+      for (const [key, row] of this.enrollments) {
+        if (row.enrolledAt < threshold) this.enrollments.delete(key);
+      }
+      return [];
+    }
     if (normalized.startsWith("SELECT jti_hash")) {
       return (this.replays.has(args[0] as string)
         ? [{ jti_hash: args[0] }]
@@ -222,6 +229,25 @@ describe("broker replay and rate ledger", () => {
     expect([...sql.replays.keys()]).toEqual(["b".repeat(64)]);
     expect(sql.rates.size).toBe(0);
     expect(sql.enrollments.size).toBe(1);
+  });
+
+  it("prunes enrollment witnesses past the session retention window", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const { ledger, sql } = ledgerHarness();
+    const retention = 90 * 24 * 60 * 60 * 1000;
+    sql.enrollments.set("expired".padEnd(64, "0"), {
+      enrolledAt: 1_700_000_000_000 - retention - 1,
+    });
+    sql.enrollments.set("retained".padEnd(64, "0"), {
+      enrolledAt: 1_700_000_000_000 - retention + 1,
+    });
+
+    expect(await (await enroll(ledger, "987654321:7:" + "a".repeat(40))).json()).toEqual({
+      state: "enrolled",
+    });
+
+    expect([...sql.enrollments.keys()]).not.toContain("expired".padEnd(64, "0"));
+    expect(sql.enrollments.size).toBe(2);
   });
 
   it("rejects malformed and non-POST requests without persisting them", async () => {

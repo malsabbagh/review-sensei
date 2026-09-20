@@ -473,6 +473,28 @@ def _provider_settings_from_args(
     )
 
 
+def _checkpoint_cache_request(
+    request: ReviewRequest,
+    *,
+    base_sha: str | None,
+    head_sha: str | None,
+) -> ReviewRequest:
+    """Return the request the durable checkpoint binds to the trusted SHAs.
+
+    The live inference request deliberately stays unbound: ADR 0053 keeps F2 off
+    the inference path, so `service.run` must never derive coverage or cache
+    identity from the trusted SHAs. Only this copy carries them, and it is used
+    solely to derive the checkpoint cache key, which keeps the invariant in one
+    place instead of depending on where a caller happens to build the key.
+    """
+
+    return replace(
+        request,
+        base_sha=(base_sha or "").strip().lower() or None,
+        head_sha=(head_sha or "").strip().lower() or None,
+    )
+
+
 def _transaction_provider_identity(
     settings: ProviderSettings,
 ) -> tuple[dict[str, object], str | None]:
@@ -2663,15 +2685,11 @@ def main(argv: list[str] | None = None) -> int:
                         raise ReviewInputError(
                             "prepared review transaction has no session record"
                         )
-                    # The live inference request deliberately stays unbound to
-                    # the trusted SHAs (ADR 0053 keeps F2 off the inference
-                    # path). Only the durable checkpoint binds the identity
-                    # the transaction already carries.
                     cache_key = build_review_context_cache_key(
-                        replace(
+                        _checkpoint_cache_request(
                             request,
-                            base_sha=(args.base_sha or "").strip().lower() or None,
-                            head_sha=(args.head_sha or "").strip().lower() or None,
+                            base_sha=args.base_sha,
+                            head_sha=args.head_sha,
                         ),
                         provider_name=provider.name,
                         stages=service.stages,
