@@ -289,6 +289,9 @@ as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
 partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
 transport retries, structural retries, prompt/output bytes, and elapsed time.
+When an unbound request supplies `current_key`, callers must also supply the
+matching trusted `trusted_base_sha` and `trusted_head_sha`; the service rejects
+an incomplete identity binding before orchestration.
 For an identity-bound result whose local ledger already records
 `publication_succeeded`, `github review` may return `already_published`
 before broker exchange; this is an idempotent local-ledger recovery signal,
