@@ -425,6 +425,7 @@ class GitHubApplication:
                 result = replace(result, transaction=transaction_record.transaction)
         authorized_dispositions: tuple[object, ...] = ()
         durable_baseline = baseline
+        baseline_recovery_required = False
         if ledger is not None:
             from ...disposition import session_dispositions
 
@@ -438,9 +439,12 @@ class GitHubApplication:
             if durable_baseline is None and record_for_baseline is not None:
                 history = record_for_baseline.convergence_history
                 if isinstance(history, Mapping) and history.get("state") == "completed":
-                    durable_baseline = baseline_from_history_document(
-                        history.get("baseline")
-                    )
+                    try:
+                        durable_baseline = baseline_from_history_document(
+                            history.get("baseline")
+                        )
+                    except ReviewInputError:
+                        baseline_recovery_required = True
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
         # Falling back to the prior key would treat an unknown head/configuration
@@ -453,7 +457,8 @@ class GitHubApplication:
                     status="handoff",
                     diagnostic="durable_baseline_recovery_required",
                 )
-                if durable_baseline is not None and current_key is None
+                if baseline_recovery_required
+                or (durable_baseline is not None and current_key is None)
                 else self.reviewer.publish(
                     token=token,
                     repository=repository,

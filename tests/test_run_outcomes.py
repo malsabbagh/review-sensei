@@ -26,6 +26,7 @@ from review_sensei.hosting.github.publication import (
 )
 from review_sensei.models import ProviderResponse, ReviewRequest, ReviewResult
 from review_sensei.outcomes import (
+    PUBLIC_DIAGNOSTICS,
     RecoveryArtifact,
     ResourceBudget,
     RunOutcome,
@@ -36,6 +37,7 @@ from review_sensei.outcomes import (
     sanitize_diagnostic,
 )
 from review_sensei.providers.transport import parse_retry_after_seconds
+from review_sensei.schemas import validate_public_document
 from review_sensei.stages import Stage
 from review_sensei.workflow import ReviewExecutionPlan
 
@@ -352,6 +354,14 @@ class RunOutcomeWiringTests(unittest.TestCase):
         with patch("sys.stderr", new_callable=io.StringIO) as stderr:
             emit_host_outcome(RunOutcome("action_required", diagnostic="paused"))
         self.assertIn("ReviewSensei maintainer attention required", stderr.getvalue())
+
+    def test_durable_baseline_recovery_diagnostic_is_a_public_contract(self):
+        diagnostic = "durable_baseline_recovery_required"
+        self.assertIn(diagnostic, PUBLIC_DIAGNOSTICS)
+        validate_public_document(
+            RunOutcome("action_required", diagnostic=diagnostic).to_dict(),
+            "run-outcome",
+        )
 
     def test_ineligible_plan_emits_skipped_policy(self):
         plan = plan_review_execution(

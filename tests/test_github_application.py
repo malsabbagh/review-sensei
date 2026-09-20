@@ -1,11 +1,13 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from review_sensei import ProviderResponse
 from review_sensei.baseline import ReviewBaseline, baseline_history_document
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubPublicationError,
@@ -510,28 +512,39 @@ class GitHubApplicationTests(unittest.TestCase):
             session_ledger=ledger,
         )
 
-        outcome = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
-            oidc_token=None,
-            repository="owner/repo",
-            repository_id=1,
-            pull_request=1,
-            head_sha="a" * 40,
-            base_branch="main",
-            base_sha="b" * 40,
-            result=ReviewResult(
+        publish_kwargs = {
+            "options": GitHubWriteOptions(auto_review=True, github_writes=True),
+            "oidc_token": None,
+            "repository": "owner/repo",
+            "repository_id": 1,
+            "pull_request": 1,
+            "head_sha": "a" * 40,
+            "base_branch": "main",
+            "base_sha": "b" * 40,
+            "result": ReviewResult(
                 summary="Summary.",
                 comments=(),
                 provider="fixture",
                 review_status="complete",
             ),
-            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
-            app_slug="review-sensei[bot]",
-            convergence_policy=policy,
-        )
+            "diff": "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            "app_slug": "review-sensei[bot]",
+            "convergence_policy": policy,
+        }
+        outcome = application.publish_review(**publish_kwargs)
 
         self.assertEqual(outcome.status, "handoff")
         self.assertEqual(outcome.diagnostic, "durable_baseline_recovery_required")
+        self.assertEqual(reviewer.calls, [])
+        self.assertIsNone(ledger.load(identity).record.reservation_id)
+
+        with patch(
+            "review_sensei.hosting.github.application.baseline_from_history_document",
+            side_effect=ReviewInputError("corrupt persisted baseline"),
+        ):
+            malformed = application.publish_review(**publish_kwargs)
+        self.assertEqual(malformed.status, "handoff")
+        self.assertEqual(malformed.diagnostic, "durable_baseline_recovery_required")
         self.assertEqual(reviewer.calls, [])
         self.assertIsNone(ledger.load(identity).record.reservation_id)
 
