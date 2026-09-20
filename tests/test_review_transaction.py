@@ -543,6 +543,12 @@ class ReviewTransactionTests(unittest.TestCase):
 @@ -1 +1,2 @@
  keep
 +change
+diff --git a/src/helper.py b/src/helper.py
+--- a/src/helper.py
++++ b/src/helper.py
+@@ -1 +1,2 @@
+ keep
++related change
 """
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -604,11 +610,13 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertIsNotNone(record.convergence_history)
             assert record.convergence_history is not None
             self.assertEqual(record.convergence_history["state"], "completed")
+            initial_baseline = baseline_from_history_document(
+                record.convergence_history["baseline"]
+            )
+            self.assertEqual(initial_baseline.cache_key.head_sha, HEAD_SHA)
             self.assertEqual(
-                baseline_from_history_document(
-                    record.convergence_history["baseline"]
-                ).cache_key.head_sha,
-                HEAD_SHA,
+                initial_baseline.related_paths,
+                ("src/helper.py", "src/app.py"),
             )
             self.assertEqual(
                 record.transaction.result_sha256,

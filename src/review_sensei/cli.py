@@ -39,7 +39,7 @@ from .outcomes import (
     recovery_expires_at,
     run_outcome_exit_code,
 )
-from .planning import DEFAULT_TOTAL_WORK_BUDGET
+from .planning import DEFAULT_TOTAL_WORK_BUDGET, related_paths_for_change
 from .provider_config import (
     openrouter_policy_from_env,
     openrouter_timeout_default,
@@ -2784,7 +2784,7 @@ def main(argv: list[str] | None = None) -> int:
                     verification_related_paths = (
                         verification_scope.related_paths
                         if verification_scope is not None
-                        else ()
+                        else related_paths_for_change(analysis.changed_paths)
                     )
                     checkpoint_baseline = (
                         baseline_from_review(
