@@ -534,6 +534,7 @@ class ReviewTransactionTests(unittest.TestCase):
             diff_path = root / "review.patch"
             response_path = root / "response.json"
             output_path = root / "review.json"
+            outcome_path = root / "outcome.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
             diff_path.write_text(diff, encoding="utf-8")
@@ -564,6 +565,8 @@ class ReviewTransactionTests(unittest.TestCase):
                 str(ledger_path),
                 "--output",
                 str(output_path),
+                "--outcome",
+                str(outcome_path),
                 "--configuration-context-output",
                 str(configuration_path),
                 "--no-learning-proposals",
@@ -595,8 +598,27 @@ class ReviewTransactionTests(unittest.TestCase):
                 record.transaction.result_sha256,
                 ReviewResult.from_dict(rendered).content_digest(),
             )
+            initial_history = record.convergence_history
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(convergence_history=None),
+            )
             second_argv = list(argv)
             second_argv[second_argv.index("--head-sha") + 1] = "c" * 40
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(provider),
+            ):
+                self.assertNotEqual(main(second_argv), 0)
+            recovery_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            recovery_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(recovery_outcome["status"], "action_required")
+            self.assertIsNone(recovery_record.reservation_id)
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(convergence_history=initial_history),
+            )
             with patch(
                 "review_sensei.cli.default_registry",
                 return_value=RecordingRegistry(provider),
