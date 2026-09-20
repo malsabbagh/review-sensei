@@ -590,8 +590,9 @@ class ReviewTransactionTests(unittest.TestCase):
             assert record.convergence_history is not None
             self.assertEqual(record.convergence_history["state"], "completed")
             self.assertEqual(
-                baseline_from_history_document(record.convergence_history["baseline"])
-                .cache_key.head_sha,
+                baseline_from_history_document(
+                    record.convergence_history["baseline"]
+                ).cache_key.head_sha,
                 HEAD_SHA,
             )
             self.assertEqual(
@@ -631,8 +632,9 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertEqual(restarted.completed_initial_reviews, 1)
             self.assertEqual(restarted.completed_verification_rounds, 1)
             self.assertEqual(
-                baseline_from_history_document(restarted.convergence_history["baseline"])
-                .cache_key.head_sha,
+                baseline_from_history_document(
+                    restarted.convergence_history["baseline"]
+                ).cache_key.head_sha,
                 "c" * 40,
             )
             incompatible_argv = list(second_argv)

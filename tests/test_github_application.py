@@ -444,7 +444,10 @@ class GitHubApplicationTests(unittest.TestCase):
             base_branch="main",
             base_sha="b" * 40,
             result=ReviewResult(
-                summary="Summary.", comments=(), provider="fixture", review_status="complete"
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
             ),
             diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
             app_slug="review-sensei[bot]",
