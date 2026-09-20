@@ -826,9 +826,22 @@ class ReviewTransactionTests(unittest.TestCase):
             live_requests: list[ReviewRequest] = []
             original_run = ReviewService.run
 
-            def recording_run(self, request, budget=None):
+            def recording_run(
+                self,
+                request,
+                *,
+                incremental=None,
+                current_key=None,
+                budget=None,
+            ):
                 live_requests.append(request)
-                return original_run(self, request, budget=budget)
+                return original_run(
+                    self,
+                    request,
+                    incremental=incremental,
+                    current_key=current_key,
+                    budget=budget,
+                )
 
             with (
                 patch(
