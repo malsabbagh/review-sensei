@@ -116,6 +116,15 @@ _CONTENT_DIGEST_FIELDS = (
     "finding_lifecycles",
     "coverage",
 )
+_CONTENT_DIGEST_REQUIRED_FIELDS = (
+    "summary",
+    "comments",
+    "provider",
+    "model",
+    "learning_proposals",
+    "review_status",
+    "evidence_policy",
+)
 
 
 def _configuration_text(value: object, *, label: str, allow_none: bool = False) -> None:
@@ -1399,6 +1408,11 @@ class ReviewResult:
         """
 
         serialized = self.to_dict()
+        missing = set(_CONTENT_DIGEST_REQUIRED_FIELDS) - set(serialized)
+        if missing:
+            raise ReviewInputError(
+                "review result is missing digest fields: " + ", ".join(sorted(missing))
+            )
         value = {
             field: serialized[field]
             for field in _CONTENT_DIGEST_FIELDS

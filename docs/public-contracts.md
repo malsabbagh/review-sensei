@@ -261,6 +261,10 @@ endpoint, timeout/output budget, and routing policy), evidence context, exact
 base/head, and result
 digest before broker exchange or publisher writes. Publication retries advance
 the existing transaction and never increment completed-round counters.
+The legacy `mutate_commit` / `complete_session_round` reservation APIs reject a
+transaction-bearing record; transaction callers must use
+`checkpoint_review_analysis` and `complete_review_publication` so the result
+digest and publication phase remain bound.
 `ReviewService.run` always returns a
 `ReviewRun` with that envelope. `ReviewService.review` raises
 `ReviewInputError` when resource budgets are exhausted; other failures surface
@@ -489,7 +493,7 @@ The command is `review-sensei`. Supported flags are:
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
-| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger` |
+| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger`. Protect the emitted file because it becomes trusted admission input for the later `github review` command |
 
 Stage and category catalogs are trusted operator configuration. Hosted reviews
 read them only from the reviewed trusted base checkout (the validated base

@@ -170,6 +170,14 @@ class ReviewTransactionTests(unittest.TestCase):
         with patch.object(ReviewResult, "to_dict", return_value=serialized):
             self.assertEqual(result.content_digest(), baseline)
 
+    def test_content_digest_rejects_missing_required_projection_fields(self):
+        result = _result()
+        serialized = result.to_dict()
+        serialized.pop("summary")
+        with patch.object(ReviewResult, "to_dict", return_value=serialized):
+            with self.assertRaisesRegex(ReviewInputError, "summary"):
+                result.content_digest()
+
     def test_transaction_schema_matches_phase_digest_rules(self):
         transaction = _checkpoint(InMemorySessionLedger()).transaction
         analysis_with_digest = {
@@ -1041,6 +1049,42 @@ class PublicationTransactionTests(unittest.TestCase):
         record = ledger.load(IDENTITY).record
         self.assertEqual(record.completed_initial_reviews, 1)
         self.assertEqual(record.transaction.phase, "publication_succeeded")
+
+    def test_application_keyboard_interrupt_leaves_transaction_pending(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        with patch.object(reviewer, "publish", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                application.publish_review(
+                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                    oidc_token="oidc",
+                    repository=IDENTITY.repository,
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD_SHA,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=result,
+                    diff="diff",
+                    app_slug="review-sensei[bot]",
+                    convergence_policy=POLICY,
+                    configuration_context=CONFIGURATION,
+                    evidence_context=EVIDENCE,
+                )
+        record = ledger.load(IDENTITY).record
+        self.assertEqual(record.transaction.phase, "publication_pending")
+        self.assertIsNone(record.reservation_id)
+        self.assertEqual(record.completed_initial_reviews, 1)
 
     def test_application_replays_prepublication_result_after_success_idempotently(
         self,

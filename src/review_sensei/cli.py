@@ -735,7 +735,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Write the trusted, secret-free configuration context needed to "
             "publish an identity-bound result; requires an operator review mode "
-            "and an explicit session ledger"
+            "and an explicit session ledger. Protect the emitted file: it becomes "
+            "trusted admission input for the later github review command"
         ),
     )
     parser.add_argument(

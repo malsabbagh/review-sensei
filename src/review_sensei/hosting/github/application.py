@@ -357,16 +357,7 @@ class GitHubApplication:
                     "identity-bound review publication context is incomplete"
                 )
             if transaction_record is None:
-                transaction_record = load_review_transaction_for_publication(
-                    ledger,
-                    identity,
-                    result,
-                    base_sha=base_sha,
-                    head_sha=head_sha,
-                    policy_digest=policy.digest(),
-                    configuration_digest=expected_configuration_digest,
-                    evidence_digest=expected_evidence_digest,
-                )
+                transaction_record = load_transaction(ledger)
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
         authorized_dispositions: tuple[object, ...] = ()
@@ -405,19 +396,30 @@ class GitHubApplication:
                 and isinstance(result, ReviewResult)
                 and result.transaction is not None
             ):
-                try:
-                    complete_review_publication(
-                        ledger,
-                        identity,
-                        result.transaction,
-                        published=False,
+                if not isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
+                    durable_transaction = (
+                        transaction_record.transaction
+                        if transaction_record is not None
+                        else None
                     )
-                except BaseException as cleanup_error:
-                    publication_error.add_note(
-                        "transaction phase cleanup failed: "
-                        f"{type(cleanup_error).__name__}: "
-                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                    )
+                    if durable_transaction is not None:
+                        try:
+                            complete_review_publication(
+                                ledger,
+                                identity,
+                                durable_transaction,
+                                published=False,
+                            )
+                        except BaseException as cleanup_error:
+                            publication_error.add_note(
+                                "transaction phase cleanup failed: "
+                                f"{type(cleanup_error).__name__}: "
+                                f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                            )
+                    else:
+                        publication_error.add_note(
+                            "transaction phase cleanup skipped: durable transaction unavailable"
+                        )
             elif ledger is not None and policy.mode in OPERATOR_REVIEW_MODES:
                 if isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
                     if prepared is not None:
@@ -464,10 +466,19 @@ class GitHubApplication:
                 "already_changes_requested",
                 "auto_approval_disabled",
             }
+            durable_transaction = (
+                transaction_record.transaction
+                if transaction_record is not None
+                else None
+            )
+            if durable_transaction is None:
+                raise GitHubPublicationError(
+                    "identity-bound publication has no durable transaction"
+                )
             complete_review_publication(
                 ledger,
                 identity,
-                result.transaction,
+                durable_transaction,
                 published=publication.status in success_statuses,
             )
         elif ledger is not None and prepared is not None:
