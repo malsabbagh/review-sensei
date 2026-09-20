@@ -256,6 +256,37 @@ class LocalSessionLedgerTests(unittest.TestCase):
             expired.to_dict(),
         )
 
+    def test_expired_established_history_never_reopens_an_initial_allowance(self):
+        history = SessionRecordTests._history()
+        expired = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW - timedelta(days=31),
+            ttl=timedelta(days=30),
+            completed_initial_reviews=1,
+            completed_verification_rounds=2,
+            failed_attempts=1,
+            generation=4,
+            convergence_history=history,
+        )
+        self.ledger._write(IDENTITY, expired)
+
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        self.assertEqual(restarted.load(IDENTITY, now=FIXED_NOW).status, "expired")
+        with self.assertRaisesRegex(ReviewInputError, "expired"):
+            prepare_session_round(
+                restarted,
+                IDENTITY,
+                ReviewConvergencePolicy(mode="merge-focused"),
+                reservation_id="expired-history",
+                now=FIXED_NOW,
+            )
+        retained = restarted.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(retained.status, "expired")
+        self.assertEqual(
+            json.loads(restarted._path(IDENTITY).read_text(encoding="utf-8")),
+            expired.to_dict(),
+        )
+
     def test_integrity_failed_does_not_initialize(self):
         record = self.ledger.initialize(IDENTITY, now=FIXED_NOW)
         path = self.ledger._path(IDENTITY)
