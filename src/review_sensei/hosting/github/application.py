@@ -134,6 +134,7 @@ class GitHubApplication:
             repository_id=repository_id,
         )
         transaction_record = None
+        transaction_ledger: SessionLedger | None = None
         expected_configuration_digest: str | None = None
         expected_evidence_digest: str | None = None
         if isinstance(result, ReviewResult) and result.transaction is not None:
@@ -157,6 +158,7 @@ class GitHubApplication:
                 evidence_context
             )
             if self.session_ledger is not None:
+                transaction_ledger = self.session_ledger
                 assert expected_configuration_digest is not None
                 assert expected_evidence_digest is not None
                 transaction_record = load_review_transaction_for_publication(
@@ -172,6 +174,7 @@ class GitHubApplication:
                 if (
                     transaction_record.transaction is not None
                     and transaction_record.transaction.phase == "publication_succeeded"
+                    and not options.github_session_ledger
                 ):
                     return PublicationResult(
                         status="already_published",
@@ -197,6 +200,41 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     "identity-bound review publication context is incomplete"
                 )
+            transaction_record = load_review_transaction_for_publication(
+                ledger,
+                identity,
+                result,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                policy_digest=policy.digest(),
+                configuration_digest=expected_configuration_digest,
+                evidence_digest=expected_evidence_digest,
+            )
+            transaction_ledger = ledger
+            if (
+                transaction_record.transaction is not None
+                and transaction_record.transaction.phase == "publication_succeeded"
+            ):
+                return PublicationResult(
+                    status="already_published",
+                    diagnostic="transaction-publication-complete",
+                )
+        if (
+            transaction_record is not None
+            and transaction_ledger is not None
+            and ledger is not transaction_ledger
+        ):
+            if (
+                expected_configuration_digest is None
+                or expected_evidence_digest is None
+                or ledger is None
+            ):
+                raise GitHubPublicationError(
+                    "identity-bound review publication context is incomplete"
+                )
+            # A local preflight ledger is not authoritative once the broker
+            # selects a different token-bound ledger.  Revalidate the result
+            # against that ledger before rebinding or short-circuiting.
             transaction_record = load_review_transaction_for_publication(
                 ledger,
                 identity,

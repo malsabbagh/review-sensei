@@ -653,6 +653,160 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertIsNone(record.reservation_id)
             self.assertEqual(record.failed_attempts, 1)
 
+    def test_cli_analysis_failure_cleans_transaction_reservation(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(),
+                ),
+                patch(
+                    "review_sensei.cli.ReviewService.run",
+                    side_effect=RuntimeError("analysis failed"),
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "analysis failed"):
+                    main(argv)
+
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNone(record.transaction)
+            self.assertIsNone(record.reservation_id)
+            self.assertEqual(record.failed_attempts, 1)
+
+    def test_cli_keyboard_interrupt_aborts_transaction_without_failed_attempt(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "fixture-v1"
+
+            def complete(self, request):
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def create(self, settings):
+                return RecordingProvider()
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(response_path),
+                "--model",
+                "fixture-v1",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(),
+                ),
+                patch(
+                    "review_sensei.cli.ReviewService.run",
+                    side_effect=KeyboardInterrupt(),
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    main(argv)
+
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNone(record.transaction)
+            self.assertIsNone(record.reservation_id)
+            self.assertEqual(record.failed_attempts, 0)
+
 
 class _Broker:
     def __init__(self):
@@ -849,6 +1003,60 @@ class PublicationTransactionTests(unittest.TestCase):
         self.assertEqual(reviewer.calls, 1)
         self.assertEqual(
             ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+        )
+
+    def test_application_revalidates_a_token_bound_ledger_after_exchange(self):
+        local_ledger = InMemorySessionLedger()
+        remote_ledger = InMemorySessionLedger()
+        local_result = _checkpoint(local_ledger)
+        _checkpoint(remote_ledger)
+        complete_review_publication(
+            local_ledger, IDENTITY, local_result.transaction, published=True, now=NOW
+        )
+        broker = _Broker()
+        reviewer = _Reviewer()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=reviewer,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=local_ledger,
+        )
+        with patch.object(
+            application, "_session_ledger_for_token", return_value=remote_ledger
+        ):
+            outcome = application.publish_review(
+                options=GitHubWriteOptions(
+                    auto_review=True,
+                    github_writes=True,
+                    github_session_ledger=True,
+                ),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=local_result,
+                diff="diff",
+                app_slug="review-sensei[bot]",
+                convergence_policy=POLICY,
+                configuration_context=CONFIGURATION,
+                evidence_context=EVIDENCE,
+            )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(broker.exchanges, 1)
+        self.assertEqual(reviewer.calls, 1)
+        self.assertEqual(
+            local_ledger.load(IDENTITY).record.transaction.phase,
+            "publication_succeeded",
+        )
+        self.assertEqual(
+            remote_ledger.load(IDENTITY).record.transaction.phase,
+            "publication_succeeded",
         )
 
 

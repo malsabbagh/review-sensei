@@ -1305,7 +1305,13 @@ def complete_review_publication(
     published: bool,
     now: datetime | None = None,
 ) -> SessionRecord:
-    """Advance publication state without touching completed-round counters."""
+    """Advance publication state without charging the failed-attempt budget.
+
+    Publication failures remain retryable.  The failed-attempt counter is
+    reserved for inference or reservation failures, so a retry of a
+    ``publication_failed`` transaction does not consume another analysis
+    attempt.
+    """
 
     if not isinstance(transaction, ReviewTransaction):
         raise ReviewInputError("review transaction is invalid")

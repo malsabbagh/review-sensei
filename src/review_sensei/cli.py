@@ -734,7 +734,8 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Write the trusted, secret-free configuration context needed to "
-            "publish an identity-bound result"
+            "publish an identity-bound result; requires an operator review mode "
+            "and an explicit session ledger"
         ),
     )
     parser.add_argument(
@@ -2500,9 +2501,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     if isinstance(analysis_error, (KeyboardInterrupt, SystemExit)):
                         expected_cleanup_generation = (
-                            prepared_transaction.generation
-                            if prepared_transaction is not None
-                            else prepared_round.record.generation
+                            prepared_round.record.generation
                             if prepared_round is not None
                             else None
                         )
@@ -2521,8 +2520,8 @@ def main(argv: list[str] | None = None) -> int:
                             identity,
                             reservation_id=held_reservation,
                             expected_generation=(
-                                prepared_transaction.generation
-                                if prepared_transaction is not None
+                                prepared_round.record.generation
+                                if prepared_round is not None
                                 else None
                             ),
                         )
@@ -2545,8 +2544,8 @@ def main(argv: list[str] | None = None) -> int:
                 identity,
                 reservation_id=held_reservation,
                 expected_generation=(
-                    prepared_transaction.generation
-                    if prepared_transaction is not None
+                    prepared_round.record.generation
+                    if prepared_round is not None
                     else None
                 ),
             )
@@ -2582,7 +2581,7 @@ def main(argv: list[str] | None = None) -> int:
                     ledger,
                     identity,
                     reservation_id=held_reservation,
-                    expected_generation=prepared_transaction.generation,
+                    expected_generation=prepared_round.record.generation,
                 )
                 prepared_round = None
                 prepared_transaction = None
@@ -2617,7 +2616,7 @@ def main(argv: list[str] | None = None) -> int:
                                 ledger,
                                 identity,
                                 reservation_id=held_reservation,
-                                expected_generation=prepared_transaction.generation,
+                                expected_generation=prepared_round.record.generation,
                             )
                         except BaseException as reservation_cleanup_error:
                             cleanup_error.add_note(
@@ -2640,7 +2639,7 @@ def main(argv: list[str] | None = None) -> int:
                                 ledger,
                                 identity,
                                 reservation_id=held_reservation,
-                                expected_generation=prepared_transaction.generation,
+                                expected_generation=prepared_round.record.generation,
                             )
                         except BaseException as cleanup_error:
                             checkpoint_error.add_note(

@@ -484,7 +484,7 @@ The command is `review-sensei`. Supported flags are:
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
-| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result |
+| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger` |
 
 Stage and category catalogs are trusted operator configuration. Hosted reviews
 read them only from the reviewed trusted base checkout (the validated base
