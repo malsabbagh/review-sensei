@@ -615,6 +615,69 @@ class ReviewTransactionTests(unittest.TestCase):
                 ReviewResult.from_dict(rendered).content_digest(),
             )
             initial_history = record.convergence_history
+            malformed_argv = list(argv)
+            malformed_argv[malformed_argv.index("--head-sha") + 1] = "c" * 40
+            with (
+                patch(
+                    "review_sensei.cli.baseline_from_history_document",
+                    side_effect=ReviewInputError("corrupt persisted baseline"),
+                ),
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(provider),
+                ),
+            ):
+                self.assertNotEqual(main(malformed_argv), 0)
+            malformed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            malformed_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(malformed_outcome["status"], "action_required")
+            self.assertEqual(
+                malformed_outcome["diagnostic"],
+                "durable_baseline_recovery_required",
+            )
+            self.assertEqual(provider.calls, 1)
+            self.assertIsNone(malformed_record.reservation_id)
+            self.assertEqual(malformed_record.convergence_history, initial_history)
+
+            stage_mismatch_history = json.loads(json.dumps(initial_history))
+            stage_mismatch_head = "c" * 40
+            stage_mismatch_history["baseline"]["cache_key"]["head_sha"] = (
+                stage_mismatch_head
+            )
+            stage_mismatch_history["baseline"]["cache_key"]["stage_digest"] = "f" * 64
+            stage_mismatch_argv = list(argv)
+            stage_mismatch_argv[stage_mismatch_argv.index("--head-sha") + 1] = (
+                stage_mismatch_head
+            )
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(
+                    convergence_history=stage_mismatch_history
+                ),
+            )
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(provider),
+            ):
+                self.assertNotEqual(main(stage_mismatch_argv), 0)
+            stage_mismatch_outcome = json.loads(
+                outcome_path.read_text(encoding="utf-8")
+            )
+            stage_mismatch_record = (
+                LocalSessionLedger(ledger_path).load(IDENTITY).record
+            )
+            self.assertEqual(stage_mismatch_outcome["status"], "action_required")
+            self.assertEqual(
+                stage_mismatch_outcome["diagnostic"],
+                "durable_baseline_recovery_required",
+            )
+            self.assertEqual(provider.calls, 1)
+            self.assertIsNone(stage_mismatch_record.reservation_id)
+
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(convergence_history=initial_history),
+            )
             LocalSessionLedger(ledger_path).replace(
                 IDENTITY,
                 lambda current: current.evolve(convergence_history=None),
@@ -665,6 +728,141 @@ class ReviewTransactionTests(unittest.TestCase):
             self.assertEqual(rejected.completed_initial_reviews, 1)
             self.assertEqual(rejected.completed_verification_rounds, 1)
             self.assertIsNone(rejected.reservation_id)
+
+    def test_cli_checkpoint_preserves_named_profile_in_cache_identity(self):
+        class RecordingProvider:
+            name = "fixture"
+            model = "deepseek-v4.1-flash:cloud"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                return ProviderResponse(
+                    text=json.dumps({"summary": "ok", "comments": []}),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        class RecordingRegistry:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def create(self, settings):
+                return self.provider
+
+        diff = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "review.patch"
+            response_path = root / "response.json"
+            output_path = root / "review.json"
+            outcome_path = root / "outcome.json"
+            configuration_path = root / "configuration.json"
+            ledger_path = root / "ledger"
+            diff_path.write_text(diff, encoding="utf-8")
+            response_path.write_text(
+                json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+            )
+            provider = RecordingProvider()
+            argv = [
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "ollama",
+                "--profile",
+                "deep-verification",
+                "--repository",
+                IDENTITY.repository,
+                "--pull-request",
+                str(IDENTITY.pull_request),
+                "--base-sha",
+                BASE_SHA,
+                "--head-sha",
+                HEAD_SHA,
+                "--review-mode",
+                "merge-focused",
+                "--session-ledger",
+                str(ledger_path),
+                "--output",
+                str(output_path),
+                "--outcome",
+                str(outcome_path),
+                "--configuration-context-output",
+                str(configuration_path),
+                "--no-learning-proposals",
+            ]
+            observed_profiles: list[str] = []
+            original_run = ReviewService.run
+
+            def recording_run(
+                service,
+                request,
+                *,
+                incremental=None,
+                current_key=None,
+                profile="default",
+                budget=None,
+            ):
+                observed_profiles.append(profile)
+                return original_run(
+                    service,
+                    request,
+                    incremental=incremental,
+                    current_key=current_key,
+                    profile=profile,
+                    budget=budget,
+                )
+
+            with (
+                patch.dict("os.environ", {"OLLAMA_API_KEY": "test-key"}),
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(provider),
+                ),
+                patch("review_sensei.service.ReviewService.run", recording_run),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertIsNotNone(record.convergence_history)
+            assert record.convergence_history is not None
+            self.assertEqual(
+                baseline_from_history_document(
+                    record.convergence_history["baseline"]
+                ).cache_key.profile,
+                "deep-verification",
+            )
+            self.assertEqual(
+                baseline_from_history_document(
+                    record.convergence_history["baseline"]
+                ).cache_key.model,
+                provider.model,
+            )
+
+            second_argv = list(argv)
+            second_argv[second_argv.index("--head-sha") + 1] = "c" * 40
+            with (
+                patch.dict("os.environ", {"OLLAMA_API_KEY": "test-key"}),
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(provider),
+                ),
+                patch("review_sensei.service.ReviewService.run", recording_run),
+            ):
+                self.assertEqual(main(second_argv), 0)
+
+            self.assertEqual(
+                observed_profiles,
+                ["deep-verification", "deep-verification"],
+            )
 
     def test_cli_checkpoint_completes_without_a_cache_key(self):
         class RecordingProvider:
@@ -832,6 +1030,7 @@ class ReviewTransactionTests(unittest.TestCase):
                 *,
                 incremental=None,
                 current_key=None,
+                profile="default",
                 budget=None,
             ):
                 live_requests.append(request)
@@ -840,6 +1039,7 @@ class ReviewTransactionTests(unittest.TestCase):
                     request,
                     incremental=incremental,
                     current_key=current_key,
+                    profile=profile,
                     budget=budget,
                 )
 
