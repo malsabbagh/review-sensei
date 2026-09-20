@@ -22,7 +22,7 @@ import ntpath
 import os
 import re
 import tempfile
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -1168,19 +1168,9 @@ def _checkpoint_transaction_record(
         raise ReviewInputError("session analysis reservation does not match")
     increments = _apply_slot(record, record.reserved_slot)
     next_generation = _next_generation(record)
-    pending = ReviewTransaction(
-        transaction_id=transaction.transaction_id,
-        repository=transaction.repository,
-        pull_request=transaction.pull_request,
-        base_sha=transaction.base_sha,
-        head_sha=transaction.head_sha,
-        policy_digest=transaction.policy_digest,
-        configuration_digest=transaction.configuration_digest,
-        evidence_digest=transaction.evidence_digest,
-        reservation_id=transaction.reservation_id,
+    pending = replace(
+        transaction.with_result(result_digest),
         generation=next_generation,
-        phase="publication_pending",
-        result_sha256=result_digest,
     )
     return record.evolve(
         now=now,
@@ -1203,8 +1193,6 @@ def checkpoint_review_analysis(
     now: datetime | None = None,
 ) -> ReviewResult:
     """Durably commit completed analysis once and return its bound artifact."""
-
-    from dataclasses import replace
 
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("review analysis result is invalid")

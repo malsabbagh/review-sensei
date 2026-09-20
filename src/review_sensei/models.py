@@ -1162,6 +1162,10 @@ class ReviewTransaction:
     def with_result(self, result_sha256: str) -> "ReviewTransaction":
         if not isinstance(result_sha256, str) or not _SHA256.fullmatch(result_sha256):
             raise ReviewInputError("review transaction result digest is invalid")
+        if "publication_pending" not in _TRANSACTION_PHASE_TRANSITIONS[self.phase]:
+            raise ReviewInputError(
+                f"review transaction phase transition {self.phase}->publication_pending is invalid"
+            )
         return ReviewTransaction(
             transaction_id=self.transaction_id,
             repository=self.repository,
