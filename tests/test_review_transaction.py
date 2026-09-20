@@ -668,6 +668,7 @@ diff --git a/src/helper.py b/src/helper.py
                     convergence_history=stage_mismatch_history
                 ),
             )
+            stage_mismatch_provider_calls = provider.calls
             with patch(
                 "review_sensei.cli.default_registry",
                 return_value=RecordingRegistry(provider),
@@ -675,7 +676,8 @@ diff --git a/src/helper.py b/src/helper.py
                 self.assertEqual(
                     main(stage_mismatch_argv), run_outcome_exit_code("action_required")
                 )
-            self.assertEqual(provider.calls, malformed_provider_calls)
+            self.assertEqual(provider.calls, stage_mismatch_provider_calls)
+            self.assertEqual(provider.calls, 1)
             stage_mismatch_outcome = json.loads(
                 outcome_path.read_text(encoding="utf-8")
             )
