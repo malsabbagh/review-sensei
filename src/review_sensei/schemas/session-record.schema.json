@@ -164,7 +164,7 @@
             "generation": {"type": "integer", "minimum": 0},
             "findings": {
               "type": "array",
-              "maxItems": 3,
+              "maxItems": 2,
               "items": {
                 "type": "object",
                 "additionalProperties": false,
@@ -187,15 +187,30 @@
         },
         "progress": {
           "type": "array",
-          "maxItems": 2,
+          "maxItems": 3,
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["event", "generation"],
             "properties": {
               "event": {"enum": ["completed", "invalidated", "recovery-required"]},
-              "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647}
-            }
+              "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+              "blocker_set_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+              "blocker_count": {"type": "integer", "minimum": 0, "maximum": 4096}
+            },
+            "allOf": [
+              {
+                "if": {"required": ["blocker_set_sha256"]},
+                "then": {
+                  "required": ["blocker_count"],
+                  "properties": {"event": {"const": "completed"}}
+                }
+              },
+              {
+                "if": {"required": ["blocker_count"]},
+                "then": {"required": ["blocker_set_sha256"]}
+              }
+            ]
           }
         },
         "provenance": {

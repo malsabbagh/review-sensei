@@ -7,12 +7,13 @@ from hashlib import sha256
 from typing import Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
-from ...context import ReviewContextCacheKey
+from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
     ReviewConvergencePolicy,
     RoundSessionState,
+    detect_no_progress,
     observe_shadow_admission,
 )
 from ...conversation import ConversationService
@@ -28,15 +29,18 @@ from ...session import (
     SessionIdentity,
     SessionLedger,
     admission_diagnostic,
+    blocker_set_digest,
     complete_review_publication,
     complete_session_round,
+    convergence_progress_blocker_sets,
     load_review_transaction_for_publication,
     prepare_session_round,
+    record_admitted_blocker_progress,
     record_session_failed_attempt,
     session_reservation_id,
     should_skip_automation,
 )
-from ...verifier import CandidateFinding
+from ...verifier import CandidateFinding, PublishableReview
 from .approval import has_blocking_findings, has_human_adjudication_findings
 from .broker_client import BrokerClient
 from .conversation import (
@@ -110,7 +114,6 @@ class GitHubApplication:
         related_paths: Sequence[str] | None = None,
         evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
-        no_progress: bool = False,
         configuration_context: Mapping[str, object] | None = None,
         evidence_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
@@ -370,10 +373,10 @@ class GitHubApplication:
             "coverage_complete": False,
             "independently_approval_eligible": False,
             "latest_head_reviewed": False,
-            "no_progress": no_progress,
+            "no_progress": False,
         }
         if isinstance(result, ReviewResult):
-            flags = _publication_round_flags(result, no_progress=no_progress)
+            flags = _publication_round_flags(result)
         if (
             ledger is not None
             and transaction_record is None
@@ -397,7 +400,6 @@ class GitHubApplication:
                         "independently_approval_eligible"
                     ],
                     latest_head_reviewed=flags["latest_head_reviewed"],
-                    no_progress=flags["no_progress"],
                 )
                 if should_skip_automation(prepared.decision, inference=False):
                     return _with_shadow(
@@ -536,6 +538,80 @@ class GitHubApplication:
             # silently widen it with paths persisted for an earlier head.
             publication_related_paths = () if related_paths is None else related_paths
         try:
+            prepared_publishable: PublishableReview | None = None
+            if (
+                operator_baseline_requested
+                and ledger is not None
+                and transaction_record is not None
+                and transaction_record.transaction is not None
+                and isinstance(self.reviewer, ReviewPublisher)
+            ):
+                # This is the sole post-admission result: its effective
+                # blockers are both recorded for F3 and passed unchanged to
+                # the publisher below. No caller flag or pre-admission model
+                # output can suppress a review event.
+                prepared_publishable = self.reviewer.prepare(
+                    result=result,
+                    diff=diff,
+                    head_sha=head_sha,
+                    candidates=candidates,
+                    snapshot=snapshot,
+                    snapshot_sha256=snapshot_sha256,
+                    evidence_policy=evidence_policy,
+                    convergence_policy=convergence_policy,
+                    blocker_candidates=blocker_candidates,
+                    input_blocker_candidates=input_blocker_candidates,
+                    baseline=durable_baseline,
+                    current_key=current_key,
+                    changed_paths=changed_paths,
+                    related_paths=publication_related_paths,
+                    evidence_confirmed_concerns=evidence_confirmed_concerns,
+                    authorized_dispositions=authorized_dispositions,
+                )
+                current_blockers = blocker_set_digest(
+                    tuple(
+                        finding_lifecycle_for_comment(comment).fingerprint
+                        for comment in prepared_publishable.result.comments
+                        if comment.effective_blocking is True
+                    )
+                )
+                prior_blockers = convergence_progress_blocker_sets(
+                    transaction_record.convergence_history
+                )
+                current_identity = f"{current_blockers[0]}:{current_blockers[1]}"
+                no_progress = detect_no_progress(
+                    previous_blocking=(
+                        f"{prior_blockers[-1][0]}:{prior_blockers[-1][1]}",
+                    )
+                    if prior_blockers
+                    else (),
+                    current_blocking=(current_identity,),
+                    earlier_blocking=(
+                        f"{prior_blockers[-2][0]}:{prior_blockers[-2][1]}",
+                    )
+                    if len(prior_blockers) >= 2
+                    else (),
+                )
+                durable_transaction = transaction_record.transaction
+                record_admitted_blocker_progress(
+                    ledger,
+                    identity,
+                    durable_transaction,
+                    blocker_set_sha256=current_blockers[0],
+                    blocker_count=current_blockers[1],
+                    suppress_publication=no_progress,
+                )
+                if no_progress:
+                    return _with_shadow(
+                        PublicationResult(
+                            status="handoff",
+                            diagnostic="no_progress",
+                        ),
+                        _shadow_observation(
+                            _shadow_state(prepared, flags),
+                            continuation_rounds=continuation_rounds,
+                        ),
+                    )
             publication = (
                 PublicationResult(
                     status="handoff",
@@ -572,6 +648,7 @@ class GitHubApplication:
                     related_paths=publication_related_paths,
                     evidence_confirmed_concerns=evidence_confirmed_concerns,
                     authorized_dispositions=authorized_dispositions,
+                    prepared_review=prepared_publishable,
                 )
             )
         except BaseException as publication_error:

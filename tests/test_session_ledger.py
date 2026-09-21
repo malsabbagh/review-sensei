@@ -47,7 +47,9 @@ from review_sensei.session import (
     SessionIdentity,
     SessionLoadResult,
     SessionRecord,
+    blocker_set_digest,
     complete_session_round,
+    convergence_progress_blocker_sets,
     issue_continuation_grant,
     migrate_session_document,
     prepare_session_round,
@@ -318,12 +320,12 @@ class SessionRecordTests(unittest.TestCase):
             reviewed_paths=("src/example.py",),
         )
         document = baseline_history_document(baseline)
-        self.assertEqual(len(document["findings"]), 3)
+        self.assertEqual(len(document["findings"]), 2)
         # Selection is deterministic and content-derived rather than dependent
         # on provider ordering or on how many retries the run took.
         self.assertEqual(
             [item["fingerprint"] for item in document["findings"]],
-            sorted(finding.fingerprint for finding in findings)[:3],
+            sorted(finding.fingerprint for finding in findings)[:2],
         )
         history = {
             "state": "completed",
@@ -357,6 +359,38 @@ class SessionRecordTests(unittest.TestCase):
         tampered["convergence_history"]["state"] = "recovery-required"  # type: ignore[index]
         with self.assertRaisesRegex(ReviewInputError, "integrity"):
             SessionRecord.from_dict(tampered)
+
+    def test_history_retains_three_canonical_admitted_blocker_sets_within_bound(self):
+        history = self._history()
+        first = blocker_set_digest(("1" * 64, "2" * 64))
+        second = blocker_set_digest(("3" * 64,))
+        third = blocker_set_digest(("1" * 64, "2" * 64))
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": generation,
+                "blocker_set_sha256": digest,
+                "blocker_count": count,
+            }
+            for generation, (digest, count) in enumerate(
+                (first, second, third), start=1
+            )
+        ]
+        encoded = json.dumps(history, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        self.assertLessEqual(len(encoded), 2048)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        validate_public_document(record.to_dict(), "session-record")
+        self.assertEqual(
+            convergence_progress_blocker_sets(record.convergence_history),
+            (first, second, third),
+        )
+
+    def test_legacy_progress_cannot_supply_blocker_identity(self):
+        self.assertEqual(convergence_progress_blocker_sets(self._history()), ())
 
     def test_convergence_history_rejects_unknown_nested_fields(self):
         history = self._history()

@@ -22,17 +22,22 @@ The envelope contains only closed metadata:
 
 - lifecycle state;
 - reviewed base/head, policy and coverage digests;
-- at most three stable concern and resolution-criterion digests;
-- two lifecycle progress markers; and
+- at most two stable concern and resolution-criterion digests; and
+- three lifecycle progress markers, each of which can carry a canonical
+  admitted-blocker-set digest.
 - an authenticated ledger digest.
 
 The history participates in `record_sha256`. A malformed, oversized, or
 tampered history therefore fails ledger parsing rather than permitting a fresh
 initialization. Only the current digest payload carries the envelope: a record
 holding one is rejected under the legacy or operator-paused digest shape, so an
-in-place upgrade can never keep a digest computed without it. The F3 slice will
-translate this persisted envelope into the runtime baseline used by the review
-service; F2 deliberately does not change the live inference path.
+in-place upgrade can never keep a digest computed without it. The F3 slice
+translates this persisted envelope into the runtime baseline used by the review
+service and reserves enough space for three trusted blocker-set identities.
+The baseline snapshot therefore retains two, rather than three, findings:
+keeping all three would exceed the fixed 2048-byte component bound when F3
+records the minimum repeat/oscillation evidence. F2 deliberately does not
+change the live inference path.
 
 ## Session witness
 
