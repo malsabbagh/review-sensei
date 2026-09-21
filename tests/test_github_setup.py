@@ -379,6 +379,46 @@ class SetupPlanTests(unittest.TestCase):
             "review-sensei/setup-v4-bbbbbbbbbbbb-stable",
         )
 
+    def test_generated_caller_forwards_command_context_for_the_command_operation(self):
+        workflow = SetupPlanBuilder().build("owner/repo").files[0].content
+
+        forwarding = {
+            "comment_body": "github.event.comment.body || ''",
+            "comment_actor": "github.event.comment.user.login || ''",
+            "comment_actor_type": "github.event.comment.user.type || 'User'",
+            "comment_association": "github.event.comment.author_association || ''",
+        }
+        for name, expression in forwarding.items():
+            matches = [
+                line.strip()
+                for line in workflow.splitlines()
+                if line.strip().startswith(f"{name}: ")
+            ]
+            self.assertEqual(
+                matches,
+                [f"{name}: ${{{{ {expression} }}}}"],
+                f"the generated caller must forward {name} exactly once",
+            )
+
+        self.assertIn(
+            "      ((github.event_name == 'issue_comment' &&\n"
+            "      github.event.action == 'created' &&\n"
+            "      github.event.issue.pull_request &&\n"
+            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (github.event.comment.author_association == 'OWNER' ||\n"
+            "      github.event.comment.author_association == 'MEMBER' ||\n"
+            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
+            "      github.event.comment.user.type != 'Bot' &&\n"
+            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
+            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
+            workflow,
+            "the command arm must re-apply the caller's mention, association, "
+            "and user-type checks before admitting operation=command, and the "
+            "command operation must reach the runner without requiring "
+            "REVIEWSENSEI_MENTION_REPLIES",
+        )
+        self.assertNotIn("@@", workflow)
+
     def test_builder_rejects_unsafe_public_workflow_tags(self):
         for tag in ("", "refs/tags/v4", "v4..next", "v4.", "v4.lock", "v4\n"):
             with self.subTest(tag=tag), self.assertRaises(GitHubSetupError):

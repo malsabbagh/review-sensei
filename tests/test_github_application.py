@@ -542,6 +542,55 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(record.dispositions[0]["actor"], "alice")
         self.assertEqual(record.dispositions[0]["head_sha"], "b" * 40)
 
+    def test_handler_fails_closed_on_prefilter_over_accepted_bodies(self):
+        # The caller prefilter is deliberately wider than the authoritative
+        # parser (ADR 0050), so it routes bodies to the command job that the
+        # parser then refuses: as conversational syntax (the mention-casing,
+        # second-mention, and Unicode separator shapes) or as a disposition
+        # reason that breaks the parser's bound. Both refusal shapes must stop
+        # before the broker exchange, and the reason-bound refusals must be
+        # the documented ones rather than any error the handler happens to
+        # raise.
+        write_options = {
+            "options": GitHubWriteOptions(
+                github_writes=True, github_session_ledger=True
+            ),
+            "oidc_token": "caller-oidc",
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "actor_login": "alice",
+            "association": "MEMBER",
+            "app_slug": "reviewsensei[bot]",
+            "source_comment_id": 71,
+        }
+        for body, refusal in (
+            ("@Sensei review pause", None),
+            ("@sensei review pause\n@sensei review pause", None),
+            ("@sensei review\u2003reenroll", None),
+            ('@sensei dismiss abcd1234abcd1234 --reason ""', "requires a reason"),
+            (
+                "@sensei dismiss abcd1234abcd1234 --reason " + "x" * 513,
+                "exceeds the bound",
+            ),
+        ):
+            with self.subTest(body=body):
+                if refusal is None:
+                    result = self.application.apply_maintainer_command(
+                        body=body, **write_options
+                    )
+                    self.assertEqual(result.summary, "not-a-command")
+                    self.assertFalse(result.applied)
+                else:
+                    # The CLI maps this refusal to a non-zero exit, so the
+                    # workflow fails before reaching the broker.
+                    with self.assertRaisesRegex(ReviewInputError, refusal):
+                        self.application.apply_maintainer_command(
+                            body=body, **write_options
+                        )
+                self.assertEqual(self.broker.exchanges, [])
+
     def test_hosted_command_mutation_requires_broker_identity_inputs(self):
         application = GitHubApplication(
             broker=self.broker,
@@ -619,6 +668,170 @@ class GitHubApplicationTests(unittest.TestCase):
                 source_comment_id=71,
                 app_slug="reviewsensei[bot]",
             )
+
+    def test_broker_attestation_rejects_untrusted_actor_authorization_fields(self):
+        body = "@sensei review pause"
+        attestation = {
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 71,
+            "actor": "alice",
+            "actor_type": "User",
+            "association": "MEMBER",
+            "command_id": 71,
+            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+        }
+
+        def reconstruct(**overrides):
+            return _command_from_broker_attestation(
+                body=body,
+                attestation={**attestation, **overrides},
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                source_comment_id=71,
+                app_slug="reviewsensei[bot]",
+            )
+
+        # The caller workflow already filters bots, but the hosted handler must
+        # not accept a broker attestation that claims a non-human actor.
+        for actor_type in ("Bot", "bot", "Bot ", "Service", None, 1):
+            with (
+                self.subTest(actor_type=actor_type),
+                self.assertRaisesRegex(GitHubPublicationError, "authorization fields"),
+            ):
+                reconstruct(actor_type=actor_type)
+        for association in (None, 1, ["MEMBER"], "CONTRIBUTOR", "NONE", ""):
+            with (
+                self.subTest(association=association),
+                self.assertRaisesRegex(GitHubPublicationError, "authorization fields"),
+            ):
+                reconstruct(association=association)
+        # The App may never mint a maintainer command for itself.
+        with self.assertRaisesRegex(GitHubPublicationError, "unauthorized"):
+            reconstruct(actor="reviewsensei[bot]", actor_type="User")
+        # A body that does not match the attested digest is a stale delivery.
+        with self.assertRaisesRegex(GitHubPublicationError, "command was stale"):
+            reconstruct(command_digest=sha256(b"@sensei review pause ").hexdigest())
+        for command_id in (None, 0, -1, True, "71"):
+            with (
+                self.subTest(command_id=command_id),
+                self.assertRaisesRegex(GitHubPublicationError, "command identity"),
+            ):
+                reconstruct(command_id=command_id)
+        for actor in (None, "", "   "):
+            with (
+                self.subTest(actor=actor),
+                self.assertRaisesRegex(GitHubPublicationError, "actor was invalid"),
+            ):
+                reconstruct(actor=actor)
+
+        command = reconstruct()
+        self.assertEqual(command.action, "pause")
+        self.assertEqual(command.actor, "alice")
+
+    def test_hosted_continue_revalidates_rounds_against_the_durable_ledger(self):
+        body = "@sensei review continue --rounds 1"
+        head_sha = "b" * 40
+        policy_digest = ReviewConvergencePolicy().digest()
+        ledger = InMemorySessionLedger()
+
+        class GrantBroker:
+            def __init__(self):
+                self.attestation = None
+
+            def authorize_session_mutation(self, token, **kwargs):
+                return SimpleNamespace(
+                    token="session-token",
+                    grant="opaque-one-use-grant",
+                    attestation=self.attestation,
+                )
+
+        broker = GrantBroker()
+
+        def attestation_for(source_comment_id, *, actor="alice", head=head_sha):
+            return {
+                "repository": "owner/repo",
+                "repository_id": 99,
+                "pull_request": 136,
+                "head_sha": head,
+                "operation": "command",
+                "source_comment_id": source_comment_id,
+                "actor": actor,
+                "actor_type": "User",
+                "association": "MEMBER",
+                "command_id": source_comment_id,
+                "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+            }
+
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        identity = SessionIdentity("owner/repo", 136, repository_id=99)
+
+        def deliver(source_comment_id, *, head=head_sha):
+            broker.attestation = attestation_for(source_comment_id, head=head)
+            with mock.patch.object(
+                application, "_session_ledger_for_token", return_value=ledger
+            ):
+                return application.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=True, github_session_ledger=True
+                    ),
+                    oidc_token="caller-oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha=head,
+                    body=body,
+                    actor_login="mallory",
+                    actor_type="Bot",
+                    association="CONTRIBUTOR",
+                    app_slug="reviewsensei[bot]",
+                    source_comment_id=source_comment_id,
+                    session_attestation={"version": 1},
+                )
+
+        first = deliver(71)
+        self.assertTrue(first.applied)
+        self.assertEqual(
+            first.summary,
+            "one-use continuation grant issued for the exact head and policy",
+        )
+        granted = ledger.load(identity).record
+        self.assertEqual(len(granted.continuation_grants), 1)
+
+        # A workflow redelivery of the identical command is idempotent rather
+        # than a second grant: --rounds cannot mint authority twice.
+        replay = deliver(71)
+        self.assertTrue(replay.applied)
+        replayed = ledger.load(identity).record
+        self.assertEqual(replayed.continuation_grants, granted.continuation_grants)
+        self.assertEqual(replayed.generation, granted.generation)
+
+        # A distinct continuation command for the same head and policy while
+        # the grant is still pending is refused by the durable ledger rather
+        # than admitted, so repeated --rounds 1 cannot stack invocations.
+        with self.assertRaisesRegex(ReviewInputError, "already pending"):
+            deliver(72)
+
+        # The same command id may not be replayed against a different head.
+        with self.assertRaisesRegex(ReviewInputError, "conflicts with persisted grant"):
+            deliver(71, head="c" * 40)
+
+        record = ledger.load(identity).record
+        self.assertEqual(len(record.continuation_grants), 1)
+        self.assertEqual(record.continuation_grants[0]["head_sha"], head_sha)
+        self.assertEqual(record.continuation_grants[0]["policy_digest"], policy_digest)
+        self.assertEqual(record.operator_paused, False)
 
     def test_hosted_command_rejects_an_injected_local_ledger(self):
         application = GitHubApplication(

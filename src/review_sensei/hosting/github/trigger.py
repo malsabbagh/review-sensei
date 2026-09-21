@@ -17,9 +17,14 @@ _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 _SENSEI_MENTION = "@sensei"
 _SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
+# Grammar and dispatch move together: every token below must be handled by
+# `parse_maintainer_command` and dispatched by `apply_maintainer_command`, and
+# `reenroll` is the sharp one - the ledger retires state only for an expired or
+# absent marker and refuses a live, unreadable, or ambiguous record. A token
+# added here without a dispatcher would parse and then be ignored.
 _MAINTAINER_COMMAND = re.compile(
     r"(?:"
-    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?)"
+    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?|reenroll)"
     r"|verify"
     r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
     r"\s+--reason\s+(?P<reason>\S.*)"

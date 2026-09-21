@@ -131,9 +131,45 @@ Positive:
 
 Negative:
 
-- Generated setup-v4 inline trigger script still classifies unknown
-  issue comments as reply until operators upgrade to the packaged
-  trigger module path. New CLI/trigger entry points understand commands.
+- The generated setup-v4 inline trigger script routes command-shaped
+  comments without the packaged parser, so its prefilter is deliberately
+  looser: bodies the parser rejects still resolve to `operation=command`
+  when they differ only in the axes the regex accepts beyond the parser —
+  the mention token's casing (the regex is case-insensitive, the parser's
+  mention is case-sensitive), a second mention on a later line (the regex
+  matches any mention at a line boundary while the parser reads only the
+  first mention of the body), an empty or non-printable `--reason` value, a
+  reason beyond the 512-byte bound, or separators inside the action words
+  that the regex `\s` accepts but the parser's ASCII-only bound does not.
+  The reusable workflow re-parses the body and the hosted handler returns
+  `not-a-command` without a write, so the residual cost is a wasted run
+  rather than an unauthorized mutation.
+- On a caller that has not adopted the packaged trigger module path, that
+  inline prefilter is the only command gate, so `REVIEWSENSEI_GITHUB_WRITES=true`
+  alone enables the command surface even while `REVIEWSENSEI_MENTION_REPLIES`
+  is false: the prefilter does not consult the reply switch, and the switch
+  still governs conversational replies only. This widening from the previous
+  release is deliberate; a comment the caller does not classify as a command
+  still resolves as a conversational reply. The command path is the
+  pull-request conversation (`issue_comment`); an inline review comment always
+  resolves as a conversational reply in every copy of the resolver, so
+  review-comment bodies remain governed by the reply switch.
+- The caller workflow's `@sensei`, association, and user-type checks are a
+  routing gate, not an authorization decision. Authority is re-derived
+  inside the reusable workflow from the broker attestation and the durable
+  session ledger, so editing the caller cannot widen it. The resolver's own
+  job condition requires the mention, an OWNER/MEMBER/COLLABORATOR
+  association, and a non-bot author before it can produce
+  `operation=command`, and the command branch re-applies the same three
+  checks on its `issue_comment` arm, so the branch does not admit a run
+  whose comment failed them even if the resolver's condition is later
+  edited; the price is that an authorized actor the broker later refuses
+  still starts a run that fails closed.
+- `@sensei review status` is not a looser read path: the hosted handler
+  still requires a caller-supplied OIDC token and exchanges the read-only
+  `review_status` capability before it reads any ledger state, so status is
+  bound to the same broker-attested actor and association as every
+  mutation, and only its broker scope is narrower.
 
 ## Alternatives considered
 
@@ -160,8 +196,9 @@ to `legacy` or omitting the ledger. Unresolved findings are not discarded.
 ## Follow-up work
 
 - C7: sequential evaluation and opt-in rollout.
-- Setup-v4 inline trigger parity for `operation=command` on older caller
-  workflows after packaged trigger adoption.
+- Retire the inline trigger fallback once every supported caller resolves
+  the packaged trigger module path, so the command grammar has one
+  implementation instead of four byte-locked copies.
 
 ## Links
 

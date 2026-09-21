@@ -1,5 +1,8 @@
+import ast
+import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -8,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from review_sensei.disposition import MAINTAINER_ACTIONS, parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.setup import _tagged_workflow
 from review_sensei.hosting.github.trigger import (
     TriggerResolution,
@@ -68,6 +73,146 @@ def inline_resolver_script(text: str) -> str:
     return textwrap.dedent(text[start:end] + "\n")
 
 
+INLINE_COMMAND_PREFILTER_START = (
+    'len(comment_body.encode("utf-8")) <= 4096 and re.search(r"'
+)
+
+
+def inline_command_prefilter(text: str) -> re.Pattern[str]:
+    """Return the inline command prefilter exactly as the heredoc evaluates it.
+
+    The template stores the pattern in a raw Python string literal, so a
+    doubled backslash is a literal backslash to the regex engine. Parsing the
+    literal instead of retyping the grammar is what keeps this test honest.
+    The call's flag argument is part of the grammar contract too: every copy
+    must compile with `re.IGNORECASE`, so a copy that drops or changes the
+    flags fails here instead of passing on a pattern-string equality check.
+    """
+
+    start = text.find(INLINE_COMMAND_PREFILTER_START)
+    if start < 0:
+        raise AssertionError("caller is missing the inline command prefilter")
+    start += len(INLINE_COMMAND_PREFILTER_START)
+    end = text.find('"', start)
+    if end < 0:
+        raise AssertionError("inline command prefilter terminator is missing")
+    literal = text[start:end]
+    if not text[end + 1 :].startswith(", comment_body, re.IGNORECASE)"):
+        raise AssertionError(
+            "inline command prefilter flags changed; every copy must compile "
+            "with re.IGNORECASE"
+        )
+    return re.compile(ast.literal_eval(f'r"{literal}"'), re.IGNORECASE)
+
+
+def command_parity_cases() -> list[dict[str, object]]:
+    fixture_path = ROOT / "tests" / "fixtures" / "maintainer-command-parity.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def parses_as_command(body: str) -> bool:
+    """Return the authoritative parser's decision for a comment body.
+
+    The parser refuses some bodies by raising, so an exception is a rejection
+    rather than a test error.
+    """
+
+    try:
+        return parse_maintainer_command(body, actor="test-maintainer") is not None
+    except ReviewInputError:
+        return False
+
+
+def repaired_command(body: str) -> str:
+    """Return a body with the documented over-acceptance dimensions removed.
+
+    The prefilter may only be wider than the parser along four axes: the
+    mention token's casing (the regex is case-insensitive, the parser's
+    mention is not), a second mention on a later line (the regex matches any
+    mention at a line boundary while the parser anchors on the first mention),
+    `\\s` against the parser's ASCII separator bound, and the disposition
+    reason value (emptiness, printability, the 512-byte bound). Lowercasing
+    the mention, dropping everything from a later mention, collapsing
+    whitespace, and replacing the reason with a short printable one must
+    therefore yield a body the parser accepts; a body that still fails is a
+    shape no documented rule covers.
+    """
+
+    repaired = re.sub(r"(?i)@sensei", "@sensei", body)
+    repaired = re.sub(r"\s+", " ", repaired)
+    if parses_as_command(repaired):
+        return repaired
+    without_later_mention = re.sub(r"\s+@sensei\b.*", "", repaired)
+    if parses_as_command(without_later_mention):
+        return without_later_mention
+    head, separator, _ = repaired.rpartition("--reason")
+    if not separator:
+        return repaired
+    return f"{head}{separator} accepted"
+
+
+def command_corpus() -> list[str]:
+    """Enumerate command-shaped bodies from the grammar rather than by hand.
+
+    The fixed fixture pins behavior for known shapes; this corpus spells the
+    grammar's own tokens, separators, casing, and reason variants so a parser
+    addition the prefilter cannot route fails here instead of falling through
+    to a conversational reply at runtime.
+    """
+
+    fingerprint16 = "0123456789abcdef"
+    fingerprint64 = "abcdef0123456789" * 4
+    commands = (
+        "review status",
+        "review pause",
+        "review continue",
+        "review continue --rounds 0",
+        "review continue --rounds 1",
+        "review reenroll",
+        "verify",
+        f"dismiss {fingerprint16} --reason x",
+        f"defer {fingerprint64} --reason x",
+        f"accept-risk {fingerprint16} --reason x",
+        f"dismiss {fingerprint16.upper()} --reason x",
+        f"dismiss {fingerprint16[:-1]} --reason x",
+        f"dismiss {fingerprint64}a --reason x",
+    )
+    reasons = (
+        "x",
+        "accepted reason",
+        '"quoted reason"',
+        '""',
+        "\u2003",
+        "é",
+        "a" * 512,
+        "a" * 513,
+        "x\ny",
+        "x --reason y",
+    )
+    bodies: list[str] = []
+    for command, mention, prefix, separator, suffix in itertools.product(
+        commands,
+        ("@sensei", "@Sensei", "@SENSEI"),
+        ("", "note ", "note\n", "> "),
+        (" ", "\t", "\n", "  "),
+        ("", " ", "\n", " trailing"),
+    ):
+        tokenized = re.sub(r"\s+", lambda _match: separator, command)
+        bodies.append(f"{prefix}{mention}{separator}{tokenized}{suffix}")
+    for reason, prefix, separator in itertools.product(
+        reasons, ("", "note ", "x"), (" ", "\t", "\n", "  ")
+    ):
+        bodies.append(
+            f"{prefix}@sensei{separator}dismiss{separator}{fingerprint16}"
+            f"{separator}--reason{separator}{reason}"
+        )
+    # The mention loop above spells a single casing per body; a mixed-case
+    # mention paired with a case-sensitive action token must still repair, so
+    # the over-acceptance set pins that interaction explicitly.
+    bodies.append("@SeNsEi review ReEnRoLl")
+    return bodies
+
+
 class GitHubTriggerTests(unittest.TestCase):
     def test_issue_comment_requests_rescan(self):
         self.assertTrue(
@@ -85,6 +230,21 @@ class GitHubTriggerTests(unittest.TestCase):
         resolution = resolve_issue_comment("@sensei review pause", _pull())
         self.assertEqual(resolution.operation, "command")
         self.assertEqual(resolution.enable_review, "false")
+
+    def test_every_parser_accepted_command_routes_to_the_command_operation(self):
+        # The prefilter is deliberately narrower work than the parser, so the
+        # invariant is one-directional: anything the authoritative parser
+        # accepts must reach the hosted command handler instead of falling
+        # through to a conversational reply.
+        cases = command_parity_cases()
+        accepted = [case["body"] for case in cases if case["accepted"]]
+        self.assertIn("@sensei review reenroll", accepted)
+        self.assertGreater(len(accepted), 0)
+        for body in accepted:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    resolve_issue_comment(body, _pull()).operation, "command"
+                )
 
     def test_oversized_maintainer_command_does_not_reach_command_execution(self):
         resolution = resolve_issue_comment(
@@ -324,12 +484,176 @@ class InlineCallerResolverTests(unittest.TestCase):
         self.assertIn("_RESCAN = " + pattern, trigger)
         self.assertIn("rescan = " + pattern, script)
 
+    def test_embedded_command_prefilter_covers_every_parser_accepted_command(self):
+        prefilter = inline_command_prefilter(REPO_CALLER.read_text(encoding="utf-8"))
+        for name, text in (
+            ("example", EXAMPLE_CALLER.read_text(encoding="utf-8")),
+            ("generated", _tagged_workflow("v5")),
+            (
+                "worker-template",
+                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts").read_text(
+                    encoding="utf-8"
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    inline_command_prefilter(text).pattern, prefilter.pattern
+                )
+        for case in command_parity_cases():
+            body = case["body"]
+            with self.subTest(body=body):
+                self.assertEqual(parses_as_command(body), case["accepted"])
+        # The invariant that keeps the feature working: a command the
+        # authoritative parser accepts must never fall through to a
+        # conversational reply on a caller without the packaged module. The
+        # accepted side is derived from the parser, so a grammar change that
+        # the prefilter cannot route fails here instead of misrouting at
+        # runtime.
+        accepted = 0
+        for body in command_corpus():
+            if not parses_as_command(body):
+                continue
+            accepted += 1
+            with self.subTest(body=body):
+                self.assertTrue(prefilter.search(body) is not None)
+        self.assertGreater(accepted, 200)
+        # Over-acceptance is bounded by the documented dimensions rather than
+        # by a hand-pinned list: every corpus body the prefilter matches while
+        # the parser rejects must become parser-accepted once its whitespace is
+        # ASCII and its reason is short and printable.
+        over_accepted = [
+            body
+            for body in command_corpus()
+            if not parses_as_command(body) and prefilter.search(body) is not None
+        ]
+        for body in over_accepted:
+            with self.subTest(body=body):
+                self.assertTrue(
+                    parses_as_command(repaired_command(body)),
+                    "prefilter matched a shape outside the documented "
+                    "over-acceptance dimensions",
+                )
+        self.assertGreater(len(over_accepted), 0)
+        # The prefilter is allowed to be wider than the parser because the
+        # reusable workflow re-parses the body and fails closed on
+        # "not-a-command". These eleven fixture bodies differ on purpose: a
+        # mention whose casing the case-insensitive regex accepts (including
+        # a mixed-case mention paired with a case-sensitive action token), a
+        # second mention on a later line (the regex matches any mention at a line
+        # boundary while the parser anchors on the first mention of the
+        # body), reasons that the parser bounds by emptiness, by printable
+        # ASCII, or by 512 bytes, and separators that the parser restricts to
+        # ASCII whitespace while the prefilter uses \s. Any other difference
+        # means the two grammars drifted. Each member is also driven through
+        # the repair harness, so a body that is not on a documented axis fails
+        # against the contract rather than only against the snapshot; the
+        # snapshot below still stays, because it catches an on-axis body that
+        # was not deliberately added to the fixture.
+        fingerprint = "abcd1234abcd1234"
+        over_accepted = {
+            case["body"]
+            for case in command_parity_cases()
+            if not case["accepted"] and prefilter.search(case["body"]) is not None
+        }
+        for body in over_accepted:
+            with self.subTest(body=body):
+                self.assertTrue(
+                    parses_as_command(repaired_command(body)),
+                    "fixture body is over-accepted outside the documented "
+                    "over-acceptance dimensions",
+                )
+        self.assertEqual(
+            over_accepted,
+            {
+                "@Sensei review pause",
+                "@SENSEI review pause",
+                "@SeNsEi review ReEnRoLl",
+                "@sensei review pause\n@sensei review pause",
+                "@sensei review pause\n@sensei verify",
+                f'@sensei dismiss {fingerprint} --reason ""',
+                f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
+                f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
+                "@sensei review\x1creenroll",
+                "@sensei review\x85reenroll",
+                "@sensei review\u2003reenroll",
+            },
+        )
+
+    def test_command_corpus_covers_every_maintainer_action(self):
+        """The corpus must exercise every action the parser can return.
+
+        The fixture pins accepted shapes for known bodies; this fails when the
+        grammar gains an action token the generated corpus does not spell, so
+        the derived accepted set cannot silently miss it.
+        """
+
+        actions: set[str] = set()
+        for body in command_corpus():
+            try:
+                command = parse_maintainer_command(body, actor="test-maintainer")
+            except ReviewInputError:
+                continue
+            if command is not None:
+                actions.add(command.action)
+        self.assertEqual(actions, set(MAINTAINER_ACTIONS))
+
+    def test_inline_command_prefilter_copies_are_enumerated(self):
+        """A new prefilter copy must be a deliberate act.
+
+        The grammar lives in four byte-locked artifacts plus the two tests
+        that read them; a copy added anywhere else should fail here with the
+        new path named instead of passing as an unguarded drift site.
+        """
+
+        marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
+        pruned = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+        }
+        found: set[str] = set()
+        for directory, subdirectories, files in os.walk(ROOT):
+            subdirectories[:] = [name for name in subdirectories if name not in pruned]
+            for name in files:
+                path = Path(directory) / name
+                if marker in path.read_bytes():
+                    found.add(path.relative_to(ROOT).as_posix())
+        self.assertEqual(
+            found,
+            {
+                ".github/workflows/review-sensei-review.yml",
+                "deploy/cloudflare/src/setup-content.ts",
+                "deploy/cloudflare/test/setup-content.test.ts",
+                "examples/github-actions/review-sensei-review.yml",
+                "src/review_sensei/hosting/github/setup.py",
+                "tests/test_github_trigger.py",
+            },
+        )
+
     def test_inline_fallback_matches_trigger_module_outputs(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
         pull = _pull(head_sha="016017b" + ("0" * 33))
         cases = (
             ("issue_comment", "@sensei please re-scan commit 016017b", "false"),
             ("issue_comment", "@sensei what changed?", "false"),
+            ("issue_comment", "@sensei review status", "false"),
+            ("issue_comment", "@sensei review pause", "false"),
+            ("issue_comment", "@sensei review reenroll", "false"),
+            ("issue_comment", "@sensei Review Reenroll", "false"),
+            ("issue_comment", "@sensei review continue --rounds 0", "false"),
+            ("issue_comment", "@sensei verify", "false"),
+            (
+                "issue_comment",
+                "@sensei dismiss abcd1234abcd1234 --reason accepted",
+                "false",
+            ),
+            ("issue_comment", "@sensei review continue --rounds 2", "false"),
+            ("issue_comment", "@sensei review reenroll trailing", "false"),
             ("pull_request", "", "true"),
             ("pull_request_review_comment", "@sensei fixed?", "false"),
             ("workflow_dispatch", "", "false"),
@@ -378,6 +702,42 @@ class InlineCallerResolverTests(unittest.TestCase):
                         module_output.read_text(encoding="utf-8"),
                         inline_output.read_text(encoding="utf-8"),
                     )
+
+    def test_generated_caller_routes_reenroll_to_the_command_operation(self):
+        # The generated caller's inline resolver decides the operation its
+        # job guard selects on, so drive it with a reenroll body rather than
+        # inferring the value from the prefilter's grammar. reenroll retires
+        # durable state, which is why the routing deserves its own pin.
+        caller = _tagged_workflow("v5")
+        script = inline_resolver_script(caller)
+        self.assertIn(
+            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n",
+            caller,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pull_path = root / "pull.json"
+            pull_path.write_text(json.dumps(_pull()), encoding="utf-8")
+            output_path = root / "reenroll.out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-",
+                    str(pull_path),
+                    "false",
+                    "issue_comment",
+                    "@sensei review reenroll",
+                ],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={**os.environ, "GITHUB_OUTPUT": str(output_path)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            emitted = output_path.read_text(encoding="utf-8")
+        self.assertIn("operation=command\n", emitted)
+        self.assertIn("enable_review=false\n", emitted)
 
 
 if __name__ == "__main__":

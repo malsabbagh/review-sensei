@@ -11,6 +11,7 @@ from unittest.mock import patch
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.disposition import (
+    MAINTAINER_ACTIONS,
     FindingDisposition,
     apply_session_command,
     authorized_maintainer,
@@ -64,6 +65,26 @@ class MaintainerCommandParseTests(unittest.TestCase):
         self.assertEqual(dismissed.reason, "accepted architecture")
         reenroll = parse_maintainer_command("@sensei review reenroll", actor="alice")
         self.assertEqual(reenroll.action, "reenroll")
+
+    def test_action_identifiers_are_lowercase_for_any_action_casing(self):
+        """The grammar is case-insensitive; dispatch keys stay in the closed set."""
+
+        cases = (
+            ("@sensei review STATUS", "status"),
+            ("@sensei review PAUSE", "pause"),
+            ("@sensei review CONTINUE --rounds 1", "continue"),
+            ("@sensei review REENROLL", "reenroll"),
+            ("@sensei VERIFY", "verify"),
+            ("@sensei DISMISS abcd1234abcd1234 --reason accepted", "dismiss"),
+            ("@sensei DEFER abcd1234abcd1234 --reason accepted", "defer"),
+            ("@sensei ACCEPT-RISK abcd1234abcd1234 --reason accepted", "accept-risk"),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                command = parse_maintainer_command(body, actor="alice")
+                self.assertIsNotNone(command)
+                self.assertEqual(command.action, expected)
+                self.assertIn(command.action, MAINTAINER_ACTIONS)
 
     def test_unknown_or_bot_self_commands_are_ignored(self):
         self.assertIsNone(

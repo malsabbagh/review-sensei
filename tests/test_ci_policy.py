@@ -423,6 +423,37 @@ class ActionPinPolicyTests(unittest.TestCase):
             "trusted trigger resolver is missing from the default branch", text
         )
 
+    def test_command_branch_rechecks_the_author_before_admitting_the_operation(self):
+        """operation=command must not be the branch's only admission check.
+
+        The resolver's job condition already requires the mention, an
+        OWNER/MEMBER/COLLABORATOR association, and a non-bot author, but the
+        command branch is a separate job: re-applying the same three checks
+        there keeps a future edit to the resolver's condition from widening the
+        branch, so an over-accepted body from an unauthorized author can never
+        satisfy it.
+        """
+
+        root = Path(__file__).resolve().parents[1]
+        arm = (
+            "      ((github.event_name == 'issue_comment' &&\n"
+            "      github.event.action == 'created' &&\n"
+            "      github.event.issue.pull_request &&\n"
+            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (github.event.comment.author_association == 'OWNER' ||\n"
+            "      github.event.comment.author_association == 'MEMBER' ||\n"
+            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
+            "      github.event.comment.user.type != 'Bot' &&\n"
+            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
+            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n"
+        )
+        for relative in (
+            ".github/workflows/review-sensei-review.yml",
+            "examples/github-actions/review-sensei-review.yml",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIn(arm, (root / relative).read_text(encoding="utf-8"))
+
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (
             Path(__file__).resolve().parents[1]

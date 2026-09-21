@@ -782,6 +782,15 @@ run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', githu
 # that tag is the public setup-v4 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
+#
+# REVIEWSENSEI_GITHUB_WRITES also exposes the maintainer command surface:
+# @sensei review status|pause|continue|reenroll, @sensei verify, and
+# @sensei dismiss|defer|accept-risk run whenever github writes are enabled,
+# regardless of REVIEWSENSEI_MENTION_REPLIES. That variable now only controls
+# conversational @sensei replies. Commands are read from the pull-request
+# conversation (issue comments); an inline review comment on a diff line
+# always resolves as a conversational reply and still requires
+# REVIEWSENSEI_MENTION_REPLIES=true.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -855,7 +864,6 @@ jobs:
       github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -1033,6 +1041,9 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue(?:\s+--rounds\s+[01])?|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+                  operation = "command"
+                  enable_review = "false"
               else:
                   operation = "reply"
                   enable_review = "false"
@@ -1067,7 +1078,6 @@ jobs:
       github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -1075,8 +1085,11 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot') ||
-      (github.event_name == 'pull_request_review_comment' &&
+      github.event.comment.user.type != 'Bot' &&
+      (needs.resolve-trigger.outputs.operation == 'command' ||
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||
+      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
+      github.event_name == 'pull_request_review_comment' &&
       github.event.action == 'created' &&
       contains(github.event.comment.body, '@sensei') &&
       (github.event.comment.author_association == 'OWNER' ||
@@ -1101,6 +1114,10 @@ jobs:
       source_comment_id: ${{ inputs.source_comment_id || github.event.comment.id }}
       source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: ${{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
+      comment_body: ${{ github.event.comment.body || '' }}
+      comment_actor: ${{ github.event.comment.user.login || '' }}
+      comment_actor_type: ${{ github.event.comment.user.type || 'User' }}
+      comment_association: ${{ github.event.comment.author_association || '' }}
       review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
       pull_request_title: ${{ needs.resolve-trigger.outputs.pull_request_title || inputs.pull_request_title || github.event.pull_request.title }}
       stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
