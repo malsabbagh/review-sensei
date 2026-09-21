@@ -341,12 +341,28 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
-                status = main(["evaluate-convergence", "--json", "--observed"])
+                status = main(
+                    [
+                        "evaluate-convergence",
+                        "--json",
+                        "--observed",
+                        "--source-identity",
+                        "source-sha",
+                        "--package-identity",
+                        "review-sensei@0.5.0",
+                        "--workflow-identity",
+                        "workflow-sha",
+                    ]
+                )
         self.assertEqual(status, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["mode"], "merge-focused")
         self.assertTrue(payload["events"])
         self.assertEqual(payload["events"][0]["provider_calls"], 1)
+        self.assertEqual(payload["evidence_identity"]["source_identity"], "source-sha")
+        self.assertEqual(
+            payload["evidence_identity"]["workflow_identity"], "workflow-sha"
+        )
 
     def test_cli_replays_sentinel_and_keeps_legacy_default(self):
         stdout = io.StringIO()

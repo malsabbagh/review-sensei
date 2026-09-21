@@ -161,6 +161,7 @@ class ObservedSequenceReport:
     finding_metrics: ObservedFindingMetrics
     execution_metrics: ObservedExecutionMetrics
     shadow_isolated: bool
+    evidence_identity: ObservedEvidenceIdentity
     approval_events: int | None
     cap_created_approval: bool | None
     cutover_status: str
@@ -181,6 +182,7 @@ class ObservedSequenceReport:
             "finding_metrics": self.finding_metrics.to_dict(),
             "execution_metrics": self.execution_metrics.to_dict(),
             "shadow_isolated": self.shadow_isolated,
+            "evidence_identity": self.evidence_identity.to_dict(),
             "approval_events": self.approval_events,
             "cap_created_approval": self.cap_created_approval,
             "cutover_status": self.cutover_status,
@@ -236,6 +238,44 @@ class ObservedExecutionMetrics:
             "handoffs": self.handoffs,
             "provider_calls": self.provider_calls,
             "failed_attempts": self.failed_attempts,
+        }
+
+
+@dataclass(frozen=True)
+class ObservedEvidenceIdentity:
+    """Bounded identifiers that make an observed run independently auditable."""
+
+    source_identity: str
+    package_identity: str
+    workflow_identity: str
+    configuration_digest: str
+    fixture_identity: str
+    command: str
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("source identity", self.source_identity),
+            ("package identity", self.package_identity),
+            ("workflow identity", self.workflow_identity),
+            ("configuration digest", self.configuration_digest),
+            ("fixture identity", self.fixture_identity),
+            ("command", self.command),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.encode("utf-8")) > 256
+            ):
+                raise ReviewInputError(f"observed {label} is invalid")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "source_identity": self.source_identity,
+            "package_identity": self.package_identity,
+            "workflow_identity": self.workflow_identity,
+            "configuration_digest": self.configuration_digest,
+            "fixture_identity": self.fixture_identity,
+            "command": self.command,
         }
 
 
@@ -399,7 +439,10 @@ class _ObservedGitHub:
 
 
 def run_observed_review_sequence(
-    steps: Sequence[SequenceStep], policy: ReviewConvergencePolicy
+    steps: Sequence[SequenceStep],
+    policy: ReviewConvergencePolicy,
+    *,
+    evidence_identity: ObservedEvidenceIdentity | None = None,
 ) -> ObservedSequenceReport:
     """Exercise service, durable admission, and publication across fresh jobs.
 
@@ -413,6 +456,18 @@ def run_observed_review_sequence(
         raise ReviewInputError("review convergence policy is invalid")
     if not isinstance(steps, Sequence) or not steps:
         raise ReviewInputError("observed sequence requires at least one step")
+    report_identity = evidence_identity or ObservedEvidenceIdentity(
+        source_identity="unavailable",
+        package_identity="unavailable",
+        workflow_identity="unavailable",
+        configuration_digest=policy.digest(),
+        fixture_identity="observed-convergence-fixture-v1",
+        command="review-sensei evaluate-convergence --observed",
+    )
+    if not isinstance(report_identity, ObservedEvidenceIdentity):
+        raise ReviewInputError("observed evidence identity is invalid")
+    if report_identity.configuration_digest != policy.digest():
+        raise ReviewInputError("observed evidence configuration is stale")
     from .hosting.github.application import GitHubApplication, GitHubWriteOptions
 
     github = _ObservedGitHub()
@@ -516,9 +571,9 @@ def run_observed_review_sequence(
                     result, cache_key=current_key, policy=policy
                 )
                 baseline_events += 1
-        identity = SessionIdentity("owner/repo", 136, repository_id=136)
+        session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
         ledger = LocalSessionLedger(ledger_root)
-        loaded_record = ledger.load(identity).record
+        loaded_record = ledger.load(session_identity).record
         completed_rounds = (
             0
             if loaded_record is None
@@ -537,7 +592,7 @@ def run_observed_review_sequence(
         )
         shadow_isolated = (
             len(github.calls) == publisher_calls_before_shadow
-            and ledger.load(identity).record == shadow_record_before
+            and ledger.load(session_identity).record == shadow_record_before
         )
         command_application = GitHubApplication(
             broker=cast(Any, _ObservedBroker()),
@@ -621,14 +676,28 @@ def run_observed_review_sequence(
             failed_attempts=failed_attempts,
         ),
         shadow_isolated=shadow_isolated,
+        evidence_identity=report_identity,
         approval_events=github.approval_events,
         cap_created_approval=cap_created_approval,
         cutover_status="not_ready",
-        unmet_criteria=(
-            "cap-created approval remains unknown until the supplied sequence exercises a round cap",
-            "duplicate, reopen, and contradiction finding metrics need labelled fixtures",
-            "installed source, package, and workflow identities are not captured by this offline harness",
-            "maintainer-approved cutover thresholds have not been recorded",
+        unmet_criteria=tuple(
+            item
+            for item in (
+                "cap-created approval remains unknown until the supplied sequence exercises a round cap",
+                "duplicate, reopen, and contradiction finding metrics need labelled fixtures",
+                (
+                    "installed source, package, and workflow identities are unavailable"
+                    if "unavailable"
+                    in {
+                        report_identity.source_identity,
+                        report_identity.package_identity,
+                        report_identity.workflow_identity,
+                    }
+                    else None
+                ),
+                "maintainer-approved cutover thresholds have not been recorded",
+            )
+            if item is not None
         ),
     )
     return report
@@ -747,6 +816,7 @@ def compare_sequence_policies(
 
 
 __all__ = [
+    "ObservedEvidenceIdentity",
     "ObservedExecutionMetrics",
     "ObservedFindingMetrics",
     "ObservedSequenceEvent",

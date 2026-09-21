@@ -186,6 +186,7 @@ These imports are public and stable within a major version:
 - `review_sensei.resolve_shadow_review_mode`
 - `review_sensei.SequenceReport`
 - `review_sensei.ObservedSequenceReport`
+- `review_sensei.ObservedEvidenceIdentity`
 - `review_sensei.ObservedExecutionMetrics`
 - `review_sensei.ObservedFindingMetrics`
 - `review_sensei.ObservedSequenceEvent`

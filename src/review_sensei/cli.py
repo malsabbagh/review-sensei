@@ -2167,6 +2167,21 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the real-component offline evidence harness with mocked model and GitHub edges",
     )
+    parser.add_argument(
+        "--source-identity",
+        default=os.getenv("GITHUB_SHA", "unavailable"),
+        help="Exact source revision for --observed evidence (default: GITHUB_SHA or unavailable)",
+    )
+    parser.add_argument(
+        "--package-identity",
+        default=_package_version(),
+        help="Exact package identity for --observed evidence",
+    )
+    parser.add_argument(
+        "--workflow-identity",
+        default=os.getenv("GITHUB_WORKFLOW_REF", "unavailable"),
+        help="Exact workflow identity for --observed evidence (default: GITHUB_WORKFLOW_REF or unavailable)",
+    )
     return parser
 
 
@@ -2178,6 +2193,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             resolve_review_convergence_policy,
         )
         from .sequence import (
+            ObservedEvidenceIdentity,
             SequenceStep,
             compare_sequence_policies,
             replay_review_sequence,
@@ -2217,7 +2233,21 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 "observed evidence and legacy comparison cannot run in one report"
             )
         if args.observed:
-            observed = run_observed_review_sequence(steps, policy)
+            observed = run_observed_review_sequence(
+                steps,
+                policy,
+                evidence_identity=ObservedEvidenceIdentity(
+                    source_identity=args.source_identity,
+                    package_identity=args.package_identity,
+                    workflow_identity=args.workflow_identity,
+                    configuration_digest=policy.digest(),
+                    fixture_identity="observed-convergence-fixture-v1",
+                    command=(
+                        "review-sensei evaluate-convergence --observed "
+                        f"--review-mode {policy.mode}"
+                    ),
+                ),
+            )
             payload = observed.to_dict()
             if args.as_json:
                 sys.stdout.write(json.dumps(payload, indent=2) + "\n")

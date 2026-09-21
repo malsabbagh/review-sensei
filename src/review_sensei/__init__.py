@@ -132,6 +132,7 @@ from .release_manifest import (
     verify_worker_compatibility,
 )
 from .sequence import (
+    ObservedEvidenceIdentity,
     ObservedExecutionMetrics,
     ObservedFindingMetrics,
     ObservedSequenceEvent,
@@ -283,6 +284,7 @@ __all__ = [
     "resolve_review_convergence_policy",
     "resolve_shadow_review_mode",
     "SequenceReport",
+    "ObservedEvidenceIdentity",
     "ObservedExecutionMetrics",
     "ObservedFindingMetrics",
     "ObservedSequenceEvent",
