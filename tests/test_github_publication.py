@@ -232,6 +232,32 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+        valid_http, valid_calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        published = ReviewPublisher(http=valid_http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=result(),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            prepared_review=prepared,
+        )
+        self.assertEqual(published.status, "published")
+        self.assertEqual(valid_calls[4][0], "POST")
+        self.assertTrue(valid_calls[4][1].endswith("/repos/owner/repo/pulls/2/reviews"))
+
         original_comment = result().comments[0]
         runtime_tampered = replace(
             result(),

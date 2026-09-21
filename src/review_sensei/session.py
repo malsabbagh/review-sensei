@@ -51,11 +51,12 @@ MAX_SESSION_RECORD_BYTES = 4096
 MAX_CONVERGENCE_HISTORY_BYTES = 2048
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
 SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
-# This is a deliberately coarse structural ceiling.  The publisher's review
-# limits bound the real number of admitted findings; this envelope bound keeps
-# an untrusted marker from driving an allocation or making the session record
-# unbounded without coupling the ledger to provider-specific limits.
-MAX_DURABLE_BLOCKER_COUNT = MAX_SESSION_RECORD_BYTES
+# This is a deliberately coarse structural ceiling, independent of the byte
+# budgets above.  The publisher's review limits bound the real number of
+# admitted findings; this envelope bound keeps an untrusted marker from
+# driving an allocation without coupling the ledger to provider-specific
+# limits or to the serialized record size.
+MAX_DURABLE_BLOCKER_COUNT = 4_096
 MAX_STORED_CONTINUATION_GRANTS = 4
 MAX_CONTINUATION_COMMAND_ID_BYTES = 128
 MAX_CONTINUATION_GRANT_TTL = timedelta(days=7)
@@ -403,25 +404,56 @@ def blocker_set_digest(fingerprints: Sequence[str]) -> tuple[str, int]:
 def convergence_progress_blocker_sets(
     history: Mapping[str, object] | None,
 ) -> tuple[tuple[str, int], ...]:
-    """Return only complete trusted blocker sets from a validated history."""
+    """Return complete blocker sets, rejecting malformed marker metadata.
+
+    Legacy lifecycle-only entries remain intentionally ignored, but an entry
+    that starts claiming blocker metadata must be complete and well-typed.
+    Failing closed here prevents a malformed in-memory or bypassed history
+    from being converted into an empty window, which the no-progress detector
+    treats as verified progress.
+    """
 
     if not isinstance(history, Mapping):
         return ()
+    if "progress" not in history:
+        return ()
     progress = history.get("progress")
     if not isinstance(progress, list):
-        return ()
+        raise ReviewInputError("session convergence progress is invalid")
+    if len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES:
+        raise ReviewInputError(
+            "session convergence progress exceeds the configured bound"
+        )
     result: list[tuple[str, int]] = []
     for item in progress:
         if not isinstance(item, Mapping):
-            return ()
+            raise ReviewInputError("session convergence progress item is invalid")
+        has_digest = "blocker_set_sha256" in item
+        has_count = "blocker_count" in item
+        if not has_digest and not has_count:
+            continue
+        if not has_digest or not has_count:
+            raise ReviewInputError("session convergence blocker marker is incomplete")
+        if item.get("event") != "completed":
+            raise ReviewInputError("session convergence blocker event is invalid")
         digest = item.get("blocker_set_sha256")
         count = item.get("blocker_count")
-        if digest is None and count is None:
-            continue
         if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            return ()
+            raise ReviewInputError("session convergence blocker digest is invalid")
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            return ()
+            raise ReviewInputError("session convergence blocker count is invalid")
+        if count > MAX_DURABLE_BLOCKER_COUNT:
+            raise ReviewInputError(
+                "session convergence blocker count exceeds the configured bound"
+            )
+        if "transaction_id" in item:
+            transaction_id = item.get("transaction_id")
+            if not isinstance(transaction_id, str) or not _SHA256.fullmatch(
+                transaction_id
+            ):
+                raise ReviewInputError(
+                    "session convergence blocker transaction id is invalid"
+                )
         result.append((digest, count))
     return tuple(result)
 
@@ -2058,7 +2090,7 @@ def suppress_review_publication(
             raise ReviewInputError("publication transaction identity does not match")
         if current.phase == "publication_suppressed":
             return record
-        if current.phase != "publication_pending":
+        if current.phase not in {"publication_pending", "publication_failed"}:
             raise ReviewInputError(
                 "publication suppression phase transition is invalid"
             )
@@ -2150,10 +2182,19 @@ def record_admitted_blocker_progress(
             # A retry can observe a terminal transaction whose record
             # generation advanced while the admitted progress marker still
             # carries the transaction generation from before publication. The
-            # The transaction id is the ownership witness: an older round
-            # with the same blocker set must never be treated as this retry.
+            # transaction id is the ownership witness: an older round with
+            # the same blocker set must never be treated as this retry.
+            if current.phase == "publication_failed" and suppress_publication:
+                updated_history = dict(history)
+                updated_history["progress"] = [*progress[:-1], item]
+                return record.evolve(
+                    now=now,
+                    generation=_next_generation(record),
+                    transaction=current.with_phase("publication_suppressed"),
+                    convergence_history=updated_history,
+                )
             # The exact marker is already durable; do not charge a second
-            # generation.
+            # generation for a retry that remains failed or already succeeded.
             return record
         if current.phase == "publication_suppressed":
             if dict(last) != item:

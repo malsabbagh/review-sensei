@@ -431,6 +431,23 @@ class ReviewTransactionTests(unittest.TestCase):
         self.assertEqual(cleanup.generation, suppressed.generation)
         self.assertEqual(cleanup.transaction.phase, "publication_suppressed")
 
+    def test_failed_publication_retry_can_become_terminally_suppressed(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        failed = complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=False, now=NOW
+        )
+        suppressed = suppress_review_publication(
+            ledger, IDENTITY, failed.transaction, now=NOW
+        )
+        self.assertEqual(suppressed.transaction.phase, "publication_suppressed")
+        self.assertEqual(suppressed.generation, failed.generation + 1)
+        replay = suppress_review_publication(
+            ledger, IDENTITY, suppressed.transaction, now=NOW
+        )
+        self.assertEqual(replay.generation, suppressed.generation)
+        self.assertEqual(replay.transaction.phase, "publication_suppressed")
+
     def test_admitted_blocker_progress_and_suppression_are_one_terminal_transition(
         self,
     ):
@@ -2139,7 +2156,9 @@ class _Noop:
 
 
 class PublicationTransactionTests(unittest.TestCase):
-    def test_application_suppresses_repeated_admitted_blockers_before_publish(self):
+    def test_application_suppresses_repeated_or_oscillating_blockers_before_publish(
+        self,
+    ):
         class Publisher(ReviewPublisher):
             def __init__(self) -> None:
                 super().__init__(http=object())
@@ -2219,6 +2238,7 @@ class PublicationTransactionTests(unittest.TestCase):
         digest, count = blocker_set_digest(
             (finding_lifecycle_for_comment(comment).fingerprint,)
         )
+        empty_digest, empty_count = blocker_set_digest(())
         record = ledger.load(IDENTITY, now=NOW).record
         assert record is not None
         history = dict(record.convergence_history)
@@ -2232,8 +2252,8 @@ class PublicationTransactionTests(unittest.TestCase):
             {
                 "event": "completed",
                 "generation": 2,
-                "blocker_set_sha256": digest,
-                "blocker_count": count,
+                "blocker_set_sha256": empty_digest,
+                "blocker_count": empty_count,
             },
             {
                 "event": "completed",

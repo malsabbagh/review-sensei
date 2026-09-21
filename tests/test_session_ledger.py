@@ -413,6 +413,21 @@ class SessionRecordTests(unittest.TestCase):
     def test_legacy_progress_cannot_supply_blocker_identity(self):
         self.assertEqual(convergence_progress_blocker_sets(self._history()), ())
 
+    def test_malformed_progress_marker_fails_closed(self):
+        history = self._history()
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "not-a-sha256",
+                "blocker_count": 1,
+            }
+        ]
+        with self.assertRaisesRegex(
+            ReviewInputError, "session convergence blocker digest is invalid"
+        ):
+            convergence_progress_blocker_sets(history)
+
     def test_convergence_history_rejects_unknown_nested_fields(self):
         history = self._history()
         baseline = history["baseline"]
