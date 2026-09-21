@@ -538,11 +538,7 @@ def classify_registry_state(
             or not isinstance(dist, dict)
             or dist.get("integrity") != expected_integrity
         ):
-            raise IntegrityMismatchError(
-                "published npm bytes do not match the attested release bundle: "
-                f"{package}@{version}. Reuse the previously attested release "
-                "bundle for this version instead of rebuilding."
-            )
+            return "conflicting"
         return "verified"
 
     raise PublishError(last_error)
@@ -571,7 +567,11 @@ def package_action(bundle_dir: Path, package: str, version: str) -> str:
     matches = [
         item["action"] for item in state["packages"] if item.get("name") == package
     ]
-    if len(matches) != 1 or matches[0] not in {"publish", "verified"}:
+    if len(matches) != 1 or matches[0] not in {
+        "publish",
+        "verified",
+        "already-published",
+    }:
         raise PublishError(f"missing unique package registry state for {package}")
     return matches[0]
 
@@ -708,6 +708,12 @@ def publish_package(
     if action == "verified":
         print(f"Registry already contains the attested bytes for {package}@{version}")
         return
+    if action == "already-published":
+        print(
+            f"Registry already publishes {package}@{version} with bytes this "
+            "dispatch did not verify; leaving it untouched"
+        )
+        return
 
     tarball = tarball_for_package(bundle_dir, package, version, records)
     print(f"Publishing {package}@{version} from {tarball.name}")
@@ -769,17 +775,54 @@ def preflight(
         "initial_delay_seconds": initial_delay_seconds,
         "max_delay_seconds": max_delay_seconds,
     }
+    resuming = expected_source_sha is not None
     state = []
     for package in ALL_PACKAGES:
         action = classify_registry_state(
             package,
             version,
             records[package]["integrity"],
-            resuming=expected_source_sha is not None,
+            resuming=resuming,
             **retry_kwargs,
         )
         state.append({"name": package, "action": action})
-        print(f"{package}: {action}")
+
+    conflicting = [item["name"] for item in state if item["action"] == "conflicting"]
+    pending = [item["name"] for item in state if item["action"] == "publish"]
+    if conflicting and pending:
+        raise IntegrityMismatchError(
+            f"{version} is only partially published: {len(conflicting)} package(s) "
+            f"already hold different bytes ({', '.join(conflicting)}) while "
+            f"{len(pending)} still need publishing ({', '.join(pending)}). Publishing "
+            "this bundle would mix bytes from two builds. Reuse the previously "
+            "attested release bundle for this version instead of rebuilding."
+        )
+    if conflicting and resuming:
+        raise IntegrityMismatchError(
+            "registry bytes do not match the attested release bundle for "
+            f"{version}: {', '.join(conflicting)}. Every package is already published, "
+            "so there is nothing to publish and the published bytes must not be "
+            "overwritten. Preserve the evidence and publish a higher patch version."
+        )
+    # A fresh dispatch rebuilds native binaries that never reproduce published bytes,
+    # so a version that is already complete on the registry is a no-op rather than a
+    # byte mismatch: nothing reaches the registry, and this bundle cannot verify the
+    # bytes that are already there.
+    if conflicting:
+        for item in state:
+            if item["action"] == "conflicting":
+                item["action"] = "already-published"
+    for item in state:
+        print(f"{item['name']}: {item['action']}")
+    if conflicting:
+        print(
+            f"All {len(ALL_PACKAGES)} packages are already published at {version}. "
+            "Nothing to publish: this bundle's bytes were not published and the "
+            "registry was not modified. Provenance was NOT verified for this "
+            "dispatch, because a fresh rebuild cannot reproduce previously published "
+            "bytes. Use resume_bundle_run_id to verify an existing release against "
+            "its attested bundle."
+        )
     write_publish_state(bundle_dir, version, state)
 
 
