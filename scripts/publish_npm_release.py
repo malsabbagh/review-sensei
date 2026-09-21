@@ -16,7 +16,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from scripts.check_release_version import TAG_PATTERN
+# Workflow steps invoke this file directly, so the checkout root must be importable.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.check_release_version import TAG_PATTERN  # noqa: E402
 
 REGISTRY_USER_AGENT = "review-sensei-npm-publish/1.0"
 
