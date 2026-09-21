@@ -313,7 +313,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         run_blocks = _run_blocks(text)
         self.assertTrue(run_blocks)
-        self.assertIn("# ReviewSensei setup version: 4", text)
+        self.assertIn("# ReviewSensei setup version: 5", text)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             text,

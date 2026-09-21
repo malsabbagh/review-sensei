@@ -34,12 +34,12 @@ MAX_SETUP_FILE_BYTES = 128 * 1024
 DEFAULT_SETUP_BRANCH = "review-sensei/setup"
 DEFAULT_SETUP_TITLE = "ReviewSensei review setup"
 SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files"
-SETUP_BRANCH_PREFIX = "review-sensei/setup-v4"
+SETUP_BRANCH_PREFIX = "review-sensei/setup-v5"
 SETUP_APP_LOGIN = "reviewsensei[bot]"
 REQUIRED_SETUP_PERMISSIONS = frozenset(
     {"contents", "pull_requests", "variables", "workflows"}
 )
-SETUP_VERSION = 4
+SETUP_VERSION = 5
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
 CURRENT_PACKAGE_VERSION = "0.6.0"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
@@ -71,7 +71,7 @@ SETUP_VARIABLES = (
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# The public tag is the only setup-v4 update channel. The Worker validates the
+# The public tag is the only setup-v5 update channel. The Worker validates the
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
 DEFAULT_PUBLIC_WORKFLOW_TAG = "v5"
@@ -175,7 +175,7 @@ def _looks_like_current_setup(
     *,
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> bool:
-    """Recognize only the exact current tag-following setup-v4 artifact."""
+    """Recognize only the exact current tag-following setup-v5 artifact."""
 
     expected = {
         WORKFLOW_PATH: _tagged_workflow(public_workflow_tag),
@@ -261,7 +261,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
             return False
         try:
             return content in {
-                _tagged_workflow(tag_matches[0]),
+                _merge_focused_v4_workflow(tag_matches[0]),
                 _released_runner_switch_v4_workflow(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
@@ -272,13 +272,28 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         except GitHubSetupError:
             return False
     if path == UNINSTALL_WORKFLOW_PATH:
-        return content == _v4_uninstall_workflow()
+        return content == _historical_v4_uninstall_workflow()
     if path == CONFIG_PATH:
         return content in {
-            _v4_config_file(),
+            _merge_focused_v4_config_file(),
             _historical_v4_config_file(),
         }
     return False
+
+
+def _looks_like_managed_v5_workflow(content: str) -> bool:
+    """Recognize an otherwise-current v5 caller following a stale valid tag."""
+
+    tag_matches = [
+        match.group("tag")
+        for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
+    ]
+    if len(tag_matches) != 1 or len(set(tag_matches)) != 1:
+        return False
+    try:
+        return content == _tagged_workflow(tag_matches[0])
+    except GitHubSetupError:
+        return False
 
 
 def _classify_setup_files(
@@ -316,10 +331,17 @@ def _classify_setup_files(
                     public_workflow_tag=public_workflow_tag,
                 ):
                     has_current = True
+                elif path == WORKFLOW_PATH and _looks_like_managed_v5_workflow(content):
+                    has_managed = True
                 elif _looks_like_managed_v4_setup(path, content):
                     has_managed = True
                 else:
                     return "unknown"
+                continue
+            if marker == 4:
+                if not _looks_like_managed_v4_setup(path, content):
+                    return "unknown"
+                has_managed = True
                 continue
             if marker == 3:
                 if not _looks_like_managed_v3_setup(path, content):
@@ -775,15 +797,15 @@ def _released_runner_switch_v4_caller_bytes() -> str:
 
 
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
-    """Return the current setup-v4 caller with trusted trigger resolution."""
+    """Return the current setup-v5 caller with trusted trigger resolution."""
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
-    return r"""# ReviewSensei setup version: 4
+    return r"""# ReviewSensei setup version: 5
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
 # The installer and this example follow the operator-managed v5 git tag. Moving
-# that tag is the public setup-v4 release action. The reusable workflow installs
+# that tag is the public setup-v5 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
 #
@@ -1141,9 +1163,21 @@ jobs:
 
 
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
-    """Return the current setup-v4 caller following the public git tag."""
+    """Return the current setup-v5 caller following the public git tag."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
+
+
+def _merge_focused_v4_workflow(public_workflow_tag: str) -> str:
+    """Return the immediate pre-cutover caller for managed v4 recognition."""
+
+    return (
+        _tagged_workflow(public_workflow_tag)
+        .replace(
+            "# ReviewSensei setup version: 5", "# ReviewSensei setup version: 4", 1
+        )
+        .replace("public setup-v5 release action", "public setup-v4 release action", 1)
+    )
 
 
 def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
@@ -1223,11 +1257,11 @@ upload_artifacts: false
 
 
 def _v4_config_file() -> str:
-    """Return the current setup-v4 configuration."""
+    """Return the current setup-v5 configuration."""
 
     return (
-        "# ReviewSensei setup version: 4\n"
-        "setup_version: 4\n"
+        "# ReviewSensei setup version: 5\n"
+        "setup_version: 5\n"
         "provider: ollama\n"
         "provider_mode: local\n"
         "model: ''\n"
@@ -1245,6 +1279,16 @@ def _v4_config_file() -> str:
         "upload_artifacts: false\n"
         "stages_dir: ''\n"
         "categories_dir: ''\n"
+    )
+
+
+def _merge_focused_v4_config_file() -> str:
+    """Return the pre-cutover v4 configuration with an explicit mode."""
+
+    return _v4_config_file().replace(
+        "# ReviewSensei setup version: 5\nsetup_version: 5",
+        "# ReviewSensei setup version: 4\nsetup_version: 4",
+        1,
     )
 
 
@@ -1326,6 +1370,12 @@ jobs:
 
 
 def _v4_uninstall_workflow() -> str:
+    return _uninstall_workflow().replace(
+        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 5", 1
+    )
+
+
+def _historical_v4_uninstall_workflow() -> str:
     return _uninstall_workflow().replace(
         "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
     )

@@ -115,7 +115,7 @@ describe("setup-v4 public boundary", () => {
   it("generates fork-safe callers at the supplied public workflow tag", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
-    expect(SETUP_VERSION).toBe(4);
+    expect(SETUP_VERSION).toBe(5);
     expect(SETUP_VARIABLES).toContainEqual(
       expect.objectContaining({ name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" }),
     );
@@ -251,7 +251,7 @@ describe("setup-v4 public boundary", () => {
     const workflow = buildTaggedV4SetupFiles(tag)[0].content;
     const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
     expect(workflow.match(workflowPattern)).toHaveLength(1);
-    expect(workflow).toContain("# ReviewSensei setup version: 4");
+    expect(workflow).toContain("# ReviewSensei setup version: 5");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("github.event.pull_request.draft != true");

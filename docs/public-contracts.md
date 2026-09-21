@@ -941,7 +941,7 @@ reply returns `resolve: true` for a blocking root and the resolution mutation
 succeeds, the same provider job invokes the deterministic exact-head approval
 finalizer. It does not call the provider again.
 
-All setup-v4 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
+All setup-v5 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
 Automatic approval defaults to `true` and can be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
 enabled, blocking findings publish as `REQUEST_CHANGES` and non-blocking

@@ -20,6 +20,12 @@ repository variable (`REVIEWSENSEI_REVIEW_MODE`) as well as recording the
 default in the generated configuration file, so the live caller and its
 operator-visible configuration agree.
 
+Generated setup increments from v4 to v5. Classifiers retain byte-exact
+recognition of historic v4 content, including the immediate pre-cutover v4
+caller/configuration that already specifies `merge-focused`, and open a
+reviewable v5 setup PR. The migration changes only generated setup files; it
+does not reset durable session-ledger state or finding identities.
+
 `legacy` remains readable only as historical persisted policy data. It is not a
 live runtime selection: explicit CLI or configuration use fails with an
 actionable migration error. The migration helper maps a historical `legacy`

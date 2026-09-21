@@ -27,7 +27,7 @@ result before a future publisher can consume it.
 | GitHub App auth and approval boundary | JWT and installation-token authentication, exact-head review publication, and idempotent approval finalization | Maintainers | `src/review_sensei/hosting/github/` | Unresolved blocking ReviewSensei roots request changes and withhold approval; GraphQL classification sweep is bounded and fail-closed |
 | GitHub App setup bootstrap | Webhook signature verification, delivery deduplication, visible provider-default variables, and idempotent setup pull request creation | Maintainers | `src/review_sensei/hosting/github/` | Fails closed on invalid webhooks; generated files and PR bodies contain no secrets |
 | GitHub learning publisher | Stable source-PR draft identity, content-addressed learning files, and fail-closed reconciliation | Maintainers | `src/review_sensei/hosting/github/learning_pr.py` | Hash-bound marker/commit provenance, latest-base rereads, non-force refreshes, merged generations |
-| Cloudflare deployment package | Worker ingress, SQLite delivery/broker claims, Web Crypto GitHub App auth, capability broker, and setup-v4 PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap and issuance-only token boundary; no hosted review execution or provider data |
+| Cloudflare deployment package | Worker ingress, SQLite delivery/broker claims, Web Crypto GitHub App auth, capability broker, and setup-v5 PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap and issuance-only token boundary; no hosted review execution or provider data |
 
 ## Dependency Direction
 

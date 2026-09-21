@@ -14,6 +14,8 @@ import {
   buildHistoricalProviderParityV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
   releasedRunnerSwitchV4WorkflowTemplate,
@@ -22,7 +24,7 @@ import {
 const SHA = "a".repeat(40);
 const TAG = "v5";
 const BASE_SHA = "b".repeat(40);
-const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}`;
+const SETUP_BRANCH = `review-sensei/setup-v5-${BASE_SHA.slice(0, 12)}-${TAG}`;
 const ALL_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
@@ -102,7 +104,7 @@ class FakeGitHub {
     if (method === "GET" && /^\/repos\/acme\/(widgets|one|two)$/.test(path)) {
       return { status: 200, data: { default_branch: "main" } };
     }
-    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v4-")) {
+    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v5-")) {
       const exists = this.branchExists || this.collisionObserved;
       return {
         status: exists ? 200 : 404,
@@ -148,7 +150,7 @@ class FakeGitHub {
     if (method === "GET" && path.includes("/contents/")) {
       const encoded = path.split("/contents/")[1].split("?", 1)[0];
       const filePath = encoded.split("/").map(decodeURIComponent).join("/");
-      const content = path.includes("?ref=review-sensei%2Fsetup-v4-")
+      const content = path.includes("?ref=review-sensei%2Fsetup-v5-")
         ? this.branchFiles[filePath]
         : this.files[filePath];
       return content === null || content === undefined
@@ -537,6 +539,12 @@ describe("setup repository reconciliation", () => {
     fake.files = Object.fromEntries(
       buildTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
     );
+    fake.files[SETUP_FILE_PATHS[0]] = mergeFocusedV4WorkflowTemplate("old-v4");
+    fake.files[SETUP_FILE_PATHS[1]] = fake.files[SETUP_FILE_PATHS[1]]!.replace(
+      "ReviewSensei setup version: 5",
+      "ReviewSensei setup version: 4",
+    );
+    fake.files[SETUP_FILE_PATHS[2]] = mergeFocusedV4ConfigFile();
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },

@@ -157,7 +157,7 @@ unreviewed or unpublished snapshot.
 
 Keep these names distinct:
 
-- **setup-v4** is the generated caller format (`SETUP_VERSION = 4`). It is not
+- **setup-v5** is the generated caller format (`SETUP_VERSION = 5`). It is not
   the git tag.
 - **`v5`** is the movable public workflow channel. Generated callers use
   `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.

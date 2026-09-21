@@ -95,8 +95,8 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_setup_content_is_tagged_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
-        self.assertIn("SETUP_VERSION = 4", source)
-        self.assertIn("ReviewSensei setup version: 4", source)
+        self.assertIn("SETUP_VERSION = 5", source)
+        self.assertIn("ReviewSensei setup version: 5", source)
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
         self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
@@ -150,8 +150,8 @@ class CloudflarePackageTests(unittest.TestCase):
         )
 
         expected_ts = (
-            "# ReviewSensei setup version: 4\n"
-            "setup_version: 4\n"
+            "# ReviewSensei setup version: 5\n"
+            "setup_version: 5\n"
             "provider: ollama\n"
             "provider_mode: local\n"
             "model: ''\n"
@@ -196,7 +196,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             py_fields,
             {
-                "setup_version": "4",
+                "setup_version": "5",
                 "provider": "ollama",
                 "provider_mode": "local",
                 "model": "''",
@@ -332,7 +332,7 @@ class CloudflarePackageTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
         for content in (readme, installation):
-            self.assertIn("setup-v4", content)
+            self.assertIn("setup-v5", content)
             self.assertIn("nine", content)
             self.assertIn("five", content)
             self.assertIn("automatic", content)

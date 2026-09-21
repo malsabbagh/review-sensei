@@ -1,5 +1,5 @@
 # ReviewSensei setup version: 4
-setup_version: 4
+setup_version: 5
 provider: ollama
 provider_mode: cloud
 model: ''

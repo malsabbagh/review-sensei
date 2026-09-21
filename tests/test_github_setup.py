@@ -23,6 +23,9 @@ from review_sensei.hosting.github.setup import (
     WORKFLOW_PATH,
     _broker_accepted_public_workflow_tags,
     _historical_provider_parity_workflow,
+    _historical_v4_uninstall_workflow,
+    _merge_focused_v4_config_file,
+    _merge_focused_v4_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
     _public_workflow_tag_from_job_ref,
@@ -258,7 +261,7 @@ class SetupPlanTests(unittest.TestCase):
         workflow = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-review.yml"
         ]
-        self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             workflow,
@@ -348,7 +351,7 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             dynamic.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
 
     def test_build_plan_uses_the_supplied_tag(self):
@@ -369,7 +372,7 @@ class SetupPlanTests(unittest.TestCase):
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", workflow)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", workflow)
         self.assertNotIn("default: main", workflow)
-        self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertEqual(
             workflow,
             (
@@ -379,10 +382,10 @@ class SetupPlanTests(unittest.TestCase):
             .read_text(encoding="utf-8")
             .replace("@v5", "@stable"),
         )
-        self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
+        self.assertIn("setup_version: 5", files[".github/review-sensei/config.yml"])
         self.assertEqual(
             plan.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-stable",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-stable",
         )
 
     def test_generated_caller_forwards_command_context_for_the_command_operation(self):
@@ -697,10 +700,10 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
 
-    def test_stale_v4_setup_following_another_tag_is_migrated(self):
+    def test_stale_v5_setup_following_another_tag_is_migrated(self):
         plan = SetupPlanBuilder(public_workflow_tag="old-v4").build("owner/repo")
         files = {file.path: file.content for file in plan.files}
         transport = FileTransport(
@@ -718,8 +721,25 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
+
+    def test_immediate_pre_cutover_v4_setup_is_migrated(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = _merge_focused_v4_workflow("v5")
+        files[".github/workflows/review-sensei-uninstall.yml"] = (
+            _historical_v4_uninstall_workflow()
+        )
+        files[CONFIG_PATH] = _merge_focused_v4_config_file()
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")

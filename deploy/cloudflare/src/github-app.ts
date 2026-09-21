@@ -17,6 +17,8 @@ import {
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   previousProviderParityWorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
@@ -274,7 +276,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
     try {
       return (
-        content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
+        content === mergeFocusedV4WorkflowTemplate(publicWorkflowTag) ||
         content === releasedRunnerSwitchV4WorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowBeforeDraftSkip(publicWorkflowTag) ||
@@ -291,11 +293,27 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
   }
   if (path === SETUP_FILE_PATHS[2]) {
     return (
-      content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content ||
+      content === mergeFocusedV4ConfigFile() ||
       content === buildHistoricalTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content
     );
   }
   return false;
+}
+
+function looksLikeManagedV5Workflow(content: string): boolean {
+  const tagMatches = [...content.matchAll(PUBLIC_WORKFLOW_TAG_REFERENCE)];
+  if (tagMatches.length !== 1) {
+    return false;
+  }
+  const publicWorkflowTag = tagMatches[0]?.[1];
+  if (!publicWorkflowTag) {
+    return false;
+  }
+  try {
+    return content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content;
+  } catch {
+    return false;
+  }
 }
 
 async function classifySetupFiles(
@@ -323,11 +341,21 @@ async function classifySetupFiles(
       if (marker === SETUP_VERSION) {
         if (looksLikeCurrentSetup(path, content, publicWorkflowTag)) {
           hasCurrent = true;
+        } else if (
+          path === SETUP_FILE_PATHS[0] &&
+          looksLikeManagedV5Workflow(content)
+        ) {
+          hasManaged = true;
         } else if (looksLikeManagedV4Setup(path, content)) {
           hasManaged = true;
         } else {
           return "unknown";
         }
+      } else if (marker === 4) {
+        if (!looksLikeManagedV4Setup(path, content)) {
+          return "unknown";
+        }
+        hasManaged = true;
       } else if (marker === 3) {
         if (!looksLikeManagedV3Setup(path, content)) {
           return "unknown";
