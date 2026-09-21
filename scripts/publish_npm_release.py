@@ -375,6 +375,7 @@ def classify_registry_state(
     preflight_404_attempts: int = DEFAULT_PREFLIGHT_404_ATTEMPTS,
     initial_delay_seconds: float = DEFAULT_READBACK_INITIAL_DELAY_SECONDS,
     max_delay_seconds: float = DEFAULT_READBACK_MAX_DELAY_SECONDS,
+    resuming: bool = False,
 ) -> str:
     delay = initial_delay_seconds
     last_error = "unknown registry preflight failure"
@@ -396,10 +397,12 @@ def classify_registry_state(
             )
         ):
             return "publish"
+        # A resumed publish can be racing the previous attempt's replication;
+        # a fresh preflight has published nothing, so absence is conclusive.
         if (
             final_probe == PackumentProbeState.VERSION_ABSENT
             and packument_seen
-            and attempt >= max_attempts
+            and (not resuming or attempt >= max_attempts)
         ):
             return "publish"
         if attempt >= max_attempts:
@@ -772,6 +775,7 @@ def preflight(
             package,
             version,
             records[package]["integrity"],
+            resuming=expected_source_sha is not None,
             **retry_kwargs,
         )
         state.append({"name": package, "action": action})

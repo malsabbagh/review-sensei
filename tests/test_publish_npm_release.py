@@ -717,7 +717,82 @@ class PublishNpmReleaseTests(unittest.TestCase):
         self.assertEqual(actions["@reviewsensei/cli-darwin-arm64"], "verified")
         self.assertEqual(actions["@reviewsensei/cli-linux-x64-gnu"], "publish")
 
-    def test_preflight_retries_404_until_package_is_visible(self) -> None:
+    def test_preflight_concludes_fresh_absence_within_preflight_budget(self) -> None:
+        fetches: list[str] = []
+
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            fetches.append(package)
+            raise HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=30,
+                preflight_404_attempts=3,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
+        )
+        actions = {item["name"]: item["action"] for item in state["packages"]}
+        self.assertEqual(set(actions.values()), {"publish"})
+        self.assertEqual(
+            fetches, [package for package in ALL_PACKAGES for _ in range(3)]
+        )
+
+    def test_preflight_resume_mode_polls_absence_until_budget(self) -> None:
+        source_sha = "a" * 40
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": source_sha},
+        )
+        fetches: list[str] = []
+
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            fetches.append(package)
+            raise HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+                expected_source_sha=source_sha,
+            )
+
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
+        )
+        actions = {item["name"]: item["action"] for item in state["packages"]}
+        self.assertEqual(set(actions.values()), {"publish"})
+        self.assertEqual(
+            fetches, [package for package in ALL_PACKAGES for _ in range(3)]
+        )
         target = "@reviewsensei/cli-darwin-arm64"
         responses: dict[str, list[object]] = {
             target: [
@@ -1180,7 +1255,7 @@ class PublishNpmReleaseTests(unittest.TestCase):
         publish.assert_not_called()
         readback.assert_not_called()
 
-    def test_classify_registry_state_does_not_publish_on_stale_packument_at_budget(
+    def test_classify_registry_state_resume_does_not_publish_on_stale_packument(
         self,
     ) -> None:
         package = "@reviewsensei/cli-linux-x64-gnu"
@@ -1233,9 +1308,66 @@ class PublishNpmReleaseTests(unittest.TestCase):
                 preflight_404_attempts=1,
                 initial_delay_seconds=1.0,
                 max_delay_seconds=1.0,
+                resuming=True,
             )
 
         self.assertEqual(action, "verified")
+
+    def test_classify_registry_state_publishes_fresh_absence_within_preflight_budget(
+        self,
+    ) -> None:
+        package = "@reviewsensei/cli-linux-x64-gnu"
+        version = "0.5.0"
+        integrity = f"sha512-{package}"
+        version_url = self._version_document_url(package, version)
+        packument_url = self._packument_url(package)
+        absent_packument = json.dumps(
+            {
+                "name": package,
+                "versions": {"0.4.0": {"name": package, "version": "0.4.0"}},
+            }
+        ).encode("utf-8")
+        responses: dict[str, list[object]] = {
+            version_url: [
+                HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+            ]
+            * 3,
+            packument_url: [io.BytesIO(absent_packument) for _ in range(4)],
+        }
+        requested: list[str] = []
+
+        def fake_urlopen(url: str, **_kwargs: object) -> io.BytesIO:
+            target = self._registry_url(url)
+            requested.append(target)
+            queue = responses[target]
+            item = queue.pop(0)
+            if isinstance(item, HTTPError):
+                raise item
+            return io.BytesIO(item.read())
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.urlopen",
+                side_effect=fake_urlopen,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+        ):
+            action = classify_registry_state(
+                package,
+                version,
+                integrity,
+                max_attempts=30,
+                preflight_404_attempts=3,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        self.assertEqual(action, "publish")
+        self.assertEqual(
+            [url for url in requested if url == version_url],
+            [version_url] * 3,
+        )
+        self.assertEqual(len(sleep.mock_calls), 2)
 
     def test_preflight_keeps_partially_published_package_verified_via_urlopen(
         self,
