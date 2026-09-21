@@ -21,6 +21,53 @@ import {
   validatePublicWorkflowSha,
 } from "../src/setup-content";
 
+const INLINE_COMMAND_PREFILTER_START =
+  'len(comment_body.encode("utf-8")) <= 4096 and re.search(r"';
+
+/**
+ * Return the inline command prefilter as the generated caller's heredoc
+ * evaluates it. The template stores the pattern in a Python raw string
+ * literal, so the literal text is the regex source. Python's `(?m)` flag is
+ * dropped and its `\Z` anchor becomes a JavaScript end-of-input `$` without
+ * the `m` flag, which asserts the same thing for a pattern that uses neither
+ * `^` nor `$` itself.
+ */
+function inlineCommandPrefilter(text: string): string {
+  const start = text.indexOf(INLINE_COMMAND_PREFILTER_START);
+  if (start < 0) {
+    throw new Error("caller is missing the inline command prefilter");
+  }
+  const patternStart = start + INLINE_COMMAND_PREFILTER_START.length;
+  const end = text.indexOf('"', patternStart);
+  if (end < 0) {
+    throw new Error("inline command prefilter terminator is missing");
+  }
+  const literal = text.slice(patternStart, end);
+  if (!literal.startsWith("(?m)") || !literal.endsWith("\\Z")) {
+    throw new Error(
+      "inline command prefilter anchors changed; update the JavaScript translation",
+    );
+  }
+  return literal.slice("(?m)".length, -"\\Z".length) + "$";
+}
+
+interface CommandParityCase {
+  readonly body: string;
+  readonly accepted: boolean;
+}
+
+function commandParityCases(): readonly CommandParityCase[] {
+  return JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../tests/fixtures/maintainer-command-parity.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as readonly CommandParityCase[];
+}
+
 describe("setup-v4 public boundary", () => {
   it("retains strict SHA validation for historical setup recognition", () => {
     expect(() => validatePublicWorkflowSha("")).toThrow();
@@ -111,6 +158,34 @@ describe("setup-v4 public boundary", () => {
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
     // in the trigger guard untouched.
     expect(workflow).not.toContain("@@");
+  });
+
+  it("matches every parser-accepted command with the Worker-generated prefilter", () => {
+    const workflow = buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[0].content;
+    // The Worker template is the fourth copy of the command grammar. Locking
+    // its literal to the checked-in example is what makes the fixture
+    // assertion below cover the copy operators actually receive.
+    expect(inlineCommandPrefilter(workflow)).toBe(
+      inlineCommandPrefilter(
+        readFileSync(
+          new URL(
+            "../../../examples/github-actions/review-sensei-review.yml",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ),
+    );
+    const prefilter = new RegExp(inlineCommandPrefilter(workflow), "i");
+    // The invariant that keeps the feature working: a command the authoritative
+    // parser accepts must never fall through to a conversational reply on a
+    // caller without the packaged module. The over-acceptance budget for
+    // bodies the parser rejects is pinned by tests/test_github_trigger.py,
+    // which owns the Python-side copies.
+    const missed = commandParityCases()
+      .filter((item) => item.accepted && !prefilter.test(item.body))
+      .map((item) => item.body);
+    expect(missed).toEqual([]);
   });
 
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
