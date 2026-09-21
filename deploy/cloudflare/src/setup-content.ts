@@ -722,6 +722,8 @@ jobs:
       github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
+      (needs.resolve-trigger.outputs.operation == 'command' ||
+      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -736,7 +738,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot')))
+      github.event.comment.user.type != 'Bot'))))
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
