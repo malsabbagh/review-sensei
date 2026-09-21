@@ -41,6 +41,13 @@ keeping all three would exceed the fixed 2048-byte component bound when F3
 records the minimum repeat/oscillation evidence. F2 deliberately does not
 change the live inference path.
 
+The convergence key is the canonical admitted blocker identity set, not the
+provenance of equivalent evidence. Fresh candidate evidence still has to pass
+admission and is reflected in the prepared result; evidence that leaves the
+same blocker identities admitted is not verified progress and cannot lift a
+terminal suppression. A maintainer may use the authenticated `@sensei review
+reenroll` recovery command when a new operator decision is required.
+
 ## Session witness
 
 Durable history is only meaningful while the record it describes exists, so F2
@@ -75,6 +82,10 @@ checkpoint rewrites the bounded projection. Records that predate
 migration path. Rolling back the code does not authorize publishing from a
 record that failed the current integrity or shape checks; such a record still
 requires the authenticated `@sensei review reenroll` recovery path.
+Once `publication_suppressed` is persisted for a result, retries of that same
+transaction return a terminal handoff with its transaction identity; a later
+head or an authenticated reenrollment creates the new transaction needed for
+publication.
 
 ## Validation
 

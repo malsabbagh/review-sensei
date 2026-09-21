@@ -50,6 +50,7 @@ MAX_SESSION_TTL = timedelta(days=90)
 MAX_SESSION_RECORD_BYTES = 4096
 MAX_CONVERGENCE_HISTORY_BYTES = 2048
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
+SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 MAX_STORED_CONTINUATION_GRANTS = 4
 MAX_CONTINUATION_COMMAND_ID_BYTES = 128
 MAX_CONTINUATION_GRANT_TTL = timedelta(days=7)
@@ -67,7 +68,7 @@ _REPOSITORY_RE = re.compile(
 _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
-_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_SHA256 = re.compile(SESSION_SHA256_PATTERN)
 _CONTINUATION_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 LOAD_STATUSES = frozenset(
     {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
@@ -2107,11 +2108,14 @@ def record_admitted_blocker_progress(
             "blocker_set_sha256": blocker_set_sha256,
             "blocker_count": blocker_count,
         }
-        if current.phase == "publication_failed" and marker_matches:
-            # A retry can observe a failed transaction whose record generation
-            # advanced while the admitted progress marker still carries the
-            # transaction generation from before that failure. The exact
-            # marker is already durable; do not charge a second generation.
+        if (
+            current.phase in {"publication_failed", "publication_succeeded"}
+            and marker_matches
+        ):
+            # A retry can observe a terminal transaction whose record
+            # generation advanced while the admitted progress marker still
+            # carries the transaction generation from before publication. The
+            # exact marker is already durable; do not charge a second generation.
             return record
         if current.phase == "publication_suppressed":
             if dict(last) != item:

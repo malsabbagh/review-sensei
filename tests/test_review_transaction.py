@@ -539,6 +539,19 @@ class ReviewTransactionTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(failed_replay.generation, failed.generation)
+        succeeded = complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=True, now=NOW
+        )
+        succeeded_replay = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            succeeded.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        self.assertEqual(succeeded_replay.generation, succeeded.generation)
 
     def test_trusted_context_mismatch_fails_closed(self):
         ledger = InMemorySessionLedger()

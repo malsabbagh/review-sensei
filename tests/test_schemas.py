@@ -26,6 +26,7 @@ from review_sensei.session import (
     MAX_CONVERGENCE_PROGRESS_ENTRIES,
     MAX_SESSION_RECORD_BYTES,
     MAX_STORED_CONTINUATION_GRANTS,
+    SESSION_SHA256_PATTERN,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,10 @@ class PublicSchemaTests(unittest.TestCase):
         progress_properties = history["progress"]["items"]["properties"]
         self.assertEqual(
             progress_properties["blocker_count"]["maximum"], MAX_SESSION_RECORD_BYTES
+        )
+        self.assertEqual(
+            progress_properties["blocker_set_sha256"]["pattern"],
+            SESSION_SHA256_PATTERN,
         )
 
     def test_later_finding_schema_enums_match_runtime_contract(self) -> None:

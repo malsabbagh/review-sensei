@@ -563,15 +563,15 @@ class GitHubApplication:
             ):
                 prepare = getattr(self.reviewer, "prepare", None)
                 if not callable(prepare):
-                    return _with_shadow(
-                        PublicationResult(
-                            status="handoff",
-                            diagnostic="review_admission_unavailable",
-                        ),
-                        _shadow_observation(
-                            _shadow_state(prepared, flags),
-                            continuation_rounds=continuation_rounds,
-                        ),
+                    # A fresh operator transaction cannot safely fall back to
+                    # publish without the admission capability. Raise through
+                    # the normal cleanup path so a pending transaction becomes
+                    # retryable ``publication_failed`` rather than a handoff
+                    # that leaves durable work latched forever. A validated
+                    # checkpointed recovery skips this branch above because
+                    # its post-admission result is already durable.
+                    raise GitHubPublicationError(
+                        "review admission is unavailable: reviewer.prepare is required"
                     )
                 # This is the sole post-admission result: its effective
                 # blockers are both recorded for F3 and passed unchanged to
@@ -607,7 +607,11 @@ class GitHubApplication:
                 )
                 if validated_transaction_recovery and transaction_record.transaction:
                     history = transaction_record.convergence_history
-                    progress = history.get("progress") if isinstance(history, Mapping) else None
+                    progress = (
+                        history.get("progress")
+                        if isinstance(history, Mapping)
+                        else None
+                    )
                     if (
                         isinstance(progress, list)
                         and progress
@@ -654,6 +658,16 @@ class GitHubApplication:
                     blocker_count=current_blockers[1],
                     suppress_publication=no_progress,
                 )
+                if (
+                    admitted_record.transaction is not None
+                    and admitted_record.transaction.phase == "publication_succeeded"
+                ):
+                    return PublicationResult(
+                        status="already_published",
+                        diagnostic="transaction-publication-complete",
+                        transaction_id=admitted_record.transaction.transaction_id,
+                        generation=admitted_record.generation,
+                    )
                 if no_progress:
                     return _with_shadow(
                         PublicationResult(
