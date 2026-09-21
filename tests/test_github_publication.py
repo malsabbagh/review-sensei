@@ -216,9 +216,7 @@ class ReviewPublisherTests(unittest.TestCase):
         head = "b" * 40
         prepared = publisher.prepare(result=result(), diff=DIFF, head_sha=head)
 
-        with self.assertRaisesRegex(
-            GitHubPublicationError, "publication context"
-        ):
+        with self.assertRaisesRegex(GitHubPublicationError, "publication context"):
             publisher.publish(
                 token="token",
                 repository="owner/repo",
@@ -240,9 +238,7 @@ class ReviewPublisherTests(unittest.TestCase):
             comments=(replace(original_comment, effective_blocking=False),),
         )
         self.assertEqual(runtime_tampered.content_digest(), result().content_digest())
-        with self.assertRaisesRegex(
-            GitHubPublicationError, "publication context"
-        ):
+        with self.assertRaisesRegex(GitHubPublicationError, "publication context"):
             publisher.publish(
                 token="token",
                 repository="owner/repo",

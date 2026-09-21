@@ -2121,9 +2121,10 @@ def record_admitted_blocker_progress(
             if dict(last) != item:
                 raise ReviewInputError("durable blocker progress does not match")
             return record
-        if current.phase in {"publication_pending", "publication_failed"} and dict(
-            last
-        ) == item:
+        if (
+            current.phase in {"publication_pending", "publication_failed"}
+            and dict(last) == item
+        ):
             # A retry can observe the same admitted result after the caller
             # crashed between this CAS and the GitHub write. The progress
             # evidence is already durable; do not charge another generation.

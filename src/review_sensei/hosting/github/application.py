@@ -632,15 +632,11 @@ class GitHubApplication:
                     return (value[0],) if value[1] else ()
 
                 no_progress = detect_no_progress(
-                    previous_blocking=(
-                        *blocker_identity(prior_blockers[-1]),
-                    )
+                    previous_blocking=(*blocker_identity(prior_blockers[-1]),)
                     if prior_blockers
                     else (),
                     current_blocking=blocker_identity(current_blockers),
-                    earlier_blocking=(
-                        *blocker_identity(prior_blockers[-2]),
-                    )
+                    earlier_blocking=(*blocker_identity(prior_blockers[-2]),)
                     if len(prior_blockers) >= 2
                     else (),
                 )
