@@ -81,6 +81,52 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertFalse(issue_comment_requests_rescan("@sensei I rescanned the diff"))
         self.assertFalse(issue_comment_requests_rescan("@sensei rescanning now"))
 
+    def test_maintainer_commands_route_to_the_command_operation(self):
+        resolution = resolve_issue_comment("@sensei review pause", _pull())
+        self.assertEqual(resolution.operation, "command")
+        self.assertEqual(resolution.enable_review, "false")
+
+    def test_oversized_maintainer_command_does_not_reach_command_execution(self):
+        resolution = resolve_issue_comment(
+            "@sensei review pause " + ("x" * 4096), _pull()
+        )
+        self.assertEqual(resolution.operation, "reply")
+
+    def test_multibyte_padding_past_the_byte_bound_stays_out_of_command_execution(
+        self,
+    ):
+        # Ideographic spaces are whitespace to str.strip() at three bytes each,
+        # so this body stays command-shaped while passing 4096 bytes. A
+        # character bound would route it to command instead of reply.
+        body = "@sensei" + "\N{IDEOGRAPHIC SPACE}" * 2000 + "review pause"
+        self.assertEqual(len(body), 2019)
+        self.assertEqual(len(body.encode("utf-8")), 6019)
+        self.assertEqual(resolve_issue_comment(body, _pull()).operation, "reply")
+
+    def test_multibyte_command_reason_is_bounded_in_bytes(self):
+        reason = "\N{LATIN SMALL LETTER E WITH ACUTE}" * 300
+        self.assertLessEqual(len(reason), 512)
+        self.assertGreater(len(reason.encode("utf-8")), 512)
+        resolution = resolve_issue_comment(
+            "@sensei dismiss " + "a" * 20 + " --reason " + reason, _pull()
+        )
+        self.assertEqual(resolution.operation, "reply")
+
+    def test_command_body_byte_boundary_is_inclusive_at_4096(self):
+        # 1359 ideographic spaces are 4077 bytes and are stripped by str.strip(),
+        # so the remainder still parses as a command. "@sensei"+"review pause"
+        # is 19 bytes, putting the body exactly on the 4096-byte ceiling.
+        padding = "\N{IDEOGRAPHIC SPACE}" * 1359
+        at_bound = "@sensei" + padding + "review pause"
+        self.assertEqual(len(at_bound.encode("utf-8")), 4096)
+        self.assertEqual(resolve_issue_comment(at_bound, _pull()).operation, "command")
+
+        # One extra ASCII space pushes the body to 4097 bytes; it is also
+        # stripped, so only the byte ceiling can route this one to reply.
+        over_bound = "@sensei" + padding + " " + "review pause"
+        self.assertEqual(len(over_bound.encode("utf-8")), 4097)
+        self.assertEqual(resolve_issue_comment(over_bound, _pull()).operation, "reply")
+
     def test_comment_mentions_sensei_matches_workflow_gate(self):
         self.assertTrue(comment_mentions_sensei("@sensei please re-scan"))
         self.assertFalse(comment_mentions_sensei("@SENSEI please re-scan"))

@@ -66,6 +66,25 @@ on:
       root_comment_id:
         required: false
         type: string
+      comment_body:
+        required: false
+        default: ''
+        type: string
+      comment_actor:
+        required: false
+        default: ''
+        type: string
+      comment_actor_type:
+        # No default: a command caller must state the actor type explicitly so
+        # an omitted value fails the maintainer gate instead of silently
+        # satisfying it.
+        required: false
+        default: ''
+        type: string
+      comment_association:
+        required: false
+        default: ''
+        type: string
       review_sensei_version:
         required: true
         type: string
@@ -159,6 +178,7 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          INPUT_PULL_REQUEST: ${{ inputs.pull_request_number }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -171,6 +191,11 @@ jobs:
           ENABLE_LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           ENABLE_MENTION_REPLIES: ${{ inputs.enable_mention_replies }}
           UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          COMMENT_BODY: ${{ inputs.comment_body }}
+          COMMENT_ACTOR: ${{ inputs.comment_actor }}
+          COMMENT_ACTOR_TYPE: ${{ inputs.comment_actor_type }}
+          COMMENT_ASSOCIATION: ${{ inputs.comment_association }}
         run: |
           set -euo pipefail
           PROVIDER_MODE="$(printf '%s' "$PROVIDER_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -225,8 +250,8 @@ jobs:
               ;;
           esac
           case "$OPERATION" in
-            review|reply) ;;
-            *) echo '::error::operation must be review or reply' >&2; exit 1 ;;
+            review|reply|command) ;;
+            *) echo '::error::operation must be review, reply, or command' >&2; exit 1 ;;
           esac
           case "$MODE" in
             automatic|manual) ;;
@@ -268,6 +293,28 @@ jobs:
           elif [[ "$OPERATION" == reply && "$ENABLE_GITHUB_WRITES" == true && "$ENABLE_MENTION_REPLIES" == true && ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
             echo '::error::pull request number is required for reply operations' >&2
             exit 1
+          elif [[ "$OPERATION" == command ]]; then
+            # Command inputs are checked whether or not writes are enabled, so
+            # a caller cannot route command payloads through the workflow while
+            # the job that consumes them is skipped.
+            if [[ "$ENABLE_GITHUB_WRITES" != true ]]; then
+              echo '::error::command operations require enable_github_writes' >&2
+              exit 1
+            fi
+            # LC_ALL=C pins wc to byte counting instead of the runner locale.
+            comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | LC_ALL=C wc -c)"
+            if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+              echo '::error::command operations require an explicit pull_request_number input' >&2
+              exit 1
+            fi
+            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ || ! "$SOURCE_COMMENT_ID" =~ ^[1-9][0-9]*$ || -z "$COMMENT_BODY" || "$comment_body_bytes" -gt 4096 || -z "$COMMENT_ACTOR" || ${#COMMENT_ACTOR} -gt 256 ]]; then
+              echo '::error::command operations require a pull request, current head SHA, and source comment identity' >&2
+              exit 1
+            fi
+            if [[ "$COMMENT_ACTOR_TYPE" != "User" || ! "$COMMENT_ASSOCIATION" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
+              echo '::error::command operations require an authorized human maintainer' >&2
+              exit 1
+            fi
           fi
           for flag in ENABLE_REVIEW ENABLE_AUTO_APPROVE ENABLE_LEARNING_PROPOSALS ENABLE_GITHUB_WRITES ENABLE_LEARNING_PRS ENABLE_MENTION_REPLIES UPLOAD_ARTIFACTS; do
             value="${!flag}"
@@ -333,7 +380,10 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
         run: |
           set -euo pipefail
-          if [[ "$OPERATION" != "review" || "$ENABLE_REVIEW" != "true" ]]; then
+          # Command mutations reuse the live head/branch checks below, so a
+          # stale or fabricated head SHA fails here rather than only at the
+          # broker. Reviews need the fetch for their base SHA and title.
+          if [[ "$OPERATION" != "command" && ("$OPERATION" != "review" || "$ENABLE_REVIEW" != "true") ]]; then
             echo 'authoritative PR preflight not required for this operation'
             exit 0
           fi
@@ -427,6 +477,128 @@ jobs:
               output.write(f"base_sha={base['sha']}\n")
               output.write(f"pull_request_number={data['number']}\n")
           PY
+
+  command:
+    needs: [validate-provider-mode, authoritative-preflight]
+    # authoritative-preflight re-reads the live PR and rejects a head SHA that
+    # no longer matches, so the mutation only runs against the commit the
+    # maintainer addressed.
+    if: inputs.operation == 'command' && inputs.enable_github_writes == 'true' && needs.validate-provider-mode.result == 'success' && needs.authoritative-preflight.result == 'success'
+    concurrency:
+      group: reviewsensei-command-${{ github.run_id }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    # The session-comment mutation is authorized by the OIDC broker's
+    # `review_session` capability (pull_requests: write); GITHUB_TOKEN keeps no
+    # write scope, matching ADR 0022/0050.
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
+        env:
+          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/review-sensei-venv"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          expected_version="${REVIEW_SENSEI_VERSION#v}"
+          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+            exit 1
+          fi
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
+            install_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
+          else
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
+          "$python_bin" -m pip check
+          echo "Installed ReviewSensei $installed_version from $install_source."
+
+      - name: Apply broker-attested maintainer command
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
+          COMMENT_BODY: ${{ inputs.comment_body }}
+          COMMENT_ACTOR: ${{ inputs.comment_actor }}
+          COMMENT_ACTOR_TYPE: ${{ inputs.comment_actor_type }}
+          COMMENT_ASSOCIATION: ${{ inputs.comment_association }}
+          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          oidc_response="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
+          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json, sys; value = json.load(sys.stdin).get("value"); assert isinstance(value, str) and value; print(value)')"
+          attestation="$RUNNER_TEMP/review-sensei-command-attestation.json"
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - "$attestation" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import time
+
+          repository = os.environ.get("REPOSITORY", "")
+          repository_id = os.environ.get("REPOSITORY_ID", "")
+          pull_request = os.environ.get("PULL_REQUEST", "")
+          head_sha = os.environ.get("HEAD_SHA", "")
+          source_comment_id = os.environ.get("SOURCE_COMMENT_ID", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          workflow_ref = os.environ.get("JOB_WORKFLOW_REF", "")
+          workflow_sha = os.environ.get("JOB_WORKFLOW_SHA", "")
+          if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository) or not re.fullmatch(r"[1-9][0-9]*", repository_id) or not re.fullmatch(r"[1-9][0-9]*", pull_request) or not re.fullmatch(r"[a-f0-9]{40}", head_sha) or not re.fullmatch(r"[1-9][0-9]*", source_comment_id) or not re.fullmatch(r"[1-9][0-9]{0,18}", run_id) or not re.fullmatch(r"[a-f0-9]{40}", workflow_sha):
+              raise SystemExit("hosted command identity is invalid")
+          json.dump({
+              "version": 1,
+              "repository": repository,
+              "repository_id": int(repository_id),
+              "pull_request": int(pull_request),
+              "head_sha": head_sha,
+              "operation": "command",
+              "source_comment_id": int(source_comment_id),
+              "run_id": run_id,
+              "issued_at": int(time.time()),
+              "concurrency_group": f"reviewsensei-session-{repository_id}-{pull_request}",
+              "job_workflow_ref": workflow_ref,
+              "job_workflow_sha": workflow_sha,
+          }, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
+          PY
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github command \
+            --comment-body "$COMMENT_BODY" --actor "$COMMENT_ACTOR" \
+            --actor-type "$COMMENT_ACTOR_TYPE" --association "$COMMENT_ASSOCIATION" \
+            --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
+            --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
+            --source-comment-id "$SOURCE_COMMENT_ID" --session-attestation "$attestation" \
+            --github-session-ledger --oidc-token "$oidc_token" --allow-write
 
   cloud:
     needs: [validate-provider-mode, authoritative-preflight]
@@ -739,7 +911,8 @@ jobs:
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --allow-write "${publish_args[@]}"
+            --outcome publication-outcome.json --github-session-ledger \
+            --allow-write "${publish_args[@]}"
 
       - name: Generate and publish cloud mention reply
         id: reply
@@ -1165,7 +1338,8 @@ jobs:
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --allow-write "${publish_args[@]}"
+            --outcome publication-outcome.json --github-session-ledger \
+            --allow-write "${publish_args[@]}"
 
       - name: Generate and publish OpenRouter mention reply
         id: reply
@@ -1580,7 +1754,8 @@ jobs:
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --allow-write "${publish_args[@]}"
+            --outcome publication-outcome.json --github-session-ledger \
+            --allow-write "${publish_args[@]}"
 
       - name: Generate and publish trusted local mention reply
         id: reply

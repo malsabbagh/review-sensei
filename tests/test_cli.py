@@ -1089,6 +1089,267 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("--allow-write", stderr.getvalue())
 
+    def test_github_command_uses_the_broker_backed_session_ledger(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.calls = []
+                self.__class__.instances.append(self)
+
+            def apply_maintainer_command(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(summary="paused")
+
+        attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 1,
+            "pull_request": 2,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 10,
+            "run_id": "123",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-1-2",
+            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_sha": "a" * 40,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "attestation.json"
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with patch.object(github_module, "GitHubApplication", FakeApplication):
+                status = main(
+                    [
+                        "github",
+                        "command",
+                        "--comment-body",
+                        "@sensei review pause",
+                        "--actor",
+                        "alice",
+                        "--association",
+                        "OWNER",
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "1",
+                        "--pull-request",
+                        "2",
+                        "--head-sha",
+                        "b" * 40,
+                        "--source-comment-id",
+                        "10",
+                        "--session-attestation",
+                        str(path),
+                        "--github-session-ledger",
+                        "--allow-write",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        call = FakeApplication.instances[0].calls[0]
+        self.assertTrue(call["options"].github_session_ledger)
+        self.assertTrue(call["options"].github_writes)
+        self.assertEqual(call["session_attestation"], attestation)
+        self.assertEqual(call["source_comment_id"], 10)
+
+    def test_github_command_rejects_an_attestation_that_disagrees_with_the_cli(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.__class__.instances.append(self)
+
+        attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 1,
+            "pull_request": 2,
+            "head_sha": "a" * 40,
+            "operation": "command",
+            "source_comment_id": 10,
+            "run_id": "123",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-1-2",
+            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_sha": "b" * 40,
+        }
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "attestation.json"
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with (
+                patch.object(github_module, "GitHubApplication", FakeApplication),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "github",
+                        "command",
+                        "--comment-body",
+                        "@sensei review pause",
+                        "--actor",
+                        "alice",
+                        "--association",
+                        "OWNER",
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "1",
+                        "--pull-request",
+                        "2",
+                        "--head-sha",
+                        "c" * 40,
+                        "--source-comment-id",
+                        "10",
+                        "--session-attestation",
+                        str(path),
+                        "--github-session-ledger",
+                        "--allow-write",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn("does not match the hosted command identity", stderr.getvalue())
+        self.assertEqual(FakeApplication.instances, [])
+
+    def test_github_command_reaches_the_real_application_with_an_injected_transport(
+        self,
+    ):
+        from review_sensei.hosting import github as github_module
+
+        constructed = []
+
+        class RecordingHttp:
+            def __init__(self):
+                constructed.append(self)
+
+        broker_calls = []
+
+        class FakeBroker:
+            def __init__(self):
+                broker_calls.append(self)
+
+            def authorize_session_mutation(self, token, **kwargs):
+                broker_calls.append((token, kwargs))
+                # A grant without a session grant id must stop the mutation
+                # before any write, in the real application code.
+                return type(
+                    "Grant",
+                    (),
+                    {"token": "capability-token", "grant": None, "attestation": {}},
+                )()
+
+        attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 1,
+            "pull_request": 2,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 10,
+            "run_id": "123",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-1-2",
+            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_sha": "c" * 40,
+        }
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "attestation.json"
+            path.write_text(json.dumps(attestation), encoding="utf-8")
+            with (
+                patch.object(github_module, "GitHubHttp", RecordingHttp),
+                patch.object(github_module, "BrokerClient", FakeBroker),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "github",
+                        "command",
+                        "--comment-body",
+                        "@sensei review pause",
+                        "--actor",
+                        "alice",
+                        "--association",
+                        "OWNER",
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "1",
+                        "--pull-request",
+                        "2",
+                        "--head-sha",
+                        "b" * 40,
+                        "--source-comment-id",
+                        "10",
+                        "--session-attestation",
+                        str(path),
+                        "--github-session-ledger",
+                        "--oidc-token",
+                        "caller-oidc",
+                        "--allow-write",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "broker command authorization returned an invalid grant",
+            stderr.getvalue(),
+        )
+        self.assertEqual(len(constructed), 1)
+        token, kwargs = broker_calls[1]
+        self.assertEqual(token, "caller-oidc")
+        self.assertEqual(kwargs["repository_id"], 1)
+        self.assertEqual(kwargs["pull_request"], 2)
+        self.assertEqual(kwargs["head_sha"], "b" * 40)
+        self.assertEqual(kwargs["session_attestation"], attestation)
+
+    def test_github_command_local_ledger_rejects_hosted_only_flags(self):
+        from review_sensei.session import LocalSessionLedger, SessionIdentity
+
+        hosted_only = (
+            ("--repository-id", "1"),
+            ("--source-comment-id", "10"),
+            ("--session-attestation", "attestation.json"),
+            ("--oidc-token", "token"),
+        )
+        for flag, value in hosted_only:
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as raw:
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    status = main(
+                        [
+                            "github",
+                            "command",
+                            "--comment-body",
+                            "@sensei review pause",
+                            "--actor",
+                            "alice",
+                            "--association",
+                            "MEMBER",
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "136",
+                            flag,
+                            value,
+                            "--allow-write",
+                            "--session-ledger",
+                            raw,
+                        ]
+                    )
+                self.assertEqual(status, 1)
+                self.assertIn(
+                    f"{flag} requires --github-session-ledger", stderr.getvalue()
+                )
+                loaded = LocalSessionLedger(Path(raw)).load(
+                    SessionIdentity("owner/repo", 136)
+                )
+                self.assertEqual(loaded.status, "missing")
+
     def test_cli_version_returns_metadata_version(self):
         expected = importlib.metadata.version("review-sensei")
         stdout = io.StringIO()
