@@ -4,7 +4,7 @@
   "title": "ReviewSensei observed convergence evidence report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "mode", "events", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
+  "required": ["schema_version", "mode", "events", "baseline_events", "command_events", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "mode": {"type": "string", "enum": ["advisory", "merge-focused", "strict"]},
@@ -15,14 +15,17 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["label", "provider_calls", "publication_status"],
+        "required": ["label", "provider_calls", "baseline_loaded", "publication_status"],
         "properties": {
           "label": {"type": "string", "minLength": 1, "maxLength": 128},
           "provider_calls": {"type": "integer", "minimum": 0, "maximum": 32},
+          "baseline_loaded": {"type": "boolean"},
           "publication_status": {"type": "string", "enum": ["published", "handoff", "disabled", "already_published"]}
         }
       }
     },
+    "baseline_events": {"type": "integer", "minimum": 0, "maximum": 32},
+    "command_events": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
     "approval_events": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
     "cap_created_approval": {"type": ["boolean", "null"]},
     "cutover_status": {"type": "string", "enum": ["passed", "not_ready"]},

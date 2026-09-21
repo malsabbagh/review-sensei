@@ -206,10 +206,15 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(len(report.events), 2)
         self.assertTrue(all(event.provider_calls == 1 for event in report.events))
         self.assertEqual(
+            [event.baseline_loaded for event in report.events], [False, True]
+        )
+        self.assertEqual(
             [event.publication_status for event in report.events],
             ["published", "published"],
         )
         self.assertEqual(report.approval_events, 2)
+        self.assertEqual(report.baseline_events, 2)
+        self.assertEqual(report.command_events, ("pause:applied", "continue:applied"))
         self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
         self.assertTrue(report.unmet_criteria)

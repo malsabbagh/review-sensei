@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, Sequence, cast
 from urllib.parse import urlparse
 
+from .baseline import ReviewBaseline, baseline_from_review
+from .context import build_review_context_cache_key
 from .convergence import (
     DEFAULT_REVIEW_MODE,
     ReviewConvergencePolicy,
@@ -118,12 +120,14 @@ class ObservedSequenceEvent:
 
     label: str
     provider_calls: int
+    baseline_loaded: bool
     publication_status: str
 
     def to_dict(self) -> dict[str, object]:
         return {
             "label": self.label,
             "provider_calls": self.provider_calls,
+            "baseline_loaded": self.baseline_loaded,
             "publication_status": self.publication_status,
         }
 
@@ -134,6 +138,8 @@ class ObservedSequenceReport:
 
     mode: str
     events: tuple[ObservedSequenceEvent, ...]
+    baseline_events: int
+    command_events: tuple[str, ...]
     approval_events: int | None
     cap_created_approval: bool | None
     cutover_status: str
@@ -149,6 +155,8 @@ class ObservedSequenceReport:
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "mode": self.mode,
             "events": [event.to_dict() for event in self.events],
+            "baseline_events": self.baseline_events,
+            "command_events": list(self.command_events),
             "approval_events": self.approval_events,
             "cap_created_approval": self.cap_created_approval,
             "cutover_status": self.cutover_status,
@@ -318,6 +326,9 @@ def run_observed_review_sequence(
 
     github = _ObservedGitHub()
     events: list[ObservedSequenceEvent] = []
+    baseline: ReviewBaseline | None = None
+    baseline_events = 0
+    command_events: list[str] = []
     cap_created_approval: bool | None = None
     with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
         ledger_root = Path(temporary_root)
@@ -326,19 +337,32 @@ def run_observed_review_sequence(
                 raise ReviewInputError("sequence step is invalid")
             provider = _ObservedProvider()
             service = ReviewService(provider)
+            request = ReviewRequest(
+                diff=(
+                    "diff --git a/src/observed.py b/src/observed.py\n"
+                    "--- a/src/observed.py\n+++ b/src/observed.py\n"
+                    "@@ -1 +1 @@\n-old\n+new\n"
+                ),
+                repository="owner/repo",
+                pull_request_number=136,
+                model=provider.model,
+                base_sha="f" * 40,
+                head_sha=step.head_sha,
+            )
+            current_key = build_review_context_cache_key(
+                request, provider_name=provider.name, stages=service.stages
+            )
+            if current_key is None:
+                raise ReviewInputError("observed cache identity is unavailable")
             result = service.review(
-                ReviewRequest(
-                    diff=(
-                        "diff --git a/src/observed.py b/src/observed.py\n"
-                        "--- a/src/observed.py\n+++ b/src/observed.py\n"
-                        "@@ -1 +1 @@\n-old\n+new\n"
-                    )
-                )
+                request,
+                current_key=current_key,
             )
             from .hosting.github.publication import ReviewPublisher
 
             github.head_sha = step.head_sha
             approvals_before = github.approval_events
+            baseline_loaded = baseline is not None
             application = GitHubApplication(
                 # The GitHub transport and model response are bounded fixture
                 # edges. Publisher and finalizer remain production components.
@@ -364,6 +388,9 @@ def run_observed_review_sequence(
                 diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
                 app_slug="reviewsensei[bot]",
                 convergence_policy=policy,
+                baseline=baseline,
+                current_key=current_key if baseline is not None else None,
+                changed_paths=("src/observed.py",),
             )
             if (
                 outcome.status == "handoff"
@@ -374,12 +401,68 @@ def run_observed_review_sequence(
                 ObservedSequenceEvent(
                     label=step.label or f"step-{index + 1}",
                     provider_calls=provider.calls,
+                    baseline_loaded=baseline_loaded,
                     publication_status=outcome.status,
                 )
             )
+            if outcome.status == "published":
+                baseline = baseline_from_review(
+                    result, cache_key=current_key, policy=policy
+                )
+                baseline_events += 1
+        command_application = GitHubApplication(
+            broker=cast(Any, _ObservedBroker()),
+            http=github.http,
+            reviewer=ReviewPublisher(http=github.http),
+            learner=cast(Any, object()),
+            replier=cast(Any, object()),
+            session_ledger=LocalSessionLedger(ledger_root),
+        )
+        pause = command_application.apply_maintainer_command(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=136,
+            pull_request=136,
+            head_sha=steps[-1].head_sha,
+            body="@sensei review pause",
+            actor_login="maintainer",
+            actor_type="User",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+        )
+        command_events.append(
+            f"{pause.action}:{'applied' if pause.applied else 'ignored'}"
+        )
+        continue_application = GitHubApplication(
+            broker=cast(Any, _ObservedBroker()),
+            http=github.http,
+            reviewer=ReviewPublisher(http=github.http),
+            learner=cast(Any, object()),
+            replier=cast(Any, object()),
+            session_ledger=LocalSessionLedger(ledger_root),
+        )
+        continued = continue_application.apply_maintainer_command(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=136,
+            pull_request=136,
+            head_sha=steps[-1].head_sha,
+            body="@sensei review continue --rounds 1",
+            actor_login="maintainer",
+            actor_type="User",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+        )
+        command_events.append(
+            f"{continued.action}:{'applied' if continued.applied else 'ignored'}"
+        )
     report = ObservedSequenceReport(
         mode=policy.mode,
         events=tuple(events),
+        baseline_events=baseline_events,
+        command_events=tuple(command_events),
         approval_events=github.approval_events,
         cap_created_approval=cap_created_approval,
         cutover_status="not_ready",
