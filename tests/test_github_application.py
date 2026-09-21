@@ -545,11 +545,11 @@ class GitHubApplicationTests(unittest.TestCase):
     def test_handler_fails_closed_on_prefilter_over_accepted_bodies(self):
         # The caller prefilter is deliberately wider than the authoritative
         # parser (ADR 0050), so it routes bodies to the command job that the
-        # parser then refuses: as conversational syntax (the Unicode separator
-        # shapes) or as a disposition reason that breaks the parser's bound.
-        # Both refusal shapes must stop before the broker exchange, and the
-        # reason-bound refusals must be the documented ones rather than any
-        # error the handler happens to raise.
+        # parser then refuses: as conversational syntax (the mention-casing
+        # and Unicode separator shapes) or as a disposition reason that
+        # breaks the parser's bound. Both refusal shapes must stop before the
+        # broker exchange, and the reason-bound refusals must be the
+        # documented ones rather than any error the handler happens to raise.
         write_options = {
             "options": GitHubWriteOptions(
                 github_writes=True, github_session_ledger=True
@@ -565,6 +565,7 @@ class GitHubApplicationTests(unittest.TestCase):
             "source_comment_id": 71,
         }
         for body, refusal in (
+            ("@Sensei review pause", None),
             ("@sensei review\u2003reenroll", None),
             ('@sensei dismiss abcd1234abcd1234 --reason ""', "requires a reason"),
             (
