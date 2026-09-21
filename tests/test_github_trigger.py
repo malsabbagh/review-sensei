@@ -519,12 +519,14 @@ class InlineCallerResolverTests(unittest.TestCase):
         self.assertGreater(len(over_accepted), 0)
         # The prefilter is allowed to be wider than the parser because the
         # reusable workflow re-parses the body and fails closed on
-        # "not-a-command". These eight fixture bodies differ on purpose: a
-        # mention whose casing the case-insensitive regex accepts, reasons that
-        # the parser bounds by emptiness, by printable ASCII, or by 512 bytes,
-        # and separators that the parser restricts to ASCII whitespace while
-        # the prefilter uses \s. Any other difference means the two grammars
-        # drifted.
+        # "not-a-command". These ten fixture bodies differ on purpose: a
+        # mention whose casing the case-insensitive regex accepts, a second
+        # mention on a later line (the regex matches any mention at a line
+        # boundary while the parser anchors on the first mention of the
+        # body), reasons that the parser bounds by emptiness, by printable
+        # ASCII, or by 512 bytes, and separators that the parser restricts to
+        # ASCII whitespace while the prefilter uses \s. Any other difference
+        # means the two grammars drifted.
         fingerprint = "abcd1234abcd1234"
         self.assertEqual(
             {
@@ -535,6 +537,8 @@ class InlineCallerResolverTests(unittest.TestCase):
             {
                 "@Sensei review pause",
                 "@SENSEI review pause",
+                "@sensei review pause\n@sensei review pause",
+                "@sensei review pause\n@sensei verify",
                 f'@sensei dismiss {fingerprint} --reason ""',
                 f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
                 f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
@@ -666,6 +670,42 @@ class InlineCallerResolverTests(unittest.TestCase):
                         module_output.read_text(encoding="utf-8"),
                         inline_output.read_text(encoding="utf-8"),
                     )
+
+    def test_generated_caller_routes_reenroll_to_the_command_operation(self):
+        # The generated caller's inline resolver decides the operation its
+        # job guard selects on, so drive it with a reenroll body rather than
+        # inferring the value from the prefilter's grammar. reenroll retires
+        # durable state, which is why the routing deserves its own pin.
+        caller = _tagged_workflow("v5")
+        script = inline_resolver_script(caller)
+        self.assertIn(
+            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n",
+            caller,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pull_path = root / "pull.json"
+            pull_path.write_text(json.dumps(_pull()), encoding="utf-8")
+            output_path = root / "reenroll.out"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-",
+                    str(pull_path),
+                    "false",
+                    "issue_comment",
+                    "@sensei review reenroll",
+                ],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={**os.environ, "GITHUB_OUTPUT": str(output_path)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            emitted = output_path.read_text(encoding="utf-8")
+        self.assertIn("operation=command\n", emitted)
+        self.assertIn("enable_review=false\n", emitted)
 
 
 if __name__ == "__main__":

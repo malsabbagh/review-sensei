@@ -4,6 +4,8 @@
   {"body": "note @sensei\treview pause", "accepted": true},
   {"body": "@Sensei review pause", "accepted": false},
   {"body": "@SENSEI review pause", "accepted": false},
+  {"body": "@sensei review pause\n@sensei review pause", "accepted": false},
+  {"body": "@sensei review pause\n@sensei verify", "accepted": false},
   {"body": "@sensei Review Continue --Rounds 1", "accepted": true},
   {"body": "@sensei review continue --rounds 0", "accepted": true},
   {"body": "@sensei review continue --rounds 2", "accepted": false},
