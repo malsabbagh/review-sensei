@@ -238,7 +238,8 @@
                   "analysis_failed",
                   "publication_pending",
                   "publication_failed",
-                  "publication_succeeded"
+                  "publication_succeeded",
+                  "publication_suppressed"
                 ]
               }
             }

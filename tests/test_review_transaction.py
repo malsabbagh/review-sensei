@@ -45,6 +45,7 @@ from review_sensei.session import (
     prepare_review_transaction,
     reclaim_abandoned_review_transaction,
     session_reservation_id,
+    suppress_review_publication,
 )
 
 try:
@@ -326,6 +327,23 @@ class ReviewTransactionTests(unittest.TestCase):
         self.assertEqual(replay.transaction.phase, "publication_succeeded")
         self.assertEqual(replay.generation, succeeded.generation)
         self.assertEqual(replay.completed_initial_reviews, 1)
+
+    def test_publication_suppression_is_terminal_and_idempotent(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        suppressed = suppress_review_publication(
+            ledger, IDENTITY, result.transaction, now=NOW
+        )
+        self.assertEqual(suppressed.transaction.phase, "publication_suppressed")
+        self.assertEqual(suppressed.completed_initial_reviews, 1)
+        replay = suppress_review_publication(
+            ledger, IDENTITY, suppressed.transaction, now=NOW
+        )
+        self.assertEqual(replay.generation, suppressed.generation)
+        with self.assertRaisesRegex(ReviewInputError, "phase transition"):
+            complete_review_publication(
+                ledger, IDENTITY, suppressed.transaction, published=True, now=NOW
+            )
 
     def test_trusted_context_mismatch_fails_closed(self):
         ledger = InMemorySessionLedger()

@@ -1683,6 +1683,7 @@ def _checkpoint_transaction_record(
         "publication_pending",
         "publication_failed",
         "publication_succeeded",
+        "publication_suppressed",
     }:
         if record.transaction.result_sha256 != result_digest:
             raise ReviewInputError("session transaction result digest does not match")
@@ -1918,6 +1919,39 @@ def complete_review_publication(
         )
         return record.evolve(
             now=now, generation=next_generation, transaction=updated_transaction
+        )
+
+    return ledger.replace(identity, mutate, now=now)
+
+
+def suppress_review_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Terminally record a policy handoff without making it retryable publish work."""
+
+    if not isinstance(transaction, ReviewTransaction):
+        raise ReviewInputError("review transaction is invalid")
+
+    def mutate(record: SessionRecord) -> SessionRecord:
+        current = record.transaction
+        if current is None or current.transaction_id != transaction.transaction_id:
+            raise ReviewInputError("durable transaction does not match")
+        if not current.logical_identity_matches(transaction):
+            raise ReviewInputError("publication transaction identity does not match")
+        if current.phase == "publication_suppressed":
+            return record
+        if current.phase != "publication_pending":
+            raise ReviewInputError("publication suppression phase transition is invalid")
+        if transaction.result_sha256 is None or current.result_sha256 != transaction.result_sha256:
+            raise ReviewInputError("publication result digest does not match")
+        return record.evolve(
+            now=now,
+            generation=_next_generation(record),
+            transaction=current.with_phase("publication_suppressed"),
         )
 
     return ledger.replace(identity, mutate, now=now)

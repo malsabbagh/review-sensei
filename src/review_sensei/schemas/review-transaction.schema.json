@@ -35,7 +35,8 @@
         "analysis_failed",
         "publication_pending",
         "publication_failed",
-        "publication_succeeded"
+        "publication_succeeded",
+        "publication_suppressed"
       ]
     },
     "result_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
@@ -58,7 +59,8 @@
             "enum": [
               "publication_pending",
               "publication_failed",
-              "publication_succeeded"
+              "publication_succeeded",
+              "publication_suppressed"
             ]
           }
         }
