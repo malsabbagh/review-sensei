@@ -1085,7 +1085,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot'))))
+      github.event.comment.user.type != 'Bot')))))
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
