@@ -156,6 +156,11 @@ Negative:
   inside the reusable workflow from the broker attestation and the durable
   session ledger, so editing the caller cannot widen it; the price is that
   an unauthorized mention can still start a run that fails closed.
+- `@sensei review status` is not a looser read path: the hosted handler
+  still requires a caller-supplied OIDC token and exchanges the read-only
+  `review_status` capability before it reads any ledger state, so status is
+  bound to the same broker-attested actor and association as every
+  mutation, and only its broker scope is narrower.
 
 ## Alternatives considered
 

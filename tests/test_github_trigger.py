@@ -192,6 +192,10 @@ def command_corpus() -> list[str]:
             f"{prefix}@sensei{separator}dismiss{separator}{fingerprint16}"
             f"{separator}--reason{separator}{reason}"
         )
+    # The mention loop above spells a single casing per body; a mixed-case
+    # mention paired with a case-sensitive action token must still repair, so
+    # the over-acceptance set pins that interaction explicitly.
+    bodies.append("@SeNsEi review ReEnRoLl")
     return bodies
 
 
@@ -519,9 +523,10 @@ class InlineCallerResolverTests(unittest.TestCase):
         self.assertGreater(len(over_accepted), 0)
         # The prefilter is allowed to be wider than the parser because the
         # reusable workflow re-parses the body and fails closed on
-        # "not-a-command". These ten fixture bodies differ on purpose: a
-        # mention whose casing the case-insensitive regex accepts, a second
-        # mention on a later line (the regex matches any mention at a line
+        # "not-a-command". These eleven fixture bodies differ on purpose: a
+        # mention whose casing the case-insensitive regex accepts (including
+        # a mixed-case mention paired with a case-sensitive action token), a
+        # second mention on a later line (the regex matches any mention at a line
         # boundary while the parser anchors on the first mention of the
         # body), reasons that the parser bounds by emptiness, by printable
         # ASCII, or by 512 bytes, and separators that the parser restricts to
@@ -537,6 +542,7 @@ class InlineCallerResolverTests(unittest.TestCase):
             {
                 "@Sensei review pause",
                 "@SENSEI review pause",
+                "@SeNsEi review ReEnRoLl",
                 "@sensei review pause\n@sensei review pause",
                 "@sensei review pause\n@sensei verify",
                 f'@sensei dismiss {fingerprint} --reason ""',
