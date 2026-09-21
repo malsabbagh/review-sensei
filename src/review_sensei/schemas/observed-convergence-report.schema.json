@@ -4,7 +4,7 @@
   "title": "ReviewSensei observed convergence evidence report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "mode", "events", "baseline_events", "command_events", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
+  "required": ["schema_version", "mode", "events", "baseline_events", "command_events", "finding_metrics", "execution_metrics", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "mode": {"type": "string", "enum": ["advisory", "merge-focused", "strict"]},
@@ -26,6 +26,34 @@
     },
     "baseline_events": {"type": "integer", "minimum": 0, "maximum": 32},
     "command_events": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+    "finding_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_material_findings", "observed_material_findings", "matched_material_findings", "missed_material_findings", "unjustified_late_blockers", "blocker_precision", "seeded_material_regressions_detected", "duplicate_findings", "reopened_findings", "contradictions"],
+      "properties": {
+        "expected_material_findings": {"type": "integer", "minimum": 0, "maximum": 512},
+        "observed_material_findings": {"type": "integer", "minimum": 0, "maximum": 512},
+        "matched_material_findings": {"type": "integer", "minimum": 0, "maximum": 512},
+        "missed_material_findings": {"type": "integer", "minimum": 0, "maximum": 512},
+        "unjustified_late_blockers": {"type": "integer", "minimum": 0, "maximum": 512},
+        "blocker_precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "seeded_material_regressions_detected": {"type": "integer", "minimum": 0, "maximum": 512},
+        "duplicate_findings": {"type": ["integer", "null"], "minimum": 0, "maximum": 512},
+        "reopened_findings": {"type": ["integer", "null"], "minimum": 0, "maximum": 512},
+        "contradictions": {"type": ["integer", "null"], "minimum": 0, "maximum": 512}
+      }
+    },
+    "execution_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed_rounds", "handoffs", "provider_calls", "failed_attempts"],
+      "properties": {
+        "completed_rounds": {"type": "integer", "minimum": 0, "maximum": 32},
+        "handoffs": {"type": "integer", "minimum": 0, "maximum": 32},
+        "provider_calls": {"type": "integer", "minimum": 0, "maximum": 512},
+        "failed_attempts": {"type": "integer", "minimum": 0, "maximum": 32}
+      }
+    },
     "approval_events": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
     "cap_created_approval": {"type": ["boolean", "null"]},
     "cutover_status": {"type": "string", "enum": ["passed", "not_ready"]},

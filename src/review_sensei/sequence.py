@@ -49,6 +49,8 @@ class SequenceStep:
     independently_approval_eligible: bool = False
     latest_head_reviewed: bool = True
     label: str = "step"
+    expected_material_finding_ids: tuple[str, ...] = ()
+    fixture_material_finding_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.head_sha, str) or not self.head_sha.strip():
@@ -57,6 +59,22 @@ class SequenceStep:
             not isinstance(item, str) or not item for item in self.blocking_identities
         ):
             raise ReviewInputError("blocking identity must be a non-empty string")
+        for label, values in (
+            ("expected material finding", self.expected_material_finding_ids),
+            ("fixture material finding", self.fixture_material_finding_ids),
+        ):
+            if (
+                not isinstance(values, tuple)
+                or len(values) > 16
+                or any(
+                    not isinstance(item, str)
+                    or not item.strip()
+                    or len(item.encode("utf-8")) > 128
+                    for item in values
+                )
+                or len(values) != len(set(values))
+            ):
+                raise ReviewInputError(f"{label} identities are invalid")
 
 
 @dataclass(frozen=True)
@@ -140,6 +158,8 @@ class ObservedSequenceReport:
     events: tuple[ObservedSequenceEvent, ...]
     baseline_events: int
     command_events: tuple[str, ...]
+    finding_metrics: ObservedFindingMetrics
+    execution_metrics: ObservedExecutionMetrics
     approval_events: int | None
     cap_created_approval: bool | None
     cutover_status: str
@@ -157,6 +177,8 @@ class ObservedSequenceReport:
             "events": [event.to_dict() for event in self.events],
             "baseline_events": self.baseline_events,
             "command_events": list(self.command_events),
+            "finding_metrics": self.finding_metrics.to_dict(),
+            "execution_metrics": self.execution_metrics.to_dict(),
             "approval_events": self.approval_events,
             "cap_created_approval": self.cap_created_approval,
             "cutover_status": self.cutover_status,
@@ -167,17 +189,84 @@ class ObservedSequenceReport:
         return payload
 
 
+@dataclass(frozen=True)
+class ObservedFindingMetrics:
+    """Finding-quality counters from labels and the fixture model output."""
+
+    expected_material_findings: int
+    observed_material_findings: int
+    matched_material_findings: int
+    missed_material_findings: int
+    unjustified_late_blockers: int
+    blocker_precision: float | None
+    seeded_material_regressions_detected: int
+    duplicate_findings: int | None = None
+    reopened_findings: int | None = None
+    contradictions: int | None = None
+
+    def to_dict(self) -> dict[str, int | float | None]:
+        return {
+            "expected_material_findings": self.expected_material_findings,
+            "observed_material_findings": self.observed_material_findings,
+            "matched_material_findings": self.matched_material_findings,
+            "missed_material_findings": self.missed_material_findings,
+            "unjustified_late_blockers": self.unjustified_late_blockers,
+            "blocker_precision": self.blocker_precision,
+            "seeded_material_regressions_detected": self.seeded_material_regressions_detected,
+            "duplicate_findings": self.duplicate_findings,
+            "reopened_findings": self.reopened_findings,
+            "contradictions": self.contradictions,
+        }
+
+
+@dataclass(frozen=True)
+class ObservedExecutionMetrics:
+    """Round and work consumption loaded from the durable fixture ledger."""
+
+    completed_rounds: int
+    handoffs: int
+    provider_calls: int
+    failed_attempts: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "completed_rounds": self.completed_rounds,
+            "handoffs": self.handoffs,
+            "provider_calls": self.provider_calls,
+            "failed_attempts": self.failed_attempts,
+        }
+
+
 class _ObservedProvider:
     name = "observed-fixture"
     model: str | None = "observed-fixture-model"
 
-    def __init__(self) -> None:
+    def __init__(self, material_finding_ids: tuple[str, ...] = ()) -> None:
         self.calls = 0
+        self.material_finding_ids = material_finding_ids
 
     def complete(self, request):
         self.calls += 1
+        comments = [
+            {
+                "path": "src/observed.py",
+                "line": 1,
+                "body": f"fixture-material:{finding_id}",
+                "blocking": True,
+                "severity": "high",
+                "fix_effort": "small",
+                "category": "correctness",
+            }
+            for finding_id in self.material_finding_ids
+        ]
         return ProviderResponse(
-            text='{"summary":"Observed fixture review.","comments":[],"learning_proposals":[]}',
+            text=json.dumps(
+                {
+                    "summary": "Observed fixture review.",
+                    "comments": comments,
+                    "learning_proposals": [],
+                }
+            ),
             provider=self.name,
             model=self.model,
         )
@@ -329,13 +418,17 @@ def run_observed_review_sequence(
     baseline: ReviewBaseline | None = None
     baseline_events = 0
     command_events: list[str] = []
+    expected_material_finding_ids: set[str] = set()
+    observed_material_finding_ids: set[str] = set()
+    handoffs = 0
+    provider_calls = 0
     cap_created_approval: bool | None = None
     with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
         ledger_root = Path(temporary_root)
         for index, step in enumerate(steps):
             if not isinstance(step, SequenceStep):
                 raise ReviewInputError("sequence step is invalid")
-            provider = _ObservedProvider()
+            provider = _ObservedProvider(step.fixture_material_finding_ids)
             service = ReviewService(provider)
             request = ReviewRequest(
                 diff=(
@@ -357,6 +450,14 @@ def run_observed_review_sequence(
             result = service.review(
                 request,
                 current_key=current_key,
+            )
+            provider_calls += provider.calls
+            expected_material_finding_ids.update(step.expected_material_finding_ids)
+            observed_material_finding_ids.update(
+                comment.body.removeprefix("fixture-material:")
+                for comment in result.comments
+                if comment.body.startswith("fixture-material:")
+                and comment.severity in {"high", "critical"}
             )
             from .hosting.github.publication import ReviewPublisher
 
@@ -397,6 +498,8 @@ def run_observed_review_sequence(
                 and outcome.diagnostic == "round-budget-exhausted"
             ):
                 cap_created_approval = github.approval_events > approvals_before
+            if outcome.status == "handoff":
+                handoffs += 1
             events.append(
                 ObservedSequenceEvent(
                     label=step.label or f"step-{index + 1}",
@@ -410,6 +513,18 @@ def run_observed_review_sequence(
                     result, cache_key=current_key, policy=policy
                 )
                 baseline_events += 1
+        loaded_record = (
+            LocalSessionLedger(ledger_root)
+            .load(SessionIdentity("owner/repo", 136, repository_id=136))
+            .record
+        )
+        completed_rounds = (
+            0
+            if loaded_record is None
+            else loaded_record.completed_initial_reviews
+            + loaded_record.completed_verification_rounds
+        )
+        failed_attempts = 0 if loaded_record is None else loaded_record.failed_attempts
         command_application = GitHubApplication(
             broker=cast(Any, _ObservedBroker()),
             http=github.http,
@@ -463,6 +578,34 @@ def run_observed_review_sequence(
         events=tuple(events),
         baseline_events=baseline_events,
         command_events=tuple(command_events),
+        finding_metrics=ObservedFindingMetrics(
+            expected_material_findings=len(expected_material_finding_ids),
+            observed_material_findings=len(observed_material_finding_ids),
+            matched_material_findings=len(
+                expected_material_finding_ids & observed_material_finding_ids
+            ),
+            missed_material_findings=len(
+                expected_material_finding_ids - observed_material_finding_ids
+            ),
+            unjustified_late_blockers=len(
+                observed_material_finding_ids - expected_material_finding_ids
+            ),
+            blocker_precision=(
+                None
+                if not observed_material_finding_ids
+                else len(expected_material_finding_ids & observed_material_finding_ids)
+                / len(observed_material_finding_ids)
+            ),
+            seeded_material_regressions_detected=len(
+                expected_material_finding_ids & observed_material_finding_ids
+            ),
+        ),
+        execution_metrics=ObservedExecutionMetrics(
+            completed_rounds=completed_rounds,
+            handoffs=handoffs,
+            provider_calls=provider_calls,
+            failed_attempts=failed_attempts,
+        ),
         approval_events=github.approval_events,
         cap_created_approval=cap_created_approval,
         cutover_status="not_ready",
@@ -586,6 +729,8 @@ def compare_sequence_policies(
 
 
 __all__ = [
+    "ObservedExecutionMetrics",
+    "ObservedFindingMetrics",
     "ObservedSequenceEvent",
     "ObservedSequenceReport",
     "SequenceReport",

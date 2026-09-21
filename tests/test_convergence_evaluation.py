@@ -215,6 +215,8 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(report.approval_events, 2)
         self.assertEqual(report.baseline_events, 2)
         self.assertEqual(report.command_events, ("pause:applied", "continue:applied"))
+        self.assertEqual(report.execution_metrics.completed_rounds, 2)
+        self.assertEqual(report.execution_metrics.provider_calls, 2)
         self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
         self.assertTrue(report.unmet_criteria)
@@ -222,6 +224,29 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(
             report.to_dict()["events"][0]["publication_status"], "published"
         )
+
+    def test_observed_harness_compares_material_labels_to_fixture_output(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                    label="seeded-regression",
+                ),
+                SequenceStep(head_sha="b" * 40, label="verification"),
+            ),
+            _policy(),
+        )
+        metrics = report.finding_metrics
+        self.assertEqual(metrics.expected_material_findings, 1)
+        self.assertEqual(metrics.observed_material_findings, 1)
+        self.assertEqual(metrics.matched_material_findings, 1)
+        self.assertEqual(metrics.missed_material_findings, 0)
+        self.assertEqual(metrics.unjustified_late_blockers, 0)
+        self.assertEqual(metrics.blocker_precision, 1.0)
+        self.assertEqual(metrics.seeded_material_regressions_detected, 1)
+        self.assertIsNone(metrics.duplicate_findings)
 
 
 class ShadowObservationTests(unittest.TestCase):
