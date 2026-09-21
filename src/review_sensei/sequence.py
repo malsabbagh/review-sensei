@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Sequence
+from typing import Any, Sequence, cast
 
 from .convergence import (
     DEFAULT_REVIEW_MODE,
@@ -95,7 +95,7 @@ class SequenceReport:
     )
 
     def to_dict(self) -> dict[str, object]:
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "mode": self.mode,
             "steps": [step.to_dict() for step in self.steps],
@@ -141,7 +141,7 @@ class ObservedSequenceReport:
     )
 
     def to_dict(self) -> dict[str, object]:
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "mode": self.mode,
             "events": [event.to_dict() for event in self.events],
@@ -155,7 +155,7 @@ class ObservedSequenceReport:
 
 class _ObservedProvider:
     name = "observed-fixture"
-    model = "observed-fixture-model"
+    model: str | None = "observed-fixture-model"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -224,11 +224,13 @@ def run_observed_review_sequence(
             )
         )
         application = GitHubApplication(
-            broker=_ObservedBroker(),
-            http=None,
-            reviewer=publisher,
-            learner=object(),
-            replier=object(),
+            # These are deliberately the only mocked external edges. Their
+            # production protocol types are wider than this bounded fixture.
+            broker=cast(Any, _ObservedBroker()),
+            http=cast(Any, None),
+            reviewer=cast(Any, publisher),
+            learner=cast(Any, object()),
+            replier=cast(Any, object()),
             # Construct a new adapter for every event: only its on-disk record
             # crosses the logical process boundary.
             session_ledger=LocalSessionLedger(ledger_root),
