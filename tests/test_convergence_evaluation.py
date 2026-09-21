@@ -209,13 +209,11 @@ class ObservedSequenceTests(unittest.TestCase):
             [event.publication_status for event in report.events],
             ["published", "published"],
         )
-        self.assertIsNone(report.approval_events)
+        self.assertEqual(report.approval_events, 2)
         self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
         self.assertTrue(report.unmet_criteria)
-        self.assertTrue(
-            any("Approval metrics are unknown" in item for item in report.limitations)
-        )
+        self.assertTrue(report.unmet_criteria)
         self.assertEqual(
             report.to_dict()["events"][0]["publication_status"], "published"
         )

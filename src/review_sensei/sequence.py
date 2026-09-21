@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Sequence, cast
+from typing import Any, Literal, Sequence, cast
+from urllib.parse import urlparse
 
 from .convergence import (
     DEFAULT_REVIEW_MODE,
@@ -137,8 +139,8 @@ class ObservedSequenceReport:
     cutover_status: str
     unmet_criteria: tuple[str, ...]
     limitations: tuple[str, ...] = (
-        "External model and GitHub APIs are mocked; internal admission and publication run normally.",
-        "Approval metrics are unknown because the mocked publisher does not execute a GitHub finalizer.",
+        "External model and GitHub APIs are mocked; service, admission, publisher, and finalizer run normally.",
+        "A cap-created approval is unknown until a supplied sequence reaches the relevant round cap.",
         "This harness is evidence for deterministic component behavior, not real-world model recall.",
     )
 
@@ -181,15 +183,120 @@ class _ObservedBroker:
         return f"observed-{capability or 'session'}-token"
 
 
-class _ObservedPublisher:
+class _ObservedHTTPResponse:
+    """Small response shape consumed by the real bounded GitHub adapter."""
+
+    def __init__(
+        self, payload: dict[str, object] | Sequence[object], status: int = 200
+    ):
+        self.body = json.dumps(payload).encode("utf-8")
+        self.status = status
+        self.reason = "observed fixture"
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self) -> _ObservedHTTPResponse:
+        return self
+
+    def __exit__(
+        self, exc_type: object, exc_value: object, traceback: object
+    ) -> Literal[False]:
+        return False
+
+    def read(self, size: int) -> bytes:
+        return self.body[:size]
+
+
+class _ObservedGitHub:
+    """Stateful host double; the production HTTP and publisher code stay live."""
+
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        from .hosting.github.http import GitHubHttp
 
-    def publish(self, **kwargs):
-        from .hosting.github.publication import PublicationResult
+        self.head_sha = "0" * 40
+        self.reviews: list[dict[str, object]] = []
+        self.calls: list[tuple[str, str, dict[str, object] | None]] = []
+        self.http = GitHubHttp(
+            api_url="https://observed.github.invalid", opener=self._open, timeout=1
+        )
 
-        self.calls.append(kwargs)
-        return PublicationResult(status="published", review_id=len(self.calls))
+    @property
+    def approval_events(self) -> int:
+        return sum(
+            1
+            for method, path, body in self.calls
+            if method == "POST"
+            and path.endswith("/reviews")
+            and isinstance(body, dict)
+            and body.get("event") == "APPROVE"
+        )
+
+    def _pr_payload(self) -> dict[str, object]:
+        return {
+            "state": "open",
+            "draft": False,
+            "user": {"login": "maintainer", "type": "User"},
+            "head": {
+                "sha": self.head_sha,
+                "repo": {"full_name": "owner/repo", "fork": False},
+            },
+            "base": {
+                "ref": "main",
+                "sha": "f" * 40,
+                "repo": {"id": 136, "full_name": "owner/repo", "fork": False},
+            },
+        }
+
+    def _open(self, request: Any, timeout: int) -> _ObservedHTTPResponse:
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        raw = request.data
+        body = (
+            json.loads(raw.decode("utf-8"))
+            if isinstance(raw, (bytes, bytearray)) and raw
+            else None
+        )
+        if body is not None and not isinstance(body, dict):
+            raise ReviewInputError("observed GitHub request body is invalid")
+        self.calls.append((request.method, path, body))
+        if request.method == "GET" and path.endswith("/pulls/136"):
+            return _ObservedHTTPResponse(self._pr_payload())
+        if request.method == "GET" and path.endswith("/pulls/136/reviews"):
+            return _ObservedHTTPResponse(self.reviews)
+        if request.method == "POST" and path == "/graphql":
+            return _ObservedHTTPResponse(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        if request.method == "POST" and path.endswith("/pulls/136/reviews"):
+            if body is None:
+                raise ReviewInputError("observed review publication body is missing")
+            review_id = len(self.reviews) + 1
+            self.reviews.append(
+                {
+                    "id": review_id,
+                    "body": body.get("body"),
+                    "commit_id": body.get("commit_id"),
+                    "state": body.get("event"),
+                    "user": {"login": "reviewsensei[bot]"},
+                }
+            )
+            return _ObservedHTTPResponse({"id": review_id})
+        raise ReviewInputError(
+            f"unexpected observed GitHub request: {request.method} {path}"
+        )
 
 
 def run_observed_review_sequence(
@@ -209,68 +316,77 @@ def run_observed_review_sequence(
         raise ReviewInputError("observed sequence requires at least one step")
     from .hosting.github.application import GitHubApplication, GitHubWriteOptions
 
-    temporary_root = TemporaryDirectory(prefix="reviewsensei-observed-")
-    ledger_root = Path(temporary_root.name)
-    publisher = _ObservedPublisher()
+    github = _ObservedGitHub()
     events: list[ObservedSequenceEvent] = []
-    for index, step in enumerate(steps):
-        if not isinstance(step, SequenceStep):
-            raise ReviewInputError("sequence step is invalid")
-        provider = _ObservedProvider()
-        service = ReviewService(provider)
-        result = service.review(
-            ReviewRequest(
-                diff=(
-                    "diff --git a/src/observed.py b/src/observed.py\n"
-                    "--- a/src/observed.py\n+++ b/src/observed.py\n"
-                    "@@ -1 +1 @@\n-old\n+new\n"
+    cap_created_approval: bool | None = None
+    with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
+        ledger_root = Path(temporary_root)
+        for index, step in enumerate(steps):
+            if not isinstance(step, SequenceStep):
+                raise ReviewInputError("sequence step is invalid")
+            provider = _ObservedProvider()
+            service = ReviewService(provider)
+            result = service.review(
+                ReviewRequest(
+                    diff=(
+                        "diff --git a/src/observed.py b/src/observed.py\n"
+                        "--- a/src/observed.py\n+++ b/src/observed.py\n"
+                        "@@ -1 +1 @@\n-old\n+new\n"
+                    )
                 )
             )
-        )
-        application = GitHubApplication(
-            # These are deliberately the only mocked external edges. Their
-            # production protocol types are wider than this bounded fixture.
-            broker=cast(Any, _ObservedBroker()),
-            http=cast(Any, None),
-            reviewer=cast(Any, publisher),
-            learner=cast(Any, object()),
-            replier=cast(Any, object()),
-            # Construct a new adapter for every event: only its on-disk record
-            # crosses the logical process boundary.
-            session_ledger=LocalSessionLedger(ledger_root),
-        )
-        outcome = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
-            oidc_token="observed-oidc",
-            repository="owner/repo",
-            repository_id=136,
-            pull_request=136,
-            head_sha=step.head_sha,
-            base_branch="main",
-            base_sha="f" * 40,
-            result=result,
-            diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
-            app_slug="reviewsensei[bot]",
-            convergence_policy=policy,
-        )
-        events.append(
-            ObservedSequenceEvent(
-                label=step.label or f"step-{index + 1}",
-                provider_calls=provider.calls,
-                publication_status=outcome.status,
+            from .hosting.github.publication import ReviewPublisher
+
+            github.head_sha = step.head_sha
+            approvals_before = github.approval_events
+            application = GitHubApplication(
+                # The GitHub transport and model response are bounded fixture
+                # edges. Publisher and finalizer remain production components.
+                broker=cast(Any, _ObservedBroker()),
+                http=github.http,
+                reviewer=ReviewPublisher(http=github.http),
+                learner=cast(Any, object()),
+                replier=cast(Any, object()),
+                # Construct a new adapter for every event: only its on-disk record
+                # crosses the logical process boundary.
+                session_ledger=LocalSessionLedger(ledger_root),
             )
-        )
+            outcome = application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="observed-oidc",
+                repository="owner/repo",
+                repository_id=136,
+                pull_request=136,
+                head_sha=step.head_sha,
+                base_branch="main",
+                base_sha="f" * 40,
+                result=result,
+                diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+            )
+            if (
+                outcome.status == "handoff"
+                and outcome.diagnostic == "round-budget-exhausted"
+            ):
+                cap_created_approval = github.approval_events > approvals_before
+            events.append(
+                ObservedSequenceEvent(
+                    label=step.label or f"step-{index + 1}",
+                    provider_calls=provider.calls,
+                    publication_status=outcome.status,
+                )
+            )
     report = ObservedSequenceReport(
         mode=policy.mode,
         events=tuple(events),
-        approval_events=None,
-        cap_created_approval=None,
+        approval_events=github.approval_events,
+        cap_created_approval=cap_created_approval,
         cutover_status="not_ready",
         unmet_criteria=(
-            "approval and cap metrics are unmeasured without a GitHub finalizer fixture",
+            "cap-created approval remains unknown until the supplied sequence exercises a round cap",
         ),
     )
-    temporary_root.cleanup()
     return report
 
 
