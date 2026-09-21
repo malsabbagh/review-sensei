@@ -25,6 +25,7 @@ from scripts.publish_npm_release import (  # noqa: E402
     load_integrity_records,
     package_action,
     preflight,
+    publish_launcher,
     publish_package,
     publish_platforms,
     read_back_with_retry,
@@ -1441,6 +1442,111 @@ class PublishNpmReleaseTests(unittest.TestCase):
         self.assertEqual(actions[target], "verified")
         self.assertEqual(actions["@reviewsensei/cli-linux-x64-gnu"], "publish")
 
+    def test_preflight_concludes_completed_version_as_already_published(self) -> None:
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            return {
+                "name": package,
+                "version": version,
+                "dist": {"integrity": f"sha512-rebuilt-{package}"},
+            }
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+
+        state = json.loads(
+            (self.bundle_dir / "publish-state.json").read_text(encoding="utf-8")
+        )
+        actions = {item["name"]: item["action"] for item in state["packages"]}
+        self.assertEqual(set(actions), set(ALL_PACKAGES))
+        self.assertEqual(set(actions.values()), {"already-published"})
+        output = stdout.getvalue()
+        self.assertIn("All 6 packages are already published at 0.5.0", output)
+        self.assertIn("Provenance was NOT verified", output)
+
+    def test_preflight_refuses_partial_publish_with_conflicting_bytes(self) -> None:
+        target = "@reviewsensei/cli-darwin-arm64"
+
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            if package == target:
+                return {
+                    "name": package,
+                    "version": version,
+                    "dist": {"integrity": "sha512-other-build"},
+                }
+            raise HTTPError("url", 404, "not found", hdrs=None, fp=io.BytesIO(b""))
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch(
+                "scripts.publish_npm_release.probe_packument_version_state",
+                return_value=PackumentProbeState.VERSION_ABSENT,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                IntegrityMismatchError, "only partially published"
+            ):
+                preflight(
+                    self.bundle_dir,
+                    "0.5.0",
+                    max_attempts=3,
+                    preflight_404_attempts=1,
+                    initial_delay_seconds=1.0,
+                    max_delay_seconds=1.0,
+                )
+        self.assertFalse((self.bundle_dir / "publish-state.json").exists())
+
+    def test_preflight_resume_refuses_conflicting_bytes_when_complete(self) -> None:
+        source_sha = "a" * 40
+        self._write_resume_bundle_files(
+            metadata={"version": "0.5.0", "source_sha": source_sha},
+        )
+
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            return {
+                "name": package,
+                "version": version,
+                "dist": {"integrity": f"sha512-other-build-{package}"},
+            }
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                IntegrityMismatchError, "do not match the attested release bundle"
+            ):
+                preflight(
+                    self.bundle_dir,
+                    "0.5.0",
+                    max_attempts=3,
+                    preflight_404_attempts=1,
+                    initial_delay_seconds=1.0,
+                    max_delay_seconds=1.0,
+                    expected_source_sha=source_sha,
+                )
+        self.assertFalse((self.bundle_dir / "publish-state.json").exists())
+
     def test_publish_package_recovers_from_publish_failure_when_registry_matches(
         self,
     ) -> None:
@@ -1573,6 +1679,72 @@ class PublishNpmReleaseTests(unittest.TestCase):
             )
         publish.assert_not_called()
         readback.assert_not_called()
+
+    def test_publish_package_skips_already_published_packages(self) -> None:
+        records = load_integrity_records(self.bundle_dir, "0.5.0")
+        package = "@reviewsensei/cli-darwin-arm64"
+        write_publish_state(
+            self.bundle_dir,
+            "0.5.0",
+            [{"name": package, "action": "already-published"}],
+        )
+        with (
+            mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
+            mock.patch(
+                "scripts.publish_npm_release.read_back_with_retry",
+            ) as readback,
+        ):
+            publish_package(
+                self.bundle_dir,
+                package,
+                "0.5.0",
+                records,
+                max_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+            )
+        publish.assert_not_called()
+        readback.assert_not_called()
+
+    def test_publish_commands_no_op_when_version_is_already_complete(self) -> None:
+        def fake_fetch(package: str, version: str) -> dict[str, object]:
+            return {
+                "name": package,
+                "version": version,
+                "dist": {"integrity": f"sha512-rebuilt-{package}"},
+            }
+
+        with (
+            mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
+            mock.patch(
+                "scripts.publish_npm_release.fetch_registry_package",
+                side_effect=fake_fetch,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+        ):
+            preflight(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=3,
+                preflight_404_attempts=1,
+                initial_delay_seconds=1.0,
+                max_delay_seconds=1.0,
+            )
+            publish_platforms(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+            )
+            publish_launcher(
+                self.bundle_dir,
+                "0.5.0",
+                max_attempts=1,
+                initial_delay_seconds=0.0,
+                max_delay_seconds=0.0,
+            )
+        publish.assert_not_called()
 
     def test_verify_resumed_bundle_rejects_legacy_bundle_when_source_sha_required(
         self,

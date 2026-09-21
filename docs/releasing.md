@@ -24,7 +24,15 @@ preflights every package: a registry entry must be absent or already match the
 attested tarball's exact npm SRI. It publishes missing platform packages first,
 reads back each exact version and `dist.integrity`, then publishes
 `@reviewsensei/cli` last. This makes a transient partial run safely retryable
-when already-published bytes exactly match the release bundle.
+when already-published bytes exactly match the release bundle. When every
+package for the requested version is already published, the version is complete:
+preflight records each package as `already-published`, publishes nothing, exits
+successfully, and reports that it did not verify provenance. A rebuilt bundle
+cannot reproduce bytes that are already on the registry, so a completed version
+is a no-op rather than a byte mismatch. A partially published version is
+different: if any existing registry entry holds different bytes while another
+package for the same version is still missing, the publish is refused because it
+would mix bytes from two builds.
 
 If a publish job fails after some packages reach the registry, do not dispatch a
 fresh rebuild for the same version. Either re-run the failed workflow job from
