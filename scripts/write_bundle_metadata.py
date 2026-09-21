@@ -12,7 +12,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.check_release_version import TAG_PATTERN
+# Workflow steps invoke this file directly, so the checkout root must be importable.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.check_release_version import TAG_PATTERN  # noqa: E402
 
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 BUNDLE_METADATA_FILENAME = "bundle-metadata.json"
