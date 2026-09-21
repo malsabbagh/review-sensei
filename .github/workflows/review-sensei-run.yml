@@ -11,6 +11,10 @@ on:
       mode:
         required: true
         type: string
+      review_mode:
+        required: false
+        default: merge-focused
+        type: string
       provider_mode:
         required: false
         default: ''
@@ -171,6 +175,7 @@ jobs:
         env:
           PROVIDER_MODE: ${{ inputs.provider_mode }}
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           MODEL: ${{ inputs.model }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
           ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
@@ -256,6 +261,11 @@ jobs:
           case "$MODE" in
             automatic|manual) ;;
             *) echo '::error::workflow mode must be automatic or manual' >&2; exit 1 ;;
+          esac
+          case "$REVIEW_MODE" in
+            advisory|merge-focused|strict) ;;
+            legacy) echo '::error::legacy review mode is retired; migrate configuration to merge-focused' >&2; exit 1 ;;
+            *) echo '::error::review mode must be advisory, merge-focused, or strict' >&2; exit 1 ;;
           esac
           if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
             echo '::error::repository input is invalid' >&2
@@ -638,6 +648,7 @@ jobs:
       - name: Validate trusted workflow inputs
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           OPERATION: ${{ inputs.operation }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud-ollama' }}
           REPOSITORY: ${{ inputs.repository }}
@@ -812,6 +823,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -894,6 +906,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -912,7 +925,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish cloud mention reply
         id: reply

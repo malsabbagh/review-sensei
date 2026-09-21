@@ -323,6 +323,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}

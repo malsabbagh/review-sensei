@@ -716,6 +716,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
@@ -1099,6 +1100,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
@@ -1226,6 +1228,7 @@ def _v4_config_file() -> str:
         "provider: ollama\n"
         "provider_mode: local\n"
         "model: ''\n"
+        "review_mode: merge-focused\n"
         "base_url: http://127.0.0.1:11434/api\n"
         "cloud_base_url: https://ollama.com/api\n"
         f"local_model: {DEFAULT_LOCAL_MODEL}\n"
