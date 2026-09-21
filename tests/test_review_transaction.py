@@ -580,6 +580,14 @@ class ReviewTransactionTests(unittest.TestCase):
         failed = complete_review_publication(
             ledger, IDENTITY, result.transaction, published=False, now=NOW
         )
+        advanced = ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                generation=current.generation + 1,
+                now=NOW,
+            ),
+            now=NOW,
+        )
         failed_replay = record_admitted_blocker_progress(
             ledger,
             IDENTITY,
@@ -589,7 +597,7 @@ class ReviewTransactionTests(unittest.TestCase):
             suppress_publication=False,
             now=NOW,
         )
-        self.assertEqual(failed_replay.generation, failed.generation)
+        self.assertEqual(failed_replay.generation, advanced.generation)
         succeeded = complete_review_publication(
             ledger, IDENTITY, result.transaction, published=True, now=NOW
         )

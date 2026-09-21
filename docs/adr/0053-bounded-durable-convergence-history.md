@@ -30,6 +30,10 @@ The envelope contains only closed metadata:
   rounds governed by ADR 0048 and the round budget in ADR 0049.
 - an authenticated ledger digest.
 
+The two-finding limit is the F3 writer projection. During rolling upgrades the
+reader and schema continue to accept the F2 three-finding projection; a later
+checkpoint rewrites it to the two-finding/three-marker writer shape.
+
 The history participates in `record_sha256`. A malformed, oversized, or
 tampered history therefore fails ledger parsing rather than permitting a fresh
 initialization. Only the current digest payload carries the envelope: a record

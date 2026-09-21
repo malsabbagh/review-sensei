@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei.baseline import ReviewBaseline
 from review_sensei.cli import main
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import run_doctor
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
@@ -297,7 +299,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
         self.assertEqual(result.diagnostic, "durable_baseline_recovery_required")
         self.assertEqual(reviewer.calls, [])
 
-    def test_operator_without_identity_bound_transaction_handoffs_before_provider(self):
+    def test_provider_failure_records_failed_attempt(self):
         class FailingReviewer:
             def publish(self, **kwargs):
                 raise RuntimeError("github down")
@@ -311,24 +313,44 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             replier=object(),
             session_ledger=ledger,
         )
-        outcome = application.publish_review(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
-            oidc_token="oidc",
-            repository=IDENTITY.repository,
-            repository_id=99,
-            pull_request=IDENTITY.pull_request,
-            head_sha=HEAD,
-            base_branch="main",
-            base_sha="b" * 40,
-            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-            diff="diff",
-            app_slug="reviewsensei[bot]",
-            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha="b" * 40,
+                head_sha=HEAD,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
         )
-        self.assertEqual(outcome.status, "handoff")
-        self.assertEqual(outcome.diagnostic, "identity-bound transaction required")
+        with self.assertRaises(RuntimeError):
+            application.publish_review(
+                options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=99,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD,
+                base_branch="main",
+                base_sha="b" * 40,
+                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                baseline=baseline,
+                current_key=baseline.cache_key,
+            )
         loaded = ledger.load(IDENTITY)
-        self.assertEqual(loaded.record.failed_attempts, 0)
+        self.assertEqual(loaded.record.failed_attempts, 1)
         self.assertEqual(loaded.record.completed_initial_reviews, 0)
 
 
