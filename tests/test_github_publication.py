@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from review_sensei.convergence import (
@@ -206,6 +207,56 @@ class ReviewPublisherTests(unittest.TestCase):
         arguments.update(overrides)
         http, calls = make_http(responses)
         return ReviewApprovalFinalizer(http=http).finalize(**arguments), calls
+
+    def test_prepared_review_shortcut_rechecks_publication_context_and_runtime_state(
+        self,
+    ):
+        http, calls = make_http([])
+        publisher = ReviewPublisher(http=http)
+        head = "b" * 40
+        prepared = publisher.prepare(result=result(), diff=DIFF, head_sha=head)
+
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "publication context"
+        ):
+            publisher.publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=result(),
+                diff=DIFF.replace("+change", "+different-change"),
+                app_slug="reviewsensei[bot]",
+                prepared_review=prepared,
+            )
+        self.assertEqual(calls, [])
+
+        original_comment = result().comments[0]
+        runtime_tampered = replace(
+            result(),
+            comments=(replace(original_comment, effective_blocking=False),),
+        )
+        self.assertEqual(runtime_tampered.content_digest(), result().content_digest())
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "publication context"
+        ):
+            publisher.publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha=head,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=runtime_tampered,
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+                prepared_review=prepared,
+            )
+        self.assertEqual(calls, [])
 
     def test_finalizer_approves_with_only_non_blocking_and_human_threads_open(self):
         head = "b" * 40

@@ -24,7 +24,9 @@ The envelope contains only closed metadata:
 - reviewed base/head, policy and coverage digests;
 - at most two stable concern and resolution-criterion digests; and
 - three lifecycle progress markers, each of which can carry a canonical
-  admitted-blocker-set digest.
+  admitted-blocker-set digest. These three markers are the durable F3
+  repeat/oscillation window; they are independent of the two verification
+  rounds governed by ADR 0048 and the round budget in ADR 0049.
 - an authenticated ledger digest.
 
 The history participates in `record_sha256`. A malformed, oversized, or
@@ -60,6 +62,19 @@ Fresh local and GitHub-comment ledger reads preserve a bounded completed
 history without storing review source or model output. Capacity is checked
 before writes and by untrusted-document loading. Existing records without the
 optional field continue to parse for migration/recovery handling.
+
+## Migration and rollback
+
+The envelope shape is intentionally fail-closed, but the reader remains
+backward-compatible with the F2 envelope: it accepts up to three baseline
+findings and the earlier two-marker progress window, while new checkpoints
+write the F3 projection of two findings and up to three markers. Existing
+integrity-valid records are not silently truncated during load; a later
+checkpoint rewrites the bounded projection. Records that predate
+`convergence_history` remain compatible and continue to follow the existing
+migration path. Rolling back the code does not authorize publishing from a
+record that failed the current integrity or shape checks; such a record still
+requires the authenticated `@sensei review reenroll` recovery path.
 
 ## Validation
 

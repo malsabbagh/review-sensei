@@ -360,6 +360,26 @@ class SessionRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "integrity"):
             SessionRecord.from_dict(tampered)
 
+    def test_f2_three_finding_history_remains_read_compatible(self):
+        history = self._history()
+        baseline = history["baseline"]
+        assert isinstance(baseline, dict)
+        findings = baseline["findings"]
+        assert isinstance(findings, list)
+        for index in (2, 3):
+            finding = dict(findings[0])
+            finding["fingerprint"] = str(index) * 64
+            finding["resolution_criterion"] = chr(96 + index) * 64
+            finding["concern"] = ("e", "f")[index - 2] * 64
+            findings.append(finding)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        restored = SessionRecord.from_dict(record.to_dict())
+        restored_baseline = restored.convergence_history["baseline"]
+        assert isinstance(restored_baseline, dict)
+        self.assertEqual(len(restored_baseline["findings"]), 3)
+
     def test_history_retains_three_canonical_admitted_blocker_sets_within_bound(self):
         history = self._history()
         first = blocker_set_digest(("1" * 64, "2" * 64))

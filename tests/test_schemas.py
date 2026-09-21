@@ -7,7 +7,7 @@ from pathlib import Path
 from review_sensei.baseline import (
     FINDING_CLASSIFICATIONS,
     LINEAGE_REASONS,
-    MAX_HISTORY_FINDINGS,
+    MAX_HISTORY_READ_FINDINGS,
 )
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS
 from review_sensei.convergence import ATTRIBUTIONS, LATE_REASONS
@@ -19,10 +19,14 @@ from review_sensei.errors import (
     ReviewInputError,
     ReviewSenseiError,
 )
-from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.models import TRANSACTION_PHASES, ReviewComment, ReviewResult
 from review_sensei.planning import MAX_RELATED_PATHS
 from review_sensei.schemas import SCHEMA_DIR, validate_public_document
-from review_sensei.session import MAX_STORED_CONTINUATION_GRANTS
+from review_sensei.session import (
+    MAX_CONVERGENCE_PROGRESS_ENTRIES,
+    MAX_SESSION_RECORD_BYTES,
+    MAX_STORED_CONTINUATION_GRANTS,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
@@ -51,6 +55,7 @@ SCHEMA_NAMES = (
     "verification-scope",
     "later-finding-classification",
     "convergence-sequence-report",
+    "review-transaction",
 )
 
 
@@ -116,6 +121,25 @@ class PublicSchemaTests(unittest.TestCase):
             properties["existing_concerns"]["maximum"], MAX_CACHE_METADATA_ITEMS
         )
         self.assertEqual(properties["related_paths"]["maxItems"], MAX_RELATED_PATHS)
+
+    def test_transaction_schema_and_history_bounds_match_runtime_contract(self) -> None:
+        schema = json.loads(
+            (SCHEMA_DIR / "review-transaction.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            set(schema["properties"]["phase"]["enum"]), set(TRANSACTION_PHASES)
+        )
+        session_schema = json.loads(
+            (SCHEMA_DIR / "session-record.schema.json").read_text(encoding="utf-8")
+        )
+        history = session_schema["properties"]["convergence_history"]["properties"]
+        self.assertEqual(
+            history["progress"]["maxItems"], MAX_CONVERGENCE_PROGRESS_ENTRIES
+        )
+        progress_properties = history["progress"]["items"]["properties"]
+        self.assertEqual(
+            progress_properties["blocker_count"]["maximum"], MAX_SESSION_RECORD_BYTES
+        )
 
     def test_later_finding_schema_enums_match_runtime_contract(self) -> None:
         schema = json.loads(
@@ -273,7 +297,7 @@ class PublicSchemaTests(unittest.TestCase):
         ]["properties"]
         # A Python-written envelope must never exceed these caps, or the record
         # fails schema validation on its next read.
-        self.assertEqual(baseline["findings"]["maxItems"], MAX_HISTORY_FINDINGS)
+        self.assertEqual(baseline["findings"]["maxItems"], MAX_HISTORY_READ_FINDINGS)
         self.assertEqual(
             baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
         )

@@ -104,6 +104,10 @@ MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
 # runtime baseline keeps the wider shared metadata budget; only its persisted
 # projection is narrowed here.
 MAX_HISTORY_FINDINGS = 2
+# New F3 writes retain two findings to reserve space for blocker progress, but
+# readers accept the three-finding F2 envelope during rolling upgrades. A
+# later checkpoint rewrites the bounded projection using MAX_HISTORY_FINDINGS.
+MAX_HISTORY_READ_FINDINGS = 3
 # The verification-scope and session-record schemas mirror these bounds; update
 # their parity tests whenever the shared metadata budget changes.
 
@@ -1312,6 +1316,7 @@ __all__ = [
     "LaterFindingClassification",
     "LINEAGE_REASONS",
     "MAX_HISTORY_FINDINGS",
+    "MAX_HISTORY_READ_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "ReviewBaseline",

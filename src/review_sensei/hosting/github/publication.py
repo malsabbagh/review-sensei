@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline
@@ -408,6 +408,11 @@ class PublicationResult:
     review_id: int | None = None
     diagnostic: str | None = None
     shadow: Mapping[str, object] | None = None
+    # A terminal no-progress handoff exposes the durable identity so an
+    # at-least-once caller can distinguish persisted suppression from retryable
+    # publication failure.
+    transaction_id: str | None = None
+    generation: int | None = None
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -1124,7 +1129,7 @@ class ReviewPublisher:
 
         try:
             analysis = analyze_diff(diff)
-            return prepare_publishable_review(
+            prepared = prepare_publishable_review(
                 result,
                 candidates=candidates,
                 snapshot=snapshot,
@@ -1142,6 +1147,10 @@ class ReviewPublisher:
                 evidence_confirmed_concerns=evidence_confirmed_concerns,
                 authorized_dispositions=authorized_dispositions,
                 current_head_sha=head_sha,
+            )
+            return replace(
+                prepared,
+                diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
             )
         except ReviewInputError as exc:
             raise GitHubPublicationError("review evidence verification failed") from exc
@@ -1212,7 +1221,29 @@ class ReviewPublisher:
                 raise GitHubPublicationError("prepared review is invalid")
             if prepared_review.result.content_digest() != result.content_digest():
                 raise GitHubPublicationError("prepared review does not match result")
-            prepared = prepared_review
+            rebound = self.prepare(
+                result=result,
+                diff=diff,
+                head_sha=head_sha,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                convergence_policy=convergence_policy,
+                blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                related_paths=related_paths,
+                evidence_confirmed_concerns=evidence_confirmed_concerns,
+                authorized_dispositions=authorized_dispositions,
+            )
+            if rebound != prepared_review:
+                raise GitHubPublicationError(
+                    "prepared review does not match publication context"
+                )
+            prepared = rebound
         else:
             prepared = self.prepare(
                 result=result,

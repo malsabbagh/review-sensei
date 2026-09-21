@@ -441,6 +441,13 @@ class PublishableReview:
     verifications: tuple[VerificationResult, ...]
     evidence_policy: str
     unpublished: int
+    # These bindings make a prepared artifact safe to reuse only for the
+    # publication context that admitted it.  ``None`` is retained for direct
+    # verifier callers that do not have a host head/policy context; the GitHub
+    # publisher rejects such artifacts in its prepared-review shortcut.
+    head_sha: str | None = None
+    convergence_policy_digest: str | None = None
+    diff_sha256: str | None = None
 
 
 def _escape_published_text(value: str) -> str:
@@ -703,6 +710,12 @@ def prepare_publishable_review(
         raise ReviewInputError("review result is invalid")
     if evidence_policy not in EVIDENCE_POLICIES:
         raise ReviewInputError("evidence policy is unsupported")
+    policy_for_binding = convergence_policy or ReviewConvergencePolicy()
+    convergence_policy_digest = (
+        policy_for_binding.digest()
+        if isinstance(policy_for_binding, ReviewConvergencePolicy)
+        else None
+    )
     if evidence_policy == "legacy":
         if input_blocker_candidates is not None:
             raise ReviewInputError(
@@ -728,7 +741,14 @@ def prepare_publishable_review(
             authorized_dispositions=authorized_dispositions,
             current_head_sha=current_head_sha,
         )
-        return PublishableReview(result, (), "legacy", 0)
+        return PublishableReview(
+            result,
+            (),
+            "legacy",
+            0,
+            head_sha=current_head_sha,
+            convergence_policy_digest=convergence_policy_digest,
+        )
 
     if candidates is None:
         candidates = ()
@@ -826,5 +846,10 @@ def prepare_publishable_review(
         current_head_sha=current_head_sha,
     )
     return PublishableReview(
-        prepared, tuple(final_verifications), "confirmed", unpublished
+        prepared,
+        tuple(final_verifications),
+        "confirmed",
+        unpublished,
+        head_sha=current_head_sha,
+        convergence_policy_digest=convergence_policy_digest,
     )

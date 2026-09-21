@@ -355,7 +355,13 @@ def _stored_convergence_history(
 
 
 def blocker_set_digest(fingerprints: Sequence[str]) -> tuple[str, int]:
-    """Return the canonical digest of the complete admitted blocker identity set."""
+    """Return the digest and cardinality of admitted blocker fingerprints.
+
+    ``fingerprints`` is a sequence of canonical finding-lifecycle identities:
+    lowercase SHA-256 strings, not paths, prose, or provider output.  The
+    strict input contract keeps persisted progress markers comparable across
+    runtimes and prevents alternate encodings from creating false progress.
+    """
 
     values = tuple(fingerprints)
     if any(
@@ -2089,20 +2095,39 @@ def record_admitted_blocker_progress(
         last = progress[-1]
         if not isinstance(last, Mapping) or last.get("event") != "completed":
             raise ReviewInputError("durable convergence progress is invalid")
-        if last.get("generation") != current.generation:
-            raise ReviewInputError(
-                "durable convergence progress does not match transaction"
-            )
         item = {
             "event": "completed",
             "generation": current.generation,
             "blocker_set_sha256": blocker_set_sha256,
             "blocker_count": blocker_count,
         }
+        marker_matches = dict(last) == {
+            "event": "completed",
+            "generation": last.get("generation"),
+            "blocker_set_sha256": blocker_set_sha256,
+            "blocker_count": blocker_count,
+        }
+        if current.phase == "publication_failed" and marker_matches:
+            # A retry can observe a failed transaction whose record generation
+            # advanced while the admitted progress marker still carries the
+            # transaction generation from before that failure. The exact
+            # marker is already durable; do not charge a second generation.
+            return record
         if current.phase == "publication_suppressed":
             if dict(last) != item:
                 raise ReviewInputError("durable blocker progress does not match")
             return record
+        if current.phase in {"publication_pending", "publication_failed"} and dict(
+            last
+        ) == item:
+            # A retry can observe the same admitted result after the caller
+            # crashed between this CAS and the GitHub write. The progress
+            # evidence is already durable; do not charge another generation.
+            return record
+        if last.get("generation") != current.generation:
+            raise ReviewInputError(
+                "durable convergence progress does not match transaction"
+            )
         if current.phase != "publication_pending":
             raise ReviewInputError("publication progress phase transition is invalid")
         if set(last) == set(item) and dict(last) != item:

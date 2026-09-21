@@ -459,6 +459,18 @@ class GitHubApplication:
             and transaction_record.transaction.result_sha256 is not None
             and result.content_digest() == transaction_record.transaction.result_sha256
         )
+        if (
+            validated_transaction_recovery
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.phase == "publication_suppressed"
+        ):
+            return PublicationResult(
+                status="handoff",
+                diagnostic="no_progress",
+                transaction_id=transaction_record.transaction.transaction_id,
+                generation=transaction_record.generation,
+            )
         baseline_admission_required = (
             operator_baseline_requested and not validated_transaction_recovery
         )
@@ -544,13 +556,28 @@ class GitHubApplication:
                 and ledger is not None
                 and transaction_record is not None
                 and transaction_record.transaction is not None
-                and isinstance(self.reviewer, ReviewPublisher)
+                and (
+                    callable(getattr(self.reviewer, "prepare", None))
+                    or not validated_transaction_recovery
+                )
             ):
+                prepare = getattr(self.reviewer, "prepare", None)
+                if not callable(prepare):
+                    return _with_shadow(
+                        PublicationResult(
+                            status="handoff",
+                            diagnostic="review_admission_unavailable",
+                        ),
+                        _shadow_observation(
+                            _shadow_state(prepared, flags),
+                            continuation_rounds=continuation_rounds,
+                        ),
+                    )
                 # This is the sole post-admission result: its effective
                 # blockers are both recorded for F3 and passed unchanged to
                 # the publisher below. No caller flag or pre-admission model
                 # output can suppress a review event.
-                prepared_publishable = self.reviewer.prepare(
+                prepared_publishable = prepare(
                     result=result,
                     diff=diff,
                     head_sha=head_sha,
@@ -578,22 +605,48 @@ class GitHubApplication:
                 prior_blockers = convergence_progress_blocker_sets(
                     transaction_record.convergence_history
                 )
-                current_identity = f"{current_blockers[0]}:{current_blockers[1]}"
+                if validated_transaction_recovery and transaction_record.transaction:
+                    history = transaction_record.convergence_history
+                    progress = history.get("progress") if isinstance(history, Mapping) else None
+                    if (
+                        isinstance(progress, list)
+                        and progress
+                        and isinstance(progress[-1], Mapping)
+                        and "blocker_set_sha256" in progress[-1]
+                        and "blocker_count" in progress[-1]
+                    ):
+                        # This result already has a durable blocker marker. It
+                        # belongs to the recovery attempt being replayed, not
+                        # to the prior round window used for no-progress.
+                        prior_blockers = prior_blockers[:-1]
+
+                def blocker_identity(value: tuple[str, int]) -> tuple[str, ...]:
+                    # ``detect_no_progress`` treats an empty sequence as
+                    # verified progress. The digest/count pair is storage
+                    # metadata, so an empty admitted set must not become a
+                    # synthetic singleton identity.
+                    return (value[0],) if value[1] else ()
+
                 no_progress = detect_no_progress(
                     previous_blocking=(
-                        f"{prior_blockers[-1][0]}:{prior_blockers[-1][1]}",
+                        *blocker_identity(prior_blockers[-1]),
                     )
                     if prior_blockers
                     else (),
-                    current_blocking=(current_identity,),
+                    current_blocking=blocker_identity(current_blockers),
                     earlier_blocking=(
-                        f"{prior_blockers[-2][0]}:{prior_blockers[-2][1]}",
+                        *blocker_identity(prior_blockers[-2]),
                     )
                     if len(prior_blockers) >= 2
                     else (),
                 )
+                flags["no_progress"] = no_progress
                 durable_transaction = transaction_record.transaction
-                record_admitted_blocker_progress(
+                # Every admitted set is recorded, including an empty set. An
+                # empty set is progress, but retaining it in the bounded
+                # window is what lets a later A -> empty -> A regression be
+                # classified as oscillation.
+                admitted_record = record_admitted_blocker_progress(
                     ledger,
                     identity,
                     durable_transaction,
@@ -606,6 +659,8 @@ class GitHubApplication:
                         PublicationResult(
                             status="handoff",
                             diagnostic="no_progress",
+                            transaction_id=durable_transaction.transaction_id,
+                            generation=admitted_record.generation,
                         ),
                         _shadow_observation(
                             _shadow_state(prepared, flags),
@@ -1393,12 +1448,12 @@ def _with_shadow(
         review_id=result.review_id,
         diagnostic=result.diagnostic,
         shadow=dict(shadow),
+        transaction_id=result.transaction_id,
+        generation=result.generation,
     )
 
 
-def _publication_round_flags(
-    result: ReviewResult, *, no_progress: bool = False
-) -> dict[str, bool]:
+def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
     coverage = coverage_approval_state(result.coverage)
     coverage_complete = result.coverage is None or coverage == "reviewed"
     eligible = (
@@ -1414,5 +1469,5 @@ def _publication_round_flags(
         # publishing. A stale head returns a non-published result, and the
         # caller aborts the reservation rather than counting the round.
         "latest_head_reviewed": True,
-        "no_progress": no_progress,
+        "no_progress": False,
     }
