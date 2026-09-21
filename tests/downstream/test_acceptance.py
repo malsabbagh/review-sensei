@@ -154,9 +154,9 @@ class GeneratedCallerContractTests(unittest.TestCase):
         workflow = files[WORKFLOW_PATH]
         config = files[CONFIG_PATH]
         uninstall = files[UNINSTALL_WORKFLOW_PATH]
-        self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertIn("review-sensei-run.yml@v5", workflow)
-        self.assertIn("setup_version: 4", config)
+        self.assertIn("setup_version: 5", config)
         self.assertIn("auto_review: false", config)
         self.assertIn("github_writes: false", config)
         self.assertIn("mention_replies: false", config)

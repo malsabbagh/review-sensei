@@ -35,7 +35,7 @@ import {
 export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const MAX_SETUP_FILE_BYTES = 128 * 1024;
-const SETUP_BRANCH_PREFIX = "review-sensei/setup-v4";
+const SETUP_BRANCH_PREFIX = "review-sensei/setup-v5";
 const SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files";
 const SETUP_APP_LOGIN = "reviewsensei[bot]";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -289,7 +289,10 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
   }
   if (path === SETUP_FILE_PATHS[1]) {
-    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[1].content;
+    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[1].content.replace(
+      "ReviewSensei setup version: 5",
+      "ReviewSensei setup version: 4",
+    );
   }
   if (path === SETUP_FILE_PATHS[2]) {
     return (
