@@ -9,10 +9,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
+from .baseline import baseline_from_history_document, plan_verification_scope
 from .context import (
     ContextSnapshot,
     RepositoryContextStore,
     SymbolAwareContextPolicy,
+    build_review_context_cache_key,
     build_review_context_selection,
 )
 from .diff import analyze_diff
@@ -37,7 +39,7 @@ from .outcomes import (
     recovery_expires_at,
     run_outcome_exit_code,
 )
-from .planning import DEFAULT_TOTAL_WORK_BUDGET
+from .planning import DEFAULT_TOTAL_WORK_BUDGET, related_paths_for_change
 from .provider_config import (
     openrouter_policy_from_env,
     openrouter_timeout_default,
@@ -2330,6 +2332,17 @@ def main(argv: list[str] | None = None) -> int:
             fixture_response=args.fixture_response,
             argv=args_list,
         )
+        # Normalize the caller-supplied snapshot identity once.  The live
+        # inference request intentionally remains unbound; these values are
+        # the trusted identity used only for session admission, checkpoint
+        # cache keys, and public outcome metadata.
+        resolved_base_sha = (args.base_sha or "").strip().lower() or None
+        resolved_head_sha = (args.head_sha or "").strip().lower() or None
+        effective_profile = (
+            get_provider_profile(provider_settings.profile).name
+            if provider_settings.profile
+            else "default"
+        )
         transaction_provider_identity, transaction_model = (
             _transaction_provider_identity(provider_settings)
         )
@@ -2340,7 +2353,7 @@ def main(argv: list[str] | None = None) -> int:
             or policy.mode not in OPERATOR_REVIEW_MODES
             or not args.repository
             or args.pull_request is None
-            or not (args.head_sha or "").strip()
+            or resolved_head_sha is None
         ):
             raise ReviewInputError(
                 "--no-progress requires an operator review mode and session ledger"
@@ -2396,17 +2409,53 @@ def main(argv: list[str] | None = None) -> int:
                     expected_generation=current.generation,
                 )
 
+        def cleanup_analysis_error(
+            analysis_error: BaseException, *, charge_failed_attempt: bool
+        ) -> None:
+            if (
+                ledger is None
+                or identity is None
+                or held_reservation is None
+                or policy.mode not in OPERATOR_REVIEW_MODES
+            ):
+                return
+            try:
+                cleanup_analysis_reservation(
+                    charge_failed_attempt=charge_failed_attempt
+                )
+            except BaseException as cleanup_error:
+                analysis_error.add_note(
+                    "analysis reservation cleanup failed: "
+                    f"{type(cleanup_error).__name__}: "
+                    f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
+                )
+
+        def emit_durable_baseline_recovery() -> int:
+            cleanup_analysis_reservation(charge_failed_attempt=False)
+            outcome = RunOutcome(
+                "action_required",
+                repository=args.repository,
+                pull_request_number=args.pull_request,
+                base_sha=resolved_base_sha,
+                head_sha=resolved_head_sha,
+                diagnostic="durable_baseline_recovery_required",
+                provider_calls=0,
+            )
+            emit_host_outcome(outcome, output_path=args.outcome)
+            print(outcome.status)
+            return run_outcome_exit_code(outcome.status)
+
         if (
             ledger is not None
             and args.repository
             and args.pull_request is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            head_sha = (args.head_sha or "").strip().lower()
-            if not head_sha:
+            if resolved_head_sha is None:
                 raise ReviewInputError(
                     "operator-mode session admission requires --head-sha"
                 )
+            head_sha = resolved_head_sha
             identity = SessionIdentity(
                 repository=args.repository,
                 pull_request=args.pull_request,
@@ -2418,7 +2467,7 @@ def main(argv: list[str] | None = None) -> int:
                 kind="publish",
             )
             if transaction_requested:
-                effective_base_sha = (args.base_sha or "").strip().lower()
+                effective_base_sha = resolved_base_sha or ""
                 stage_identity = [
                     {
                         "name": stage.name,
@@ -2494,7 +2543,7 @@ def main(argv: list[str] | None = None) -> int:
                     status,
                     repository=args.repository,
                     pull_request_number=args.pull_request,
-                    base_sha=(args.base_sha or "").strip().lower() or None,
+                    base_sha=resolved_base_sha,
                     head_sha=head_sha,
                     diagnostic=admission_diagnostic(prepared_round.decision),
                     provider_calls=0,
@@ -2532,14 +2581,14 @@ def main(argv: list[str] | None = None) -> int:
                 max_bytes=args.symbol_context_max_bytes,
                 max_depth=args.symbol_context_max_depth,
             )
-            base_sha = (args.base_sha or "").strip().lower()
+            base_sha = resolved_base_sha or ""
             if not base_sha:
                 raise ReviewInputError(
                     "--enable-symbol-context requires --base-sha for the trusted "
                     "base snapshot"
                 )
             snapshot = ContextSnapshot(base_sha, kind="base")
-            untrusted_head_sha = (args.head_sha or "").strip().lower() or None
+            untrusted_head_sha = resolved_head_sha
         context_selection = build_review_context_selection(
             service.review_categories,
             changed_paths=changed_paths,
@@ -2550,13 +2599,14 @@ def main(argv: list[str] | None = None) -> int:
             changed_lines=analysis.changed_lines,
         )
 
+        effective_model = provider_settings.model or provider.model or args.model
         request = ReviewRequest(
             diff=diff,
             repository=args.repository,
             pull_request_number=args.pull_request,
             title=args.title,
             instructions=args.instructions,
-            model=args.model,
+            model=effective_model,
             learnings=learnings,
             active_category_ids=context_selection.active_category_ids,
             lens_contexts=context_selection.lens_contexts,
@@ -2567,29 +2617,65 @@ def main(argv: list[str] | None = None) -> int:
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
         )
+        incremental = None
+        current_key = None
+        verification_scope = None
+        # F3 durable-baseline enforcement is explicitly opted into by the
+        # identity-bound transaction/artifact request. Legacy operator runs
+        # keep their prior full-review behavior until that flag is selected.
+        baseline_enforcement_requested = transaction_requested
+        if (
+            ledger is not None
+            and identity is not None
+            and prepared_round is not None
+            and policy.mode in OPERATOR_REVIEW_MODES
+            and baseline_enforcement_requested
+            and prepared_round.record.completed_initial_reviews > 0
+        ):
+            history = prepared_round.record.convergence_history
+            if not isinstance(history, dict) or history.get("state") != "completed":
+                return emit_durable_baseline_recovery()
+            try:
+                persisted_baseline = baseline_from_history_document(
+                    history.get("baseline")
+                )
+            except ReviewInputError:
+                return emit_durable_baseline_recovery()
+            current_key = build_review_context_cache_key(
+                _checkpoint_cache_request(
+                    request,
+                    base_sha=resolved_base_sha,
+                    head_sha=resolved_head_sha,
+                ),
+                provider_name=service.provider.name,
+                stages=service.stages,
+                profile=effective_profile,
+            )
+            scope = plan_verification_scope(
+                policy=policy,
+                baseline=persisted_baseline,
+                current_key=current_key,
+                changed_paths=analysis.changed_paths,
+            )
+            if scope.status != "verify" or scope.incremental is None:
+                return emit_durable_baseline_recovery()
+            verification_scope = scope
+            incremental = scope.incremental
         try:
             run = service.run(
                 request,
+                incremental=incremental,
+                current_key=current_key,
+                trusted_base_sha=resolved_base_sha,
+                trusted_head_sha=resolved_head_sha,
+                profile=effective_profile,
                 budget=ResourceBudget.for_limits(limits),
             )
-        except BaseException as analysis_error:
-            if (
-                ledger is not None
-                and identity is not None
-                and held_reservation is not None
-                and policy.mode in OPERATOR_REVIEW_MODES
-            ):
-                try:
-                    if isinstance(analysis_error, (KeyboardInterrupt, SystemExit)):
-                        cleanup_analysis_reservation(charge_failed_attempt=False)
-                    else:
-                        cleanup_analysis_reservation(charge_failed_attempt=True)
-                except BaseException as cleanup_error:
-                    analysis_error.add_note(
-                        "analysis reservation cleanup failed: "
-                        f"{type(cleanup_error).__name__}: "
-                        f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                    )
+        except (KeyboardInterrupt, SystemExit) as analysis_error:
+            cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
+            raise
+        except Exception as analysis_error:
+            cleanup_analysis_error(analysis_error, charge_failed_attempt=True)
             raise
         if (
             run.result is None
@@ -2601,8 +2687,8 @@ def main(argv: list[str] | None = None) -> int:
             cleanup_analysis_reservation(charge_failed_attempt=True)
         outcome = replace(
             run.outcome,
-            base_sha=(args.base_sha or "").strip().lower() or None,
-            head_sha=(args.head_sha or "").strip().lower() or None,
+            base_sha=resolved_base_sha,
+            head_sha=resolved_head_sha,
         )
         if run.result is None:
             emit_host_outcome(outcome, output_path=args.outcome)
@@ -2679,7 +2765,6 @@ def main(argv: list[str] | None = None) -> int:
                         raise
                 try:
                     from .baseline import baseline_from_review
-                    from .context import build_review_context_cache_key
                     from .session import next_session_generation
 
                     if prepared_round.record is None:
@@ -2689,17 +2774,24 @@ def main(argv: list[str] | None = None) -> int:
                     cache_key = build_review_context_cache_key(
                         _checkpoint_cache_request(
                             request,
-                            base_sha=args.base_sha,
-                            head_sha=args.head_sha,
+                            base_sha=resolved_base_sha,
+                            head_sha=resolved_head_sha,
                         ),
-                        provider_name=provider.name,
+                        provider_name=service.provider.name,
                         stages=service.stages,
+                        profile=effective_profile,
+                    )
+                    verification_related_paths = (
+                        verification_scope.related_paths
+                        if verification_scope is not None
+                        else related_paths_for_change(analysis.changed_paths)
                     )
                     checkpoint_baseline = (
                         baseline_from_review(
                             result,
                             cache_key=cache_key,
                             policy=policy,
+                            related_paths=verification_related_paths,
                             generation=next_session_generation(prepared_round.record),
                         )
                         if cache_key is not None

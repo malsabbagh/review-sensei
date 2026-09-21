@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
+from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...context import ReviewContextCacheKey
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
@@ -14,9 +16,11 @@ from ...convergence import (
 )
 from ...conversation import ConversationService
 from ...coverage import coverage_approval_state
+from ...diff import analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
+from ...planning import related_paths_for_change
 from ...providers.base import ReviewProvider
 from ...session import (
     SessionIdentity,
@@ -98,6 +102,11 @@ class GitHubApplication:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] | None = None,
+        evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
         no_progress: bool = False,
         configuration_context: Mapping[str, object] | None = None,
@@ -109,6 +118,18 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
             )
+        if current_key is not None:
+            if not isinstance(current_key, ReviewContextCacheKey):
+                raise GitHubPublicationError("review current cache key is invalid")
+            if (
+                current_key.repository != repository
+                or current_key.pull_request != pull_request
+                or current_key.base_sha != base_sha
+                or current_key.head_sha != head_sha
+            ):
+                raise GitHubPublicationError(
+                    "review current cache key does not match publication identity"
+                )
         if evidence_policy not in {"legacy", "confirmed"}:
             raise GitHubPublicationError("evidence policy is unsupported")
         if evidence_policy == "confirmed" and (
@@ -127,6 +148,12 @@ class GitHubApplication:
             convergence_policy
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
+        )
+        operator_baseline_requested = policy.mode in OPERATOR_REVIEW_MODES and (
+            (isinstance(result, ReviewResult) and result.transaction is not None)
+            or options.github_session_ledger
+            or baseline is not None
+            or current_key is not None
         )
         identity = SessionIdentity(
             repository=repository,
@@ -416,7 +443,35 @@ class GitHubApplication:
                 transaction_record = load_transaction(ledger)
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
+        validated_transaction_recovery = (
+            # A pending identity-bound result has already crossed the F1
+            # checkpoint and digest gate. It is the explicit transaction
+            # recovery path, so it does not need to reconstruct F3 admission
+            # state before replaying the same publication.
+            isinstance(result, ReviewResult)
+            and result.transaction is not None
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.result_sha256 is not None
+            and result.content_digest() == transaction_record.transaction.result_sha256
+        )
+        baseline_admission_required = (
+            operator_baseline_requested and not validated_transaction_recovery
+        )
+        # A validated transaction is enough to replay an initial checkpoint,
+        # but it does not carry the *prior* baseline needed to classify a later
+        # verification result.  Once a verification round has already been
+        # completed, publishing without both trusted admission inputs would
+        # silently downgrade the result to a fresh review.
+        verification_transaction_recovery_required = (
+            validated_transaction_recovery
+            and transaction_record is not None
+            and transaction_record.completed_verification_rounds > 0
+            and (baseline is None or current_key is None)
+        )
         authorized_dispositions: tuple[object, ...] = ()
+        durable_baseline = baseline
+        baseline_recovery_required = False
         if ledger is not None:
             from ...disposition import session_dispositions
 
@@ -424,27 +479,98 @@ class GitHubApplication:
                 authorized_dispositions = session_dispositions(prepared.record)
             elif transaction_record is not None:
                 authorized_dispositions = session_dispositions(transaction_record)
+            if baseline_admission_required:
+                record_for_baseline = (
+                    prepared.record if prepared is not None else transaction_record
+                )
+                if (
+                    durable_baseline is None
+                    and record_for_baseline is not None
+                    and record_for_baseline.completed_initial_reviews > 0
+                ):
+                    history = record_for_baseline.convergence_history
+                    if not (
+                        isinstance(history, Mapping)
+                        and history.get("state") == "completed"
+                    ):
+                        baseline_recovery_required = True
+                    else:
+                        try:
+                            durable_baseline = baseline_from_history_document(
+                                history.get("baseline")
+                            )
+                        except ReviewInputError:
+                            baseline_recovery_required = True
+        # A persisted baseline is not self-authenticating for a new head: the
+        # caller must supply the independently constructed current context key.
+        # Falling back to the prior key would treat an unknown head/configuration
+        # as compatible and turn stale evidence into admission authority.  Do
+        # not silently downgrade to a fresh review when the caller omitted the
+        # key; make the recovery requirement visible and retryable instead.
+        publication_related_paths: Sequence[str]
+        if related_paths is None and durable_baseline is not None:
+            # An omitted scope must be derived from the current head. The
+            # publisher separately unions this fresh impact set with the
+            # persisted baseline scope; borrowing the old scope here would
+            # make a stale publication input look current at the boundary.
+            current_changed_paths = changed_paths
+            if current_changed_paths is None:
+                try:
+                    current_changed_paths = analyze_diff(diff).changed_paths
+                except ReviewInputError as exc:
+                    raise GitHubPublicationError(
+                        "review diff failed validation"
+                    ) from exc
+            try:
+                publication_related_paths = related_paths_for_change(
+                    current_changed_paths
+                )
+            except ReviewInputError as exc:
+                raise GitHubPublicationError(
+                    "review related-path scope failed validation"
+                ) from exc
+        else:
+            # An explicit empty tuple is a deliberate narrow scope. Do not
+            # silently widen it with paths persisted for an earlier head.
+            publication_related_paths = () if related_paths is None else related_paths
         try:
-            publication = self.reviewer.publish(
-                token=token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_branch=base_branch,
-                base_sha=base_sha,
-                result=result,
-                diff=diff,
-                app_slug=app_slug,
-                auto_approve=options.auto_approve,
-                candidates=candidates,
-                snapshot=snapshot,
-                snapshot_sha256=snapshot_sha256,
-                evidence_policy=evidence_policy,
-                convergence_policy=convergence_policy,
-                blocker_candidates=blocker_candidates,
-                input_blocker_candidates=input_blocker_candidates,
-                authorized_dispositions=authorized_dispositions,
+            publication = (
+                PublicationResult(
+                    status="handoff",
+                    diagnostic="durable_baseline_recovery_required",
+                )
+                if operator_baseline_requested
+                and (
+                    (baseline_admission_required and baseline_recovery_required)
+                    or (durable_baseline is not None and current_key is None)
+                    or verification_transaction_recovery_required
+                )
+                else self.reviewer.publish(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                    result=result,
+                    diff=diff,
+                    app_slug=app_slug,
+                    auto_approve=options.auto_approve,
+                    candidates=candidates,
+                    snapshot=snapshot,
+                    snapshot_sha256=snapshot_sha256,
+                    evidence_policy=evidence_policy,
+                    convergence_policy=convergence_policy,
+                    blocker_candidates=blocker_candidates,
+                    input_blocker_candidates=input_blocker_candidates,
+                    baseline=durable_baseline,
+                    current_key=current_key,
+                    changed_paths=changed_paths,
+                    related_paths=publication_related_paths,
+                    evidence_confirmed_concerns=evidence_confirmed_concerns,
+                    authorized_dispositions=authorized_dispositions,
+                )
             )
         except BaseException as publication_error:
             if (

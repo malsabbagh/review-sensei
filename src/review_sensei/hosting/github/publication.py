@@ -9,7 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ...context import finding_lifecycle_for_comment
+from ...baseline import ReviewBaseline
+from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     BlockerCandidate,
     ReviewConvergencePolicy,
@@ -1120,6 +1121,11 @@ class ReviewPublisher:
         convergence_policy: ReviewConvergencePolicy | None = None,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] = (),
+        evidence_confirmed_concerns: Sequence[str] = (),
         authorized_dispositions: Sequence[object] = (),
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
@@ -1170,6 +1176,11 @@ class ReviewPublisher:
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                related_paths=related_paths,
+                evidence_confirmed_concerns=evidence_confirmed_concerns,
                 authorized_dispositions=authorized_dispositions,
                 current_head_sha=head_sha,
             )

@@ -240,7 +240,9 @@ These imports are public and stable within a major version:
 - `review_sensei.ChannelPromotionRecord`
 
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
-against `run-outcome.schema.json`. `ReviewConvergencePolicy.to_dict()`,
+against `run-outcome.schema.json`; `run_outcome_exit_code` maps every
+`FAILURE_RUN_STATUSES` value, including `action_required`, to exit code 1.
+`ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
 validate against the review-convergence schemas. `SessionRecord.to_dict()`
 validates against `session-record.schema.json`. The record also carries the
@@ -289,6 +291,9 @@ as `ReviewFormatError` or `ProviderError`. Statuses distinguish a clean review,
 partial coverage, an intentional skip, provider or budget failure, publication
 failure, and an already-published head. Resource budgets cap provider calls,
 transport retries, structural retries, prompt/output bytes, and elapsed time.
+When an unbound request supplies `current_key`, callers must also supply the
+matching trusted `trusted_base_sha` and `trusted_head_sha`; the service rejects
+an incomplete identity binding before orchestration.
 For an identity-bound result whose local ledger already records
 `publication_succeeded`, `github review` may return `already_published`
 before broker exchange; this is an idempotent local-ledger recovery signal,
@@ -315,6 +320,10 @@ The evidence context is a closed two-field identity (`evidence_policy` and
 `snapshot_sha256`): `legacy` requires a null snapshot, while `confirmed`
 requires the reviewed snapshot SHA-256. Unknown fields and inconsistent
 policy/snapshot pairs are rejected before publication admission.
+Hosted integrations that restore a durable baseline must also construct the
+`current_key` for the exact repository, pull request, base/head pair, and
+effective provider/model/profile/stage settings used by that request; the
+GitHub application rejects a key bound to a different publication identity.
 
 The analysis CLI keeps the existing `--session-ledger` reservation path
 compatible by default. Pass `--transaction` to opt into the identity-bound
