@@ -10,8 +10,9 @@ directories, and symlinked assets are reported as `action` rather than
 silently treated as available. Doctor also records that symbol-aware source
 context is an opt-in trusted-base policy that stays disabled by default.
 It reports the review-convergence policy resolved from `--review-mode` or
-`REVIEWSENSEI_REVIEW_MODE` (`legacy` by default). `legacy` is display-only and
-does not change publication. Operator modes report `enforcement=publication`
+`REVIEWSENSEI_REVIEW_MODE` (`merge-focused` by default). Explicit historical
+`legacy` configuration reports an actionable migration error before execution.
+Supported modes report `enforcement=publication`
 because the blocker-admission evaluator now sits in front of GitHub review
 events. It never calls a model, mints a broker token, or writes to GitHub.
 When `REVIEWSENSEI_REVIEW_SHADOW` is set to an operator mode, doctor reports

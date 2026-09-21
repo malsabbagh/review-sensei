@@ -99,12 +99,12 @@ def _policy(mode: str = "merge-focused") -> ReviewConvergencePolicy:
     return ReviewConvergencePolicy(mode=mode)
 
 
-class DefaultRemainsLegacyTests(unittest.TestCase):
-    def test_installed_default_stays_legacy(self):
-        self.assertEqual(DEFAULT_REVIEW_MODE, "legacy")
-        self.assertEqual(resolve_review_mode(), "legacy")
-        self.assertEqual(ReviewConvergencePolicy().mode, "legacy")
-        self.assertEqual(run_doctor()["review_convergence"]["mode"], "legacy")
+class DefaultIsMergeFocusedTests(unittest.TestCase):
+    def test_installed_default_is_merge_focused(self):
+        self.assertEqual(DEFAULT_REVIEW_MODE, "merge-focused")
+        self.assertEqual(resolve_review_mode(), "merge-focused")
+        self.assertEqual(ReviewConvergencePolicy().mode, "merge-focused")
+        self.assertEqual(run_doctor()["review_convergence"]["mode"], "merge-focused")
         self.assertNotIn("shadow_review_convergence", run_doctor())
 
 
@@ -201,7 +201,7 @@ class SequenceReplayTests(unittest.TestCase):
         self.assertEqual(report.no_progress_events, 1)
         self.assertFalse(report.cap_created_approval)
 
-    def test_comparison_keeps_legacy_default_and_never_mints_cap_approval(self):
+    def test_comparison_uses_merge_focused_default_and_never_mints_cap_approval(self):
         steps = (
             SequenceStep(
                 head_sha="a" * 40,
@@ -216,8 +216,8 @@ class SequenceReplayTests(unittest.TestCase):
             ),
         )
         payload = compare_sequence_policies(steps)
-        self.assertEqual(payload["publication_default"], "legacy")
-        self.assertEqual(payload["current"]["mode"], "legacy")
+        self.assertEqual(payload["publication_default"], "merge-focused")
+        self.assertEqual(payload["current"]["mode"], "merge-focused")
         self.assertEqual(payload["proposed"]["mode"], "merge-focused")
         self.assertFalse(payload["cap_created_approval"])
         self.assertFalse(payload["current"]["cap_created_approval"])
@@ -1012,9 +1012,9 @@ class ShadowObservationTests(unittest.TestCase):
         )
         self.assertEqual(check["status"], "pass")
         self.assertIn("observation-only", check["detail"])
-        self.assertEqual(doctor["review_convergence"]["mode"], "legacy")
+        self.assertEqual(doctor["review_convergence"]["mode"], "merge-focused")
         self.assertEqual(doctor["shadow_review_convergence"]["mode"], "merge-focused")
-        self.assertEqual(plan["review_convergence"]["mode"], "legacy")
+        self.assertEqual(plan["review_convergence"]["mode"], "merge-focused")
         self.assertEqual(plan["shadow_review_convergence"]["mode"], "merge-focused")
         self.assertFalse(plan["operations"]["publication"])
         rendered = render_diagnostic(doctor)
@@ -1025,7 +1025,7 @@ class ShadowObservationTests(unittest.TestCase):
             item for item in invalid["checks"] if item["name"] == "review-shadow"
         )
         self.assertEqual(shadow_check["status"], "action")
-        self.assertEqual(invalid["review_convergence"]["mode"], "legacy")
+        self.assertEqual(invalid["review_convergence"]["mode"], "merge-focused")
 
     def test_shadow_does_not_skip_legacy_publication(self):
         ledger = InMemorySessionLedger()
@@ -1058,7 +1058,7 @@ class ShadowObservationTests(unittest.TestCase):
                 result=ReviewResult(summary="ok", comments=(), provider="fixture"),
                 diff="diff",
                 app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(),
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         self.assertEqual(result.status, "published")
         self.assertEqual(len(reviewer.calls), 1)
@@ -1163,7 +1163,10 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
                 )
         self.assertEqual(status, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("operator review mode", stderr.getvalue())
+        self.assertIn(
+            "legacy review mode is retired; migrate configuration to merge-focused",
+            stderr.getvalue(),
+        )
 
     def test_cli_observed_rejects_compare_default(self):
         stderr = io.StringIO()
@@ -1216,17 +1219,17 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
             UNAVAILABLE_EVIDENCE_IDENTITY,
         )
 
-    def test_cli_replays_sentinel_and_keeps_legacy_default(self):
+    def test_cli_replays_sentinel_with_merge_focused_default(self):
         stdout = io.StringIO()
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
                 status = main(["evaluate-convergence", "--json", "--compare-default"])
         self.assertEqual(status, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["publication_default"], "legacy")
+        self.assertEqual(payload["publication_default"], "merge-focused")
         self.assertFalse(payload["cap_created_approval"])
         self.assertEqual(payload["proposed"]["mode"], "merge-focused")
-        self.assertEqual(payload["current"]["mode"], "legacy")
+        self.assertEqual(payload["current"]["mode"], "merge-focused")
 
     def test_cli_rejects_invalid_mode(self):
         stdout = io.StringIO()

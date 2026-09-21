@@ -22,6 +22,7 @@ from review_sensei.convergence import (
     REQUIRED_CONTRACT_KINDS,
     REVIEW_MODE_ENV,
     comment_targets_pr_change,
+    migrate_review_mode,
     policy_from_mapping,
     resolve_review_mode,
 )
@@ -55,11 +56,15 @@ def _admitted(**overrides: object) -> BlockerCandidate:
 
 
 class ReviewModeResolutionTests(unittest.TestCase):
-    def test_default_is_legacy_and_empty_values_are_compatible(self):
+    def test_default_is_merge_focused_and_legacy_requires_migration(self):
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(resolve_review_mode(), "legacy")
-            self.assertEqual(resolve_review_mode(""), "legacy")
-            self.assertEqual(resolve_review_mode("  "), "legacy")
+            self.assertEqual(resolve_review_mode(), "merge-focused")
+            self.assertEqual(resolve_review_mode(""), "merge-focused")
+            self.assertEqual(resolve_review_mode("  "), "merge-focused")
+        with self.assertRaisesRegex(ReviewInputError, "retired"):
+            resolve_review_mode("legacy")
+        self.assertEqual(migrate_review_mode("legacy"), "merge-focused")
+        self.assertEqual(migrate_review_mode("merge-focused"), "merge-focused")
 
     def test_cli_overrides_environment(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "strict"}):
@@ -74,14 +79,14 @@ class ReviewModeResolutionTests(unittest.TestCase):
 
 
 class PolicyContractTests(unittest.TestCase):
-    def test_default_policy_is_display_only_legacy(self):
+    def test_default_policy_enforces_merge_focused(self):
         policy = resolve_review_convergence_policy()
         document = policy.to_dict()
-        self.assertEqual(document["mode"], "legacy")
-        self.assertEqual(document["enforcement"], "display-only")
+        self.assertEqual(document["mode"], "merge-focused")
+        self.assertEqual(document["enforcement"], "publication")
         self.assertEqual(document["max_completed_verification_rounds"], 2)
         self.assertTrue(document["automatic_github_review_events"])
-        self.assertTrue(document["inline_advisory_threads"])
+        self.assertFalse(document["inline_advisory_threads"])
         self.assertEqual(document["policy_digest"], policy.digest())
         validate_public_document(document, "review-convergence-policy")
         restored = policy_from_mapping(document)
@@ -128,7 +133,7 @@ class PolicyContractTests(unittest.TestCase):
 
 class BlockerAdmissionDecisionTableTests(unittest.TestCase):
     def test_legacy_trusts_explicit_blocking_without_evidence(self):
-        policy = ReviewConvergencePolicy()
+        policy = ReviewConvergencePolicy(mode="legacy")
         blocked = evaluate_blocker_admission(
             BlockerCandidate(proposed_blocking=True, severity="low"),
             policy,
@@ -437,7 +442,7 @@ class BlockerAdmissionDecisionTableTests(unittest.TestCase):
 
 class RoundAdmissionDecisionTableTests(unittest.TestCase):
     def test_legacy_does_not_cap_rounds(self):
-        policy = ReviewConvergencePolicy()
+        policy = ReviewConvergencePolicy(mode="legacy")
         decision = evaluate_round_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
@@ -806,20 +811,20 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
 
 
 class DoctorPlanDisplayTests(unittest.TestCase):
-    def test_doctor_and_plan_display_legacy_policy_by_default(self):
+    def test_doctor_and_plan_display_merge_focused_policy_by_default(self):
         doctor = run_doctor()
         check = next(
             item for item in doctor["checks"] if item["name"] == "review-convergence"
         )
         self.assertEqual(check["status"], "pass")
-        self.assertIn("mode=legacy", check["detail"])
-        self.assertEqual(doctor["review_convergence"]["mode"], "legacy")
-        self.assertEqual(doctor["review_convergence"]["enforcement"], "display-only")
+        self.assertIn("mode=merge-focused", check["detail"])
+        self.assertEqual(doctor["review_convergence"]["mode"], "merge-focused")
+        self.assertEqual(doctor["review_convergence"]["enforcement"], "publication")
         plan = build_plan(diff=DIFF)
-        self.assertEqual(plan["review_convergence"]["mode"], "legacy")
+        self.assertEqual(plan["review_convergence"]["mode"], "merge-focused")
         self.assertFalse(plan["operations"]["publication"])
         rendered = render_diagnostic(plan)
-        self.assertIn("review_convergence: mode=legacy", rendered)
+        self.assertIn("review_convergence: mode=merge-focused", rendered)
 
     def test_doctor_reports_opt_in_mode_and_invalid_mode(self):
         doctor = run_doctor(review_mode="merge-focused")
@@ -901,7 +906,7 @@ class FindingAdmissionTests(unittest.TestCase):
         result = ReviewResult(
             summary="Summary.", comments=(comment,), provider="fixture"
         )
-        admitted = admit_review_result(result, ReviewConvergencePolicy())
+        admitted = admit_review_result(result, ReviewConvergencePolicy(mode="legacy"))
         self.assertIs(admitted, result)
         self.assertTrue(admitted.comments[0].blocks_approval)
         self.assertIsNone(admitted.comments[0].effective_blocking)

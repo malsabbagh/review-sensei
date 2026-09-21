@@ -536,7 +536,7 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
-| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Operator modes apply C2 admission at publication |
+| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `merge-focused` (default), `advisory`, or `strict`. Explicit historical `legacy` configuration must migrate to `merge-focused` before inference or writes. |
 | `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; `github review` write-through). The GitHub review flag does not affect `reply` or other GitHub subcommands. Requires repository and pull-request identity |
  | none | `REVIEWSENSEI_REVIEW_SHADOW` | Observation-only operator mode (`advisory`, `merge-focused`, or `strict`). Never changes GitHub publication; `legacy` is rejected |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
@@ -643,7 +643,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --json
 review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `--base-sha` and `--head-sha` record snapshot identity when supplied.
 Doctor and plan also report the resolved review-convergence policy
-(`legacy` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
+(`merge-focused` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
 When `--session-ledger` or `REVIEWSENSEI_SESSION_LEDGER` is set with a
 repository and pull-request identity, they also report the C3 session
 counters or an explicit missing/expired/tampered status. Doctor and plan

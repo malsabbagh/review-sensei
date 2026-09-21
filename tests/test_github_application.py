@@ -428,6 +428,9 @@ class GitHubApplicationTests(unittest.TestCase):
             ),
             diff="diff",
             app_slug="review-sensei[bot]",
+            # Pin the low-level compatibility path now that the omitted
+            # runtime policy resolves to merge-focused.
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         forwarded = self.reviewer.calls[-1]["authorized_dispositions"]
