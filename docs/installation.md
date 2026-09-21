@@ -276,10 +276,12 @@ status|pause|continue|reenroll`, `@sensei verify`, or `@sensei
 dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
 those comments take the command path whenever writes are enabled, while
 `REVIEWSENSEI_MENTION_REPLIES` continues to control only conversational
-replies. The caller workflow's `@sensei` and association checks are routing
-gates, not the authorization decision: every mutation is re-authorized inside
-the reusable workflow against the broker-attested actor and the durable session
-ledger before any write.
+replies. The command path is the pull-request conversation: an inline review
+comment on a diff line always resolves as a conversational reply and therefore
+still requires `REVIEWSENSEI_MENTION_REPLIES`. The caller workflow's `@sensei`
+and association checks are routing gates, not the authorization decision: every
+mutation is re-authorized inside the reusable workflow against the
+broker-attested actor and the durable session ledger before any write.
 `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` runs on `ubuntu-latest`
 and requires the customer-owned `OLLAMA_API_KEY` under Repository Settings →
 Secrets and variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` or

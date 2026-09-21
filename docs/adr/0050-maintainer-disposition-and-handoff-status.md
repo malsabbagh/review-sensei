@@ -150,12 +150,18 @@ Negative:
   is false: the prefilter does not consult the reply switch, and the switch
   still governs conversational replies only. This widening from the previous
   release is deliberate; a comment the caller does not classify as a command
-  still resolves as a conversational reply.
+  still resolves as a conversational reply. The command path is the
+  pull-request conversation (`issue_comment`); an inline review comment always
+  resolves as a conversational reply in every copy of the resolver, so
+  review-comment bodies remain governed by the reply switch.
 - The caller workflow's `@sensei`, association, and user-type checks are a
   routing gate, not an authorization decision. Authority is re-derived
   inside the reusable workflow from the broker attestation and the durable
-  session ledger, so editing the caller cannot widen it; the price is that
-  an unauthorized mention can still start a run that fails closed.
+  session ledger, so editing the caller cannot widen it. The resolver's own
+  job condition already requires the mention, an OWNER/MEMBER/COLLABORATOR
+  association, and a non-bot author, so `operation=command` is only produced
+  for those comments; the price is that an authorized actor the broker later
+  refuses still starts a run that fails closed.
 - `@sensei review status` is not a looser read path: the hosted handler
   still requires a caller-supplied OIDC token and exchanges the read-only
   `review_status` capability before it reads any ledger state, so status is
