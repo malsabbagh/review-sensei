@@ -440,7 +440,10 @@ run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', gith
 # @sensei review status|pause|continue|reenroll, @sensei verify, and
 # @sensei dismiss|defer|accept-risk run whenever github writes are enabled,
 # regardless of REVIEWSENSEI_MENTION_REPLIES. That variable now only controls
-# conversational @sensei replies.
+# conversational @sensei replies. Commands are read from the pull-request
+# conversation (issue comments); an inline review comment on a diff line
+# always resolves as a conversational reply and still requires
+# REVIEWSENSEI_MENTION_REPLIES=true.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
