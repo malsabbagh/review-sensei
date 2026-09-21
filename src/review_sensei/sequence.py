@@ -7,9 +7,9 @@ installed default or emit GitHub events. Shadow mode is observation-only.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Sequence, cast
