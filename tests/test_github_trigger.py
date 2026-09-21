@@ -84,6 +84,9 @@ def inline_command_prefilter(text: str) -> re.Pattern[str]:
     The template stores the pattern in a raw Python string literal, so a
     doubled backslash is a literal backslash to the regex engine. Parsing the
     literal instead of retyping the grammar is what keeps this test honest.
+    The call's flag argument is part of the grammar contract too: every copy
+    must compile with `re.IGNORECASE`, so a copy that drops or changes the
+    flags fails here instead of passing on a pattern-string equality check.
     """
 
     start = text.find(INLINE_COMMAND_PREFILTER_START)
@@ -94,6 +97,11 @@ def inline_command_prefilter(text: str) -> re.Pattern[str]:
     if end < 0:
         raise AssertionError("inline command prefilter terminator is missing")
     literal = text[start:end]
+    if not text[end + 1 :].startswith(", comment_body, re.IGNORECASE)"):
+        raise AssertionError(
+            "inline command prefilter flags changed; every copy must compile "
+            "with re.IGNORECASE"
+        )
     return re.compile(ast.literal_eval(f'r"{literal}"'), re.IGNORECASE)
 
 
@@ -118,19 +126,25 @@ def parses_as_command(body: str) -> bool:
 def repaired_command(body: str) -> str:
     """Return a body with the documented over-acceptance dimensions removed.
 
-    The prefilter may only be wider than the parser along three axes: the
+    The prefilter may only be wider than the parser along four axes: the
     mention token's casing (the regex is case-insensitive, the parser's
-    mention is not), `\\s` against the parser's ASCII separator bound, and the
-    disposition reason value (emptiness, printability, the 512-byte bound).
-    Lowercasing the mention, collapsing whitespace, and replacing the reason
-    with a short printable one must therefore yield a body the parser accepts;
-    a body that still fails is a shape no documented rule covers.
+    mention is not), a second mention on a later line (the regex matches any
+    mention at a line boundary while the parser anchors on the first mention),
+    `\\s` against the parser's ASCII separator bound, and the disposition
+    reason value (emptiness, printability, the 512-byte bound). Lowercasing
+    the mention, dropping everything from a later mention, collapsing
+    whitespace, and replacing the reason with a short printable one must
+    therefore yield a body the parser accepts; a body that still fails is a
+    shape no documented rule covers.
     """
 
     repaired = re.sub(r"(?i)@sensei", "@sensei", body)
     repaired = re.sub(r"\s+", " ", repaired)
     if parses_as_command(repaired):
         return repaired
+    without_later_mention = re.sub(r"\s+@sensei\b.*", "", repaired)
+    if parses_as_command(without_later_mention):
+        return without_later_mention
     head, separator, _ = repaired.rpartition("--reason")
     if not separator:
         return repaired
@@ -531,14 +545,26 @@ class InlineCallerResolverTests(unittest.TestCase):
         # body), reasons that the parser bounds by emptiness, by printable
         # ASCII, or by 512 bytes, and separators that the parser restricts to
         # ASCII whitespace while the prefilter uses \s. Any other difference
-        # means the two grammars drifted.
+        # means the two grammars drifted. Each member is also driven through
+        # the repair harness, so a body that is not on a documented axis fails
+        # against the contract rather than only against the snapshot; the
+        # snapshot below still stays, because it catches an on-axis body that
+        # was not deliberately added to the fixture.
         fingerprint = "abcd1234abcd1234"
+        over_accepted = {
+            case["body"]
+            for case in command_parity_cases()
+            if not case["accepted"] and prefilter.search(case["body"]) is not None
+        }
+        for body in over_accepted:
+            with self.subTest(body=body):
+                self.assertTrue(
+                    parses_as_command(repaired_command(body)),
+                    "fixture body is over-accepted outside the documented "
+                    "over-acceptance dimensions",
+                )
         self.assertEqual(
-            {
-                case["body"]
-                for case in command_parity_cases()
-                if not case["accepted"] and prefilter.search(case["body"]) is not None
-            },
+            over_accepted,
             {
                 "@Sensei review pause",
                 "@SENSEI review pause",

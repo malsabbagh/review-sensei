@@ -401,10 +401,20 @@ class SetupPlanTests(unittest.TestCase):
             )
 
         self.assertIn(
+            "      ((github.event_name == 'issue_comment' &&\n"
+            "      github.event.action == 'created' &&\n"
+            "      github.event.issue.pull_request &&\n"
+            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (github.event.comment.author_association == 'OWNER' ||\n"
+            "      github.event.comment.author_association == 'MEMBER' ||\n"
+            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
+            "      github.event.comment.user.type != 'Bot' &&\n"
             "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
-            "      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&\n",
+            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
             workflow,
-            "the command operation must reach the runner without requiring "
+            "the command arm must re-apply the caller's mention, association, "
+            "and user-type checks before admitting operation=command, and the "
+            "command operation must reach the runner without requiring "
             "REVIEWSENSEI_MENTION_REPLIES",
         )
         self.assertNotIn("@@", workflow)

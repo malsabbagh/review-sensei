@@ -161,12 +161,21 @@ describe("setup-v4 public boundary", () => {
     // The command branch must stay scoped to a created issue_comment on a pull
     // request: the command job forwards github.event.comment fields that do
     // not exist on a pull_request event, so the guard has to fail closed there.
+    // The branch also re-applies the caller's mention, association, and
+    // user-type checks, so it does not rely on the resolver alone to admit a
+    // runner, while the command operation still reaches the runner without
+    // requiring REVIEWSENSEI_MENTION_REPLIES.
     expect(workflow).toContain(
       "      ((github.event_name == 'issue_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
         "      github.event.issue.pull_request &&\n" +
+        "      contains(github.event.comment.body, '@sensei') &&\n" +
+        "      (github.event.comment.author_association == 'OWNER' ||\n" +
+        "      github.event.comment.author_association == 'MEMBER' ||\n" +
+        "      github.event.comment.author_association == 'COLLABORATOR') &&\n" +
+        "      github.event.comment.user.type != 'Bot' &&\n" +
         "      (needs.resolve-trigger.outputs.operation == 'command' ||\n" +
-        "      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&\n",
+        "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
     );
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
     // in the trigger guard untouched.

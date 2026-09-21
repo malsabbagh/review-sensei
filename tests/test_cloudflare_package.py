@@ -105,6 +105,22 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_MODEL", source)
         self.assertIn("github.event.comment.author_association == 'OWNER'", source)
         self.assertIn("github.event.comment.user.type != 'Bot'", source)
+        # The Worker's copy of the caller must re-apply the mention,
+        # association, and user-type checks on the command arm itself, not only
+        # in the resolver job's condition that produces operation=command.
+        self.assertIn(
+            "      ((github.event_name == 'issue_comment' &&\n"
+            "      github.event.action == 'created' &&\n"
+            "      github.event.issue.pull_request &&\n"
+            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (github.event.comment.author_association == 'OWNER' ||\n"
+            "      github.event.comment.author_association == 'MEMBER' ||\n"
+            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
+            "      github.event.comment.user.type != 'Bot' &&\n"
+            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
+            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
+            source,
+        )
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@", source
         )

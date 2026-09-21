@@ -158,10 +158,13 @@ Negative:
   routing gate, not an authorization decision. Authority is re-derived
   inside the reusable workflow from the broker attestation and the durable
   session ledger, so editing the caller cannot widen it. The resolver's own
-  job condition already requires the mention, an OWNER/MEMBER/COLLABORATOR
-  association, and a non-bot author, so `operation=command` is only produced
-  for those comments; the price is that an authorized actor the broker later
-  refuses still starts a run that fails closed.
+  job condition requires the mention, an OWNER/MEMBER/COLLABORATOR
+  association, and a non-bot author before it can produce
+  `operation=command`, and the command branch re-applies the same three
+  checks on its `issue_comment` arm, so the branch does not admit a run
+  whose comment failed them even if the resolver's condition is later
+  edited; the price is that an authorized actor the broker later refuses
+  still starts a run that fails closed.
 - `@sensei review status` is not a looser read path: the hosted handler
   still requires a caller-supplied OIDC token and exchanges the read-only
   `review_status` capability before it reads any ledger state, so status is

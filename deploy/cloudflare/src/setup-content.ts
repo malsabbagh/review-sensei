@@ -731,13 +731,13 @@ jobs:
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
-      (needs.resolve-trigger.outputs.operation == 'command' ||
-      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       contains(github.event.comment.body, '@sensei') &&
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot'))) ||
+      github.event.comment.user.type != 'Bot' &&
+      (needs.resolve-trigger.outputs.operation == 'command' ||
+      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||
       (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       github.event_name == 'pull_request_review_comment' &&
       github.event.action == 'created' &&
