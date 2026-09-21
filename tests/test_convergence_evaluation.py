@@ -436,6 +436,8 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "merge-focused")
         self.assertTrue(payload["events"])
         self.assertEqual(payload["events"][0]["provider_calls"], 1)
+        self.assertEqual(payload["cutover_status"], "passed")
+        self.assertEqual(payload["unmet_criteria"], [])
         self.assertEqual(payload["evidence_identity"]["source_identity"], "source-sha")
         self.assertEqual(
             payload["evidence_identity"]["workflow_identity"], "workflow-sha"

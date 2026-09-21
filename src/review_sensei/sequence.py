@@ -785,6 +785,46 @@ def run_observed_review_sequence(
         command_events.append(
             f"{continued.action}:{'applied' if continued.applied else 'ignored'}"
         )
+    cutover_unmet: list[str] = []
+    required_rounds = (
+        policy.max_completed_initial_reviews + policy.max_completed_verification_rounds
+    )
+    if cap_created_approval is not False:
+        cutover_unmet.append(
+            "the configured round cap was not observed with zero new approval events"
+        )
+    if completed_rounds < required_rounds or provider_calls < required_rounds:
+        cutover_unmet.append(
+            "the configured initial and verification round budget was not fully exercised"
+        )
+    if not events or events[-1].provider_calls != 0:
+        cutover_unmet.append("an over-cap request did not prove zero new inference")
+    if not any(event.baseline_loaded for event in events[1:]):
+        cutover_unmet.append("no fresh job loaded a durable completed baseline")
+    if not any(event.publication_status == "published" for event in events):
+        cutover_unmet.append("no successful application publication was observed")
+    if not shadow_isolated:
+        cutover_unmet.append("shadow comparison isolation was not observed")
+    if tuple(command_events) != ("pause:applied", "continue:applied"):
+        cutover_unmet.append("durable maintainer command evidence is incomplete")
+    if not expected_material_finding_ids:
+        cutover_unmet.append("no maintainer-labelled material regression was supplied")
+    if expected_material_finding_ids - observed_material_finding_ids:
+        cutover_unmet.append("a labelled material regression was missed")
+    if observed_material_finding_ids - expected_material_finding_ids:
+        cutover_unmet.append("an unjustified material blocker was observed")
+    if duplicate_findings or reopened_findings or contradictions:
+        cutover_unmet.append(
+            "duplicate, reopened, or contradictory finding evidence requires adjudication"
+        )
+    if "unavailable" in {
+        report_identity.source_identity,
+        report_identity.package_identity,
+        report_identity.workflow_identity,
+    }:
+        cutover_unmet.append(
+            "installed source, package, and workflow identities are unavailable"
+        )
     report = ObservedSequenceReport(
         mode=policy.mode,
         events=tuple(events),
@@ -825,29 +865,8 @@ def run_observed_review_sequence(
         evidence_identity=report_identity,
         approval_events=github.approval_events,
         cap_created_approval=cap_created_approval,
-        cutover_status="not_ready",
-        unmet_criteria=tuple(
-            item
-            for item in (
-                (
-                    "cap-created approval remains unknown until the supplied sequence exercises a round cap"
-                    if cap_created_approval is None
-                    else None
-                ),
-                (
-                    "installed source, package, and workflow identities are unavailable"
-                    if "unavailable"
-                    in {
-                        report_identity.source_identity,
-                        report_identity.package_identity,
-                        report_identity.workflow_identity,
-                    }
-                    else None
-                ),
-                "maintainer-approved cutover thresholds have not been recorded",
-            )
-            if item is not None
-        ),
+        cutover_status="passed" if not cutover_unmet else "not_ready",
+        unmet_criteria=tuple(cutover_unmet),
     )
     return report
 
