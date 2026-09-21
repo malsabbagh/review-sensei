@@ -1,4 +1,5 @@
 import ast
+import itertools
 import json
 import os
 import re
@@ -10,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from review_sensei.disposition import parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.setup import _tagged_workflow
 from review_sensei.hosting.github.trigger import (
     TriggerResolution,
@@ -97,6 +100,77 @@ def inline_command_prefilter(text: str) -> re.Pattern[str]:
 def command_parity_cases() -> list[dict[str, object]]:
     fixture_path = ROOT / "tests" / "fixtures" / "maintainer-command-parity.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def parses_as_command(body: str) -> bool:
+    """Return the authoritative parser's decision for a comment body.
+
+    The parser refuses some bodies by raising, so an exception is a rejection
+    rather than a test error.
+    """
+
+    try:
+        return parse_maintainer_command(body, actor="test-maintainer") is not None
+    except ReviewInputError:
+        return False
+
+
+def command_corpus() -> list[str]:
+    """Enumerate command-shaped bodies from the grammar rather than by hand.
+
+    The fixed fixture pins behavior for known shapes; this corpus spells the
+    grammar's own tokens, separators, casing, and reason variants so a parser
+    addition the prefilter cannot route fails here instead of falling through
+    to a conversational reply at runtime.
+    """
+
+    fingerprint16 = "0123456789abcdef"
+    fingerprint64 = "abcdef0123456789" * 4
+    commands = (
+        "review status",
+        "review pause",
+        "review continue",
+        "review continue --rounds 0",
+        "review continue --rounds 1",
+        "review reenroll",
+        "verify",
+        f"dismiss {fingerprint16} --reason x",
+        f"defer {fingerprint64} --reason x",
+        f"accept-risk {fingerprint16} --reason x",
+        f"dismiss {fingerprint16.upper()} --reason x",
+        f"dismiss {fingerprint16[:-1]} --reason x",
+        f"dismiss {fingerprint64}a --reason x",
+    )
+    reasons = (
+        "x",
+        "accepted reason",
+        '"quoted reason"',
+        '""',
+        "\u2003",
+        "é",
+        "a" * 512,
+        "a" * 513,
+        "x\ny",
+        "x --reason y",
+    )
+    bodies: list[str] = []
+    for command, mention, prefix, separator, suffix in itertools.product(
+        commands,
+        ("@sensei", "@Sensei", "@SENSEI"),
+        ("", "note ", "note\n", "> "),
+        (" ", "\t", "\n", "  "),
+        ("", " ", "\n", " trailing"),
+    ):
+        tokenized = re.sub(r"\s+", lambda _match: separator, command)
+        bodies.append(f"{prefix}{mention}{separator}{tokenized}{suffix}")
+    for reason, prefix, separator in itertools.product(
+        reasons, ("", "note ", "x"), (" ", "\t", "\n", "  ")
+    ):
+        bodies.append(
+            f"{prefix}@sensei{separator}dismiss{separator}{fingerprint16}"
+            f"{separator}--reason{separator}{reason}"
+        )
+    return bodies
 
 
 class GitHubTriggerTests(unittest.TestCase):
@@ -380,25 +454,47 @@ class InlineCallerResolverTests(unittest.TestCase):
                 self.assertEqual(
                     inline_command_prefilter(text).pattern, prefilter.pattern
                 )
-        over_accepted = 0
         for case in command_parity_cases():
             body = case["body"]
-            matched = prefilter.search(body) is not None
-            if case["accepted"]:
-                # The invariant that keeps the feature working: a command the
-                # authoritative parser accepts must never fall through to a
-                # conversational reply on a caller without the packaged module.
-                with self.subTest(body=body):
-                    self.assertTrue(matched)
-            elif matched:
-                over_accepted += 1
+            with self.subTest(body=body):
+                self.assertEqual(parses_as_command(body), case["accepted"])
+        # The invariant that keeps the feature working: a command the
+        # authoritative parser accepts must never fall through to a
+        # conversational reply on a caller without the packaged module. The
+        # accepted side is derived from the parser, so a grammar change that
+        # the prefilter cannot route fails here instead of misrouting at
+        # runtime.
+        accepted = 0
+        for body in command_corpus():
+            if not parses_as_command(body):
+                continue
+            accepted += 1
+            with self.subTest(body=body):
+                self.assertTrue(prefilter.search(body) is not None)
+        self.assertGreater(accepted, 200)
         # The prefilter is allowed to be wider than the parser because the
         # reusable workflow re-parses the body and fails closed on
-        # "not-a-command". Six fixture bodies differ on purpose: reasons that
-        # the parser bounds by emptiness, by printable ASCII, or by 512 bytes,
-        # and separators that the parser restricts to ASCII whitespace while
-        # the prefilter uses \s. Growth here means the two grammars drifted.
-        self.assertEqual(over_accepted, 6)
+        # "not-a-command". These six fixture bodies differ on purpose: reasons
+        # that the parser bounds by emptiness, by printable ASCII, or by 512
+        # bytes, and separators that the parser restricts to ASCII whitespace
+        # while the prefilter uses \s. Any other difference means the two
+        # grammars drifted.
+        fingerprint = "abcd1234abcd1234"
+        self.assertEqual(
+            {
+                case["body"]
+                for case in command_parity_cases()
+                if not case["accepted"] and prefilter.search(case["body"]) is not None
+            },
+            {
+                f'@sensei dismiss {fingerprint} --reason ""',
+                f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
+                f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
+                "@sensei review\x1creenroll",
+                "@sensei review\x85reenroll",
+                "@sensei review\u2003reenroll",
+            },
+        )
 
     def test_inline_fallback_matches_trigger_module_outputs(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
