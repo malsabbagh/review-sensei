@@ -314,14 +314,15 @@ def _stored_convergence_history(
 
         baseline_from_history_document(baseline)
     progress = normalized.get("progress")
-    if not isinstance(progress, list) or len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES:
+    if (
+        not isinstance(progress, list)
+        or len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES
+    ):
         raise ReviewInputError("session history progress is invalid")
     for item in progress:
         if not isinstance(item, Mapping) or set(item) not in {
             frozenset({"event", "generation"}),
-            frozenset(
-                {"event", "generation", "blocker_set_sha256", "blocker_count"}
-            ),
+            frozenset({"event", "generation", "blocker_set_sha256", "blocker_count"}),
         }:
             raise ReviewInputError("session history progress item is invalid")
         if item.get("event") not in {"completed", "invalidated", "recovery-required"}:
@@ -357,7 +358,9 @@ def blocker_set_digest(fingerprints: Sequence[str]) -> tuple[str, int]:
     """Return the canonical digest of the complete admitted blocker identity set."""
 
     values = tuple(fingerprints)
-    if any(not isinstance(value, str) or not _SHA256.fullmatch(value) for value in values):
+    if any(
+        not isinstance(value, str) or not _SHA256.fullmatch(value) for value in values
+    ):
         raise ReviewInputError("blocker fingerprint is invalid")
     canonical = tuple(sorted(set(values)))
     return (
@@ -2014,8 +2017,13 @@ def suppress_review_publication(
         if current.phase == "publication_suppressed":
             return record
         if current.phase != "publication_pending":
-            raise ReviewInputError("publication suppression phase transition is invalid")
-        if transaction.result_sha256 is None or current.result_sha256 != transaction.result_sha256:
+            raise ReviewInputError(
+                "publication suppression phase transition is invalid"
+            )
+        if (
+            transaction.result_sha256 is None
+            or current.result_sha256 != transaction.result_sha256
+        ):
             raise ReviewInputError("publication result digest does not match")
         return record.evolve(
             now=now,
@@ -2067,7 +2075,10 @@ def record_admitted_blocker_progress(
             raise ReviewInputError("publication transaction identity does not match")
         if transaction.generation > current.generation:
             raise ReviewInputError("publication transaction generation is stale")
-        if transaction.result_sha256 is None or current.result_sha256 != transaction.result_sha256:
+        if (
+            transaction.result_sha256 is None
+            or current.result_sha256 != transaction.result_sha256
+        ):
             raise ReviewInputError("publication result digest does not match")
         history = record.convergence_history
         if not isinstance(history, Mapping) or history.get("state") != "completed":
@@ -2079,7 +2090,9 @@ def record_admitted_blocker_progress(
         if not isinstance(last, Mapping) or last.get("event") != "completed":
             raise ReviewInputError("durable convergence progress is invalid")
         if last.get("generation") != current.generation:
-            raise ReviewInputError("durable convergence progress does not match transaction")
+            raise ReviewInputError(
+                "durable convergence progress does not match transaction"
+            )
         item = {
             "event": "completed",
             "generation": current.generation,

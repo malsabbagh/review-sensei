@@ -349,7 +349,9 @@ class ReviewTransactionTests(unittest.TestCase):
         self.assertEqual(cleanup.generation, suppressed.generation)
         self.assertEqual(cleanup.transaction.phase, "publication_suppressed")
 
-    def test_admitted_blocker_progress_and_suppression_are_one_terminal_transition(self):
+    def test_admitted_blocker_progress_and_suppression_are_one_terminal_transition(
+        self,
+    ):
         ledger = InMemorySessionLedger()
         reservation = session_reservation_id(
             repository=IDENTITY.repository,

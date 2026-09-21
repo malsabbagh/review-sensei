@@ -50,10 +50,20 @@ _TRANSACTION_PHASE_TRANSITIONS = {
     "analysis": frozenset({"analysis", "analysis_failed", "publication_pending"}),
     "analysis_failed": frozenset({"analysis_failed"}),
     "publication_pending": frozenset(
-        {"publication_pending", "publication_failed", "publication_succeeded", "publication_suppressed"}
+        {
+            "publication_pending",
+            "publication_failed",
+            "publication_succeeded",
+            "publication_suppressed",
+        }
     ),
     "publication_failed": frozenset(
-        {"publication_failed", "publication_pending", "publication_succeeded", "publication_suppressed"}
+        {
+            "publication_failed",
+            "publication_pending",
+            "publication_succeeded",
+            "publication_suppressed",
+        }
     ),
     "publication_succeeded": frozenset({"publication_succeeded"}),
     "publication_suppressed": frozenset({"publication_suppressed"}),
