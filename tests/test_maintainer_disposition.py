@@ -919,6 +919,95 @@ class DisabledWriteTests(unittest.TestCase):
                     session_attestation=request_attestation,
                 )
 
+    def test_hosted_mutation_rejects_a_broker_attestation_that_binds_another_command(
+        self,
+    ):
+        body = "@sensei review pause"
+        request_attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "run_id": "42",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
+            "job_workflow_sha": "c" * 40,
+        }
+        attestation = {
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "actor": "alice",
+            "actor_type": "User",
+            "association": "MEMBER",
+            "command_id": 501,
+            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+        }
+
+        def broker_with(**overrides):
+            def authorize_session_mutation(self, token, **kwargs):
+                del self, token, kwargs
+                return type(
+                    "SessionGrant",
+                    (),
+                    {
+                        "token": "capability-token",
+                        "grant": "opaque-grant",
+                        "attestation": {**attestation, **overrides},
+                    },
+                )()
+
+            return type(
+                "Broker", (), {"authorize_session_mutation": authorize_session_mutation}
+            )()
+
+        # The first override is an attestation for another head, the second the
+        # digest a broker records when the comment no longer holds this body.
+        for message, overrides in (
+            ("scope was invalid", {"head_sha": "d" * 40}),
+            (
+                "command was stale",
+                {"command_digest": sha256(b"@sensei review continue").hexdigest()},
+            ),
+        ):
+            with self.subTest(message=message):
+                application = GitHubApplication(
+                    broker=broker_with(**overrides),
+                    http=None,
+                    reviewer=object(),
+                    learner=object(),
+                    replier=object(),
+                )
+                with patch.object(
+                    application,
+                    "_session_ledger_for_token",
+                    return_value=InMemorySessionLedger(),
+                ):
+                    with self.assertRaisesRegex(GitHubPublicationError, message):
+                        application.apply_maintainer_command(
+                            options=GitHubWriteOptions(
+                                github_writes=True, github_session_ledger=True
+                            ),
+                            oidc_token="caller-oidc",
+                            repository="owner/repo",
+                            repository_id=99,
+                            pull_request=136,
+                            head_sha="b" * 40,
+                            body=body,
+                            actor_login="alice",
+                            association="MEMBER",
+                            app_slug="reviewsensei[bot]",
+                            source_comment_id=501,
+                            session_attestation=request_attestation,
+                        )
+
 
 class SummaryTests(unittest.TestCase):
     def test_handoff_summary_asks_for_human_review(self):

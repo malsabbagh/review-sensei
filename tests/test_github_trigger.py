@@ -92,6 +92,26 @@ class GitHubTriggerTests(unittest.TestCase):
         )
         self.assertEqual(resolution.operation, "reply")
 
+    def test_multibyte_padding_past_the_byte_bound_stays_out_of_command_execution(
+        self,
+    ):
+        # Ideographic spaces are whitespace to str.strip() at three bytes each,
+        # so this body stays command-shaped while passing 4096 bytes. A
+        # character bound would route it to command instead of reply.
+        body = "@sensei" + "\N{IDEOGRAPHIC SPACE}" * 2000 + "review pause"
+        self.assertEqual(len(body), 2019)
+        self.assertEqual(len(body.encode("utf-8")), 6019)
+        self.assertEqual(resolve_issue_comment(body, _pull()).operation, "reply")
+
+    def test_multibyte_command_reason_is_bounded_in_bytes(self):
+        reason = "\N{LATIN SMALL LETTER E WITH ACUTE}" * 300
+        self.assertLessEqual(len(reason), 512)
+        self.assertGreater(len(reason.encode("utf-8")), 512)
+        resolution = resolve_issue_comment(
+            "@sensei dismiss " + "a" * 20 + " --reason " + reason, _pull()
+        )
+        self.assertEqual(resolution.operation, "reply")
+
     def test_comment_mentions_sensei_matches_workflow_gate(self):
         self.assertTrue(comment_mentions_sensei("@sensei please re-scan"))
         self.assertFalse(comment_mentions_sensei("@SENSEI please re-scan"))

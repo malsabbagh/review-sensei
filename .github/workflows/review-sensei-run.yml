@@ -175,6 +175,7 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          INPUT_PULL_REQUEST: ${{ inputs.pull_request_number }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_REF: ${{ inputs.head_ref }}
@@ -290,7 +291,12 @@ jobs:
             echo '::error::pull request number is required for reply operations' >&2
             exit 1
           elif [[ "$OPERATION" == command && "$ENABLE_GITHUB_WRITES" == true ]]; then
-            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ || ! "$SOURCE_COMMENT_ID" =~ ^[1-9][0-9]*$ || -z "$COMMENT_BODY" || ${#COMMENT_BODY} -gt 4096 || -z "$COMMENT_ACTOR" || ${#COMMENT_ACTOR} -gt 256 ]]; then
+            comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | wc -c)"
+            if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+              echo '::error::command operations require an explicit pull_request_number input' >&2
+              exit 1
+            fi
+            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ || ! "$SOURCE_COMMENT_ID" =~ ^[1-9][0-9]*$ || -z "$COMMENT_BODY" || "$comment_body_bytes" -gt 4096 || -z "$COMMENT_ACTOR" || ${#COMMENT_ACTOR} -gt 256 ]]; then
               echo '::error::command operations require a pull request, current head SHA, and source comment identity' >&2
               exit 1
             fi
@@ -465,8 +471,11 @@ jobs:
       group: reviewsensei-command-${{ github.run_id }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
+    # The session-comment mutation is authorized by the OIDC broker's
+    # `review_session` capability (pull_requests: write); GITHUB_TOKEN keeps no
+    # write scope, matching ADR 0022/0050.
     permissions:
-      issues: write
+      contents: read
       pull-requests: read
       id-token: write
     steps:
@@ -508,7 +517,7 @@ jobs:
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.issue.number }}
+          PULL_REQUEST: ${{ inputs.pull_request_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           COMMENT_BODY: ${{ inputs.comment_body }}

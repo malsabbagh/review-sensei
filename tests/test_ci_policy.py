@@ -919,11 +919,26 @@ class ActionPinPolicyTests(unittest.TestCase):
             '--github-session-ledger --oidc-token "$oidc_token" --allow-write',
             command,
         )
+        self.assertIn("PULL_REQUEST: ${{ inputs.pull_request_number }}", command)
         self.assertIn("job_workflow_ref", command)
         self.assertIn("source_comment_id", command)
+        # The session-comment mutation is broker-authorized; GITHUB_TOKEN must
+        # keep no write scope for the command job.
+        self.assertNotIn("issues: write", command)
+        self.assertNotIn("pull-requests: write", command)
+        self.assertIn("id-token: write", command)
         validator = _job_section(text, "validate-provider-mode")
         self.assertIn(
             "command operations require an authorized human maintainer", validator
+        )
+        self.assertIn(
+            'comment_body_bytes="$(printf \'%s\' "$COMMENT_BODY" | wc -c)"',
+            validator,
+        )
+        self.assertNotIn("${#COMMENT_BODY}", validator)
+        self.assertIn(
+            "command operations require an explicit pull_request_number input",
+            validator,
         )
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):

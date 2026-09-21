@@ -1495,6 +1495,35 @@ def _github_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _bind_hosted_command_attestation(
+    attestation: dict[str, object],
+    *,
+    repository: str,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    source_comment_id: int,
+) -> None:
+    """Reject a hosted command attestation that disagrees with this invocation.
+
+    The broker re-checks this binding against the OIDC claims; checking it here
+    fails a mismatched attestation before any credential is exchanged.
+    """
+
+    if (
+        attestation.get("version") != 1
+        or attestation.get("operation") != "command"
+        or attestation.get("repository") != repository
+        or attestation.get("repository_id") != repository_id
+        or attestation.get("pull_request") != pull_request
+        or attestation.get("head_sha") != head_sha
+        or attestation.get("source_comment_id") != source_comment_id
+    ):
+        raise ReviewInputError(
+            "session attestation does not match the hosted command identity"
+        )
+
+
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     from .convergence import (
         OPERATOR_REVIEW_MODES,
@@ -1591,6 +1620,14 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     ) from exc
                 if not isinstance(loaded_attestation, dict):
                     raise ReviewInputError("session attestation must be an object")
+                _bind_hosted_command_attestation(
+                    loaded_attestation,
+                    repository=args.repository,
+                    repository_id=args.repository_id,
+                    pull_request=args.pull_request,
+                    head_sha=args.head_sha,
+                    source_comment_id=source_comment_id,
+                )
                 session_attestation = loaded_attestation
             http = GitHubHttp()
             application = GitHubApplication(
@@ -1620,6 +1657,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             print(result.summary)
             return 0
+        for flag, value in (
+            ("--repository-id", getattr(args, "repository_id", None)),
+            ("--source-comment-id", getattr(args, "source_comment_id", None)),
+            ("--session-attestation", getattr(args, "session_attestation", None)),
+            ("--oidc-token", getattr(args, "oidc_token", None)),
+        ):
+            if value is not None:
+                raise ReviewInputError(
+                    f"{flag} requires --github-session-ledger for maintainer commands"
+                )
         ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
         if ledger is None:
             raise ReviewInputError("maintainer commands require a session ledger")
