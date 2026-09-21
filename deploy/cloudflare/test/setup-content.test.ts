@@ -89,6 +89,30 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
   });
 
+  it("forwards command context and routes the command operation for the generated caller", () => {
+    const workflow = buildTaggedV4SetupFiles("v5")[0].content;
+    const forwarding: ReadonlyArray<readonly [string, string]> = [
+      ["comment_body", "github.event.comment.body || ''"],
+      ["comment_actor", "github.event.comment.user.login || ''"],
+      ["comment_actor_type", "github.event.comment.user.type || 'User'"],
+      ["comment_association", "github.event.comment.author_association || ''"],
+    ];
+    for (const [name, expression] of forwarding) {
+      const matches = workflow
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith(name + ": "));
+      expect(matches).toEqual([name + ": ${{ " + expression + " }}"]);
+    }
+    expect(workflow).toContain(
+      "      (needs.resolve-trigger.outputs.operation == 'command' ||\n" +
+        "      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&\n",
+    );
+    // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
+    // in the trigger guard untouched.
+    expect(workflow).not.toContain("@@");
+  });
+
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
     const workflow = buildTaggedV4SetupFiles("v5")[0].content;
     expect(workflow).toContain(

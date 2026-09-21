@@ -131,9 +131,20 @@ Positive:
 
 Negative:
 
-- Generated setup-v4 inline trigger script still classifies unknown
-  issue comments as reply until operators upgrade to the packaged
-  trigger module path. New CLI/trigger entry points understand commands.
+- The generated setup-v4 inline trigger script routes command-shaped
+  comments without the packaged parser, so its prefilter is deliberately
+  looser: six body shapes the parser rejects (empty or non-printable
+  `--reason` values, a reason beyond the 512-byte bound, and separators
+  inside the action words that the regex `\s` accepts but the parser's
+  ASCII-only bound does not) still resolve to `operation=command`. The
+  reusable workflow re-parses the body and the hosted handler returns
+  `not-a-command` without a write, so the residual cost is a wasted run
+  rather than an unauthorized mutation.
+- The caller workflow's `@sensei`, association, and user-type checks are a
+  routing gate, not an authorization decision. Authority is re-derived
+  inside the reusable workflow from the broker attestation and the durable
+  session ledger, so editing the caller cannot widen it; the price is that
+  an unauthorized mention can still start a run that fails closed.
 
 ## Alternatives considered
 
@@ -160,8 +171,9 @@ to `legacy` or omitting the ledger. Unresolved findings are not discarded.
 ## Follow-up work
 
 - C7: sequential evaluation and opt-in rollout.
-- Setup-v4 inline trigger parity for `operation=command` on older caller
-  workflows after packaged trigger adoption.
+- Retire the inline trigger fallback once every supported caller resolves
+  the packaged trigger module path, so the command grammar has one
+  implementation instead of four byte-locked copies.
 
 ## Links
 

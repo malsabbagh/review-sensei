@@ -19,7 +19,7 @@ _SENSEI_MENTION = "@sensei"
 _SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
 _MAINTAINER_COMMAND = re.compile(
     r"(?:"
-    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?)"
+    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?|reenroll)"
     r"|verify"
     r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
     r"\s+--reason\s+(?P<reason>\S.*)"

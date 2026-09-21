@@ -269,6 +269,17 @@ provider-only while writes are disabled. Set
 `REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated
 learning proposals are desired, and `REVIEWSENSEI_LEARNING_PRS=true` to publish
 those proposals as draft PRs.
+Enabling `REVIEWSENSEI_GITHUB_WRITES=true` also exposes the maintainer command
+surface, independently of `REVIEWSENSEI_MENTION_REPLIES`. An authorized human
+`OWNER`, `MEMBER`, or `COLLABORATOR` may post `@sensei review
+status|pause|continue|reenroll`, `@sensei verify`, or `@sensei
+dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
+those comments take the command path whenever writes are enabled, while
+`REVIEWSENSEI_MENTION_REPLIES` continues to control only conversational
+replies. The caller workflow's `@sensei` and association checks are routing
+gates, not the authorization decision: every mutation is re-authorized inside
+the reusable workflow against the broker-attested actor and the durable session
+ledger before any write.
 `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` runs on `ubuntu-latest`
 and requires the customer-owned `OLLAMA_API_KEY` under Repository Settings →
 Secrets and variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` or

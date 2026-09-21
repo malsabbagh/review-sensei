@@ -1,5 +1,7 @@
+import ast
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,6 +70,35 @@ def inline_resolver_script(text: str) -> str:
     return textwrap.dedent(text[start:end] + "\n")
 
 
+INLINE_COMMAND_PREFILTER_START = (
+    'len(comment_body.encode("utf-8")) <= 4096 and re.search(r"'
+)
+
+
+def inline_command_prefilter(text: str) -> re.Pattern[str]:
+    """Return the inline command prefilter exactly as the heredoc evaluates it.
+
+    The template stores the pattern in a raw Python string literal, so a
+    doubled backslash is a literal backslash to the regex engine. Parsing the
+    literal instead of retyping the grammar is what keeps this test honest.
+    """
+
+    start = text.find(INLINE_COMMAND_PREFILTER_START)
+    if start < 0:
+        raise AssertionError("caller is missing the inline command prefilter")
+    start += len(INLINE_COMMAND_PREFILTER_START)
+    end = text.find('"', start)
+    if end < 0:
+        raise AssertionError("inline command prefilter terminator is missing")
+    literal = text[start:end]
+    return re.compile(ast.literal_eval(f'r"{literal}"'), re.IGNORECASE)
+
+
+def command_parity_cases() -> list[dict[str, object]]:
+    fixture_path = ROOT / "tests" / "fixtures" / "maintainer-command-parity.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 class GitHubTriggerTests(unittest.TestCase):
     def test_issue_comment_requests_rescan(self):
         self.assertTrue(
@@ -85,6 +116,21 @@ class GitHubTriggerTests(unittest.TestCase):
         resolution = resolve_issue_comment("@sensei review pause", _pull())
         self.assertEqual(resolution.operation, "command")
         self.assertEqual(resolution.enable_review, "false")
+
+    def test_every_parser_accepted_command_routes_to_the_command_operation(self):
+        # The prefilter is deliberately narrower work than the parser, so the
+        # invariant is one-directional: anything the authoritative parser
+        # accepts must reach the hosted command handler instead of falling
+        # through to a conversational reply.
+        cases = command_parity_cases()
+        accepted = [case["body"] for case in cases if case["accepted"]]
+        self.assertIn("@sensei review reenroll", accepted)
+        self.assertGreater(len(accepted), 0)
+        for body in accepted:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    resolve_issue_comment(body, _pull()).operation, "command"
+                )
 
     def test_oversized_maintainer_command_does_not_reach_command_execution(self):
         resolution = resolve_issue_comment(
@@ -324,12 +370,55 @@ class InlineCallerResolverTests(unittest.TestCase):
         self.assertIn("_RESCAN = " + pattern, trigger)
         self.assertIn("rescan = " + pattern, script)
 
+    def test_embedded_command_prefilter_covers_every_parser_accepted_command(self):
+        prefilter = inline_command_prefilter(REPO_CALLER.read_text(encoding="utf-8"))
+        for name, text in (
+            ("example", EXAMPLE_CALLER.read_text(encoding="utf-8")),
+            ("generated", _tagged_workflow("v5")),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    inline_command_prefilter(text).pattern, prefilter.pattern
+                )
+        over_accepted = 0
+        for case in command_parity_cases():
+            body = case["body"]
+            matched = prefilter.search(body) is not None
+            if case["accepted"]:
+                # The invariant that keeps the feature working: a command the
+                # authoritative parser accepts must never fall through to a
+                # conversational reply on a caller without the packaged module.
+                with self.subTest(body=body):
+                    self.assertTrue(matched)
+            elif matched:
+                over_accepted += 1
+        # The prefilter is allowed to be wider than the parser because the
+        # reusable workflow re-parses the body and fails closed on
+        # "not-a-command". Six fixture bodies differ on purpose: reasons that
+        # the parser bounds by emptiness, by printable ASCII, or by 512 bytes,
+        # and separators that the parser restricts to ASCII whitespace while
+        # the prefilter uses \s. Growth here means the two grammars drifted.
+        self.assertEqual(over_accepted, 6)
+
     def test_inline_fallback_matches_trigger_module_outputs(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
         pull = _pull(head_sha="016017b" + ("0" * 33))
         cases = (
             ("issue_comment", "@sensei please re-scan commit 016017b", "false"),
             ("issue_comment", "@sensei what changed?", "false"),
+            ("issue_comment", "@sensei review status", "false"),
+            ("issue_comment", "@sensei review pause", "false"),
+            ("issue_comment", "@sensei review reenroll", "false"),
+            ("issue_comment", "@sensei Review Reenroll", "false"),
+            ("issue_comment", "@sensei review continue --rounds 0", "false"),
+            ("issue_comment", "@sensei verify", "false"),
+            (
+                "issue_comment",
+                "@sensei dismiss abcd1234abcd1234 --reason accepted",
+                "false",
+            ),
+            ("issue_comment", "@sensei review continue --rounds 2", "false"),
+            ("issue_comment", "@sensei review reenroll trailing", "false"),
             ("pull_request", "", "true"),
             ("pull_request_review_comment", "@sensei fixed?", "false"),
             ("workflow_dispatch", "", "false"),
