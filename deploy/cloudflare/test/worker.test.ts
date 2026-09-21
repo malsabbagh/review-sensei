@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const broker = vi.hoisted(() => ({ exchange: vi.fn() }));
+const broker = vi.hoisted(() => ({ exchange: vi.fn(), verifySessionGrant: vi.fn() }));
 
 vi.mock("../src/token-broker", () => ({
   TokenBroker: class {
     exchange = broker.exchange;
+    verifySessionGrant = broker.verifySessionGrant;
   },
 }));
 
@@ -26,9 +27,110 @@ function request(body = { oidc_token: "signed-jwt" }, headers: HeadersInit = {})
   });
 }
 
+function grantRequest(
+  body = { session_grant: "a".repeat(43), session_attestation: { version: 1 } },
+  headers: HeadersInit = {},
+  method = "POST",
+  includeContentLength = true,
+): Request {
+  const encoded = JSON.stringify(body);
+  const requestHeaders = new Headers(headers);
+  if (includeContentLength && !requestHeaders.has("content-length")) {
+    requestHeaders.set(
+      "content-length",
+      String(new TextEncoder().encode(encoded).byteLength),
+    );
+  }
+  return new Request("https://github.reviewsensei.dev/github/session-grant", {
+    method,
+    headers: requestHeaders,
+    body: method === "GET" || method === "HEAD" ? undefined : encoded,
+  });
+}
+
 beforeEach(() => {
   broker.exchange.mockReset();
+  broker.verifySessionGrant.mockReset();
   broker.exchange.mockResolvedValue({ token: "ghs_scoped_token", capability: "review_publish" });
+  broker.verifySessionGrant.mockResolvedValue({ repository_id: 987654321, pull_request: 7 });
+});
+
+describe("session-grant verification route", () => {
+  it("returns only verified immutable session fields and never echoes the grant", async () => {
+    const result = await worker.fetch(grantRequest(), env);
+    expect(result.status).toBe(200);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({
+      session_attestation: { repository_id: 987654321, pull_request: 7 },
+    });
+    expect(broker.verifySessionGrant).toHaveBeenCalledWith(
+      "a".repeat(43), { version: 1 },
+    );
+  });
+
+  it("rejects expired or invalid grants without exposing their values", async () => {
+    broker.verifySessionGrant.mockRejectedValue(new Error("broker_session_grant_invalid"));
+    const result = await worker.fetch(grantRequest(), env);
+    expect(result.status).toBe(403);
+    expect(await result.json()).toEqual({ error: "session_grant_not_verified" });
+  });
+
+  it.each([
+    [{ origin: "https://attacker.invalid" }, 400, "cors_not_supported", true],
+    [{}, 411, "content_length_required", false],
+    [{ "content-length": "not-a-number" }, 413, "payload_too_large", true],
+    [{ "content-length": "262145" }, 413, "payload_too_large", true],
+  ])("rejects malformed session-grant transport metadata", async (headers, status, error, includeContentLength) => {
+    const result = await worker.fetch(
+      grantRequest(undefined, headers, "POST", includeContentLength),
+      env,
+    );
+    expect(result.status).toBe(status);
+    expect(await result.json()).toEqual({ error });
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed session-grant JSON before broker verification", async () => {
+    const result = await worker.fetch(
+      new Request("https://github.reviewsensei.dev/github/session-grant", {
+        method: "POST",
+        headers: { "content-length": "8" },
+        body: "not-json",
+      }),
+      env,
+    );
+    expect(result.status).toBe(400);
+    expect(await result.json()).toEqual({ error: "invalid_request" });
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown session-grant request fields", async () => {
+    const result = await worker.fetch(
+      grantRequest({
+        session_grant: "a".repeat(43),
+        session_attestation: { version: 1 },
+        unexpected: true,
+      }),
+      env,
+    );
+    expect(result.status).toBe(400);
+    expect(await result.json()).toEqual({ error: "invalid_request" });
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+  });
+
+  it("maps a broker-ledger outage to a retryable response", async () => {
+    broker.verifySessionGrant.mockRejectedValue(new Error("broker_ledger_unavailable"));
+    const result = await worker.fetch(grantRequest(), env);
+    expect(result.status).toBe(503);
+    expect(await result.json()).toEqual({ error: "session_grant_not_verified" });
+  });
+
+  it("rejects non-POST session-grant requests", async () => {
+    const result = await worker.fetch(grantRequest(undefined, {}, "GET"), env);
+    expect(result.status).toBe(405);
+    expect(await result.json()).toEqual({ error: "method_not_allowed" });
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+  });
 });
 
 describe("token route response security", () => {

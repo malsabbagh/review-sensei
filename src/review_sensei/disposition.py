@@ -9,16 +9,19 @@ and records human dispositions without claiming an independently verified fix.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, cast
 
+from .convergence import ReviewConvergencePolicy
 from .errors import ReviewInputError
 from .session import (
     MAX_STORED_DISPOSITIONS,
     SessionIdentity,
     SessionLedger,
     SessionRecord,
+    issue_continuation_grant,
 )
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -38,19 +41,28 @@ FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
 MAX_ACTOR_BYTES = 256
+# The Cloudflare broker mirrors this parser before it issues a one-use grant.
+# Keep command separators deliberately ASCII so Python and JavaScript cannot
+# disagree about control/Unicode whitespace at the trust boundary.
+_COMMAND_WHITESPACE = " \t\r\n"
+_COMMAND_WS = r"[ \t\r\n]"
+_COMMAND_NON_WS = r"[^ \t\r\n]"
 # A command mention must start at the beginning of a line or after whitespace.
 # This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
 # text such as ``!@sensei`` and ``(@sensei``.
-_SENSEI = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
+_SENSEI = re.compile(r"(?m)(?<![^ \t\r\n])@sensei(?=[ \t\r\n]+)")
 _CONTINUE_ROUNDS = re.compile(
-    r"^review\s+continue(?:\s+--rounds\s+(0|1))?\s*$", re.IGNORECASE
+    rf"^review{_COMMAND_WS}+continue(?:{_COMMAND_WS}+--rounds{_COMMAND_WS}+(0|1))?{_COMMAND_WS}*$",
+    re.IGNORECASE,
 )
-_REVIEW_STATUS = re.compile(r"^review\s+status\s*$", re.IGNORECASE)
-_REVIEW_PAUSE = re.compile(r"^review\s+pause\s*$", re.IGNORECASE)
-_VERIFY = re.compile(r"^verify\s*$", re.IGNORECASE)
-_REENROLL = re.compile(r"^review\s+reenroll\s*$", re.IGNORECASE)
+_REVIEW_STATUS = re.compile(
+    rf"^review{_COMMAND_WS}+status{_COMMAND_WS}*$", re.IGNORECASE
+)
+_REVIEW_PAUSE = re.compile(rf"^review{_COMMAND_WS}+pause{_COMMAND_WS}*$", re.IGNORECASE)
+_VERIFY = re.compile(rf"^verify{_COMMAND_WS}*$", re.IGNORECASE)
+_REENROLL = re.compile(rf"^review{_COMMAND_WS}+reenroll{_COMMAND_WS}*$", re.IGNORECASE)
 _FINDING = re.compile(
-    r"^(dismiss|defer|accept-risk)\s+([a-f0-9]{16,64})\s+--reason\s+(\S.*)$",
+    rf"^(dismiss|defer|accept-risk){_COMMAND_WS}+([a-f0-9]{{16,64}}){_COMMAND_WS}+--reason{_COMMAND_WS}+({_COMMAND_NON_WS}.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 _FINGERPRINT = re.compile(r"^[a-f0-9]{16,64}$")
@@ -67,8 +79,16 @@ def _aware_now(now: datetime | None = None) -> datetime:
 def _require_reason(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReviewInputError("maintainer disposition requires a reason")
-    reason = value.strip()
-    if len(reason.encode("utf-8")) > MAX_REASON_BYTES or not reason.isprintable():
+    reason = value.strip(_COMMAND_WHITESPACE)
+    if (
+        len(reason.encode("utf-8")) > MAX_REASON_BYTES
+        or not reason
+        or not reason.isprintable()
+        or any(
+            character != " " and unicodedata.category(character).startswith("Z")
+            for character in reason
+        )
+    ):
         raise ReviewInputError("maintainer disposition reason exceeds the bound")
     return reason
 
@@ -103,6 +123,7 @@ class MaintainerCommand:
     finding_fingerprint: str | None = None
     continuation_rounds: int = 0
     head_sha: str | None = None
+    command_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.action not in MAINTAINER_ACTIONS:
@@ -115,6 +136,12 @@ class MaintainerCommand:
             not isinstance(self.head_sha, str) or not _HEAD_SHA.fullmatch(self.head_sha)
         ):
             raise ReviewInputError("maintainer head_sha is invalid")
+        if self.command_id is not None and (
+            not isinstance(self.command_id, str) or not self.command_id
+        ):
+            raise ReviewInputError("maintainer command_id is invalid")
+        if self.command_id is not None and self.action != "continue":
+            raise ReviewInputError("maintainer command_id only applies to continuation")
         if self.action in FINDING_ACTIONS:
             if self.finding_fingerprint is None or not _FINGERPRINT.fullmatch(
                 self.finding_fingerprint
@@ -130,6 +157,7 @@ def parse_maintainer_command(
     *,
     actor: str,
     head_sha: str | None = None,
+    command_id: str | None = None,
 ) -> MaintainerCommand | None:
     """Parse a bounded ``@sensei`` command. Unknown text is not a command."""
 
@@ -138,7 +166,7 @@ def parse_maintainer_command(
     match = _SENSEI.search(body)
     if match is None:
         return None
-    remainder = body[match.end() :].strip()
+    remainder = body[match.end() :].strip(_COMMAND_WHITESPACE)
     if _REVIEW_STATUS.fullmatch(remainder):
         return MaintainerCommand(action="status", actor=actor, head_sha=head_sha)
     if _REVIEW_PAUSE.fullmatch(remainder):
@@ -155,6 +183,7 @@ def parse_maintainer_command(
             actor=actor,
             continuation_rounds=rounds,
             head_sha=head_sha,
+            command_id=command_id,
         )
     finding = _FINDING.fullmatch(remainder)
     if finding is not None:
@@ -162,7 +191,7 @@ def parse_maintainer_command(
             action=finding.group(1).lower(),
             actor=actor,
             finding_fingerprint=finding.group(2).lower(),
-            reason=finding.group(3).strip().strip('"').strip("'"),
+            reason=finding.group(3).strip(_COMMAND_WHITESPACE).strip('"').strip("'"),
             head_sha=head_sha,
         )
     return None
@@ -256,9 +285,18 @@ def apply_session_command(
     command: MaintainerCommand,
     *,
     now: datetime | None = None,
+    policy: ReviewConvergencePolicy | None = None,
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
+    if (
+        command.action not in {"status", "verify"}
+        and getattr(ledger, "_broker", None) is not None
+        and not callable(getattr(ledger, "initialize_with_mutation", None))
+    ):
+        raise ReviewInputError(
+            "grant-bound session ledger requires atomic initialization"
+        )
     loaded = ledger.load(identity, now=now)
     if command.action == "reenroll":
         # Expired-session recovery is the one path allowed to retire durable
@@ -275,21 +313,67 @@ def apply_session_command(
                 "expired or witness-only state was retired"
             ),
         )
+    initialized_with_mutation = False
+    disposition: FindingDisposition | None = None
+    if command.action in FINDING_ACTIONS:
+        disposition = FindingDisposition(
+            fingerprint=command.finding_fingerprint or "",
+            action=command.action,
+            reason=command.reason or "",
+            actor=command.actor,
+            head_sha=command.head_sha,
+        )
     if loaded.status in {"missing", "expired"} or loaded.record is None:
         # Status is a read-only command: do not create a hosted issue comment
         # merely to report that no durable session exists.
-        record = (
-            SessionRecord.create(identity, now=now)
-            if command.action == "status"
-            else ledger.initialize(identity, now=now)
-        )
+        if command.action == "status":
+            record = SessionRecord.create(identity, now=now)
+        else:
+            initialize_with_mutation = getattr(ledger, "initialize_with_mutation", None)
+            if callable(initialize_with_mutation):
+
+                def mutate_initial(initial: SessionRecord) -> SessionRecord:
+                    if command.action == "pause":
+                        return _evolve_operator_paused(initial, paused=True, now=now)
+                    if command.action == "continue":
+                        if command.command_id is not None:
+                            if not isinstance(policy, ReviewConvergencePolicy):
+                                raise ReviewInputError(
+                                    "identified continuation requires a review policy"
+                                )
+                            if command.head_sha is None:
+                                raise ReviewInputError(
+                                    "identified continuation requires an exact head_sha"
+                                )
+                            return issue_continuation_grant(
+                                initial,
+                                command_id=command.command_id,
+                                actor=command.actor,
+                                head_sha=command.head_sha,
+                                policy_digest=policy.digest(),
+                                now=now,
+                            )
+                        return _evolve_operator_paused(initial, paused=False, now=now)
+                    if command.action in FINDING_ACTIONS:
+                        if disposition is None:
+                            raise ReviewInputError("finding disposition is invalid")
+                        return _evolve_disposition(initial, disposition, now=now)
+                    return initial
+
+                record = initialize_with_mutation(identity, mutate_initial, now=now)
+                initialized_with_mutation = True
+            else:
+                record = ledger.initialize(identity, now=now)
     elif loaded.status in {"ok", "migrated"}:
         record = loaded.record
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     paused = bool(getattr(record, "operator_paused", False))
     if command.action == "pause":
-        record = _set_operator_paused(ledger, identity, record, paused=True, now=now)
+        if not initialized_with_mutation:
+            record = _set_operator_paused(
+                ledger, identity, record, paused=True, now=now
+            )
         return record, MaintainerCommandResult(
             action="pause",
             applied=True,
@@ -307,7 +391,35 @@ def apply_session_command(
             ),
         )
     if command.action == "continue":
-        record = _set_operator_paused(ledger, identity, record, paused=False, now=now)
+        if command.command_id is not None:
+            if not isinstance(policy, ReviewConvergencePolicy):
+                raise ReviewInputError(
+                    "identified continuation requires a review policy"
+                )
+            if command.head_sha is None:
+                raise ReviewInputError(
+                    "identified continuation requires an exact head_sha"
+                )
+            if not initialized_with_mutation:
+                record = _issue_continuation_grant(
+                    ledger,
+                    identity,
+                    record,
+                    command=command,
+                    policy=policy,
+                    now=now,
+                )
+            return record, MaintainerCommandResult(
+                action="continue",
+                applied=True,
+                operator_paused=False,
+                continuation_rounds=0,
+                summary="one-use continuation grant issued for the exact head and policy",
+            )
+        if not initialized_with_mutation:
+            record = _set_operator_paused(
+                ledger, identity, record, paused=False, now=now
+            )
         return record, MaintainerCommandResult(
             action="continue",
             applied=True,
@@ -328,20 +440,46 @@ def apply_session_command(
                 f"paused={paused}{head_suffix}"
             ),
         )
-    disposition = FindingDisposition(
-        fingerprint=command.finding_fingerprint or "",
-        action=command.action,
-        reason=command.reason or "",
-        actor=command.actor,
-        head_sha=command.head_sha,
-    )
-    record = _append_disposition(ledger, identity, record, disposition, now=now)
+    if disposition is None:
+        raise ReviewInputError("finding disposition is invalid")
+    if not initialized_with_mutation:
+        record = _append_disposition(ledger, identity, record, disposition, now=now)
     return record, MaintainerCommandResult(
         action=command.action,
         applied=True,
         operator_paused=paused,
         summary="human disposition recorded; not an independently verified fix",
         disposition=disposition,
+    )
+
+
+def _evolve_operator_paused(
+    record: SessionRecord,
+    *,
+    paused: bool,
+    now: datetime | None,
+) -> SessionRecord:
+    if bool(getattr(record, "operator_paused", False)) == paused:
+        return record
+    return record.evolve(
+        now=now,
+        generation=record.generation + 1,
+        operator_paused=paused,
+    )
+
+
+def _evolve_disposition(
+    record: SessionRecord,
+    disposition: FindingDisposition,
+    *,
+    now: datetime | None,
+) -> SessionRecord:
+    if len(record.dispositions) >= MAX_STORED_DISPOSITIONS:
+        raise ReviewInputError("session disposition limit reached")
+    return record.evolve(
+        now=now,
+        generation=record.generation + 1,
+        dispositions=(*record.dispositions, disposition.to_dict()),
     )
 
 
@@ -362,10 +500,37 @@ def _set_operator_paused(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return current.evolve(
+        return _evolve_operator_paused(current, paused=paused, now=now)
+
+    return replace(identity, mutate, now=now)
+
+
+def _issue_continuation_grant(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    *,
+    command: MaintainerCommand,
+    policy: ReviewConvergencePolicy,
+    now: datetime | None,
+) -> SessionRecord:
+    replace = getattr(ledger, "replace", None)
+    if not callable(replace):
+        raise ReviewInputError("session ledger does not support CAS mutation")
+
+    def mutate(current: SessionRecord) -> SessionRecord:
+        if current.generation != record.generation:
+            raise ReviewInputError("session generation conflict")
+        # The command id, actor, exact head, and policy digest are rechecked
+        # by the durable constructor.  Returning an equal record makes a
+        # delivery replay idempotent without reviving an already-consumed grant.
+        return issue_continuation_grant(
+            current,
+            command_id=command.command_id or "",
+            actor=command.actor,
+            head_sha=command.head_sha or "",
+            policy_digest=policy.digest(),
             now=now,
-            generation=current.generation + 1,
-            operator_paused=paused,
         )
 
     return replace(identity, mutate, now=now)
@@ -388,11 +553,7 @@ def _append_disposition(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return current.evolve(
-            now=now,
-            generation=current.generation + 1,
-            dispositions=(*current.dispositions, disposition.to_dict()),
-        )
+        return _evolve_disposition(current, disposition, now=now)
 
     return replace(identity, mutate, now=now)
 

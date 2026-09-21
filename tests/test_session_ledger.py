@@ -22,10 +22,12 @@ from review_sensei.disposition import apply_session_command, parse_maintainer_co
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosting.github import (
     GitHubApplication,
+    GitHubBrokerClientError,
     GitHubHttp,
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
 )
+from review_sensei.hosting.github.errors import GitHubPublicationTransientError
 from review_sensei.hosting.github.session_ledger import (
     SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
@@ -38,6 +40,7 @@ from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_TTL,
+    MAX_STORED_CONTINUATION_GRANTS,
     MIN_SESSION_TTL,
     InMemorySessionLedger,
     LocalSessionLedger,
@@ -45,8 +48,10 @@ from review_sensei.session import (
     SessionLoadResult,
     SessionRecord,
     complete_session_round,
+    issue_continuation_grant,
     migrate_session_document,
     prepare_session_round,
+    record_session_failed_attempt,
     resolve_local_session_ledger,
     session_reservation_id,
 )
@@ -62,6 +67,123 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
 class SessionRecordTests(unittest.TestCase):
+    def test_continuation_grant_requires_paired_consumption_state(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW).to_dict()
+        record["operator_paused"] = False
+        record["dispositions"] = []
+        record["continuation_grants"] = [
+            {
+                "command_id": "comment-1",
+                "actor": "alice",
+                "head_sha": "a" * 40,
+                "policy_digest": "b" * 64,
+                "issued_at": "2026-09-19T12:00:00Z",
+                "expires_at": "2026-09-20T12:00:00Z",
+                "consumed_reservation_id": "abcd1234",
+                "consumed_generation": None,
+            }
+        ]
+        # Rebuild the digest through the public constructor so the validation
+        # oracle isolates the paired state rather than an integrity mismatch.
+        with self.assertRaisesRegex(ReviewInputError, "continuation grant"):
+            SessionRecord.from_dict(record)
+
+    def test_continuation_grant_cannot_outlive_session(self):
+        def grant(*, command_id: str, expires_at: str) -> dict[str, object]:
+            return {
+                "command_id": command_id,
+                "actor": "alice",
+                "head_sha": "a" * 40,
+                "policy_digest": "b" * 64,
+                "issued_at": "2026-09-19T12:00:00Z",
+                "expires_at": expires_at,
+                "consumed_reservation_id": None,
+                "consumed_generation": None,
+            }
+
+        session_expires_at = "2026-09-19T13:00:00Z"
+        with self.assertRaisesRegex(ReviewInputError, "exceeds session expiry"):
+            SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                expires_at=session_expires_at,
+                continuation_grants=[
+                    grant(
+                        command_id="grant-after-session",
+                        expires_at="2026-09-19T14:00:00Z",
+                    )
+                ],
+            )
+
+        for command_id, grant_expires_at in (
+            ("grant-at-session", session_expires_at),
+            ("grant-before-session", "2026-09-19T12:30:00Z"),
+        ):
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                expires_at=session_expires_at,
+                continuation_grants=[
+                    grant(command_id=command_id, expires_at=grant_expires_at)
+                ],
+            )
+            self.assertEqual(
+                record.continuation_grants[0]["expires_at"], grant_expires_at
+            )
+
+    def test_continuation_grant_rejects_an_expired_session(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            expires_at="2026-09-19T13:00:00Z",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "continuation grant expiry"):
+            issue_continuation_grant(
+                record,
+                command_id="grant-expired-session",
+                actor="alice",
+                head_sha="a" * 40,
+                policy_digest="b" * 64,
+                now=datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc),
+            )
+
+    def test_continuation_grant_history_bound_is_explicit_and_preserves_replay_tombstones(
+        self,
+    ):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        for index in range(MAX_STORED_CONTINUATION_GRANTS):
+            record = issue_continuation_grant(
+                record,
+                command_id=f"grant-{index + 1}",
+                actor="alice",
+                head_sha=f"{index + 1:040x}",
+                policy_digest="b" * 64,
+                now=FIXED_NOW,
+            )
+            pending = dict(record.continuation_grants[-1])
+            pending["consumed_reservation_id"] = f"{index + 1:08x}"
+            pending["consumed_generation"] = record.generation + 1
+            record = record.evolve(
+                now=FIXED_NOW,
+                generation=record.generation + 1,
+                continuation_grants=(
+                    *record.continuation_grants[:-1],
+                    pending,
+                ),
+            )
+
+        before = record.to_dict()
+        with self.assertRaisesRegex(ReviewInputError, "history limit"):
+            issue_continuation_grant(
+                record,
+                command_id="grant-over-bound",
+                actor="alice",
+                head_sha="f" * 40,
+                policy_digest="b" * 64,
+                now=FIXED_NOW,
+            )
+        self.assertEqual(record.to_dict(), before)
+
     @staticmethod
     def _history() -> dict[str, object]:
         baseline = ReviewBaseline(
@@ -366,6 +488,195 @@ class SessionRecordTests(unittest.TestCase):
 
 
 class LocalSessionLedgerTests(unittest.TestCase):
+    def test_restart_retains_consumed_continuation_grant(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue",
+                actor="alice",
+                head_sha="a" * 40,
+                command_id="comment-restart",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        prepared = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        self.assertIsNotNone(prepared.reservation_id)
+        restarted = LocalSessionLedger(Path(self.temp.name))
+        loaded = restarted.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(
+            loaded.record.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
+        )
+
+    def test_grant_scope_mismatch_and_direct_rounds_cannot_consume_it(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue",
+                actor="alice",
+                head_sha="a" * 40,
+                command_id="comment-scope",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        rejected = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="b" * 40,
+            continuation_rounds=1,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        self.assertFalse(rejected.decision.admit)
+        self.assertEqual(rejected.decision.handoff_reason, "round-budget-exhausted")
+        self.assertIsNone(rejected.reservation_id)
+        self.assertIsNone(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0][
+                "consumed_reservation_id"
+            ]
+        )
+
+    def test_competing_reservations_consume_a_grant_once(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue",
+                actor="alice",
+                head_sha="a" * 40,
+                command_id="comment-race",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        winner = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        loser = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="ffff1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        self.assertIsNotNone(winner.reservation_id)
+        self.assertIsNone(loser.reservation_id)
+        self.assertEqual(loser.decision.handoff_reason, "paused")
+        self.assertEqual(
+            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0][
+                "consumed_reservation_id"
+            ],
+            "abcd1234",
+        )
+
+    def test_failed_continuation_attempt_keeps_the_grant_consumed(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        apply_session_command(
+            self.ledger,
+            IDENTITY,
+            parse_maintainer_command(
+                "@sensei review continue",
+                actor="alice",
+                head_sha="a" * 40,
+                command_id="comment-failure",
+            ),
+            now=FIXED_NOW,
+            policy=policy,
+        )
+        self.ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        prepared = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        record_session_failed_attempt(
+            self.ledger, IDENTITY, reservation_id=prepared.reservation_id, now=FIXED_NOW
+        )
+        replay = prepare_session_round(
+            self.ledger,
+            IDENTITY,
+            policy,
+            reservation_id="ffff1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW).record
+        self.assertEqual(loaded.failed_attempts, 1)
+        self.assertEqual(
+            loaded.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
+        )
+        self.assertFalse(replay.decision.admit)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))
@@ -1053,6 +1364,298 @@ class RoundPersistenceTests(unittest.TestCase):
 
 
 class GitHubSessionLedgerTests(unittest.TestCase):
+    @staticmethod
+    def _grant_attestation(**overrides):
+        attestation = {
+            "version": 1,
+            "repository": IDENTITY.repository,
+            "repository_id": IDENTITY.repository_id,
+            "pull_request": IDENTITY.pull_request,
+            "head_sha": "a" * 40,
+            "operation": "command",
+            "source_comment_id": 13579,
+            "run_id": "10000000001",
+            "issued_at": 1_700_000_000,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": (
+                "malsabbagh/review-sensei/.github/workflows/"
+                "review-sensei-run.yml@refs/tags/v5"
+            ),
+            "job_workflow_sha": "b" * 40,
+            "actor": "octocat",
+            "actor_type": "User",
+            "association": "OWNER",
+            "command_id": 13579,
+            "command_digest": "c" * 64,
+        }
+        attestation.update(overrides)
+        return attestation
+
+    class _GrantVerifier:
+        def __init__(self, returned=None, error=None):
+            self.returned = returned
+            self.error = error
+            self.calls = []
+
+        def verify_session_grant(self, grant, session_attestation):
+            self.calls.append((grant, session_attestation))
+            if self.error is not None:
+                raise self.error
+            return self.returned
+
+    def _grant_bound_ledger(self, http, verifier, attestation=None):
+        attestation = attestation or self._grant_attestation()
+        return GitHubIssueCommentSessionLedger(
+            http,
+            token="token",
+            broker=verifier,
+            session_grant="g" * 43,
+            session_attestation=attestation,
+            head_sha="a" * 40,
+        )
+
+    def test_grant_bound_mutation_verifies_before_remote_discovery(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        reserved = record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="abcd1234",
+            reserved_slot="initial",
+        )
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"id": 7, "body": reserved_body}),
+                json_response([{"id": 7, "body": reserved_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        updated = ledger.reserve(
+            IDENTITY,
+            slot="initial",
+            reservation_id="abcd1234",
+            expected_generation=0,
+            now=FIXED_NOW,
+        )
+
+        self.assertEqual(updated, reserved)
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "PATCH", "GET"],
+        )
+
+    def test_missing_grant_bound_session_applies_command_in_one_remote_create(self):
+        initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        paused = initial.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            operator_paused=True,
+        )
+        paused_body = render_session_comment(
+            repository_id=99, pull_request=136, record=paused
+        )
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"id": 7, "body": paused_body}, status=201),
+                json_response([{"id": 7, "body": paused_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        command = parse_maintainer_command("@sensei review pause", actor="octocat")
+        self.assertIsNotNone(command)
+
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+
+        self.assertEqual(record, paused)
+        self.assertTrue(result.applied)
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "POST", "GET"],
+        )
+
+    def test_missing_grant_bound_session_persists_disposition_in_one_remote_create(
+        self,
+    ):
+        initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        disposition = {
+            "fingerprint": "abcd1234abcd1234",
+            "action": "dismiss",
+            "reason": "accepted",
+            "actor": "octocat",
+            "head_sha": None,
+            "expires_at": None,
+        }
+        persisted = initial.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            dispositions=(disposition,),
+        )
+        persisted_body = render_session_comment(
+            repository_id=99, pull_request=136, record=persisted
+        )
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"id": 7, "body": persisted_body}, status=201),
+                json_response([{"id": 7, "body": persisted_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        command = parse_maintainer_command(
+            "@sensei dismiss abcd1234abcd1234 --reason accepted",
+            actor="octocat",
+        )
+        self.assertIsNotNone(command)
+
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+
+        self.assertEqual(record, persisted)
+        self.assertTrue(result.applied)
+        self.assertEqual(result.disposition.action, "dismiss")
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "POST", "GET"],
+        )
+
+    def test_grant_bound_status_read_does_not_consume_mutation_authority(self):
+        http, calls = make_http([json_response([])])
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
+
+    def test_grant_bound_initialize_failure_consumes_one_attempt(self):
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"error": "upstream"}, status=500),
+                json_response([]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(
+            GitHubPublicationTransientError, "could not be verified"
+        ):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+        verifier.error = GitHubBrokerClientError("grant already consumed")
+        with self.assertRaisesRegex(ReviewInputError, "session grant"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(len(verifier.calls), 2)
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "POST", "GET"],
+        )
+
+    def test_grant_bound_initialize_rejects_a_stale_live_head_before_post(self):
+        http, calls = make_http(
+            [
+                json_response([]),
+                json_response({"head": {"sha": "d" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
+
+    def test_grant_bound_replace_rejects_a_stale_live_head_before_patch(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "d" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
+            ledger.reserve(
+                IDENTITY,
+                slot="initial",
+                reservation_id="abcd1234",
+                expected_generation=0,
+                now=FIXED_NOW,
+            )
+
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "GET"]
+        )
+
+    def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
+        cases = (
+            ("replayed", self._GrantVerifier(error=GitHubBrokerClientError("invalid"))),
+            (
+                "mismatched",
+                self._GrantVerifier(
+                    returned=self._grant_attestation(repository_id=100)
+                ),
+            ),
+            (
+                "stale-head",
+                self._GrantVerifier(
+                    returned=self._grant_attestation(head_sha="d" * 40)
+                ),
+            ),
+        )
+        for name, verifier in cases:
+            with self.subTest(name=name):
+                http, calls = make_http([])
+                ledger = self._grant_bound_ledger(http, verifier)
+                with self.assertRaisesRegex(ReviewInputError, "session grant"):
+                    ledger.initialize(IDENTITY, now=FIXED_NOW)
+                self.assertEqual(len(verifier.calls), 1)
+                self.assertEqual(calls, [])
+
+    def test_grant_bound_ledger_rejects_absent_grant_configuration(self):
+        http, _calls = make_http([])
+        with self.assertRaisesRegex(ReviewInputError, "grant configuration"):
+            GitHubIssueCommentSessionLedger(
+                http,
+                token="token",
+                broker=self._GrantVerifier(),
+                session_attestation=self._grant_attestation(),
+                head_sha="a" * 40,
+            )
+
     def test_restart_loads_integrity_checked_convergence_history(self):
         history = SessionRecordTests._history()
         record = SessionRecord.create(
@@ -1401,6 +2004,40 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [method for method, _url, _data in calls], ["GET", "GET", "PATCH", "GET"]
         )
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
+
+    def test_grant_bound_reenroll_verifies_once_before_rewriting_expired_marker(self):
+        expired = SessionRecord.create(IDENTITY, now=FIXED_NOW - timedelta(days=31))
+        replacement = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        expired_body = render_session_comment(
+            repository_id=99, pull_request=136, record=expired
+        )
+        replacement_body = render_session_comment(
+            repository_id=99, pull_request=136, record=replacement
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": expired_body}]),
+                json_response([{"id": 7, "body": expired_body}]),
+                json_response([{"id": 7, "body": expired_body}]),
+                json_response({"head": {"sha": "a" * 40}}),
+                json_response({"id": 7, "body": replacement_body}),
+                json_response([{"id": 7, "body": replacement_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        command = parse_maintainer_command("@sensei review reenroll", actor="octocat")
+
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+
+        self.assertEqual(record, replacement)
+        self.assertTrue(result.applied)
+        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "GET", "GET", "PATCH", "GET"],
+        )
 
     def test_hosted_reenroll_recreates_a_deleted_marker(self):
         # The broker witness says this head was enrolled, so the operator

@@ -9,7 +9,10 @@ GitHub issue-comment updates do not expose a conditional generation or ETag
 precondition through this adapter. Mutations therefore use a bounded
 pre-discovery check plus a post-update readback: they are best-effort against
 cross-process writers, not a strict distributed lock. Callers that require a
-no-lost-update guarantee must serialize writers for an identity.
+no-lost-update guarantee must serialize writers for an identity. A successful
+broker verification is consumed before the first remote mutation; an ambiguous
+or failed GitHub write therefore consumes that one-attempt grant and must be
+retried with a newly issued grant rather than replaying the old one.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ...errors import ReviewInputError
 from ...session import (
@@ -33,6 +36,7 @@ from ...session import (
     mutate_reserved,
 )
 from .errors import (
+    GitHubBrokerClientError,
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
     GitHubHTTPTransientError,
@@ -195,6 +199,10 @@ class GitHubIssueCommentSessionLedger:
         *,
         token: str,
         app_slug: str | None = None,
+        broker: Any | None = None,
+        session_grant: str | None = None,
+        session_attestation: Mapping[str, object] | None = None,
+        head_sha: str | None = None,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -204,9 +212,38 @@ class GitHubIssueCommentSessionLedger:
             not isinstance(app_slug, str) or not app_slug.strip()
         ):
             raise ReviewInputError("GitHub session ledger app slug is invalid")
+        grant_arguments = (broker, session_grant, session_attestation, head_sha)
+        if any(argument is not None for argument in grant_arguments) and not all(
+            argument is not None for argument in grant_arguments
+        ):
+            raise ReviewInputError(
+                "GitHub session ledger grant configuration is incomplete"
+            )
+        if broker is not None:
+            if not callable(getattr(broker, "verify_session_grant", None)):
+                raise ReviewInputError(
+                    "GitHub session ledger grant verifier is invalid"
+                )
+            if not isinstance(session_grant, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{43}", session_grant
+            ):
+                raise ReviewInputError("GitHub session ledger grant is invalid")
+            if not isinstance(session_attestation, Mapping):
+                raise ReviewInputError("GitHub session ledger attestation is invalid")
+            if (
+                not isinstance(head_sha, str)
+                or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+            ):
+                raise ReviewInputError("GitHub session ledger head SHA is invalid")
         self.http = http
         self.token = token
         self.app_slug = app_slug
+        self._broker = broker
+        self._session_grant = session_grant
+        self._session_attestation = (
+            dict(session_attestation) if session_attestation is not None else None
+        )
+        self._head_sha = head_sha
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -217,6 +254,65 @@ class GitHubIssueCommentSessionLedger:
         return self.http.repository_path(
             identity.repository, f"/issues/{identity.pull_request}/comments"
         )
+
+    def _verify_mutation_grant(self, identity: SessionIdentity) -> None:
+        """Verify one hosted mutation grant before the first GitHub request.
+
+        Read-only status calls deliberately do not consume this authority.  A
+        broker-bound instance is created only for an attested maintainer
+        command, so identity and head checks here prevent its token from being
+        replayed against a different pull request before the broker is asked.
+        """
+
+        if self._broker is None:
+            return
+        assert self._session_grant is not None
+        assert self._session_attestation is not None
+        assert self._head_sha is not None
+        attestation = self._session_attestation
+        if (
+            attestation.get("repository") != identity.repository
+            or attestation.get("repository_id") != identity.repository_id
+            or attestation.get("pull_request") != identity.pull_request
+            or attestation.get("head_sha") != self._head_sha
+        ):
+            raise ReviewInputError("session grant scope does not match the mutation")
+        try:
+            verified = self._broker.verify_session_grant(
+                self._session_grant, attestation
+            )
+        except GitHubBrokerClientError as exc:
+            raise ReviewInputError("session grant verification failed") from exc
+        if not isinstance(verified, Mapping) or dict(verified) != attestation:
+            raise ReviewInputError("session grant verification failed")
+
+    def _verify_live_head(self, identity: SessionIdentity) -> None:
+        """Re-read the PR head immediately before a grant-authorized write.
+
+        The broker binds a grant to the head observed at issuance, but the
+        short-lived grant can outlive that commit if the PR advances. GitHub
+        has no conditional comment-write primitive, so this bounded preflight
+        closes the stale-grant window as tightly as the REST API permits.
+        """
+
+        if self._broker is None:
+            return
+        assert self._head_sha is not None
+        path = self.http.repository_path(
+            identity.repository, f"/pulls/{identity.pull_request}"
+        )
+        status, payload = self._request("GET", path)
+        if status == 429 or status >= 500:
+            raise GitHubPublicationTransientError(
+                "session head preflight failed temporarily"
+            )
+        if status < 200 or status >= 300 or not isinstance(payload, dict):
+            raise GitHubPublicationError("session head preflight failed")
+        head = payload.get("head")
+        if not isinstance(head, dict) or not isinstance(head.get("sha"), str):
+            raise GitHubPublicationError("session head preflight was invalid")
+        if head["sha"] != self._head_sha:
+            raise ReviewInputError("session grant head is stale")
 
     def _request(
         self,
@@ -339,6 +435,7 @@ class GitHubIssueCommentSessionLedger:
         now: datetime | None = None,
         expires_at: datetime | str | None = None,
     ) -> SessionRecord:
+        self._verify_mutation_grant(identity)
         loaded = self.load(identity, now=now)
         if loaded.status in {"ok", "migrated"}:
             # Initialization is an idempotent ensure operation. A caller can
@@ -350,8 +447,43 @@ class GitHubIssueCommentSessionLedger:
             return loaded.record
         if loaded.status in {"integrity-failed", "conflict", "expired"}:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
-        repository_id = self._require_identity(identity)
         record = SessionRecord.create(identity, now=now, expires_at=expires_at)
+        return self._create_initial_record(identity, record, now=now)
+
+    def initialize_with_mutation(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+        expires_at: datetime | str | None = None,
+    ) -> SessionRecord:
+        """Create a missing marker with its first command mutation applied.
+
+        A hosted command may need to enroll a missing marker and persist its
+        requested disposition. Keeping that in one POST means the one-use
+        broker grant authorizes one logical command, not two independent
+        remote writes.
+        """
+
+        self._verify_mutation_grant(identity)
+        loaded = self.load(identity, now=now)
+        if loaded.status in {"ok", "migrated"}:
+            raise ReviewInputError("session already exists")
+        if loaded.status in {"integrity-failed", "conflict", "expired"}:
+            raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+        record = mutate(SessionRecord.create(identity, now=now, expires_at=expires_at))
+        return self._create_initial_record(identity, record, now=now)
+
+    def _create_initial_record(
+        self,
+        identity: SessionIdentity,
+        record: SessionRecord,
+        *,
+        now: datetime | None,
+    ) -> SessionRecord:
+        repository_id = self._require_identity(identity)
+        self._verify_live_head(identity)
         status, payload = self._request(
             "POST",
             self._comments_path(identity),
@@ -399,6 +531,7 @@ class GitHubIssueCommentSessionLedger:
         *,
         now: datetime | None = None,
     ) -> SessionRecord:
+        self._verify_mutation_grant(identity)
         comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None:
             raise ReviewInputError("session record is missing")
@@ -414,6 +547,7 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session generation conflict")
         record = latest_record
         updated = mutate(record)
+        self._verify_live_head(identity)
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
@@ -480,11 +614,14 @@ class GitHubIssueCommentSessionLedger:
 
         loaded = self.load(identity, now=now)
         if loaded.status == "missing":
-            return self.initialize(identity, now=now)
+            return self.initialize_with_mutation(
+                identity, lambda record: record, now=now
+            )
         if loaded.status != "expired":
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        self._verify_mutation_grant(identity)
         comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None or not record.expired(now=now):
             raise ReviewInputError(
@@ -492,6 +629,7 @@ class GitHubIssueCommentSessionLedger:
             )
         repository_id = self._require_identity(identity)
         replacement = SessionRecord.create(identity, now=now)
+        self._verify_live_head(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
         )

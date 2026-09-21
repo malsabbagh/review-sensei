@@ -715,6 +715,29 @@ diff --git a/src/helper.py b/src/helper.py
             self.assertEqual(recovery_outcome["status"], "action_required")
             self.assertIsNone(recovery_record.reservation_id)
             self.assertEqual(recovery_record.failed_attempts, 0)
+            # ``recovery-required`` is the closed-schema equivalent of an
+            # in-progress/non-completed history: it must take the same
+            # fail-closed branch rather than admitting inference.
+            recovery_history = {
+                "state": "recovery-required",
+                "progress": [{"event": "recovery-required", "generation": 1}],
+                "provenance": {"ledger_digest": "0" * 64},
+            }
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(convergence_history=recovery_history),
+            )
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=RecordingRegistry(provider),
+            ):
+                self.assertNotEqual(main(second_argv), 0)
+            recovery_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            recovery_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
+            self.assertEqual(provider.calls, malformed_provider_calls)
+            self.assertEqual(recovery_outcome["status"], "action_required")
+            self.assertIsNone(recovery_record.reservation_id)
+            self.assertEqual(recovery_record.failed_attempts, 0)
             LocalSessionLedger(ledger_path).replace(
                 IDENTITY,
                 lambda current: current.evolve(convergence_history=initial_history),

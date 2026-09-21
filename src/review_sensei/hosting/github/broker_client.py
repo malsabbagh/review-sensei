@@ -6,8 +6,8 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -22,8 +22,43 @@ Opener = Callable[..., Any]
 class BrokerSession:
     """One broker-attested, current-head session capability."""
 
-    token: str
+    token: str = field(repr=False)
     state: str
+
+
+@dataclass(frozen=True)
+class BrokerSessionGrant:
+    """Opaque credential for one serialized hosted session writer.
+
+    The installation token and one-use grant are intentionally omitted from
+    the dataclass repr so routine diagnostics cannot log bearer credentials.
+    """
+
+    token: str = field(repr=False)
+    state: str
+    grant: str = field(repr=False)
+    attestation: dict[str, object]
+
+
+_SESSION_ATTESTATION_REQUEST_KEYS = frozenset(
+    {
+        "version",
+        "repository",
+        "repository_id",
+        "pull_request",
+        "head_sha",
+        "operation",
+        "source_comment_id",
+        "run_id",
+        "issued_at",
+        "concurrency_group",
+        "job_workflow_ref",
+        "job_workflow_sha",
+    }
+)
+_SESSION_ATTESTATION_GRANT_KEYS = _SESSION_ATTESTATION_REQUEST_KEYS | frozenset(
+    {"actor", "actor_type", "association", "command_id", "command_digest"}
+)
 
 
 class BrokerClient:
@@ -40,8 +75,12 @@ class BrokerClient:
         opener: Opener = urlopen,
         timeout: int = 30,
     ) -> None:
-        if not isinstance(broker_url, str) or not broker_url.startswith("https://"):
-            raise GitHubBrokerClientError("Broker URL must be HTTPS")
+        if (
+            not isinstance(broker_url, str)
+            or not broker_url.startswith("https://")
+            or not broker_url.endswith("/token")
+        ):
+            raise GitHubBrokerClientError("Broker URL must be an HTTPS /token endpoint")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise GitHubBrokerClientError("Broker timeout must be positive")
         self.broker_url = broker_url
@@ -155,12 +194,185 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session response was invalid")
         return BrokerSession(token=token, state=state)
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def authorize_session_mutation(
+        self,
+        oidc_token: str,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        session_attestation: Mapping[str, object],
+    ) -> BrokerSessionGrant:
+        """Issue a broker-attested grant for one serialized session mutation.
+
+        The caller may carry the attestation between jobs, but cannot choose
+        its authority: the Worker checks it against OIDC and live GitHub state
+        before returning a random opaque grant.
+        """
+
+        if not isinstance(oidc_token, str) or not oidc_token.strip():
+            raise GitHubBrokerClientError("OIDC token is empty")
+        self._validate_session_scope(repository_id, pull_request, head_sha)
+        attestation = self._validated_attestation_request(session_attestation)
+        parsed = self._post(
+            {
+                "oidc_token": oidc_token,
+                "capability": "review_session",
+                "session": {
+                    "repository_id": repository_id,
+                    "pull_request": pull_request,
+                    "head_sha": head_sha,
+                },
+                "session_attestation": attestation,
+            }
+        )
+        token = parsed.get("token")
+        grant = parsed.get("session_grant")
+        state = parsed.get("session_state")
+        returned_attestation = parsed.get("session_attestation")
+        if (
+            not isinstance(token, str)
+            or not token.strip()
+            or not isinstance(grant, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None
+            or state not in {"enrolled", "known"}
+        ):
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        returned = self._validated_attestation_grant(returned_attestation)
+        if any(returned[key] != value for key, value in attestation.items()):
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        return BrokerSessionGrant(
+            token=token, state=state, grant=grant, attestation=returned
+        )
+
+    def verify_session_grant(
+        self,
+        grant: str,
+        session_attestation: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Verify the opaque grant immediately before a remote ledger write."""
+
+        if (
+            not isinstance(grant, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None
+        ):
+            raise GitHubBrokerClientError("Broker session grant is invalid")
+        attestation = self._validated_attestation_grant(session_attestation)
+        parsed = self._post(
+            {"session_grant": grant, "session_attestation": attestation},
+            url=self.broker_url.removesuffix("/token") + "/session-grant",
+        )
+        returned = self._validated_attestation_grant(parsed.get("session_attestation"))
+        if returned != attestation:
+            raise GitHubBrokerClientError("Broker session grant was not verified")
+        return returned
+
+    @staticmethod
+    def _validate_session_scope(
+        repository_id: int, pull_request: int, head_sha: str
+    ) -> None:
+        if (
+            isinstance(repository_id, bool)
+            or not isinstance(repository_id, int)
+            or repository_id <= 0
+            or isinstance(pull_request, bool)
+            or not isinstance(pull_request, int)
+            or pull_request <= 0
+            or not isinstance(head_sha, str)
+            or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+        ):
+            raise GitHubBrokerClientError("Broker session scope is invalid")
+
+    @staticmethod
+    def _validated_attestation_request(value: object) -> dict[str, object]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _SESSION_ATTESTATION_REQUEST_KEYS
+        ):
+            raise GitHubBrokerClientError("Broker session attestation is invalid")
+        result = dict(value)
+        if (
+            result["version"] != 1
+            or not isinstance(result["repository"], str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", result["repository"])
+            is None
+            or isinstance(result["repository_id"], bool)
+            or not isinstance(result["repository_id"], int)
+            or result["repository_id"] <= 0
+            or isinstance(result["pull_request"], bool)
+            or not isinstance(result["pull_request"], int)
+            or result["pull_request"] <= 0
+            or not isinstance(result["head_sha"], str)
+            or re.fullmatch(r"[a-f0-9]{40}", result["head_sha"]) is None
+            or result["operation"] not in {"review", "command"}
+            or (
+                result["source_comment_id"] is not None
+                and (
+                    isinstance(result["source_comment_id"], bool)
+                    or not isinstance(result["source_comment_id"], int)
+                    or result["source_comment_id"] <= 0
+                )
+            )
+            or (
+                result["operation"] == "command" and result["source_comment_id"] is None
+            )
+            or not isinstance(result["run_id"], str)
+            or re.fullmatch(r"[1-9][0-9]{0,18}", result["run_id"]) is None
+            or isinstance(result["issued_at"], bool)
+            or not isinstance(result["issued_at"], int)
+            or not isinstance(result["concurrency_group"], str)
+            or not isinstance(result["job_workflow_ref"], str)
+            or not isinstance(result["job_workflow_sha"], str)
+            or re.fullmatch(r"[a-f0-9]{40}", result["job_workflow_sha"]) is None
+        ):
+            raise GitHubBrokerClientError("Broker session attestation is invalid")
+        return result
+
+    @classmethod
+    def _validated_attestation_grant(cls, value: object) -> dict[str, object]:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _SESSION_ATTESTATION_GRANT_KEYS
+        ):
+            raise GitHubBrokerClientError("Broker session attestation is invalid")
+        result = dict(value)
+        request = {key: result[key] for key in _SESSION_ATTESTATION_REQUEST_KEYS}
+        cls._validated_attestation_request(request)
+        if result["operation"] == "review":
+            if any(
+                result[key] is not None
+                for key in (
+                    "actor",
+                    "actor_type",
+                    "association",
+                    "command_id",
+                    "command_digest",
+                )
+            ):
+                raise GitHubBrokerClientError("Broker session attestation is invalid")
+        elif (
+            not isinstance(result["actor"], str)
+            or not result["actor"].strip()
+            or not isinstance(result["actor_type"], str)
+            or result["actor_type"].lower() != "user"
+            or result["association"] not in {"OWNER", "MEMBER", "COLLABORATOR"}
+            or isinstance(result["command_id"], bool)
+            or not isinstance(result["command_id"], int)
+            or result["command_id"] <= 0
+            or not isinstance(result["command_digest"], str)
+            or re.fullmatch(r"[a-f0-9]{64}", result["command_digest"]) is None
+        ):
+            raise GitHubBrokerClientError("Broker session attestation is invalid")
+        return result
+
+    def _post(
+        self, payload: dict[str, Any], *, url: str | None = None
+    ) -> dict[str, Any]:
         """Post one bounded capability request and return a validated object."""
 
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request = Request(
-            self.broker_url,
+            url or self.broker_url,
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",

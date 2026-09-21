@@ -89,6 +89,20 @@ most recent use, matching ADR 0047's maximum session lifetime, so both a new
 head and a long-idle pull request still enroll cleanly. The subsequent F4
 session-boundary work binds this capability to serialized workflow execution
 and an opaque, short-lived grant before every hosted mutation.
+Once a record adopts the continuation-grant protocol, the transition is
+one-way for that record: legacy caller-supplied `--continue-rounds` remains
+disabled until authenticated `reenroll` creates a fresh record.
+Consumed continuation command IDs remain in the bounded session record as
+replay tombstones. A newly authenticated command may supersede only the one
+unconsumed grant whose head or policy scope is stale; it never clears consumed
+tombstones or resets a live grant-bearing record. The record permits at most
+four continuation grants; a fifth authenticated continuation is refused rather
+than pruning a consumed command ID and reviving its one-use authority. The
+bound is a storage and replay-safety limit, not an approval or review-round
+budget. Once a live record reaches that bound, the operator must wait for the
+record to expire (or recover a witness-only/missing marker) and then issue the
+authenticated `reenroll` command, which establishes a fresh record and resets
+the round counters.
 
 ## Scope
 

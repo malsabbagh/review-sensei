@@ -22,6 +22,7 @@ from review_sensei.errors import (
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.planning import MAX_RELATED_PATHS
 from review_sensei.schemas import SCHEMA_DIR, validate_public_document
+from review_sensei.session import MAX_STORED_CONTINUATION_GRANTS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
@@ -277,6 +278,10 @@ class PublicSchemaTests(unittest.TestCase):
             baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
         )
         self.assertEqual(baseline["related_paths"]["maxItems"], MAX_RELATED_PATHS)
+        self.assertEqual(
+            schema["properties"]["continuation_grants"]["maxItems"],
+            MAX_STORED_CONTINUATION_GRANTS,
+        )
 
     def test_session_record_schema_enforces_history_baseline_presence(self) -> None:
         golden = json.loads(
@@ -349,6 +354,38 @@ class PublicSchemaTests(unittest.TestCase):
                 dict(golden, convergence_history=invalidated_with_baseline),
                 "session-record",
             )
+
+    def test_session_record_schema_pairs_continuation_consumption_state(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests/fixtures/schemas/golden/session-record.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        grant = {
+            "command_id": "comment-1",
+            "actor": "alice",
+            "head_sha": "a" * 40,
+            "policy_digest": "b" * 64,
+            "issued_at": "2026-09-19T12:00:00Z",
+            "expires_at": "2026-09-19T13:00:00Z",
+            "consumed_reservation_id": None,
+            "consumed_generation": None,
+        }
+        validate_public_document(
+            dict(golden, continuation_grants=[grant]), "session-record"
+        )
+        for field, value in (
+            ("consumed_reservation_id", "abcd1234"),
+            ("consumed_generation", 1),
+        ):
+            invalid = dict(grant)
+            invalid[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(
+                        dict(golden, continuation_grants=[invalid]),
+                        "session-record",
+                    )
 
     def test_error_categories_are_stable(self) -> None:
         self.assertEqual(ReviewSenseiError.error_category, "unknown")

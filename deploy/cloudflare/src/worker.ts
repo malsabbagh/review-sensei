@@ -198,6 +198,64 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
   }
 }
 
+/**
+ * Validate a broker-held opaque session grant immediately before a ledger
+ * mutation. The response contains only the immutable, already-attested scope;
+ * it never echoes the bearer grant or an installation capability token.
+ */
+async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response> {
+  if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
+    return response({ error: "cors_not_supported" }, 400, true);
+  }
+  const length = request.headers.get("content-length");
+  if (length === null) {
+    return response({ error: "content_length_required" }, 411, true);
+  }
+  if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
+    return response({ error: "payload_too_large" }, 413, true);
+  }
+  let body: unknown;
+  try {
+    const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
+      return response({ error: "payload_too_large" }, 413, true);
+    }
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return response({ error: "invalid_request" }, 400, true);
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return response({ error: "invalid_request" }, 400, true);
+  }
+  try {
+    const values = body as Record<string, unknown>;
+    const bodyKeys = Object.keys(values);
+    if (
+      bodyKeys.length !== 2 ||
+      !Object.hasOwn(values, "session_grant") ||
+      !Object.hasOwn(values, "session_attestation")
+    ) {
+      return response({ error: "invalid_request" }, 400, true);
+    }
+    const attestation = await new TokenBroker(env).verifySessionGrant(
+      values.session_grant,
+      values.session_attestation,
+    );
+    return response({ session_attestation: attestation }, 200, true);
+  } catch (error) {
+    const rayId = brokerRayId(request);
+    console.error("github_session_grant_failed", {
+      error_code: brokerErrorCode(error),
+      ...(rayId === undefined ? {} : { cf_ray: rayId }),
+    });
+    const status =
+      error instanceof Error && error.message === "broker_ledger_unavailable"
+        ? 503
+        : 403;
+    return response({ error: "session_grant_not_verified" }, status, true);
+  }
+}
+
 function appId(value: string | undefined): number | null {
   if (!value || !/^[1-9][0-9]{0,18}$/.test(value)) {
     return null;
@@ -384,6 +442,12 @@ const worker = {
         return response({ error: "method_not_allowed" }, 405, true);
       }
       return token(request, env);
+    }
+    if (url.pathname === "/github/session-grant") {
+      if (request.method !== "POST") {
+        return response({ error: "method_not_allowed" }, 405, true);
+      }
+      return sessionGrant(request, env);
     }
     if (url.pathname !== "/github/webhook") {
       return response({ error: "not_found" }, 404);

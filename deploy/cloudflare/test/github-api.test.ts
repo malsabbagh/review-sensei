@@ -180,6 +180,63 @@ describe("GitHubApi public workflow resolution", () => {
 });
 
 describe("GitHubApi capability issuance", () => {
+  it("reads a live issue comment only when its identity is bound to the target PR", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({
+      status: 200,
+      data: {
+        id: 13579,
+        body: "@sensei review pause",
+        author_association: "OWNER",
+        issue_url: "https://api.example.test/repos/acme/widgets/issues/7",
+        user: { login: "octocat", type: "User" },
+      },
+    });
+
+    await expect(client.issueComment("acme/widgets", 7, 13579, "ghs_token")).resolves.toEqual({
+      id: 13579,
+      body: "@sensei review pause",
+      login: "octocat",
+      userType: "User",
+      association: "OWNER",
+    });
+    expect(request).toHaveBeenCalledWith(
+      "GET", "/repos/acme/widgets/issues/comments/13579", "ghs_token",
+    );
+  });
+
+  it("fails closed when a live comment belongs to a different issue", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 200,
+      data: {
+        id: 13579,
+        body: "@sensei review pause",
+        author_association: "OWNER",
+        issue_url: "https://api.example.test/repos/acme/widgets/issues/8",
+        user: { login: "octocat", type: "User" },
+      },
+    });
+    await expect(client.issueComment("acme/widgets", 7, 13579, "ghs_token")).rejects.toThrow(
+      "github_issue_comment_response_invalid",
+    );
+  });
+
+  it("distinguishes a missing issue comment from a forbidden lookup", async () => {
+    const client = api();
+    const request = vi.spyOn(client, "request");
+
+    request.mockResolvedValueOnce({ status: 404, data: null });
+    await expect(
+      client.issueComment("acme/widgets", 7, 13579, "ghs_token"),
+    ).resolves.toBeNull();
+
+    request.mockResolvedValueOnce({ status: 403, data: null });
+    await expect(
+      client.issueComment("acme/widgets", 7, 13579, "ghs_token"),
+    ).rejects.toThrow("github_issue_comment_forbidden");
+  });
+
   it("accepts contents read only when the capability opts in", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({

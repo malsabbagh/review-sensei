@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -115,6 +117,23 @@ class MaintainerCommandParseTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(parse_maintainer_command(body, actor="alice"))
 
+    def test_command_parser_matches_shared_cross_runtime_fixture(self):
+        fixture_path = (
+            Path(__file__).parents[1]
+            / "tests"
+            / "fixtures"
+            / "maintainer-command-parity.json"
+        )
+        cases = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for case in cases:
+            body = case["body"]
+            try:
+                parsed = parse_maintainer_command(body, actor="alice")
+            except ReviewInputError:
+                parsed = None
+            with self.subTest(body=body):
+                self.assertEqual(parsed is not None, case["accepted"])
+
     def test_finding_disposition_requires_reason(self):
         self.assertIsNone(
             parse_maintainer_command("@sensei dismiss abcd1234abcd1234", actor="alice")
@@ -160,6 +179,192 @@ class MaintainerCommandParseTests(unittest.TestCase):
 
 
 class SessionCommandTests(unittest.TestCase):
+    def test_grant_bound_ledger_without_atomic_initialization_fails_closed(self):
+        ledger = InMemorySessionLedger()
+        ledger._broker = object()  # type: ignore[attr-defined]
+        command = parse_maintainer_command("@sensei review pause", actor="alice")
+        assert command is not None
+
+        with self.assertRaisesRegex(ReviewInputError, "atomic initialization"):
+            apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
+
+    def test_identified_continuation_creates_an_integrity_covered_grant(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-101",
+        )
+        record, result = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+
+        self.assertTrue(result.applied)
+        self.assertEqual(result.continuation_rounds, 0)
+        self.assertEqual(len(record.continuation_grants), 1)
+        grant = record.continuation_grants[0]
+        self.assertEqual(grant["command_id"], "issue-comment-101")
+        self.assertEqual(grant["actor"], "alice")
+        self.assertEqual(grant["head_sha"], "a" * 40)
+        self.assertEqual(grant["policy_digest"], policy.digest())
+        self.assertIsNone(grant["consumed_reservation_id"])
+        tampered = record.to_dict()
+        tampered["continuation_grants"][0]["actor"] = "mallory"  # type: ignore[index]
+        with self.assertRaisesRegex(ReviewInputError, "integrity"):
+            type(record).from_dict(tampered)
+
+    def test_identified_continuation_command_is_idempotent(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-102",
+        )
+        first, _ = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+        replay, _ = apply_session_command(
+            ledger,
+            IDENTITY,
+            command,
+            now=FIXED_NOW + timedelta(minutes=1),
+            policy=policy,
+        )
+        self.assertEqual(replay.generation, first.generation)
+        self.assertEqual(replay.continuation_grants, first.continuation_grants)
+
+    def test_new_scope_supersedes_an_unconsumed_continuation_grant(self):
+        ledger = InMemorySessionLedger()
+        first_policy = ReviewConvergencePolicy(mode="merge-focused")
+        first = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-old",
+        )
+        initial, _ = apply_session_command(
+            ledger, IDENTITY, first, now=FIXED_NOW, policy=first_policy
+        )
+        same_scope = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-same-scope",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "already pending"):
+            apply_session_command(
+                ledger, IDENTITY, same_scope, now=FIXED_NOW, policy=first_policy
+            )
+
+        changed_head = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="b" * 40,
+            command_id="issue-comment-new-head",
+        )
+        replaced, _ = apply_session_command(
+            ledger, IDENTITY, changed_head, now=FIXED_NOW, policy=first_policy
+        )
+        self.assertEqual(
+            [grant["command_id"] for grant in replaced.continuation_grants],
+            ["issue-comment-new-head"],
+        )
+        from review_sensei.session import active_continuation_grant
+
+        self.assertIsNone(
+            active_continuation_grant(
+                replaced,
+                head_sha="a" * 40,
+                policy_digest=first_policy.digest(),
+                now=FIXED_NOW,
+            )
+        )
+
+        changed_policy = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="b" * 40,
+            command_id="issue-comment-new-policy",
+        )
+        second_policy = ReviewConvergencePolicy(mode="strict")
+        replaced_again, _ = apply_session_command(
+            ledger, IDENTITY, changed_policy, now=FIXED_NOW, policy=second_policy
+        )
+        self.assertEqual(
+            [grant["command_id"] for grant in replaced_again.continuation_grants],
+            ["issue-comment-new-policy"],
+        )
+        self.assertIsNone(initial.continuation_grants[0].get("consumed_reservation_id"))
+
+    def test_identified_continuation_uses_a_generation_guard(self):
+        class RacingLedger(InMemorySessionLedger):
+            def replace(self, identity, mutate, *, now=None):
+                loaded = self.load(identity, now=now)
+                assert loaded.record is not None
+                stale = loaded.record.evolve(
+                    now=now, generation=loaded.record.generation + 1
+                )
+                return mutate(stale)
+
+        ledger = RacingLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-race",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            apply_session_command(
+                ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+            )
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.continuation_grants, ())
+
+    def test_identified_command_replay_does_not_revive_a_consumed_grant(self):
+        ledger = InMemorySessionLedger()
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-103",
+        )
+        apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW, policy=policy)
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
+            ),
+            now=FIXED_NOW,
+        )
+        from review_sensei.session import prepare_session_round
+
+        prepare_session_round(
+            ledger,
+            IDENTITY,
+            policy,
+            reservation_id="abcd1234",
+            head_sha="a" * 40,
+            now=FIXED_NOW,
+            coverage_complete=True,
+            latest_head_reviewed=True,
+        )
+        replay, _ = apply_session_command(
+            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+        )
+        self.assertEqual(
+            replay.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
+        )
+
     def test_pause_and_continue_mutate_operator_paused(self):
         ledger = InMemorySessionLedger()
         pause = parse_maintainer_command("@sensei review pause", actor="alice")
@@ -356,6 +561,44 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(result.summary, "writes_disabled")
         self.assertEqual(application.broker.exchanges, [])
 
+    def test_hosted_disabled_mutation_does_not_authorize_a_session_grant(self):
+        class Broker:
+            def __init__(self):
+                self.calls = []
+
+            def request_oidc_token(self):
+                self.calls.append("request_oidc_token")
+                raise AssertionError("writes-disabled mutation must not request OIDC")
+
+            def authorize_session_mutation(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                raise AssertionError(
+                    "writes-disabled mutation must not authorize a session grant"
+                )
+
+        broker = Broker()
+        application = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        result = application.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=False, github_session_ledger=True),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="b" * 40,
+            body="@sensei review pause",
+            actor_login="alice",
+            association="MEMBER",
+            app_slug="reviewsensei[bot]",
+        )
+        self.assertEqual(result.summary, "writes_disabled")
+        self.assertEqual(broker.calls, [])
+
     def test_local_status_does_not_exchange_write_capability(self):
         class Broker:
             def __init__(self):
@@ -511,14 +754,50 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(broker.exchanges, [])
         self.assertEqual(broker.oidc_requests, 0)
 
-    def test_hosted_mutation_always_exchanges_caller_oidc(self):
+    def test_hosted_mutation_requires_broker_attested_command_grant(self):
+        body = "@sensei review pause"
+        request_attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "run_id": "42",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
+            "job_workflow_sha": "c" * 40,
+        }
+
         class Broker:
             def __init__(self):
-                self.exchanges = []
+                self.authorizations = []
 
-            def exchange(self, token, *, capability=None):
-                self.exchanges.append((token, capability))
-                return "capability-token"
+            def authorize_session_mutation(self, token, **kwargs):
+                self.authorizations.append((token, kwargs))
+                return type(
+                    "SessionGrant",
+                    (),
+                    {
+                        "token": "capability-token",
+                        "grant": "opaque-grant",
+                        "attestation": {
+                            "repository": "owner/repo",
+                            "repository_id": 99,
+                            "pull_request": 136,
+                            "head_sha": "b" * 40,
+                            "operation": "command",
+                            "source_comment_id": 501,
+                            "actor": "alice",
+                            "actor_type": "User",
+                            "association": "MEMBER",
+                            "command_id": 501,
+                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+                        },
+                    },
+                )()
 
         broker = Broker()
         application = GitHubApplication(
@@ -542,13 +821,103 @@ class DisabledWriteTests(unittest.TestCase):
                 repository_id=99,
                 pull_request=136,
                 head_sha="b" * 40,
-                body="@sensei review pause",
+                body=body,
                 actor_login="alice",
                 association="MEMBER",
                 app_slug="reviewsensei[bot]",
+                source_comment_id=501,
+                session_attestation=request_attestation,
             )
         self.assertTrue(result.applied)
-        self.assertEqual(broker.exchanges, [("caller-oidc", "review_publish")])
+        self.assertEqual(
+            broker.authorizations,
+            [
+                (
+                    "caller-oidc",
+                    {
+                        "repository_id": 99,
+                        "pull_request": 136,
+                        "head_sha": "b" * 40,
+                        "session_attestation": request_attestation,
+                    },
+                )
+            ],
+        )
+
+    def test_hosted_mutation_rejects_a_non_atomic_grant_ledger(self):
+        body = "@sensei review pause"
+        request_attestation = {
+            "version": 1,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "operation": "command",
+            "source_comment_id": 501,
+            "run_id": "42",
+            "issued_at": 1,
+            "concurrency_group": "reviewsensei-session-99-136",
+            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
+            "job_workflow_sha": "c" * 40,
+        }
+
+        class Broker:
+            def authorize_session_mutation(self, token, **kwargs):
+                del token, kwargs
+                return type(
+                    "SessionGrant",
+                    (),
+                    {
+                        "token": "capability-token",
+                        "grant": "opaque-grant",
+                        "attestation": {
+                            "repository": "owner/repo",
+                            "repository_id": 99,
+                            "pull_request": 136,
+                            "head_sha": "b" * 40,
+                            "operation": "command",
+                            "source_comment_id": 501,
+                            "actor": "alice",
+                            "actor_type": "User",
+                            "association": "MEMBER",
+                            "command_id": 501,
+                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
+                        },
+                    },
+                )()
+
+        class NonAtomicGrantLedger(InMemorySessionLedger):
+            _broker = object()
+
+        application = GitHubApplication(
+            broker=Broker(),
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        with patch.object(
+            application,
+            "_session_ledger_for_token",
+            return_value=NonAtomicGrantLedger(),
+        ):
+            with self.assertRaisesRegex(GitHubPublicationError, "atomic session"):
+                application.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=True, github_session_ledger=True
+                    ),
+                    oidc_token="caller-oidc",
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="b" * 40,
+                    body=body,
+                    actor_login="mallory",
+                    association="CONTRIBUTOR",
+                    app_slug="reviewsensei[bot]",
+                    source_comment_id=501,
+                    session_attestation=request_attestation,
+                )
 
 
 class SummaryTests(unittest.TestCase):

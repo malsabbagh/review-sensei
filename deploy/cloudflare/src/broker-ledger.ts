@@ -14,15 +14,33 @@ const RATE_LIMIT = 10;
 // session, and a session that outlived its own record cannot demand recovery
 // forever.
 const ENROLLMENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const GRANT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const ATTESTATION_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+const RUN_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
+const SESSION_GRANT_TTL_MS = 10 * 60 * 1000;
+const SESSION_GRANT_AUDIENCE = "reviewsensei-session-ledger";
 
 interface BrokerRequest {
   action?: unknown;
   jti?: unknown;
   scope?: unknown;
+  grant?: unknown;
+  attestation_digest?: unknown;
+  run_id?: unknown;
+  audience?: unknown;
 }
 
 interface BrokerReply {
-  state: "accepted" | "replay" | "rate_limited" | "enrolled" | "known" | "invalid";
+  state:
+    | "accepted"
+    | "replay"
+    | "rate_limited"
+    | "enrolled"
+    | "known"
+    | "issued"
+    | "verified"
+    | "expired"
+    | "invalid";
 }
 
 function json(value: unknown, status = 200): Response {
@@ -45,33 +63,29 @@ async function digest(value: string): Promise<string> {
     .join("");
 }
 
-/** A replay/rate assertion. Only these actions carry a JTI. */
-type AssertionRequest = BrokerRequest & {
-  action: "claim" | "admit";
-  jti: string;
+function validRequest(
+  value: BrokerRequest,
+): value is BrokerRequest & {
+  action: "claim" | "admit" | "session_enroll" | "session_issue" | "session_verify";
+  jti?: string;
   scope: string;
-};
-
-/** A session enrollment. It intentionally has no JTI to assert. */
-type SessionRequest = BrokerRequest & {
-  action: "session_enroll";
-  scope: string;
-};
-
-const VALID_SCOPES = (value: unknown): value is string =>
-  typeof value === "string" && SCOPE_PATTERN.test(value);
-
-function validAssertionRequest(value: BrokerRequest): value is AssertionRequest {
+} {
+  const grantRequest = value.action === "session_issue" || value.action === "session_verify";
   return (
-    (value.action === "claim" || value.action === "admit") &&
-    typeof value.jti === "string" &&
-    JTI_PATTERN.test(value.jti) &&
-    VALID_SCOPES(value.scope)
+    (value.action === "claim" || value.action === "admit" || value.action === "session_enroll" || grantRequest) &&
+    (value.action === "session_enroll" || grantRequest || (
+      typeof value.jti === "string" && JTI_PATTERN.test(value.jti)
+    )) &&
+    typeof value.scope === "string" &&
+    SCOPE_PATTERN.test(value.scope) &&
+    (!grantRequest || (
+      typeof value.grant === "string" && GRANT_PATTERN.test(value.grant) &&
+      typeof value.attestation_digest === "string" && ATTESTATION_DIGEST_PATTERN.test(value.attestation_digest) &&
+      value.audience === SESSION_GRANT_AUDIENCE &&
+      (value.action === "session_verify" ||
+        (typeof value.run_id === "string" && RUN_ID_PATTERN.test(value.run_id)))
+    ))
   );
-}
-
-function validSessionRequest(value: BrokerRequest): value is SessionRequest {
-  return value.action === "session_enroll" && VALID_SCOPES(value.scope);
 }
 
 /**
@@ -99,6 +113,15 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
         scope_hash TEXT PRIMARY KEY,
         enrolled_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS broker_session_grants (
+        grant_hash TEXT PRIMARY KEY,
+        scope_hash TEXT NOT NULL,
+        attestation_hash TEXT NOT NULL,
+        audience_hash TEXT NOT NULL,
+        run_id_hash TEXT NOT NULL,
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -116,7 +139,7 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
     } catch {
       return json({ error: "invalid_request" }, 400);
     }
-    if (!validAssertionRequest(data) && !validSessionRequest(data)) {
+    if (!validRequest(data)) {
       return json({ error: "invalid_request" }, 400);
     }
 
@@ -167,6 +190,81 @@ export class BrokerLedger extends DurableObject<WorkerEnv> {
           now,
         );
         return { state: "enrolled" } as BrokerReply;
+      });
+      return json(result);
+    }
+    if (data.action === "session_issue" || data.action === "session_verify") {
+      // The request validator above establishes these values. Keep them local
+      // to this branch so ordinary replay/rate actions cannot accidentally
+      // acquire a grant-shaped authority path.
+      const grantHash = await digest(data.grant as string);
+      const attestationHash = await digest(data.attestation_digest as string);
+      const audienceHash = await digest(data.audience as string);
+      const runIdHash = data.action === "session_issue"
+        ? await digest(data.run_id as string)
+        : undefined;
+      const result = this.ctx.storage.transactionSync(() => {
+        this.sql.exec(
+          "DELETE FROM broker_session_grants WHERE expires_at < ?",
+          now,
+        );
+        if (data.action === "session_issue") {
+          const rows = [
+            ...this.sql.exec(
+              "SELECT grant_hash FROM broker_session_grants WHERE grant_hash = ?",
+              grantHash,
+            ),
+          ];
+          if (rows.length > 0) {
+            return { state: "replay" } as BrokerReply;
+          }
+          this.sql.exec(
+            "INSERT INTO broker_session_grants (grant_hash, scope_hash, attestation_hash, audience_hash, run_id_hash, issued_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            grantHash,
+            scopeHash,
+            attestationHash,
+            audienceHash,
+            // The run id is only a correlation identity; persist its digest.
+            // `session_verify` does not receive it, so it cannot choose one.
+            runIdHash as string,
+            now,
+            now + SESSION_GRANT_TTL_MS,
+          );
+          return { state: "issued" } as BrokerReply;
+        }
+        const rows = [
+          ...this.sql.exec<{
+            scope_hash: string;
+            attestation_hash: string;
+            audience_hash: string;
+          }>(
+            "SELECT scope_hash, attestation_hash, audience_hash FROM broker_session_grants WHERE grant_hash = ? AND expires_at >= ?",
+            grantHash,
+            now,
+          ),
+        ];
+        const record = rows[0];
+        if (record === undefined) {
+          return { state: "invalid" } as BrokerReply;
+        }
+        const matches = record.scope_hash === scopeHash &&
+          record.attestation_hash === attestationHash &&
+          record.audience_hash === audienceHash;
+        if (!matches) {
+          return { state: "invalid" } as BrokerReply;
+        }
+        // A session grant is one-use authority. The SELECT and DELETE run in
+        // the same Durable Object transaction, so a second verification can
+        // never observe the consumed row after the first exact match.
+        this.sql.exec(
+          "DELETE FROM broker_session_grants WHERE grant_hash = ? AND scope_hash = ? AND attestation_hash = ? AND audience_hash = ? AND expires_at >= ?",
+          grantHash,
+          scopeHash,
+          attestationHash,
+          audienceHash,
+          now,
+        );
+        return { state: "verified" } as BrokerReply;
       });
       return json(result);
     }
