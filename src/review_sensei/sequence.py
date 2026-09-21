@@ -134,6 +134,8 @@ class ObservedSequenceReport:
     events: tuple[ObservedSequenceEvent, ...]
     approval_events: int | None
     cap_created_approval: bool | None
+    cutover_status: str
+    unmet_criteria: tuple[str, ...]
     limitations: tuple[str, ...] = (
         "External model and GitHub APIs are mocked; internal admission and publication run normally.",
         "Approval metrics are unknown because the mocked publisher does not execute a GitHub finalizer.",
@@ -147,6 +149,8 @@ class ObservedSequenceReport:
             "events": [event.to_dict() for event in self.events],
             "approval_events": self.approval_events,
             "cap_created_approval": self.cap_created_approval,
+            "cutover_status": self.cutover_status,
+            "unmet_criteria": list(self.unmet_criteria),
             "limitations": list(self.limitations),
         }
         validate_public_document(payload, "observed-convergence-report")
@@ -261,6 +265,10 @@ def run_observed_review_sequence(
         events=tuple(events),
         approval_events=None,
         cap_created_approval=None,
+        cutover_status="not_ready",
+        unmet_criteria=(
+            "approval and cap metrics are unmeasured without a GitHub finalizer fixture",
+        ),
     )
     temporary_root.cleanup()
     return report

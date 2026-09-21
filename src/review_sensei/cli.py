@@ -2224,6 +2224,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             else:
                 sys.stdout.write(
                     f"mode={observed.mode} events={len(observed.events)} "
+                    f"cutover_status={observed.cutover_status} "
                     f"approval_events={observed.approval_events} "
                     f"cap_created_approval={observed.cap_created_approval}\n"
                 )

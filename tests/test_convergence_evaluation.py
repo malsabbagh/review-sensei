@@ -211,6 +211,8 @@ class ObservedSequenceTests(unittest.TestCase):
         )
         self.assertIsNone(report.approval_events)
         self.assertIsNone(report.cap_created_approval)
+        self.assertEqual(report.cutover_status, "not_ready")
+        self.assertTrue(report.unmet_criteria)
         self.assertTrue(
             any("Approval metrics are unknown" in item for item in report.limitations)
         )
