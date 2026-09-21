@@ -547,36 +547,45 @@ class GitHubApplicationTests(unittest.TestCase):
         # parser (ADR 0050), so it routes bodies to the command job that the
         # parser then refuses: as conversational syntax (the Unicode separator
         # shapes) or as a disposition reason that breaks the parser's bound.
-        # Both refusal shapes must stop before the broker exchange.
-        for body in (
-            "@sensei review\u2003reenroll",
-            '@sensei dismiss abcd1234abcd1234 --reason ""',
-            "@sensei dismiss abcd1234abcd1234 --reason " + "x" * 513,
+        # Both refusal shapes must stop before the broker exchange, and the
+        # reason-bound refusals must be the documented ones rather than any
+        # error the handler happens to raise.
+        write_options = {
+            "options": GitHubWriteOptions(
+                github_writes=True, github_session_ledger=True
+            ),
+            "oidc_token": "caller-oidc",
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "b" * 40,
+            "actor_login": "alice",
+            "association": "MEMBER",
+            "app_slug": "reviewsensei[bot]",
+            "source_comment_id": 71,
+        }
+        for body, refusal in (
+            ("@sensei review\u2003reenroll", None),
+            ('@sensei dismiss abcd1234abcd1234 --reason ""', "requires a reason"),
+            (
+                "@sensei dismiss abcd1234abcd1234 --reason " + "x" * 513,
+                "exceeds the bound",
+            ),
         ):
             with self.subTest(body=body):
-                try:
+                if refusal is None:
                     result = self.application.apply_maintainer_command(
-                        options=GitHubWriteOptions(
-                            github_writes=True, github_session_ledger=True
-                        ),
-                        oidc_token="caller-oidc",
-                        repository="owner/repo",
-                        repository_id=99,
-                        pull_request=136,
-                        head_sha="b" * 40,
-                        body=body,
-                        actor_login="alice",
-                        association="MEMBER",
-                        app_slug="reviewsensei[bot]",
-                        source_comment_id=71,
+                        body=body, **write_options
                     )
-                except ReviewInputError:
-                    # A reason the parser rejects is surfaced as a refusal by
-                    # the CLI, which exits non-zero before any write.
-                    pass
-                else:
                     self.assertEqual(result.summary, "not-a-command")
                     self.assertFalse(result.applied)
+                else:
+                    # The CLI maps this refusal to a non-zero exit, so the
+                    # workflow fails before reaching the broker.
+                    with self.assertRaisesRegex(ReviewInputError, refusal):
+                        self.application.apply_maintainer_command(
+                            body=body, **write_options
+                        )
                 self.assertEqual(self.broker.exchanges, [])
 
     def test_hosted_command_mutation_requires_broker_identity_inputs(self):

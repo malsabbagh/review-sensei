@@ -471,6 +471,12 @@ class InlineCallerResolverTests(unittest.TestCase):
         for name, text in (
             ("example", EXAMPLE_CALLER.read_text(encoding="utf-8")),
             ("generated", _tagged_workflow("v5")),
+            (
+                "worker-template",
+                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts").read_text(
+                    encoding="utf-8"
+                ),
+            ),
         ):
             with self.subTest(name=name):
                 self.assertEqual(
