@@ -151,8 +151,14 @@ describe("setup-v4 public boundary", () => {
         .filter((line) => line.startsWith(name + ": "));
       expect(matches).toEqual([name + ": ${{ " + expression + " }}"]);
     }
+    // The command branch must stay scoped to a created issue_comment on a pull
+    // request: the command job forwards github.event.comment fields that do
+    // not exist on a pull_request event, so the guard has to fail closed there.
     expect(workflow).toContain(
-      "      (needs.resolve-trigger.outputs.operation == 'command' ||\n" +
+      "      ((github.event_name == 'issue_comment' &&\n" +
+        "      github.event.action == 'created' &&\n" +
+        "      github.event.issue.pull_request &&\n" +
+        "      (needs.resolve-trigger.outputs.operation == 'command' ||\n" +
         "      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&\n",
     );
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
