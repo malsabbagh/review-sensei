@@ -593,6 +593,10 @@ class ReviewTransactionTests(unittest.TestCase):
         succeeded = complete_review_publication(
             ledger, IDENTITY, result.transaction, published=True, now=NOW
         )
+        self.assertLess(
+            succeeded.convergence_history["progress"][-1]["generation"],
+            succeeded.generation,
+        )
         succeeded_replay = record_admitted_blocker_progress(
             ledger,
             IDENTITY,

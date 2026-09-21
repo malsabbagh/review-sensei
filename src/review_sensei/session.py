@@ -1820,7 +1820,7 @@ def _checkpoint_transaction_record(
                 # comparable blocker-bearing entries, rather than letting
                 # that placeholder evict the immediately preceding F3
                 # evidence from the bounded window.
-                comparable_progress = [
+                comparable_progress: list[object] = [
                     item
                     for item in stored_progress
                     if isinstance(item, Mapping)
@@ -2138,13 +2138,11 @@ def record_admitted_blocker_progress(
             "blocker_count": blocker_count,
             "transaction_id": current.transaction_id,
         }
-        marker_matches = dict(last) == {
-            "event": "completed",
-            "generation": last.get("generation"),
-            "blocker_set_sha256": blocker_set_sha256,
-            "blocker_count": blocker_count,
-            "transaction_id": current.transaction_id,
-        }
+        marker_matches = (
+            last.get("blocker_set_sha256") == blocker_set_sha256
+            and last.get("blocker_count") == blocker_count
+            and last.get("transaction_id") == current.transaction_id
+        )
         if (
             current.phase in {"publication_failed", "publication_succeeded"}
             and marker_matches
