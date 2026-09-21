@@ -542,6 +542,43 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(record.dispositions[0]["actor"], "alice")
         self.assertEqual(record.dispositions[0]["head_sha"], "b" * 40)
 
+    def test_handler_fails_closed_on_prefilter_over_accepted_bodies(self):
+        # The caller prefilter is deliberately wider than the authoritative
+        # parser (ADR 0050), so it routes bodies to the command job that the
+        # parser then refuses: as conversational syntax (the Unicode separator
+        # shapes) or as a disposition reason that breaks the parser's bound.
+        # Both refusal shapes must stop before the broker exchange.
+        for body in (
+            "@sensei review\u2003reenroll",
+            '@sensei dismiss abcd1234abcd1234 --reason ""',
+            "@sensei dismiss abcd1234abcd1234 --reason " + "x" * 513,
+        ):
+            with self.subTest(body=body):
+                try:
+                    result = self.application.apply_maintainer_command(
+                        options=GitHubWriteOptions(
+                            github_writes=True, github_session_ledger=True
+                        ),
+                        oidc_token="caller-oidc",
+                        repository="owner/repo",
+                        repository_id=99,
+                        pull_request=136,
+                        head_sha="b" * 40,
+                        body=body,
+                        actor_login="alice",
+                        association="MEMBER",
+                        app_slug="reviewsensei[bot]",
+                        source_comment_id=71,
+                    )
+                except ReviewInputError:
+                    # A reason the parser rejects is surfaced as a refusal by
+                    # the CLI, which exits non-zero before any write.
+                    pass
+                else:
+                    self.assertEqual(result.summary, "not-a-command")
+                    self.assertFalse(result.applied)
+                self.assertEqual(self.broker.exchanges, [])
+
     def test_hosted_command_mutation_requires_broker_identity_inputs(self):
         application = GitHubApplication(
             broker=self.broker,
