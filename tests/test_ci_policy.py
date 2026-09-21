@@ -92,11 +92,19 @@ def _reusable_group_templates() -> tuple[str, str]:
         for line in _reusable_workflow_text().splitlines()
         if line.strip().startswith("group:")
     ]
-    if len(groups) != 4:
+    if len(groups) != 5:
         raise AssertionError(
-            f"expected 4 concurrency group templates, found {len(groups)}"
+            f"expected 5 concurrency group templates, found {len(groups)}"
         )
-    workflow_group, cloud_provider, openrouter_provider, local_provider = groups
+    (
+        workflow_group,
+        command_group,
+        cloud_provider,
+        openrouter_provider,
+        local_provider,
+    ) = groups
+    if command_group != "reviewsensei-command-${{ github.run_id }}":
+        raise AssertionError("command group must be isolated by host run identity")
     if cloud_provider != openrouter_provider or cloud_provider != local_provider:
         raise AssertionError("provider group templates diverged across jobs")
     return workflow_group, cloud_provider
@@ -771,9 +779,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 4)
+        self.assertEqual(len(group_lines), 5)
 
-        top_level, cloud, openrouter, local = group_lines
+        top_level, command, cloud, openrouter, local = group_lines
+        self.assertEqual(command, "group: reviewsensei-command-${{ github.run_id }}")
         review_selector = "inputs.operation == 'review'"
         reply_selector = "inputs.operation == 'review' && ("
         self.assertIn(review_selector, top_level)
@@ -844,6 +853,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             cancel_lines,
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: false",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
@@ -901,6 +911,19 @@ class ActionPinPolicyTests(unittest.TestCase):
                 "if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'"
             ),
             3,
+        )
+        command = _job_section(text, "command")
+        self.assertIn("inputs.operation == 'command'", command)
+        self.assertIn("reviewsensei-command-${{ github.run_id }}", command)
+        self.assertIn(
+            '--github-session-ledger --oidc-token "$oidc_token" --allow-write',
+            command,
+        )
+        self.assertIn("job_workflow_ref", command)
+        self.assertIn("source_comment_id", command)
+        validator = _job_section(text, "validate-provider-mode")
+        self.assertIn(
+            "command operations require an authorized human maintainer", validator
         )
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
@@ -1138,18 +1161,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("Install ReviewSensei package (PyPI first, GitHub fallback)"),
-            3,
+            4,
         )
         self.assertNotIn("Install ReviewSensei and validate hosted model", text)
         self.assertEqual(
             text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
-            3,
+            4,
         )
         self.assertEqual(
             text.count(
                 '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
             ),
-            3,
+            4,
         )
         self.assertIn(
             '"review-sensei==$expected_version"',
@@ -1177,7 +1200,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             for block in _run_blocks(text)
             if "REVIEW_SENSEI_WORKFLOW_REF" in block
         ]
-        self.assertEqual(len(install_blocks), 3)
+        self.assertEqual(len(install_blocks), 4)
         for block in install_blocks:
             with self.subTest(block=block[:40]):
                 self.assertLess(
@@ -1453,7 +1476,11 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 4)
+        self.assertEqual(len(group_lines), 5)
+        command_group = group_lines.pop(1)
+        self.assertEqual(
+            command_group, "group: reviewsensei-command-${{ github.run_id }}"
+        )
         for line in group_lines:
             self.assertIn("github.repository", line)
             self.assertIn("inputs.operation == 'review'", line)
@@ -1582,6 +1609,7 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             cancel_lines,
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
+                "cancel-in-progress: false",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",

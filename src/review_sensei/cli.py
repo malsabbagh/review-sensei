@@ -4,6 +4,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import replace
@@ -1376,8 +1377,18 @@ def _github_parser() -> argparse.ArgumentParser:
     command.add_argument("--actor-type", default="User")
     command.add_argument("--association", required=True)
     command.add_argument("--repository", required=True)
+    command.add_argument(
+        "--repository-id",
+        type=int,
+        help="GitHub repository database ID required for the hosted session ledger",
+    )
     command.add_argument("--pull-request", type=int, required=True)
     command.add_argument("--head-sha")
+    command.add_argument(
+        "--source-comment-id",
+        type=int,
+        help="GitHub issue-comment ID required for a hosted command mutation",
+    )
     command.add_argument("--app-slug", default="reviewsensei[bot]")
     command.add_argument(
         "--session-ledger",
@@ -1386,6 +1397,20 @@ def _github_parser() -> argparse.ArgumentParser:
             "Local operator directory for the durable session ledger; hosted "
             "webhook commands use GitHubApplication and broker authorization."
         ),
+    )
+    command.add_argument(
+        "--github-session-ledger",
+        action="store_true",
+        help="Use the broker-attested GitHub issue-comment session ledger.",
+    )
+    command.add_argument(
+        "--session-attestation",
+        type=Path,
+        help="Broker-bound hosted command attestation JSON.",
+    )
+    command.add_argument(
+        "--oidc-token",
+        help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
     )
     command.add_argument(
         "--allow-write",
@@ -1519,6 +1544,82 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             raise ReviewInputError("maintainer command is unauthorized")
         if parsed.action != "status" and not args.allow_write:
             raise ReviewInputError("github writes require --allow-write")
+        if getattr(args, "github_session_ledger", False):
+            if args.session_ledger is not None:
+                raise ReviewInputError(
+                    "hosted maintainer commands cannot use --session-ledger"
+                )
+            if (
+                isinstance(args.repository_id, bool)
+                or not isinstance(args.repository_id, int)
+                or args.repository_id <= 0
+            ):
+                raise ReviewInputError(
+                    "hosted maintainer commands require --repository-id"
+                )
+            if not isinstance(args.head_sha, str) or not re.fullmatch(
+                r"[a-f0-9]{40}", args.head_sha
+            ):
+                raise ReviewInputError("hosted maintainer commands require --head-sha")
+            source_comment_id = getattr(args, "source_comment_id", None)
+            session_attestation = None
+            if parsed.action != "status":
+                if (
+                    isinstance(source_comment_id, bool)
+                    or not isinstance(source_comment_id, int)
+                    or source_comment_id <= 0
+                ):
+                    raise ReviewInputError(
+                        "hosted command mutations require --source-comment-id"
+                    )
+                attestation_path = getattr(args, "session_attestation", None)
+                if attestation_path is None:
+                    raise ReviewInputError(
+                        "hosted command mutations require --session-attestation"
+                    )
+                try:
+                    loaded_attestation = json.loads(
+                        read_bounded_utf8(
+                            attestation_path,
+                            maximum=16 * 1024,
+                            label="session attestation",
+                        )
+                    )
+                except json.JSONDecodeError as exc:
+                    raise ReviewInputError(
+                        "session attestation is invalid JSON"
+                    ) from exc
+                if not isinstance(loaded_attestation, dict):
+                    raise ReviewInputError("session attestation must be an object")
+                session_attestation = loaded_attestation
+            http = GitHubHttp()
+            application = GitHubApplication(
+                broker=BrokerClient(),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=LearningPRPublisher(http=http),
+                replier=ConversationPublisher(http=http),
+            )
+            result = application.apply_maintainer_command(
+                options=GitHubWriteOptions(
+                    github_writes=args.allow_write,
+                    github_session_ledger=True,
+                ),
+                oidc_token=getattr(args, "oidc_token", None),
+                repository=args.repository,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+                body=args.comment_body,
+                actor_login=args.actor,
+                actor_type=args.actor_type,
+                association=args.association,
+                app_slug=args.app_slug,
+                source_comment_id=source_comment_id,
+                session_attestation=session_attestation,
+            )
+            print(result.summary)
+            return 0
         ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
         if ledger is None:
             raise ReviewInputError("maintainer commands require a session ledger")

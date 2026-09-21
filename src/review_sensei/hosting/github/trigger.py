@@ -92,7 +92,7 @@ def _is_maintainer_command(body: object) -> bool:
     authorization remain in ``disposition.py`` for the command workflow.
     """
 
-    if not isinstance(body, str):
+    if not isinstance(body, str) or len(body.encode("utf-8")) > 4096:
         return False
     mention = _SENSEI_COMMAND.search(body)
     if mention is None:

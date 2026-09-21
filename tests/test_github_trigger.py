@@ -81,6 +81,17 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertFalse(issue_comment_requests_rescan("@sensei I rescanned the diff"))
         self.assertFalse(issue_comment_requests_rescan("@sensei rescanning now"))
 
+    def test_maintainer_commands_route_to_the_command_operation(self):
+        resolution = resolve_issue_comment("@sensei review pause", _pull())
+        self.assertEqual(resolution.operation, "command")
+        self.assertEqual(resolution.enable_review, "false")
+
+    def test_oversized_maintainer_command_does_not_reach_command_execution(self):
+        resolution = resolve_issue_comment(
+            "@sensei review pause " + ("x" * 4096), _pull()
+        )
+        self.assertEqual(resolution.operation, "reply")
+
     def test_comment_mentions_sensei_matches_workflow_gate(self):
         self.assertTrue(comment_mentions_sensei("@sensei please re-scan"))
         self.assertFalse(comment_mentions_sensei("@SENSEI please re-scan"))
