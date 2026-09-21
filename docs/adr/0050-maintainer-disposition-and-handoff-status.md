@@ -133,10 +133,12 @@ Negative:
 
 - The generated setup-v4 inline trigger script routes command-shaped
   comments without the packaged parser, so its prefilter is deliberately
-  looser: six body shapes the parser rejects (empty or non-printable
-  `--reason` values, a reason beyond the 512-byte bound, and separators
-  inside the action words that the regex `\s` accepts but the parser's
-  ASCII-only bound does not) still resolve to `operation=command`. The
+  looser: bodies the parser rejects still resolve to `operation=command`
+  when they differ only in the axes the regex cannot express — the mention
+  token's casing (the regex is case-insensitive, the parser's mention is
+  case-sensitive), an empty or non-printable `--reason` value, a reason
+  beyond the 512-byte bound, or separators inside the action words that the
+  regex `\s` accepts but the parser's ASCII-only bound does not. The
   reusable workflow re-parses the body and the hosted handler returns
   `not-a-command` without a write, so the residual cost is a wasted run
   rather than an unauthorized mutation.

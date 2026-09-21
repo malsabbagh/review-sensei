@@ -115,6 +115,28 @@ def parses_as_command(body: str) -> bool:
         return False
 
 
+def repaired_command(body: str) -> str:
+    """Return a body with the documented over-acceptance dimensions removed.
+
+    The prefilter may only be wider than the parser along three axes: the
+    mention token's casing (the regex is case-insensitive, the parser's
+    mention is not), `\\s` against the parser's ASCII separator bound, and the
+    disposition reason value (emptiness, printability, the 512-byte bound).
+    Lowercasing the mention, collapsing whitespace, and replacing the reason
+    with a short printable one must therefore yield a body the parser accepts;
+    a body that still fails is a shape no documented rule covers.
+    """
+
+    repaired = re.sub(r"(?i)@sensei", "@sensei", body)
+    repaired = re.sub(r"\s+", " ", repaired)
+    if parses_as_command(repaired):
+        return repaired
+    head, separator, _ = repaired.rpartition("--reason")
+    if not separator:
+        return repaired
+    return f"{head}{separator} accepted"
+
+
 def command_corpus() -> list[str]:
     """Enumerate command-shaped bodies from the grammar rather than by hand.
 
@@ -472,13 +494,31 @@ class InlineCallerResolverTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertTrue(prefilter.search(body) is not None)
         self.assertGreater(accepted, 200)
+        # Over-acceptance is bounded by the documented dimensions rather than
+        # by a hand-pinned list: every corpus body the prefilter matches while
+        # the parser rejects must become parser-accepted once its whitespace is
+        # ASCII and its reason is short and printable.
+        over_accepted = [
+            body
+            for body in command_corpus()
+            if not parses_as_command(body) and prefilter.search(body) is not None
+        ]
+        for body in over_accepted:
+            with self.subTest(body=body):
+                self.assertTrue(
+                    parses_as_command(repaired_command(body)),
+                    "prefilter matched a shape outside the documented "
+                    "over-acceptance dimensions",
+                )
+        self.assertGreater(len(over_accepted), 0)
         # The prefilter is allowed to be wider than the parser because the
         # reusable workflow re-parses the body and fails closed on
-        # "not-a-command". These six fixture bodies differ on purpose: reasons
-        # that the parser bounds by emptiness, by printable ASCII, or by 512
-        # bytes, and separators that the parser restricts to ASCII whitespace
-        # while the prefilter uses \s. Any other difference means the two
-        # grammars drifted.
+        # "not-a-command". These eight fixture bodies differ on purpose: a
+        # mention whose casing the case-insensitive regex accepts, reasons that
+        # the parser bounds by emptiness, by printable ASCII, or by 512 bytes,
+        # and separators that the parser restricts to ASCII whitespace while
+        # the prefilter uses \s. Any other difference means the two grammars
+        # drifted.
         fingerprint = "abcd1234abcd1234"
         self.assertEqual(
             {
@@ -487,6 +527,8 @@ class InlineCallerResolverTests(unittest.TestCase):
                 if not case["accepted"] and prefilter.search(case["body"]) is not None
             },
             {
+                "@Sensei review pause",
+                "@SENSEI review pause",
                 f'@sensei dismiss {fingerprint} --reason ""',
                 f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
                 f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
