@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline
@@ -26,7 +26,7 @@ from ...presentation import (
     format_review_summary,
 )
 from ...validation import validate_bounded_text
-from ...verifier import CandidateFinding, prepare_publishable_review
+from ...verifier import CandidateFinding, PublishableReview, prepare_publishable_review
 from .approval import has_blocking_findings
 from .errors import (
     GitHubHTTPError,
@@ -408,6 +408,11 @@ class PublicationResult:
     review_id: int | None = None
     diagnostic: str | None = None
     shadow: Mapping[str, object] | None = None
+    # A terminal no-progress handoff exposes the durable identity so an
+    # at-least-once caller can distinguish persisted suppression from retryable
+    # publication failure.
+    transaction_id: str | None = None
+    generation: int | None = None
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -1093,12 +1098,108 @@ class ReviewApprovalFinalizer:
         )
 
 
+def prepare_publication_review(
+    *,
+    result: ReviewResult,
+    diff: str,
+    head_sha: str,
+    candidates: Sequence[CandidateFinding] | None = None,
+    snapshot: Mapping[str, str] | None = None,
+    snapshot_sha256: str | None = None,
+    evidence_policy: str = "legacy",
+    convergence_policy: ReviewConvergencePolicy | None = None,
+    blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    baseline: ReviewBaseline | None = None,
+    current_key: ReviewContextCacheKey | None = None,
+    changed_paths: Sequence[str] | None = None,
+    related_paths: Sequence[str] = (),
+    evidence_confirmed_concerns: Sequence[str] = (),
+    authorized_dispositions: Sequence[object] = (),
+) -> PublishableReview:
+    """Prepare one publication artifact independently of the HTTP publisher.
+
+    The application uses this same admission routine for publisher adapters
+    that expose only ``publish``. Keeping preparation here ensures operator
+    F3 admission is never skipped merely because an adapter lacks the
+    optional ``ReviewPublisher.prepare`` convenience method.
+    """
+
+    try:
+        analysis = analyze_diff(diff)
+        prepared = prepare_publishable_review(
+            result,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
+            changed_lines=analysis.changed_lines,
+            deleted_lines=analysis.deleted_lines,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=changed_paths,
+            related_paths=related_paths,
+            evidence_confirmed_concerns=evidence_confirmed_concerns,
+            authorized_dispositions=authorized_dispositions,
+            current_head_sha=head_sha,
+        )
+        return replace(
+            prepared,
+            diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        )
+    except ReviewInputError as exc:
+        raise GitHubPublicationError("review evidence verification failed") from exc
+
+
 class ReviewPublisher:
     """Publish one validated review as App-authored inline comments and summary."""
 
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http
         self.finalizer = ReviewApprovalFinalizer(http=http)
+
+    def prepare(
+        self,
+        *,
+        result: ReviewResult,
+        diff: str,
+        head_sha: str,
+        candidates: Sequence[CandidateFinding] | None = None,
+        snapshot: Mapping[str, str] | None = None,
+        snapshot_sha256: str | None = None,
+        evidence_policy: str = "legacy",
+        convergence_policy: ReviewConvergencePolicy | None = None,
+        blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] = (),
+        evidence_confirmed_concerns: Sequence[str] = (),
+        authorized_dispositions: Sequence[object] = (),
+    ) -> PublishableReview:
+        """Admit the exact result that a later call to :meth:`publish` emits."""
+        return prepare_publication_review(
+            result=result,
+            diff=diff,
+            head_sha=head_sha,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=changed_paths,
+            related_paths=related_paths,
+            evidence_confirmed_concerns=evidence_confirmed_concerns,
+            authorized_dispositions=authorized_dispositions,
+        )
 
     def publish(
         self,
@@ -1127,6 +1228,7 @@ class ReviewPublisher:
         related_paths: Sequence[str] = (),
         evidence_confirmed_concerns: Sequence[str] = (),
         authorized_dispositions: Sequence[object] = (),
+        prepared_review: PublishableReview | None = None,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -1160,19 +1262,19 @@ class ReviewPublisher:
         auto_approve = (
             auto_approve and convergence_policy.automatic_github_review_events
         )
-        try:
-            analysis = analyze_diff(diff)
-        except ReviewInputError as exc:
-            raise GitHubPublicationError("review diff failed validation") from exc
-        try:
-            prepared = prepare_publishable_review(
-                result,
+        if prepared_review is not None:
+            if not isinstance(prepared_review, PublishableReview):
+                raise GitHubPublicationError("prepared review is invalid")
+            if prepared_review.result.content_digest() != result.content_digest():
+                raise GitHubPublicationError("prepared review does not match result")
+            rebound = self.prepare(
+                result=result,
+                diff=diff,
+                head_sha=head_sha,
                 candidates=candidates,
                 snapshot=snapshot,
                 snapshot_sha256=snapshot_sha256,
                 evidence_policy=evidence_policy,
-                changed_lines=analysis.changed_lines,
-                deleted_lines=analysis.deleted_lines,
                 convergence_policy=convergence_policy,
                 blocker_candidates=blocker_candidates,
                 input_blocker_candidates=input_blocker_candidates,
@@ -1182,10 +1284,31 @@ class ReviewPublisher:
                 related_paths=related_paths,
                 evidence_confirmed_concerns=evidence_confirmed_concerns,
                 authorized_dispositions=authorized_dispositions,
-                current_head_sha=head_sha,
             )
-        except ReviewInputError as exc:
-            raise GitHubPublicationError("review evidence verification failed") from exc
+            if rebound != prepared_review:
+                raise GitHubPublicationError(
+                    "prepared review does not match publication context"
+                )
+            prepared = rebound
+        else:
+            prepared = self.prepare(
+                result=result,
+                diff=diff,
+                head_sha=head_sha,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                convergence_policy=convergence_policy,
+                blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                related_paths=related_paths,
+                evidence_confirmed_concerns=evidence_confirmed_concerns,
+                authorized_dispositions=authorized_dispositions,
+            )
         result = prepared.result
         analysis = self._validate_locations(result, diff)
         marker = review_marker(

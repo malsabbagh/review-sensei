@@ -43,18 +43,30 @@ TRANSACTION_PHASES = frozenset(
         "publication_pending",
         "publication_failed",
         "publication_succeeded",
+        "publication_suppressed",
     }
 )
 _TRANSACTION_PHASE_TRANSITIONS = {
     "analysis": frozenset({"analysis", "analysis_failed", "publication_pending"}),
     "analysis_failed": frozenset({"analysis_failed"}),
     "publication_pending": frozenset(
-        {"publication_pending", "publication_failed", "publication_succeeded"}
+        {
+            "publication_pending",
+            "publication_failed",
+            "publication_succeeded",
+            "publication_suppressed",
+        }
     ),
     "publication_failed": frozenset(
-        {"publication_failed", "publication_pending", "publication_succeeded"}
+        {
+            "publication_failed",
+            "publication_pending",
+            "publication_succeeded",
+            "publication_suppressed",
+        }
     ),
     "publication_succeeded": frozenset({"publication_succeeded"}),
+    "publication_suppressed": frozenset({"publication_suppressed"}),
 }
 _TRANSACTION_REPOSITORY = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"
@@ -1064,6 +1076,7 @@ class ReviewTransaction:
                 "publication_pending",
                 "publication_failed",
                 "publication_succeeded",
+                "publication_suppressed",
             }
             and self.result_sha256 is None
         ):

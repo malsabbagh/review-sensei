@@ -22,17 +22,49 @@ The envelope contains only closed metadata:
 
 - lifecycle state;
 - reviewed base/head, policy and coverage digests;
-- at most three stable concern and resolution-criterion digests;
-- two lifecycle progress markers; and
+- at most two stable concern and resolution-criterion digests; and
+- three lifecycle progress markers, each of which can carry a canonical
+  admitted-blocker-set digest and (for newly written markers) the owning
+  transaction id. These three markers are the durable F3
+  repeat/oscillation window; they are independent of the two verification
+  rounds governed by ADR 0048 and the round budget in ADR 0049.
 - an authenticated ledger digest.
+
+The two-finding limit is the F3 writer projection. During rolling upgrades the
+reader and schema continue to accept the F2 three-finding projection; a later
+checkpoint rewrites it to the two-finding/three-marker writer shape.
 
 The history participates in `record_sha256`. A malformed, oversized, or
 tampered history therefore fails ledger parsing rather than permitting a fresh
 initialization. Only the current digest payload carries the envelope: a record
 holding one is rejected under the legacy or operator-paused digest shape, so an
-in-place upgrade can never keep a digest computed without it. The F3 slice will
-translate this persisted envelope into the runtime baseline used by the review
-service; F2 deliberately does not change the live inference path.
+in-place upgrade can never keep a digest computed without it. The F3 slice
+translates this persisted envelope into the runtime baseline used by the review
+service and reserves enough space for three trusted blocker-set identities.
+The baseline snapshot therefore retains two, rather than three, findings:
+keeping all three would exceed the fixed 2048-byte component bound when F3
+records the minimum repeat/oscillation evidence. F2 deliberately does not
+change the live inference path.
+
+The convergence key is the canonical admitted blocker identity set, not the
+provenance of equivalent evidence. Fresh candidate evidence still has to pass
+admission and is reflected in the prepared result; evidence that leaves the
+same blocker identities admitted is not verified progress and cannot lift a
+terminal suppression. A maintainer may use the authenticated `@sensei review
+reenroll` recovery command when a new operator decision is required.
+
+Each F3-eligible transaction owns exactly one durable blocker marker. A
+recovery replay may exclude the last marker only when that marker carries the
+same transaction id; a marker from a prior round with the same blocker set is
+still comparable evidence. Checkpoint placeholders are lifecycle-only entries
+and do not evict the bounded comparable blocker window; the admission CAS
+replaces the current transaction's placeholder with its owned marker.
+
+The application owns the canonical post-admission preparation step. A publisher
+adapter may expose only `publish`; in that case the application supplies the
+same admitted result rather than bypassing F3 or requiring an adapter-specific
+preparation method. The built-in GitHub publisher additionally rebinds the
+prepared artifact at its write boundary.
 
 ## Session witness
 
@@ -55,6 +87,23 @@ Fresh local and GitHub-comment ledger reads preserve a bounded completed
 history without storing review source or model output. Capacity is checked
 before writes and by untrusted-document loading. Existing records without the
 optional field continue to parse for migration/recovery handling.
+
+## Migration and rollback
+
+The envelope shape is intentionally fail-closed, but the reader remains
+backward-compatible with the F2 envelope: it accepts up to three baseline
+findings and the earlier two-marker progress window, while new checkpoints
+write the F3 projection of two findings and up to three markers. Existing
+integrity-valid records are not silently truncated during load; a later
+checkpoint rewrites the bounded projection. Records that predate
+`convergence_history` remain compatible and continue to follow the existing
+migration path. Rolling back the code does not authorize publishing from a
+record that failed the current integrity or shape checks; such a record still
+requires the authenticated `@sensei review reenroll` recovery path.
+Once `publication_suppressed` is persisted for a result, retries of that same
+transaction return a terminal handoff with its transaction identity; a later
+head or an authenticated reenrollment creates the new transaction needed for
+publication.
 
 ## Validation
 

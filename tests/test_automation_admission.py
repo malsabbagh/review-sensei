@@ -4,13 +4,14 @@ import io
 import json
 import tempfile
 import unittest
-from argparse import ArgumentTypeError
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import _no_progress_reason, main
+from review_sensei.baseline import ReviewBaseline
+from review_sensei.cli import main
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import run_doctor
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
@@ -101,51 +102,6 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertEqual(
             admission_diagnostic(prepared.decision), "round-budget-exhausted"
         )
-
-    def test_no_progress_reason_is_bounded_and_non_empty(self):
-        self.assertEqual(
-            _no_progress_reason("  verified contradiction  "),
-            "verified contradiction",
-        )
-        with self.assertRaises(ArgumentTypeError):
-            _no_progress_reason("\n")
-        with self.assertRaises(ArgumentTypeError):
-            _no_progress_reason("x" * 257)
-
-    def test_no_progress_requires_operator_mode_and_ledger(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
-            response_path = root / "response.json"
-            response_path.write_text('{"summary":"ok","comments":[]}', encoding="utf-8")
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                status = main(
-                    [
-                        "--diff",
-                        str(diff_path),
-                        "--provider",
-                        "fixture",
-                        "--fixture-response",
-                        str(response_path),
-                        "--review-mode",
-                        "merge-focused",
-                        "--no-progress",
-                        "verified contradiction",
-                        "--repository",
-                        IDENTITY.repository,
-                        "--pull-request",
-                        str(IDENTITY.pull_request),
-                        "--head-sha",
-                        HEAD,
-                    ]
-                )
-            self.assertEqual(status, 1)
-            self.assertIn(
-                "--no-progress requires an operator review mode and session ledger",
-                stderr.getvalue(),
-            )
 
     def test_in_flight_reservation_pauses_other_jobs(self):
         ledger = InMemorySessionLedger()
@@ -357,6 +313,25 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             replier=object(),
             session_ledger=ledger,
         )
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha="b" * 40,
+                head_sha=HEAD,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
+        )
         with self.assertRaises(RuntimeError):
             application.publish_review(
                 options=GitHubWriteOptions(auto_review=True, github_writes=True),
@@ -368,9 +343,11 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
                 base_branch="main",
                 base_sha="b" * 40,
                 result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-                diff="diff",
+                diff=DIFF,
                 app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                convergence_policy=policy,
+                baseline=baseline,
+                current_key=baseline.cache_key,
             )
         loaded = ledger.load(IDENTITY)
         self.assertEqual(loaded.record.failed_attempts, 1)

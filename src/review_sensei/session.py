@@ -49,6 +49,14 @@ MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
 MAX_SESSION_RECORD_BYTES = 4096
 MAX_CONVERGENCE_HISTORY_BYTES = 2048
+MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
+SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
+# This is a deliberately coarse structural ceiling, independent of the byte
+# budgets above.  The publisher's review limits bound the real number of
+# admitted findings; this envelope bound keeps an untrusted marker from
+# driving an allocation without coupling the ledger to provider-specific
+# limits or to the serialized record size.
+MAX_DURABLE_BLOCKER_COUNT = 4_096
 MAX_STORED_CONTINUATION_GRANTS = 4
 MAX_CONTINUATION_COMMAND_ID_BYTES = 128
 MAX_CONTINUATION_GRANT_TTL = timedelta(days=7)
@@ -66,7 +74,7 @@ _REPOSITORY_RE = re.compile(
 _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
-_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_SHA256 = re.compile(SESSION_SHA256_PATTERN)
 _CONTINUATION_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 LOAD_STATUSES = frozenset(
     {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
@@ -313,10 +321,25 @@ def _stored_convergence_history(
 
         baseline_from_history_document(baseline)
     progress = normalized.get("progress")
-    if not isinstance(progress, list) or len(progress) > 2:
+    if (
+        not isinstance(progress, list)
+        or len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES
+    ):
         raise ReviewInputError("session history progress is invalid")
     for item in progress:
-        if not isinstance(item, Mapping) or set(item) != {"event", "generation"}:
+        if not isinstance(item, Mapping) or set(item) not in {
+            frozenset({"event", "generation"}),
+            frozenset({"event", "generation", "blocker_set_sha256", "blocker_count"}),
+            frozenset(
+                {
+                    "event",
+                    "generation",
+                    "blocker_set_sha256",
+                    "blocker_count",
+                    "transaction_id",
+                }
+            ),
+        }:
             raise ReviewInputError("session history progress item is invalid")
         if item.get("event") not in {"completed", "invalidated", "recovery-required"}:
             raise ReviewInputError("session history progress event is invalid")
@@ -326,6 +349,26 @@ def _stored_convergence_history(
             minimum=0,
             maximum=MAX_GENERATION,
         )
+        if "blocker_set_sha256" in item:
+            if item.get("event") != "completed":
+                raise ReviewInputError("session history blocker set event is invalid")
+            digest = item.get("blocker_set_sha256")
+            if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+                raise ReviewInputError("session history blocker set digest is invalid")
+            _require_bounded_int(
+                item.get("blocker_count"),
+                label="session history blocker count",
+                minimum=0,
+                maximum=MAX_DURABLE_BLOCKER_COUNT,
+            )
+            if "transaction_id" in item:
+                transaction_id = item.get("transaction_id")
+                if not isinstance(transaction_id, str) or not _SHA256.fullmatch(
+                    transaction_id
+                ):
+                    raise ReviewInputError(
+                        "session history blocker transaction id is invalid"
+                    )
     provenance = normalized.get("provenance")
     if not isinstance(provenance, Mapping) or set(provenance) != {"ledger_digest"}:
         raise ReviewInputError("session history provenance is invalid")
@@ -333,6 +376,100 @@ def _stored_convergence_history(
     if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
         raise ReviewInputError("session history ledger_digest is invalid")
     return cast(dict[str, object], normalized)
+
+
+def blocker_set_digest(fingerprints: Sequence[str]) -> tuple[str, int]:
+    """Return the digest and cardinality of admitted blocker fingerprints.
+
+    ``fingerprints`` is a sequence of canonical finding-lifecycle identities:
+    lowercase SHA-256 strings, not paths, prose, or provider output.  The
+    strict input contract keeps persisted progress markers comparable across
+    runtimes and prevents alternate encodings from creating false progress.
+    """
+
+    values = tuple(fingerprints)
+    if any(
+        not isinstance(value, str) or not _SHA256.fullmatch(value) for value in values
+    ):
+        raise ReviewInputError("blocker fingerprint is invalid")
+    canonical = tuple(sorted(set(values)))
+    return (
+        hashlib.sha256(
+            json.dumps(canonical, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        len(canonical),
+    )
+
+
+def convergence_progress_blocker_markers(
+    history: Mapping[str, object] | None,
+) -> tuple[tuple[str, int, str | None], ...]:
+    """Return complete blocker markers, rejecting malformed metadata.
+
+    Legacy lifecycle-only entries remain intentionally ignored, but an entry
+    that starts claiming blocker metadata must be complete and well-typed.
+    Failing closed here prevents a malformed in-memory or bypassed history
+    from being converted into an empty window, which the no-progress detector
+    treats as verified progress.
+    """
+
+    if not isinstance(history, Mapping):
+        return ()
+    if "progress" not in history:
+        return ()
+    progress = history.get("progress")
+    if not isinstance(progress, list):
+        raise ReviewInputError("session convergence progress is invalid")
+    if len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES:
+        raise ReviewInputError(
+            "session convergence progress exceeds the configured bound"
+        )
+    result: list[tuple[str, int, str | None]] = []
+    for item in progress:
+        if not isinstance(item, Mapping):
+            raise ReviewInputError("session convergence progress item is invalid")
+        has_digest = "blocker_set_sha256" in item
+        has_count = "blocker_count" in item
+        if not has_digest and not has_count:
+            continue
+        if not has_digest or not has_count:
+            raise ReviewInputError("session convergence blocker marker is incomplete")
+        if item.get("event") != "completed":
+            raise ReviewInputError("session convergence blocker event is invalid")
+        digest = item.get("blocker_set_sha256")
+        count = item.get("blocker_count")
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ReviewInputError("session convergence blocker digest is invalid")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ReviewInputError("session convergence blocker count is invalid")
+        if count > MAX_DURABLE_BLOCKER_COUNT:
+            raise ReviewInputError(
+                "session convergence blocker count exceeds the configured bound"
+            )
+        transaction_id: str | None = None
+        if "transaction_id" in item:
+            transaction_id = item.get("transaction_id")
+            if not isinstance(transaction_id, str) or not _SHA256.fullmatch(
+                transaction_id
+            ):
+                raise ReviewInputError(
+                    "session convergence blocker transaction id is invalid"
+                )
+        result.append((digest, count, transaction_id))
+    return tuple(result)
+
+
+def convergence_progress_blocker_sets(
+    history: Mapping[str, object] | None,
+) -> tuple[tuple[str, int], ...]:
+    """Return complete blocker identities without dropping their order."""
+
+    return tuple(
+        (digest, count)
+        for digest, count, _transaction_id in convergence_progress_blocker_markers(
+            history
+        )
+    )
 
 
 def _validate_convergence_history_baseline(
@@ -1683,6 +1820,7 @@ def _checkpoint_transaction_record(
         "publication_pending",
         "publication_failed",
         "publication_succeeded",
+        "publication_suppressed",
     }:
         if record.transaction.result_sha256 != result_digest:
             raise ReviewInputError("session transaction result digest does not match")
@@ -1719,10 +1857,33 @@ def _checkpoint_transaction_record(
             or baseline.generation != next_generation
         ):
             raise ReviewInputError("baseline does not match the review transaction")
+        prior_progress: list[object] = []
+        if isinstance(convergence_history, Mapping):
+            stored_progress = convergence_history.get("progress")
+            if isinstance(stored_progress, list):
+                # A checkpoint writes a markerless lifecycle placeholder for
+                # the transaction that is about to be admitted.  Keep the
+                # comparable blocker-bearing entries, rather than letting
+                # that placeholder evict the immediately preceding F3
+                # evidence from the bounded window.
+                comparable_progress: list[object] = [
+                    item
+                    for item in stored_progress
+                    if isinstance(item, Mapping)
+                    and item.get("event") == "completed"
+                    and "blocker_set_sha256" in item
+                    and "blocker_count" in item
+                ]
+                prior_progress = comparable_progress[
+                    -(MAX_CONVERGENCE_PROGRESS_ENTRIES - 1) :
+                ]
         convergence_history = {
             "state": "completed",
             "baseline": baseline_history_document(baseline),
-            "progress": [{"event": "completed", "generation": next_generation}],
+            "progress": [
+                *prior_progress,
+                {"event": "completed", "generation": next_generation},
+            ],
             # Bind the checkpoint to the integrity-protected ledger state it
             # advances.  It is not a self-reference to the newly computed
             # record digest.
@@ -1884,13 +2045,19 @@ def complete_review_publication(
             raise ReviewInputError("durable transaction does not match")
         if not current.logical_identity_matches(transaction):
             raise ReviewInputError("publication transaction identity does not match")
+        # ``current`` is the durable ReviewTransaction, not the enclosing
+        # SessionRecord. Older bound result artifacts are allowed to replay;
+        # only a caller that claims a generation newer than the durable
+        # transaction is stale. The marker-generation check below refers to
+        # this same transaction generation and is skipped for an owned
+        # terminal replay.
         if transaction.generation > current.generation:
             raise ReviewInputError("publication transaction generation is stale")
         # A durable success is terminal for the publication side of the
         # transaction. A later timeout or duplicate failure observation must
         # not downgrade it or raise while the caller is retrying at-least-once
         # delivery.
-        if current.phase == "publication_succeeded":
+        if current.phase in {"publication_succeeded", "publication_suppressed"}:
             return record
         if current.phase == "publication_failed" and not published:
             return record
@@ -1918,6 +2085,177 @@ def complete_review_publication(
         )
         return record.evolve(
             now=now, generation=next_generation, transaction=updated_transaction
+        )
+
+    return ledger.replace(identity, mutate, now=now)
+
+
+def suppress_review_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Terminally record a policy handoff without making it retryable publish work."""
+
+    if not isinstance(transaction, ReviewTransaction):
+        raise ReviewInputError("review transaction is invalid")
+
+    def mutate(record: SessionRecord) -> SessionRecord:
+        current = record.transaction
+        if current is None or current.transaction_id != transaction.transaction_id:
+            raise ReviewInputError("durable transaction does not match")
+        if not current.logical_identity_matches(transaction):
+            raise ReviewInputError("publication transaction identity does not match")
+        if current.phase == "publication_suppressed":
+            return record
+        if current.phase not in {"publication_pending", "publication_failed"}:
+            raise ReviewInputError(
+                "publication suppression phase transition is invalid"
+            )
+        if (
+            transaction.result_sha256 is None
+            or current.result_sha256 != transaction.result_sha256
+        ):
+            raise ReviewInputError("publication result digest does not match")
+        return record.evolve(
+            now=now,
+            generation=_next_generation(record),
+            transaction=current.with_phase("publication_suppressed"),
+        )
+
+    return ledger.replace(identity, mutate, now=now)
+
+
+def record_admitted_blocker_progress(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    blocker_set_sha256: str,
+    blocker_count: int,
+    suppress_publication: bool,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Persist one post-admission blocker identity and optionally hand off.
+
+    The only writer is the publication boundary after it has admitted the
+    exact result it will hand to the GitHub publisher. A suppression and its
+    evidence are consequently one compare-and-swap transition, rather than a
+    retryable publication failure.
+    """
+
+    if not isinstance(transaction, ReviewTransaction):
+        raise ReviewInputError("review transaction is invalid")
+    if not isinstance(blocker_set_sha256, str) or not _SHA256.fullmatch(
+        blocker_set_sha256
+    ):
+        raise ReviewInputError("blocker set digest is invalid")
+    _require_bounded_int(
+        blocker_count,
+        label="blocker set count",
+        minimum=0,
+        maximum=MAX_DURABLE_BLOCKER_COUNT,
+    )
+    if not isinstance(suppress_publication, bool):
+        raise ReviewInputError("publication suppression flag is invalid")
+
+    def mutate(record: SessionRecord) -> SessionRecord:
+        current = record.transaction
+        if current is None or current.transaction_id != transaction.transaction_id:
+            raise ReviewInputError("durable transaction does not match")
+        if not current.logical_identity_matches(transaction):
+            raise ReviewInputError("publication transaction identity does not match")
+        if transaction.generation > current.generation:
+            raise ReviewInputError("publication transaction generation is stale")
+        if (
+            transaction.result_sha256 is None
+            or current.result_sha256 != transaction.result_sha256
+        ):
+            raise ReviewInputError("publication result digest does not match")
+        history = record.convergence_history
+        if not isinstance(history, Mapping) or history.get("state") != "completed":
+            raise ReviewInputError("durable convergence history is unavailable")
+        progress = history.get("progress")
+        if not isinstance(progress, list) or not progress:
+            raise ReviewInputError("durable convergence progress is unavailable")
+        if len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES:
+            raise ReviewInputError(
+                "durable convergence progress exceeds the configured bound"
+            )
+        last = progress[-1]
+        if not isinstance(last, Mapping) or last.get("event") != "completed":
+            raise ReviewInputError("durable convergence progress is invalid")
+        item = {
+            "event": "completed",
+            "generation": current.generation,
+            "blocker_set_sha256": blocker_set_sha256,
+            "blocker_count": blocker_count,
+            "transaction_id": current.transaction_id,
+        }
+        marker_matches = (
+            last.get("blocker_set_sha256") == blocker_set_sha256
+            and last.get("blocker_count") == blocker_count
+            and last.get("transaction_id") == current.transaction_id
+        )
+        if (
+            current.phase in {"publication_failed", "publication_succeeded"}
+            and marker_matches
+        ):
+            # A retry can observe a terminal transaction whose record
+            # generation advanced while the admitted progress marker still
+            # carries the transaction generation from before publication. The
+            # transaction id is the ownership witness: an older round with
+            # the same blocker set must never be treated as this retry.
+            if current.phase == "publication_failed" and suppress_publication:
+                updated_history = dict(history)
+                updated_history["progress"] = [*progress[:-1], item]
+                return record.evolve(
+                    now=now,
+                    generation=_next_generation(record),
+                    transaction=current.with_phase("publication_suppressed"),
+                    convergence_history=updated_history,
+                )
+            # The exact marker is already durable; do not charge a second
+            # generation for a retry that remains failed or already succeeded.
+            return record
+        if current.phase == "publication_suppressed":
+            if dict(last) != item:
+                raise ReviewInputError("durable blocker progress does not match")
+            return record
+        if (
+            current.phase in {"publication_pending", "publication_failed"}
+            and dict(last) == item
+        ):
+            # A retry can observe the same admitted result after the caller
+            # crashed between this CAS and the GitHub write. The progress
+            # evidence is already durable; do not charge another generation.
+            return record
+        if last.get("generation") != current.generation:
+            raise ReviewInputError(
+                "durable convergence progress does not match transaction"
+            )
+        if current.phase != "publication_pending":
+            raise ReviewInputError("publication progress phase transition is invalid")
+        if set(last) == set(item) and dict(last) != item:
+            raise ReviewInputError("durable blocker progress does not match")
+        # Admission replaces the transaction's final checkpoint placeholder;
+        # it never appends a fourth lifecycle entry. The loader and this
+        # explicit guard keep a bypassed in-memory record from silently
+        # evicting or reordering older evidence.
+        updated_history = dict(history)
+        updated_history["progress"] = [*progress[:-1], item]
+        next_transaction = (
+            current.with_phase("publication_suppressed")
+            if suppress_publication
+            else current
+        )
+        return record.evolve(
+            now=now,
+            generation=_next_generation(record),
+            transaction=next_transaction,
+            convergence_history=updated_history,
         )
 
     return ledger.replace(identity, mutate, now=now)

@@ -9,24 +9,30 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.baseline import ReviewBaseline, baseline_from_history_document
+from review_sensei.baseline import (
+    ReviewBaseline,
+    baseline_from_history_document,
+    baseline_history_document,
+)
 from review_sensei.cli import (
     _checkpoint_cache_request,
     _parser,
     _transaction_provider_identity,
     main,
 )
-from review_sensei.context import ReviewContextCacheKey
-from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import (
     GitHubApplication,
     GitHubWriteOptions,
     PublicationResult,
+    ReviewPublisher,
 )
 from review_sensei.hosting.github.errors import GitHubPublicationError
 from review_sensei.models import (
     ProviderResponse,
+    ReviewComment,
     ReviewRequest,
     ReviewResult,
     ReviewTransaction,
@@ -39,12 +45,16 @@ from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    blocker_set_digest,
     checkpoint_review_analysis,
     complete_review_publication,
+    convergence_progress_blocker_sets,
     load_review_transaction_for_publication,
     prepare_review_transaction,
     reclaim_abandoned_review_transaction,
+    record_admitted_blocker_progress,
     session_reservation_id,
+    suppress_review_publication,
 )
 
 try:
@@ -107,6 +117,55 @@ def _checkpoint(ledger: InMemorySessionLedger) -> ReviewResult:
         now=NOW,
     )
     return checkpoint_review_analysis(ledger, IDENTITY, prepared, _result(), now=NOW)
+
+
+def _baseline(generation: int) -> ReviewBaseline:
+    return ReviewBaseline(
+        cache_key=ReviewContextCacheKey(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="1" * 64,
+            context_digest="2" * 64,
+            learning_digest="3" * 64,
+        ),
+        policy_digest=POLICY.digest(),
+        complete=True,
+        coverage_complete=True,
+        generation=generation,
+    )
+
+
+def _checkpoint_with_baseline(ledger: InMemorySessionLedger) -> ReviewResult:
+    reservation = session_reservation_id(
+        repository=IDENTITY.repository,
+        pull_request=IDENTITY.pull_request,
+        head_sha=HEAD_SHA,
+        kind="publish",
+    )
+    prepared = prepare_review_transaction(
+        ledger,
+        IDENTITY,
+        POLICY,
+        reservation_id=reservation,
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        configuration_digest=CONFIGURATION_DIGEST,
+        evidence_digest=EVIDENCE_DIGEST,
+        now=NOW,
+    )
+    return checkpoint_review_analysis(
+        ledger,
+        IDENTITY,
+        prepared,
+        _result(),
+        baseline=_baseline(prepared.record.generation + 1),
+        now=NOW,
+    )
 
 
 class ReviewTransactionTests(unittest.TestCase):
@@ -280,6 +339,33 @@ class ReviewTransactionTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             validate_public_document(analysis_with_digest, "review-transaction")
 
+    def test_transaction_phase_transitions_accept_only_publication_suppression_path(
+        self,
+    ):
+        ledger = InMemorySessionLedger()
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id=session_reservation_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                kind="phase-transition",
+            ),
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        analysis = prepared.transaction
+        with self.assertRaisesRegex(ReviewInputError, "transition"):
+            analysis.with_phase("publication_suppressed")
+        failed = analysis.with_result("c" * 64).with_phase("publication_failed")
+        suppressed = failed.with_phase("publication_suppressed")
+        self.assertEqual(suppressed.phase, "publication_suppressed")
+
     def test_result_checkpoint_counts_once_and_replays(self):
         ledger = InMemorySessionLedger()
         result = _checkpoint(ledger)
@@ -326,6 +412,324 @@ class ReviewTransactionTests(unittest.TestCase):
         self.assertEqual(replay.transaction.phase, "publication_succeeded")
         self.assertEqual(replay.generation, succeeded.generation)
         self.assertEqual(replay.completed_initial_reviews, 1)
+
+    def test_publication_suppression_is_terminal_and_idempotent(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        suppressed = suppress_review_publication(
+            ledger, IDENTITY, result.transaction, now=NOW
+        )
+        self.assertEqual(suppressed.transaction.phase, "publication_suppressed")
+        self.assertEqual(suppressed.completed_initial_reviews, 1)
+        replay = suppress_review_publication(
+            ledger, IDENTITY, suppressed.transaction, now=NOW
+        )
+        self.assertEqual(replay.generation, suppressed.generation)
+        cleanup = complete_review_publication(
+            ledger, IDENTITY, suppressed.transaction, published=True, now=NOW
+        )
+        self.assertEqual(cleanup.generation, suppressed.generation)
+        self.assertEqual(cleanup.transaction.phase, "publication_suppressed")
+
+    def test_failed_publication_retry_can_become_terminally_suppressed(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        failed = complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=False, now=NOW
+        )
+        suppressed = suppress_review_publication(
+            ledger, IDENTITY, failed.transaction, now=NOW
+        )
+        self.assertEqual(suppressed.transaction.phase, "publication_suppressed")
+        self.assertEqual(suppressed.generation, failed.generation + 1)
+        replay = suppress_review_publication(
+            ledger, IDENTITY, suppressed.transaction, now=NOW
+        )
+        self.assertEqual(replay.generation, suppressed.generation)
+        self.assertEqual(replay.transaction.phase, "publication_suppressed")
+
+    def test_admitted_blocker_progress_and_suppression_are_one_terminal_transition(
+        self,
+    ):
+        ledger = InMemorySessionLedger()
+        reservation = session_reservation_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            kind="publish",
+        )
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id=reservation,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=POLICY.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=prepared.record.generation + 1,
+        )
+        result = checkpoint_review_analysis(
+            ledger, IDENTITY, prepared, _result(), baseline=baseline, now=NOW
+        )
+        suppressed = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=True,
+            now=NOW,
+        )
+        self.assertEqual(suppressed.transaction.phase, "publication_suppressed")
+        self.assertEqual(
+            suppressed.convergence_history["progress"],
+            [
+                {
+                    "event": "completed",
+                    "generation": result.transaction.generation,
+                    "blocker_set_sha256": "a" * 64,
+                    "blocker_count": 1,
+                    "transaction_id": result.transaction.transaction_id,
+                }
+            ],
+        )
+        replay = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=True,
+            now=NOW,
+        )
+        self.assertEqual(replay.generation, suppressed.generation)
+        with self.assertRaisesRegex(ReviewInputError, "blocker progress"):
+            record_admitted_blocker_progress(
+                ledger,
+                IDENTITY,
+                result.transaction,
+                blocker_set_sha256="b" * 64,
+                blocker_count=1,
+                suppress_publication=True,
+                now=NOW,
+            )
+
+    def test_admitted_blocker_progress_replay_is_idempotent_before_publication(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint(ledger)
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=POLICY.digest(),
+            complete=True,
+            coverage_complete=True,
+            reviewed_paths=("src/app.py",),
+            generation=result.transaction.generation,
+        )
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                convergence_history={
+                    "state": "completed",
+                    "baseline": baseline_history_document(baseline),
+                    "progress": [
+                        {
+                            "event": "completed",
+                            "generation": result.transaction.generation,
+                        }
+                    ],
+                    "provenance": {"ledger_digest": record.record_sha256},
+                },
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        pending = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        replay = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        self.assertEqual(replay.generation, pending.generation)
+        failed = complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=False, now=NOW
+        )
+        advanced = ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                generation=current.generation + 1,
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        failed_replay = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            failed.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        self.assertEqual(failed_replay.generation, advanced.generation)
+        succeeded = complete_review_publication(
+            ledger, IDENTITY, result.transaction, published=True, now=NOW
+        )
+        self.assertLess(
+            succeeded.convergence_history["progress"][-1]["generation"],
+            succeeded.generation,
+        )
+        succeeded_replay = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            succeeded.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        self.assertEqual(succeeded_replay.generation, succeeded.generation)
+
+    def test_terminal_replay_requires_transaction_owned_progress_marker(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint_with_baseline(ledger)
+        pending = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        failed = complete_review_publication(
+            ledger, IDENTITY, pending.transaction, published=False, now=NOW
+        )
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        history = dict(record.convergence_history)
+        progress = list(history["progress"])
+        progress[-1] = {**progress[-1], "transaction_id": "f" * 64}
+        history["progress"] = progress
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                convergence_history=history,
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "does not match transaction"):
+            record_admitted_blocker_progress(
+                ledger,
+                IDENTITY,
+                failed.transaction,
+                blocker_set_sha256="a" * 64,
+                blocker_count=1,
+                suppress_publication=False,
+                now=NOW,
+            )
+
+    def test_checkpoint_preserves_comparable_blocker_window(self):
+        ledger = InMemorySessionLedger()
+        first = _checkpoint_with_baseline(ledger)
+        complete_review_publication(
+            ledger, IDENTITY, first.transaction, published=True, now=NOW
+        )
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        history = dict(record.convergence_history)
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "a" * 64,
+                "blocker_count": 1,
+            },
+            {
+                "event": "completed",
+                "generation": 2,
+                "blocker_set_sha256": "b" * 64,
+                "blocker_count": 1,
+            },
+            {"event": "completed", "generation": 3},
+        ]
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                convergence_history=history,
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id="f" * 64,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        checkpoint_review_analysis(
+            ledger,
+            IDENTITY,
+            prepared,
+            _result(),
+            baseline=_baseline(prepared.record.generation + 1),
+            now=NOW,
+        )
+        self.assertEqual(
+            convergence_progress_blocker_sets(
+                ledger.load(IDENTITY, now=NOW).record.convergence_history
+            ),
+            (("a" * 64, 1), ("b" * 64, 1)),
+        )
 
     def test_trusted_context_mismatch_fails_closed(self):
         ledger = InMemorySessionLedger()
@@ -1752,6 +2156,158 @@ class _Noop:
 
 
 class PublicationTransactionTests(unittest.TestCase):
+    def test_application_suppresses_repeated_or_oscillating_blockers_before_publish(
+        self,
+    ):
+        class Publisher(ReviewPublisher):
+            def __init__(self) -> None:
+                super().__init__(http=object())
+                self.calls = 0
+
+            def publish(self, **kwargs):
+                self.calls += 1
+                return PublicationResult(status="published", review_id=1)
+
+        ledger = InMemorySessionLedger()
+        reservation = session_reservation_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            kind="publish",
+        )
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id=reservation,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=POLICY.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=prepared.record.generation + 1,
+        )
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="The changed path needs a bounded input check.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        result = checkpoint_review_analysis(
+            ledger,
+            IDENTITY,
+            prepared,
+            ReviewResult(
+                summary="Complete.",
+                comments=(comment,),
+                provider="fixture",
+                model="fixture-model",
+                review_status="complete",
+            ),
+            baseline=baseline,
+            now=NOW,
+        )
+        candidate = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        digest, count = blocker_set_digest(
+            (finding_lifecycle_for_comment(comment).fingerprint,)
+        )
+        empty_digest, empty_count = blocker_set_digest(())
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        history = dict(record.convergence_history)
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": digest,
+                "blocker_count": count,
+            },
+            {
+                "event": "completed",
+                "generation": 2,
+                "blocker_set_sha256": empty_digest,
+                "blocker_count": empty_count,
+            },
+            {
+                "event": "completed",
+                "generation": result.transaction.generation,
+            },
+        ]
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(convergence_history=history, now=NOW),
+            now=NOW,
+        )
+        publisher = Publisher()
+        application = GitHubApplication(
+            broker=_Broker(),
+            http=None,
+            reviewer=publisher,
+            learner=_Noop(),
+            replier=_Noop(),
+            session_ledger=ledger,
+        )
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            result=result,
+            diff=(
+                "diff --git a/src/app.py b/src/app.py\n"
+                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,2 @@\n keep\n+change\n"
+            ),
+            app_slug="review-sensei[bot]",
+            convergence_policy=POLICY,
+            blocker_candidates=(candidate,),
+            baseline=baseline,
+            current_key=baseline.cache_key,
+            configuration_context=CONFIGURATION,
+            evidence_context=EVIDENCE,
+        )
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "no_progress")
+        self.assertEqual(outcome.transaction_id, result.transaction.transaction_id)
+        self.assertEqual(
+            outcome.generation, ledger.load(IDENTITY, now=NOW).record.generation
+        )
+        self.assertEqual(publisher.calls, 0)
+        self.assertEqual(
+            ledger.load(IDENTITY, now=NOW).record.transaction.phase,
+            "publication_suppressed",
+        )
+
     def test_application_rejects_bound_result_before_broker_without_ledger(self):
         result = _checkpoint(InMemorySessionLedger())
         broker = _Broker()

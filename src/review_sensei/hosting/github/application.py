@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
-from ...context import ReviewContextCacheKey
+from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
     ReviewConvergencePolicy,
     RoundSessionState,
+    detect_no_progress,
     observe_shadow_admission,
 )
 from ...conversation import ConversationService
@@ -28,15 +29,18 @@ from ...session import (
     SessionIdentity,
     SessionLedger,
     admission_diagnostic,
+    blocker_set_digest,
     complete_review_publication,
     complete_session_round,
+    convergence_progress_blocker_markers,
     load_review_transaction_for_publication,
     prepare_session_round,
+    record_admitted_blocker_progress,
     record_session_failed_attempt,
     session_reservation_id,
     should_skip_automation,
 )
-from ...verifier import CandidateFinding
+from ...verifier import CandidateFinding, PublishableReview
 from .approval import has_blocking_findings, has_human_adjudication_findings
 from .broker_client import BrokerClient
 from .conversation import (
@@ -47,7 +51,11 @@ from .conversation import (
 from .errors import GitHubPublicationError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher, LearningPRResult
-from .publication import PublicationResult, ReviewPublisher
+from .publication import (
+    PublicationResult,
+    ReviewPublisher,
+    prepare_publication_review,
+)
 
 
 @dataclass(frozen=True)
@@ -110,7 +118,6 @@ class GitHubApplication:
         related_paths: Sequence[str] | None = None,
         evidence_confirmed_concerns: Sequence[str] = (),
         continuation_rounds: int = 0,
-        no_progress: bool = False,
         configuration_context: Mapping[str, object] | None = None,
         evidence_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
@@ -151,7 +158,8 @@ class GitHubApplication:
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
         )
-        operator_baseline_requested = policy.mode in OPERATOR_REVIEW_MODES and (
+        operator_mode = policy.mode in OPERATOR_REVIEW_MODES
+        operator_baseline_requested = operator_mode and (
             (isinstance(result, ReviewResult) and result.transaction is not None)
             or options.github_session_ledger
             or baseline is not None
@@ -370,10 +378,10 @@ class GitHubApplication:
             "coverage_complete": False,
             "independently_approval_eligible": False,
             "latest_head_reviewed": False,
-            "no_progress": no_progress,
+            "no_progress": False,
         }
         if isinstance(result, ReviewResult):
-            flags = _publication_round_flags(result, no_progress=no_progress)
+            flags = _publication_round_flags(result)
         if (
             ledger is not None
             and transaction_record is None
@@ -397,7 +405,6 @@ class GitHubApplication:
                         "independently_approval_eligible"
                     ],
                     latest_head_reviewed=flags["latest_head_reviewed"],
-                    no_progress=flags["no_progress"],
                 )
                 if should_skip_automation(prepared.decision, inference=False):
                     return _with_shadow(
@@ -457,6 +464,18 @@ class GitHubApplication:
             and transaction_record.transaction.result_sha256 is not None
             and result.content_digest() == transaction_record.transaction.result_sha256
         )
+        if (
+            validated_transaction_recovery
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.phase == "publication_suppressed"
+        ):
+            return PublicationResult(
+                status="handoff",
+                diagnostic="no_progress",
+                transaction_id=transaction_record.transaction.transaction_id,
+                generation=transaction_record.generation,
+            )
         baseline_admission_required = (
             operator_baseline_requested and not validated_transaction_recovery
         )
@@ -503,6 +522,39 @@ class GitHubApplication:
                             )
                         except ReviewInputError:
                             baseline_recovery_required = True
+        if (
+            operator_mode
+            and ledger is not None
+            and (not isinstance(result, ReviewResult) or result.transaction is None)
+            and durable_baseline is None
+            and not baseline_recovery_required
+            and baseline is None
+            and current_key is None
+        ):
+            # F3 admission is bound to the durable transaction and its
+            # marker. A fresh operator-ledger call without a transaction or
+            # trusted baseline cannot safely infer or suppress a review, so
+            # release any reservation and hand off for the caller to create
+            # the identity-bound transaction first.
+            if prepared is not None and prepared.reservation_id is not None:
+                cleanup_error = self._abort_held_session_reservation(
+                    ledger, identity, prepared.reservation_id
+                )
+                if cleanup_error is not None:
+                    raise GitHubPublicationError(
+                        "operator transaction is unavailable and reservation "
+                        "cleanup failed"
+                    ) from cleanup_error
+            return _with_shadow(
+                PublicationResult(
+                    status="handoff",
+                    diagnostic="identity-bound transaction required",
+                ),
+                _shadow_observation(
+                    _shadow_state(prepared, flags),
+                    continuation_rounds=continuation_rounds,
+                ),
+            )
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
         # Falling back to the prior key would treat an unknown head/configuration
@@ -536,6 +588,197 @@ class GitHubApplication:
             # silently widen it with paths persisted for an earlier head.
             publication_related_paths = () if related_paths is None else related_paths
         try:
+            prepared_publishable: PublishableReview | None = None
+            if (
+                operator_mode
+                and ledger is not None
+                and transaction_record is not None
+                and transaction_record.transaction is not None
+                and (
+                    callable(getattr(self.reviewer, "prepare", None))
+                    or not validated_transaction_recovery
+                )
+            ):
+                prepare = getattr(self.reviewer, "prepare", None)
+                # This is the sole post-admission result: its effective
+                # blockers are both recorded for F3 and passed unchanged to
+                # the publisher below. A publisher adapter may expose only
+                # ``publish``; use the shared preparation routine in that
+                # case rather than silently dropping the caller's blocker
+                # facts or bypassing admission.
+                if callable(prepare):
+                    prepared_publishable = prepare(
+                        result=result,
+                        diff=diff,
+                        head_sha=head_sha,
+                        candidates=candidates,
+                        snapshot=snapshot,
+                        snapshot_sha256=snapshot_sha256,
+                        evidence_policy=evidence_policy,
+                        convergence_policy=convergence_policy,
+                        blocker_candidates=blocker_candidates,
+                        input_blocker_candidates=input_blocker_candidates,
+                        baseline=durable_baseline,
+                        current_key=current_key,
+                        changed_paths=changed_paths,
+                        related_paths=publication_related_paths,
+                        evidence_confirmed_concerns=evidence_confirmed_concerns,
+                        authorized_dispositions=authorized_dispositions,
+                    )
+                else:
+                    prepared_publishable = prepare_publication_review(
+                        result=result,
+                        diff=diff,
+                        head_sha=head_sha,
+                        candidates=candidates,
+                        snapshot=snapshot,
+                        snapshot_sha256=snapshot_sha256,
+                        evidence_policy=evidence_policy,
+                        convergence_policy=convergence_policy,
+                        blocker_candidates=blocker_candidates,
+                        input_blocker_candidates=input_blocker_candidates,
+                        baseline=durable_baseline,
+                        current_key=current_key,
+                        changed_paths=changed_paths,
+                        related_paths=publication_related_paths,
+                        evidence_confirmed_concerns=evidence_confirmed_concerns,
+                        authorized_dispositions=authorized_dispositions,
+                    )
+                current_blockers = blocker_set_digest(
+                    tuple(
+                        finding_lifecycle_for_comment(comment).fingerprint
+                        for comment in prepared_publishable.result.comments
+                        if comment.effective_blocking is True
+                    )
+                )
+                prior_markers = convergence_progress_blocker_markers(
+                    transaction_record.convergence_history
+                )
+                prior_blockers = tuple(
+                    (digest, count) for digest, count, _transaction_id in prior_markers
+                )
+                if validated_transaction_recovery and transaction_record.transaction:
+                    history = transaction_record.convergence_history
+                    progress = (
+                        history.get("progress")
+                        if isinstance(history, Mapping)
+                        else None
+                    )
+                    if (
+                        isinstance(progress, list)
+                        and progress
+                        and isinstance(progress[-1], Mapping)
+                        and "blocker_set_sha256" in progress[-1]
+                        and "blocker_count" in progress[-1]
+                        and progress[-1].get("transaction_id")
+                        == transaction_record.transaction.transaction_id
+                    ):
+                        # This result already has a durable blocker marker. It
+                        # belongs to the recovery attempt being replayed, not
+                        # to the prior round window used for no-progress.
+                        # Filter by ownership rather than by a projected list
+                        # position: lifecycle-only placeholders are omitted
+                        # from ``prior_markers``.
+                        prior_markers = tuple(
+                            marker
+                            for marker in prior_markers
+                            if marker[2]
+                            != transaction_record.transaction.transaction_id
+                        )
+                        prior_blockers = tuple(
+                            (digest, count)
+                            for digest, count, _transaction_id in prior_markers
+                        )
+
+                def blocker_set_identity(value: tuple[str, int]) -> tuple[str, ...]:
+                    """Wrap the canonical whole-set digest for the detector."""
+
+                    # ``blocker_set_sha256`` already identifies the complete
+                    # admitted set; it is not one finding fingerprint. The
+                    # digest/count pair is storage metadata, so an empty
+                    # admitted set must not become a synthetic singleton.
+                    return (value[0],) if value[1] else ()
+
+                no_progress = detect_no_progress(
+                    previous_blocking=(*blocker_set_identity(prior_blockers[-1]),)
+                    if prior_blockers
+                    else (),
+                    current_blocking=blocker_set_identity(current_blockers),
+                    earlier_blocking=(*blocker_set_identity(prior_blockers[-2]),)
+                    if len(prior_blockers) >= 2
+                    else (),
+                )
+                flags["no_progress"] = no_progress
+                durable_transaction = transaction_record.transaction
+                # Every admitted set is recorded, including an empty set. An
+                # empty set is progress, but retaining it in the bounded
+                # window is what lets a later A -> empty -> A regression be
+                # classified as oscillation.
+                admitted_record = record_admitted_blocker_progress(
+                    ledger,
+                    identity,
+                    durable_transaction,
+                    blocker_set_sha256=current_blockers[0],
+                    blocker_count=current_blockers[1],
+                    suppress_publication=no_progress,
+                )
+                if (
+                    admitted_record.transaction is not None
+                    and admitted_record.transaction.phase == "publication_succeeded"
+                ):
+                    return PublicationResult(
+                        status="already_published",
+                        diagnostic="transaction-publication-complete",
+                        transaction_id=admitted_record.transaction.transaction_id,
+                        generation=admitted_record.generation,
+                    )
+                if no_progress:
+                    return _with_shadow(
+                        PublicationResult(
+                            status="handoff",
+                            diagnostic="no_progress",
+                            transaction_id=durable_transaction.transaction_id,
+                            generation=admitted_record.generation,
+                        ),
+                        _shadow_observation(
+                            _shadow_state(prepared, flags),
+                            continuation_rounds=continuation_rounds,
+                        ),
+                    )
+            publisher_has_prepare = callable(getattr(self.reviewer, "prepare", None))
+            publisher_result = (
+                prepared_publishable.result
+                if prepared_publishable is not None and not publisher_has_prepare
+                else result
+            )
+            publisher_arguments: dict[str, Any] = {
+                "token": token,
+                "repository": repository,
+                "repository_id": repository_id,
+                "pull_request": pull_request,
+                "head_sha": head_sha,
+                "base_branch": base_branch,
+                "base_sha": base_sha,
+                "result": publisher_result,
+                "diff": diff,
+                "app_slug": app_slug,
+                "auto_approve": options.auto_approve,
+                "candidates": candidates,
+                "snapshot": snapshot,
+                "snapshot_sha256": snapshot_sha256,
+                "evidence_policy": evidence_policy,
+                "convergence_policy": convergence_policy,
+                "blocker_candidates": blocker_candidates,
+                "input_blocker_candidates": input_blocker_candidates,
+                "baseline": durable_baseline,
+                "current_key": current_key,
+                "changed_paths": changed_paths,
+                "related_paths": publication_related_paths,
+                "evidence_confirmed_concerns": evidence_confirmed_concerns,
+                "authorized_dispositions": authorized_dispositions,
+            }
+            if publisher_has_prepare:
+                publisher_arguments["prepared_review"] = prepared_publishable
             publication = (
                 PublicationResult(
                     status="handoff",
@@ -547,32 +790,7 @@ class GitHubApplication:
                     or (durable_baseline is not None and current_key is None)
                     or verification_transaction_recovery_required
                 )
-                else self.reviewer.publish(
-                    token=token,
-                    repository=repository,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_branch=base_branch,
-                    base_sha=base_sha,
-                    result=result,
-                    diff=diff,
-                    app_slug=app_slug,
-                    auto_approve=options.auto_approve,
-                    candidates=candidates,
-                    snapshot=snapshot,
-                    snapshot_sha256=snapshot_sha256,
-                    evidence_policy=evidence_policy,
-                    convergence_policy=convergence_policy,
-                    blocker_candidates=blocker_candidates,
-                    input_blocker_candidates=input_blocker_candidates,
-                    baseline=durable_baseline,
-                    current_key=current_key,
-                    changed_paths=changed_paths,
-                    related_paths=publication_related_paths,
-                    evidence_confirmed_concerns=evidence_confirmed_concerns,
-                    authorized_dispositions=authorized_dispositions,
-                )
+                else self.reviewer.publish(**publisher_arguments)
             )
         except BaseException as publication_error:
             if (
@@ -1316,12 +1534,12 @@ def _with_shadow(
         review_id=result.review_id,
         diagnostic=result.diagnostic,
         shadow=dict(shadow),
+        transaction_id=result.transaction_id,
+        generation=result.generation,
     )
 
 
-def _publication_round_flags(
-    result: ReviewResult, *, no_progress: bool = False
-) -> dict[str, bool]:
+def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
     coverage = coverage_approval_state(result.coverage)
     coverage_complete = result.coverage is None or coverage == "reviewed"
     eligible = (
@@ -1337,5 +1555,5 @@ def _publication_round_flags(
         # publishing. A stale head returns a non-published result, and the
         # caller aborts the reservation rather than counting the round.
         "latest_head_reviewed": True,
-        "no_progress": no_progress,
+        "no_progress": False,
     }

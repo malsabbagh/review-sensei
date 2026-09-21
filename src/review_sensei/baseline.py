@@ -99,11 +99,15 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# ADR 0053 bounds the persisted convergence envelope to "at most three stable
-# concern and resolution-criterion digests". The session-record schema mirrors
-# that bound; the runtime baseline keeps the wider shared metadata budget, so
-# only the persisted projection is narrowed here.
-MAX_HISTORY_FINDINGS = 3
+# ADR 0053 reserves room in the 2 KiB envelope for three trusted blocker-set
+# identities, so the persisted baseline retains at most two findings. The
+# runtime baseline keeps the wider shared metadata budget; only its persisted
+# projection is narrowed here.
+MAX_HISTORY_FINDINGS = 2
+# New F3 writes retain two findings to reserve space for blocker progress, but
+# readers accept the three-finding F2 envelope during rolling upgrades. A
+# later checkpoint rewrites the bounded projection using MAX_HISTORY_FINDINGS.
+MAX_HISTORY_READ_FINDINGS = 3
 # The verification-scope and session-record schemas mirror these bounds; update
 # their parity tests whenever the shared metadata budget changes.
 
@@ -1312,6 +1316,7 @@ __all__ = [
     "LaterFindingClassification",
     "LINEAGE_REASONS",
     "MAX_HISTORY_FINDINGS",
+    "MAX_HISTORY_READ_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "ReviewBaseline",

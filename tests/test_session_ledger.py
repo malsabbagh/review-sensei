@@ -47,7 +47,10 @@ from review_sensei.session import (
     SessionIdentity,
     SessionLoadResult,
     SessionRecord,
+    blocker_set_digest,
     complete_session_round,
+    convergence_progress_blocker_markers,
+    convergence_progress_blocker_sets,
     issue_continuation_grant,
     migrate_session_document,
     prepare_session_round,
@@ -318,12 +321,12 @@ class SessionRecordTests(unittest.TestCase):
             reviewed_paths=("src/example.py",),
         )
         document = baseline_history_document(baseline)
-        self.assertEqual(len(document["findings"]), 3)
+        self.assertEqual(len(document["findings"]), 2)
         # Selection is deterministic and content-derived rather than dependent
         # on provider ordering or on how many retries the run took.
         self.assertEqual(
             [item["fingerprint"] for item in document["findings"]],
-            sorted(finding.fingerprint for finding in findings)[:3],
+            sorted(finding.fingerprint for finding in findings)[:2],
         )
         history = {
             "state": "completed",
@@ -357,6 +360,97 @@ class SessionRecordTests(unittest.TestCase):
         tampered["convergence_history"]["state"] = "recovery-required"  # type: ignore[index]
         with self.assertRaisesRegex(ReviewInputError, "integrity"):
             SessionRecord.from_dict(tampered)
+
+    def test_f2_three_finding_history_remains_read_compatible(self):
+        history = self._history()
+        baseline = history["baseline"]
+        assert isinstance(baseline, dict)
+        findings = baseline["findings"]
+        assert isinstance(findings, list)
+        for index in (2, 3):
+            finding = dict(findings[0])
+            finding["fingerprint"] = str(index) * 64
+            finding["resolution_criterion"] = chr(96 + index) * 64
+            finding["concern"] = ("e", "f")[index - 2] * 64
+            findings.append(finding)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        restored = SessionRecord.from_dict(record.to_dict())
+        restored_baseline = restored.convergence_history["baseline"]
+        assert isinstance(restored_baseline, dict)
+        self.assertEqual(len(restored_baseline["findings"]), 3)
+
+    def test_history_retains_three_canonical_admitted_blocker_sets_within_bound(self):
+        history = self._history()
+        first = blocker_set_digest(("1" * 64, "2" * 64))
+        second = blocker_set_digest(("3" * 64,))
+        third = blocker_set_digest(("1" * 64, "2" * 64))
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": generation,
+                "blocker_set_sha256": digest,
+                "blocker_count": count,
+                "transaction_id": str(generation) * 64,
+            }
+            for generation, (digest, count) in enumerate(
+                (first, second, third), start=1
+            )
+        ]
+        encoded = json.dumps(history, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        self.assertLessEqual(len(encoded), 2048)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        validate_public_document(record.to_dict(), "session-record")
+        self.assertEqual(
+            convergence_progress_blocker_sets(record.convergence_history),
+            (first, second, third),
+        )
+
+    def test_legacy_progress_cannot_supply_blocker_identity(self):
+        self.assertEqual(convergence_progress_blocker_sets(self._history()), ())
+
+    def test_malformed_progress_marker_fails_closed(self):
+        history = self._history()
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "not-a-sha256",
+                "blocker_count": 1,
+            }
+        ]
+        with self.assertRaisesRegex(
+            ReviewInputError, "session convergence blocker digest is invalid"
+        ):
+            convergence_progress_blocker_sets(history)
+
+    def test_progress_marker_projection_retains_owner_across_placeholders(self):
+        history = self._history()
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "a" * 64,
+                "blocker_count": 1,
+            },
+            {"event": "completed", "generation": 2},
+            {
+                "event": "completed",
+                "generation": 3,
+                "blocker_set_sha256": "b" * 64,
+                "blocker_count": 1,
+                "transaction_id": "c" * 64,
+            },
+        ]
+        self.assertEqual(
+            convergence_progress_blocker_markers(history),
+            (("a" * 64, 1, None), ("b" * 64, 1, "c" * 64)),
+        )
 
     def test_convergence_history_rejects_unknown_nested_fields(self):
         history = self._history()
@@ -2307,7 +2401,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             result=ReviewResult(summary="ok", comments=(), provider="fixture"),
             diff="diff",
             app_slug="reviewsensei[bot]",
-            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(publication.status, "published")
         self.assertEqual(
@@ -2316,15 +2410,6 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 "GET",
                 "GET",
                 "POST",
-                "GET",
-                "GET",
-                "GET",
-                "PATCH",
-                "GET",
-                "GET",
-                "GET",
-                "GET",
-                "PATCH",
                 "GET",
             ],
         )
@@ -2569,6 +2654,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                     result=ReviewResult(summary="ok", comments=(), provider="fixture"),
                     diff="diff",
                     app_slug="reviewsensei[bot]",
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
                 )
         self.assertTrue(
             any("cleanup failed" in note for note in caught.exception.__notes__)
@@ -2591,28 +2677,22 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             replier=object(),
             session_ledger=InMemorySessionLedger(),
         )
-        with patch(
-            "review_sensei.hosting.github.application.record_session_failed_attempt",
-            side_effect=ValueError("cleanup failed"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "publication failed") as caught:
-                application.publish_review(
-                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
-                    oidc_token="oidc",
-                    repository="owner/repo",
-                    repository_id=99,
-                    pull_request=136,
-                    head_sha="a" * 40,
-                    base_branch="main",
-                    base_sha="b" * 40,
-                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-                    diff="diff",
-                    app_slug="reviewsensei[bot]",
-                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
-                )
-        self.assertTrue(
-            any("cleanup failed" in note for note in caught.exception.__notes__)
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+            diff="diff",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "identity-bound transaction required")
 
     def test_publisher_base_exception_releases_a_reservation(self):
         class Broker:
@@ -2648,12 +2728,12 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 result=ReviewResult(summary="ok", comments=(), provider="fixture"),
                 diff="diff",
                 app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         loaded = ledger.load(IDENTITY)
         self.assertIsNone(loaded.record.reservation_id)
 
-    def test_operator_publish_commits_local_ledger(self):
+    def test_operator_publish_without_identity_bound_transaction_handoffs(self):
         class Broker:
             def request_oidc_token(self):
                 return "oidc-token"
@@ -2663,9 +2743,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
 
         class Reviewer:
             def publish(self, **kwargs):
-                from review_sensei.hosting.github import PublicationResult
-
-                return PublicationResult(status="published", review_id=1)
+                raise AssertionError("operator publisher must not run before admission")
 
         ledger = InMemorySessionLedger()
         application = GitHubApplication(
@@ -2690,18 +2768,11 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
             convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
-        self.assertEqual(result.status, "published")
+        self.assertEqual(result.status, "handoff")
+        self.assertEqual(result.diagnostic, "identity-bound transaction required")
         loaded = ledger.load(IDENTITY)
-        self.assertEqual(loaded.record.completed_initial_reviews, 1)
-        self.assertEqual(
-            loaded.record.last_committed_reservation_id,
-            session_reservation_id(
-                repository=IDENTITY.repository,
-                pull_request=IDENTITY.pull_request,
-                head_sha="a" * 40,
-                kind="publish",
-            ),
-        )
+        self.assertEqual(loaded.record.completed_initial_reviews, 0)
+        self.assertIsNone(loaded.record.reservation_id)
 
     def test_non_published_publication_aborts_without_counting(self):
         from review_sensei.hosting.github import PublicationResult
@@ -2735,7 +2806,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             result=ReviewResult(summary="ok", comments=(), provider="fixture"),
             diff="diff",
             app_slug="reviewsensei[bot]",
-            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(result.status, "skipped_stale")
         loaded = ledger.load(IDENTITY)
