@@ -2162,6 +2162,11 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also replay the compatible legacy default for observation-only comparison",
     )
+    parser.add_argument(
+        "--observed",
+        action="store_true",
+        help="Run the real-component offline evidence harness with mocked model and GitHub edges",
+    )
     return parser
 
 
@@ -2176,6 +2181,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             SequenceStep,
             compare_sequence_policies,
             replay_review_sequence,
+            run_observed_review_sequence,
         )
 
         policy = resolve_review_convergence_policy(mode=args.review_mode)
@@ -2206,6 +2212,22 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 label="at-cap",
             ),
         )
+        if args.observed and args.compare_default:
+            raise ReviewInputError(
+                "observed evidence and legacy comparison cannot run in one report"
+            )
+        if args.observed:
+            observed = run_observed_review_sequence(steps, policy)
+            payload = observed.to_dict()
+            if args.as_json:
+                sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+            else:
+                sys.stdout.write(
+                    f"mode={observed.mode} events={len(observed.events)} "
+                    f"approval_events={observed.approval_events} "
+                    f"cap_created_approval={observed.cap_created_approval}\n"
+                )
+            return 0
         report = replay_review_sequence(steps, policy)
         if args.compare_default:
             payload = compare_sequence_policies(steps, proposed=policy)

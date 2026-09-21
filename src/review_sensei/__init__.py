@@ -132,11 +132,14 @@ from .release_manifest import (
     verify_worker_compatibility,
 )
 from .sequence import (
+    ObservedSequenceEvent,
+    ObservedSequenceReport,
     SequenceReport,
     SequenceStep,
     SequenceStepOutcome,
     compare_sequence_policies,
     replay_review_sequence,
+    run_observed_review_sequence,
 )
 from .service import ReviewRun, ReviewService
 from .session import (
@@ -278,10 +281,13 @@ __all__ = [
     "resolve_review_convergence_policy",
     "resolve_shadow_review_mode",
     "SequenceReport",
+    "ObservedSequenceEvent",
+    "ObservedSequenceReport",
     "SequenceStep",
     "SequenceStepOutcome",
     "compare_sequence_policies",
     "replay_review_sequence",
+    "run_observed_review_sequence",
     "LargeChangePlan",
     "ReviewChunk",
     "TotalWorkBudget",

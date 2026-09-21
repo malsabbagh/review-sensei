@@ -57,6 +57,7 @@ SCHEMA_NAMES = (
     "later-finding-classification",
     "convergence-sequence-report",
     "review-transaction",
+    "observed-convergence-report",
 )
 
 

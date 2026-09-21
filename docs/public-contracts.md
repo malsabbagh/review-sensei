@@ -71,6 +71,7 @@ containing `/v1/`.
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
 | `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, limitations, and cap-never-approves flag |
+| `observed-convergence-report.schema.json` | F6 real-component evidence events and explicitly measured or unknown metrics |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -184,8 +185,11 @@ These imports are public and stable within a major version:
 - `review_sensei.observe_shadow_admission`
 - `review_sensei.resolve_shadow_review_mode`
 - `review_sensei.SequenceReport`
+- `review_sensei.ObservedSequenceReport`
+- `review_sensei.ObservedSequenceEvent`
 - `review_sensei.SequenceStep`
 - `review_sensei.replay_review_sequence`
+- `review_sensei.run_observed_review_sequence`
 - `review_sensei.compare_sequence_policies`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`

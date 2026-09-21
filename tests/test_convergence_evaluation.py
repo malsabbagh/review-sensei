@@ -26,6 +26,7 @@ from review_sensei.sequence import (
     SequenceStep,
     compare_sequence_policies,
     replay_review_sequence,
+    run_observed_review_sequence,
 )
 from review_sensei.session import InMemorySessionLedger, SessionIdentity, SessionRecord
 
@@ -188,6 +189,36 @@ class SequenceReplayTests(unittest.TestCase):
         self.assertFalse(payload["proposed"]["cap_created_approval"])
 
 
+class ObservedSequenceTests(unittest.TestCase):
+    def test_observed_harness_records_real_service_and_publication_events(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(head_sha="a" * 40, label="initial"),
+                SequenceStep(
+                    head_sha="b" * 40,
+                    independently_approval_eligible=True,
+                    label="verification",
+                ),
+            ),
+            _policy(),
+        )
+        self.assertEqual(report.mode, "merge-focused")
+        self.assertEqual(len(report.events), 2)
+        self.assertTrue(all(event.provider_calls == 1 for event in report.events))
+        self.assertEqual(
+            [event.publication_status for event in report.events],
+            ["published", "published"],
+        )
+        self.assertIsNone(report.approval_events)
+        self.assertIsNone(report.cap_created_approval)
+        self.assertTrue(
+            any("Approval metrics are unknown" in item for item in report.limitations)
+        )
+        self.assertEqual(
+            report.to_dict()["events"][0]["publication_status"], "published"
+        )
+
+
 class ShadowObservationTests(unittest.TestCase):
     def test_shadow_rejects_legacy_and_is_observation_only(self):
         with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
@@ -275,6 +306,17 @@ class ShadowObservationTests(unittest.TestCase):
 
 
 class EvaluateConvergenceCliTests(unittest.TestCase):
+    def test_cli_emits_observed_real_component_evidence(self):
+        stdout = io.StringIO()
+        with redirect_stderr(io.StringIO()):
+            with patch("sys.stdout", stdout):
+                status = main(["evaluate-convergence", "--json", "--observed"])
+        self.assertEqual(status, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["mode"], "merge-focused")
+        self.assertTrue(payload["events"])
+        self.assertEqual(payload["events"][0]["provider_calls"], 1)
+
     def test_cli_replays_sentinel_and_keeps_legacy_default(self):
         stdout = io.StringIO()
         with redirect_stderr(io.StringIO()):
@@ -303,6 +345,9 @@ class PublicExportTests(unittest.TestCase):
 
         self.assertIs(review_sensei.SequenceStep, SequenceStep)
         self.assertIs(review_sensei.replay_review_sequence, replay_review_sequence)
+        self.assertIs(
+            review_sensei.run_observed_review_sequence, run_observed_review_sequence
+        )
         self.assertIs(review_sensei.observe_shadow_admission, observe_shadow_admission)
         self.assertIs(
             review_sensei.resolve_shadow_review_mode, resolve_shadow_review_mode

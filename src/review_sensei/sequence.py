@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Sequence
 
 from .convergence import (
     DEFAULT_REVIEW_MODE,
@@ -17,9 +20,12 @@ from .convergence import (
     resolve_review_convergence_policy,
 )
 from .errors import ReviewInputError
+from .models import ProviderResponse, ReviewRequest
 from .schemas import validate_public_document
+from .service import ReviewService
 from .session import (
     InMemorySessionLedger,
+    LocalSessionLedger,
     SessionIdentity,
     complete_session_round,
     prepare_session_round,
@@ -102,6 +108,160 @@ class SequenceReport:
         }
         validate_public_document(payload, "convergence-sequence-report")
         return payload
+
+
+@dataclass(frozen=True)
+class ObservedSequenceEvent:
+    """One actual service-to-publication attempt captured by the F6 harness."""
+
+    label: str
+    provider_calls: int
+    publication_status: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "provider_calls": self.provider_calls,
+            "publication_status": self.publication_status,
+        }
+
+
+@dataclass(frozen=True)
+class ObservedSequenceReport:
+    """Bounded evidence from real internal components and mocked host edges."""
+
+    mode: str
+    events: tuple[ObservedSequenceEvent, ...]
+    approval_events: int | None
+    cap_created_approval: bool | None
+    limitations: tuple[str, ...] = (
+        "External model and GitHub APIs are mocked; internal admission and publication run normally.",
+        "Approval metrics are unknown because the mocked publisher does not execute a GitHub finalizer.",
+        "This harness is evidence for deterministic component behavior, not real-world model recall.",
+    )
+
+    def to_dict(self) -> dict[str, object]:
+        payload = {
+            "schema_version": PUBLIC_SCHEMA_VERSION,
+            "mode": self.mode,
+            "events": [event.to_dict() for event in self.events],
+            "approval_events": self.approval_events,
+            "cap_created_approval": self.cap_created_approval,
+            "limitations": list(self.limitations),
+        }
+        validate_public_document(payload, "observed-convergence-report")
+        return payload
+
+
+class _ObservedProvider:
+    name = "observed-fixture"
+    model = "observed-fixture-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, request):
+        self.calls += 1
+        return ProviderResponse(
+            text='{"summary":"Observed fixture review.","comments":[],"learning_proposals":[]}',
+            provider=self.name,
+            model=self.model,
+        )
+
+
+class _ObservedBroker:
+    def request_oidc_token(self) -> str:
+        return "observed-oidc"
+
+    def exchange(self, token: str, *, capability: str | None = None) -> str:
+        return f"observed-{capability or 'session'}-token"
+
+
+class _ObservedPublisher:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def publish(self, **kwargs):
+        from .hosting.github.publication import PublicationResult
+
+        self.calls.append(kwargs)
+        return PublicationResult(status="published", review_id=len(self.calls))
+
+
+def run_observed_review_sequence(
+    steps: Sequence[SequenceStep], policy: ReviewConvergencePolicy
+) -> ObservedSequenceReport:
+    """Exercise service, durable admission, and publication across fresh jobs.
+
+    The harness deliberately owns only the provider and GitHub publisher fakes.
+    Each loop creates a fresh service and application instance while retaining
+    one ledger, which models the fresh-process boundary without claiming a
+    live provider or GitHub result.
+    """
+
+    if not isinstance(policy, ReviewConvergencePolicy):
+        raise ReviewInputError("review convergence policy is invalid")
+    if not isinstance(steps, Sequence) or not steps:
+        raise ReviewInputError("observed sequence requires at least one step")
+    from .hosting.github.application import GitHubApplication, GitHubWriteOptions
+
+    temporary_root = TemporaryDirectory(prefix="reviewsensei-observed-")
+    ledger_root = Path(temporary_root.name)
+    publisher = _ObservedPublisher()
+    events: list[ObservedSequenceEvent] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, SequenceStep):
+            raise ReviewInputError("sequence step is invalid")
+        provider = _ObservedProvider()
+        service = ReviewService(provider)
+        result = service.review(
+            ReviewRequest(
+                diff=(
+                    "diff --git a/src/observed.py b/src/observed.py\n"
+                    "--- a/src/observed.py\n+++ b/src/observed.py\n"
+                    "@@ -1 +1 @@\n-old\n+new\n"
+                )
+            )
+        )
+        application = GitHubApplication(
+            broker=_ObservedBroker(),
+            http=None,
+            reviewer=publisher,
+            learner=object(),
+            replier=object(),
+            # Construct a new adapter for every event: only its on-disk record
+            # crosses the logical process boundary.
+            session_ledger=LocalSessionLedger(ledger_root),
+        )
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="observed-oidc",
+            repository="owner/repo",
+            repository_id=136,
+            pull_request=136,
+            head_sha=step.head_sha,
+            base_branch="main",
+            base_sha="f" * 40,
+            result=result,
+            diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+        )
+        events.append(
+            ObservedSequenceEvent(
+                label=step.label or f"step-{index + 1}",
+                provider_calls=provider.calls,
+                publication_status=outcome.status,
+            )
+        )
+    report = ObservedSequenceReport(
+        mode=policy.mode,
+        events=tuple(events),
+        approval_events=None,
+        cap_created_approval=None,
+    )
+    temporary_root.cleanup()
+    return report
 
 
 def replay_review_sequence(
@@ -217,9 +377,12 @@ def compare_sequence_policies(
 
 
 __all__ = [
+    "ObservedSequenceEvent",
+    "ObservedSequenceReport",
     "SequenceReport",
     "SequenceStep",
     "SequenceStepOutcome",
     "compare_sequence_policies",
     "replay_review_sequence",
+    "run_observed_review_sequence",
 ]
