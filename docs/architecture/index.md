@@ -104,6 +104,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0050`](../adr/0050-maintainer-disposition-and-handoff-status.md) | Proposed | Maintainer disposition and handoff status | #136 C6; `action_required` for handoff |
 | [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` |
 | [`0052`](../adr/0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 F1; one reservation, one checkpoint, retryable publication phases |
+| [`0055`](../adr/0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7; migration and release-readback remain explicit operator gates |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

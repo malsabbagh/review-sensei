@@ -279,7 +279,13 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
         self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", workflow)
         self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
+        self.assertIn(("REVIEWSENSEI_REVIEW_MODE", "merge-focused"), SETUP_VARIABLES)
+        self.assertIn(
+            "review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}",
+            workflow,
+        )
         config = dict((f.path, f.content) for f in plan.files)[CONFIG_PATH]
+        self.assertIn("review_mode: merge-focused", config)
         self.assertIn("model: ''", config)
         self.assertIn("id-token: write", workflow)
         self.assertIn("pull-requests: write", workflow)
@@ -834,7 +840,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             hashlib.sha256(
                 files[".github/workflows/review-sensei-review.yml"].encode()
             ).hexdigest(),
-            "5c56bef7ff9dcd0602b085f7ab54bdce7e0447be6c03e085795c4d1a6d4be5c8",
+            "18cb5eee42fd6acf10764e37eb5aba99d60abe77cace83a8b2db6150b1e73af3",
         )
         self.assertEqual(
             hashlib.sha256(

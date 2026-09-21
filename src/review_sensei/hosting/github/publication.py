@@ -1250,9 +1250,6 @@ class ReviewPublisher:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
         if convergence_policy is None:
-            # Omitted policy stays on compatible legacy. Operator modes must
-            # be supplied by the application layer so recovery and embedders
-            # cannot pick up REVIEWSENSEI_REVIEW_MODE from the ambient env.
             convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")

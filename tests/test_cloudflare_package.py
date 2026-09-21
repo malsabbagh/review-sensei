@@ -155,6 +155,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "provider: ollama\n"
             "provider_mode: local\n"
             "model: ''\n"
+            "review_mode: merge-focused\n"
             "base_url: http://127.0.0.1:11434/api\n"
             "cloud_base_url: https://ollama.com/api\n"
             f"local_model: {DEFAULT_LOCAL_MODEL}\n"
@@ -196,10 +197,11 @@ class CloudflarePackageTests(unittest.TestCase):
             py_fields,
             {
                 "setup_version": "4",
-                "provider": "ollama",
-                "provider_mode": "local",
-                "model": "''",
-                "base_url": "http://127.0.0.1:11434/api",
+            "provider": "ollama",
+            "provider_mode": "local",
+            "model": "''",
+            "review_mode": "merge-focused",
+            "base_url": "http://127.0.0.1:11434/api",
                 "cloud_base_url": "https://ollama.com/api",
                 "local_model": DEFAULT_LOCAL_MODEL,
                 "cloud_model": DEFAULT_CLOUD_MODEL,
@@ -216,6 +218,7 @@ class CloudflarePackageTests(unittest.TestCase):
         )
         self.assertIn("provider_mode: local", ts_source)
         self.assertIn("model: ''", ts_source)
+        self.assertIn("review_mode: merge-focused", ts_source)
         self.assertIn("local_model: ${DEFAULT_LOCAL_MODEL}", ts_source)
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)

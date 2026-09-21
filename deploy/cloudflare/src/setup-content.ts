@@ -75,6 +75,7 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
   { name: "REVIEWSENSEI_VERSION", value: REVIEWSENSEI_VERSION },
+  { name: "REVIEWSENSEI_REVIEW_MODE", value: "merge-focused" },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
   { name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" },
   { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
@@ -391,6 +392,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: @@{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
@@ -752,6 +754,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: @@{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ needs.resolve-trigger.outputs.operation }}
@@ -947,6 +950,7 @@ function configFile(
     "provider: ollama\n" +
     "provider_mode: local\n" +
     "model: ''\n" +
+    (version === SETUP_VERSION ? "review_mode: merge-focused\n" : "") +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +

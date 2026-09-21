@@ -55,6 +55,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.6.0"),
+    ("REVIEWSENSEI_REVIEW_MODE", "merge-focused"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_AUTO_APPROVE", "true"),
     ("REVIEWSENSEI_LEARNING_PROPOSALS", "false"),
@@ -523,6 +524,7 @@ jobs:
       head_repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
       head_sha: ${{{{ github.event.pull_request.head.sha }}}}
       review_sensei_version: ${{{{ vars.REVIEWSENSEI_VERSION }}}}
+      review_mode: ${{{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}}}
       enable_review: ${{{{ vars.REVIEWSENSEI_AUTO_REVIEW }}}}
       enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}}}
       enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
@@ -554,6 +556,7 @@ jobs:
     uses: {reusable}
     with:
       mode: manual
+      review_mode: ${{{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}}}
       operation: ${{{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}}}
       repository: ${{{{ github.repository }}}}
       repository_id: ${{{{ github.repository_id }}}}

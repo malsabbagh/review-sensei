@@ -42,6 +42,20 @@ def _init_repository(root: Path, name: str) -> Path:
 
 
 class WorkflowValidationTests(unittest.TestCase):
+    def test_reusable_workflow_defaults_and_rejects_retired_legacy_mode(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "review-sensei-run.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("review_mode:\n        required: false\n        default: merge-focused", workflow)
+        self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", workflow)
+        self.assertIn(
+            "legacy review mode is retired; migrate configuration to merge-focused",
+            workflow,
+        )
+
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(
             repository="owner/repo",

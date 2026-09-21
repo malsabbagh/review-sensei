@@ -1090,7 +1090,7 @@ class GitHubApplicationTests(unittest.TestCase):
             session_ledger=ledger,
         )
         legacy_kwargs = dict(publish_kwargs)
-        legacy_kwargs.pop("convergence_policy")
+        legacy_kwargs["convergence_policy"] = ReviewConvergencePolicy(mode="legacy")
         legacy_outcome = legacy_application.publish_review(**legacy_kwargs)
         self.assertEqual(legacy_outcome.status, "published")
         self.assertEqual(len(legacy_reviewer.calls), 1)

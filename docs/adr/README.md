@@ -63,6 +63,7 @@ Process: `docs/process/adr-process.md`
 | [0052](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |
 | [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger |
 | [0054](0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6 | Real internal seams, bounded fixture edges, explicit unknown metrics |
+| [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
 
 ## Policy
 

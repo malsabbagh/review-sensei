@@ -1288,7 +1288,7 @@ class RoundPersistenceTests(unittest.TestCase):
         prepared = prepare_session_round(
             ledger,
             IDENTITY,
-            ReviewConvergencePolicy(),
+            ReviewConvergencePolicy(mode="legacy"),
             reservation_id="abcd1234",
             now=FIXED_NOW,
         )

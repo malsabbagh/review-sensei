@@ -190,6 +190,7 @@ class ReviewPublisherTests(unittest.TestCase):
             "result": result(),
             "diff": DIFF,
             "app_slug": "reviewsensei[bot]",
+            "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
         }
         arguments.update(overrides)
         http, calls = make_http(responses)
@@ -2742,6 +2743,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             "result": result(),
             "diff": DIFF,
             "app_slug": "reviewsensei[bot]",
+            "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
         }
         arguments.update(overrides)
         http, calls = make_http(responses)
@@ -2769,7 +2771,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
     def test_legacy_still_emits_request_changes_for_model_blocker(self):
         outcome, calls = self.publish(
             self._responses(),
-            convergence_policy=ReviewConvergencePolicy(),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = json.loads(calls[-1][2].decode("utf-8"))

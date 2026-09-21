@@ -291,8 +291,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         policy = FakeApplication.instance.calls[0]["convergence_policy"]
-        self.assertEqual(policy.mode, "legacy")
-        self.assertEqual(policy.enforcement, "display-only")
+        self.assertEqual(policy.mode, "merge-focused")
+        self.assertEqual(policy.enforcement, "publication")
 
     def test_github_parser_allows_disabling_default_auto_approval(self):
         args = _github_parser().parse_args(
@@ -2110,13 +2110,13 @@ class DoctorPlanCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             with patch("sys.stdout", stdout):
                 status = main(["doctor", "--json"])
-        self.assertEqual(status, 0)
+        self.assertEqual(status, 2)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema_version"], "v1")
         self.assertIn("checks", payload)
-        self.assertEqual(payload["status"], "pass")
-        self.assertEqual(payload["review_convergence"]["mode"], "legacy")
-        self.assertEqual(payload["review_convergence"]["enforcement"], "display-only")
+        self.assertEqual(payload["status"], "action")
+        self.assertEqual(payload["review_convergence"]["mode"], "merge-focused")
+        self.assertEqual(payload["review_convergence"]["enforcement"], "publication")
 
     def test_doctor_cli_network_flag_reports_unreachable_endpoint(self):
         stdout = io.StringIO()
