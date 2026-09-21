@@ -1098,6 +1098,62 @@ class ReviewApprovalFinalizer:
         )
 
 
+def prepare_publication_review(
+    *,
+    result: ReviewResult,
+    diff: str,
+    head_sha: str,
+    candidates: Sequence[CandidateFinding] | None = None,
+    snapshot: Mapping[str, str] | None = None,
+    snapshot_sha256: str | None = None,
+    evidence_policy: str = "legacy",
+    convergence_policy: ReviewConvergencePolicy | None = None,
+    blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+    baseline: ReviewBaseline | None = None,
+    current_key: ReviewContextCacheKey | None = None,
+    changed_paths: Sequence[str] | None = None,
+    related_paths: Sequence[str] = (),
+    evidence_confirmed_concerns: Sequence[str] = (),
+    authorized_dispositions: Sequence[object] = (),
+) -> PublishableReview:
+    """Prepare one publication artifact independently of the HTTP publisher.
+
+    The application uses this same admission routine for publisher adapters
+    that expose only ``publish``. Keeping preparation here ensures operator
+    F3 admission is never skipped merely because an adapter lacks the
+    optional ``ReviewPublisher.prepare`` convenience method.
+    """
+
+    try:
+        analysis = analyze_diff(diff)
+        prepared = prepare_publishable_review(
+            result,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
+            changed_lines=analysis.changed_lines,
+            deleted_lines=analysis.deleted_lines,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=changed_paths,
+            related_paths=related_paths,
+            evidence_confirmed_concerns=evidence_confirmed_concerns,
+            authorized_dispositions=authorized_dispositions,
+            current_head_sha=head_sha,
+        )
+        return replace(
+            prepared,
+            diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        )
+    except ReviewInputError as exc:
+        raise GitHubPublicationError("review evidence verification failed") from exc
+
+
 class ReviewPublisher:
     """Publish one validated review as App-authored inline comments and summary."""
 
@@ -1126,34 +1182,24 @@ class ReviewPublisher:
         authorized_dispositions: Sequence[object] = (),
     ) -> PublishableReview:
         """Admit the exact result that a later call to :meth:`publish` emits."""
-
-        try:
-            analysis = analyze_diff(diff)
-            prepared = prepare_publishable_review(
-                result,
-                candidates=candidates,
-                snapshot=snapshot,
-                snapshot_sha256=snapshot_sha256,
-                evidence_policy=evidence_policy,
-                changed_lines=analysis.changed_lines,
-                deleted_lines=analysis.deleted_lines,
-                convergence_policy=convergence_policy,
-                blocker_candidates=blocker_candidates,
-                input_blocker_candidates=input_blocker_candidates,
-                baseline=baseline,
-                current_key=current_key,
-                changed_paths=changed_paths,
-                related_paths=related_paths,
-                evidence_confirmed_concerns=evidence_confirmed_concerns,
-                authorized_dispositions=authorized_dispositions,
-                current_head_sha=head_sha,
-            )
-            return replace(
-                prepared,
-                diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
-            )
-        except ReviewInputError as exc:
-            raise GitHubPublicationError("review evidence verification failed") from exc
+        return prepare_publication_review(
+            result=result,
+            diff=diff,
+            head_sha=head_sha,
+            candidates=candidates,
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy=evidence_policy,
+            convergence_policy=convergence_policy,
+            blocker_candidates=blocker_candidates,
+            input_blocker_candidates=input_blocker_candidates,
+            baseline=baseline,
+            current_key=current_key,
+            changed_paths=changed_paths,
+            related_paths=related_paths,
+            evidence_confirmed_concerns=evidence_confirmed_concerns,
+            authorized_dispositions=authorized_dispositions,
+        )
 
     def publish(
         self,

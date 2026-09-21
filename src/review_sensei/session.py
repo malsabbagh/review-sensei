@@ -401,10 +401,10 @@ def blocker_set_digest(fingerprints: Sequence[str]) -> tuple[str, int]:
     )
 
 
-def convergence_progress_blocker_sets(
+def convergence_progress_blocker_markers(
     history: Mapping[str, object] | None,
-) -> tuple[tuple[str, int], ...]:
-    """Return complete blocker sets, rejecting malformed marker metadata.
+) -> tuple[tuple[str, int, str | None], ...]:
+    """Return complete blocker markers, rejecting malformed metadata.
 
     Legacy lifecycle-only entries remain intentionally ignored, but an entry
     that starts claiming blocker metadata must be complete and well-typed.
@@ -424,7 +424,7 @@ def convergence_progress_blocker_sets(
         raise ReviewInputError(
             "session convergence progress exceeds the configured bound"
         )
-    result: list[tuple[str, int]] = []
+    result: list[tuple[str, int, str | None]] = []
     for item in progress:
         if not isinstance(item, Mapping):
             raise ReviewInputError("session convergence progress item is invalid")
@@ -446,6 +446,7 @@ def convergence_progress_blocker_sets(
             raise ReviewInputError(
                 "session convergence blocker count exceeds the configured bound"
             )
+        transaction_id: str | None = None
         if "transaction_id" in item:
             transaction_id = item.get("transaction_id")
             if not isinstance(transaction_id, str) or not _SHA256.fullmatch(
@@ -454,8 +455,21 @@ def convergence_progress_blocker_sets(
                 raise ReviewInputError(
                     "session convergence blocker transaction id is invalid"
                 )
-        result.append((digest, count))
+        result.append((digest, count, transaction_id))
     return tuple(result)
+
+
+def convergence_progress_blocker_sets(
+    history: Mapping[str, object] | None,
+) -> tuple[tuple[str, int], ...]:
+    """Return complete blocker identities without dropping their order."""
+
+    return tuple(
+        (digest, count)
+        for digest, count, _transaction_id in convergence_progress_blocker_markers(
+            history
+        )
+    )
 
 
 def _validate_convergence_history_baseline(
@@ -2031,6 +2045,12 @@ def complete_review_publication(
             raise ReviewInputError("durable transaction does not match")
         if not current.logical_identity_matches(transaction):
             raise ReviewInputError("publication transaction identity does not match")
+        # ``current`` is the durable ReviewTransaction, not the enclosing
+        # SessionRecord. Older bound result artifacts are allowed to replay;
+        # only a caller that claims a generation newer than the durable
+        # transaction is stale. The marker-generation check below refers to
+        # this same transaction generation and is skipped for an owned
+        # terminal replay.
         if transaction.generation > current.generation:
             raise ReviewInputError("publication transaction generation is stale")
         # A durable success is terminal for the publication side of the
@@ -2160,6 +2180,10 @@ def record_admitted_blocker_progress(
         progress = history.get("progress")
         if not isinstance(progress, list) or not progress:
             raise ReviewInputError("durable convergence progress is unavailable")
+        if len(progress) > MAX_CONVERGENCE_PROGRESS_ENTRIES:
+            raise ReviewInputError(
+                "durable convergence progress exceeds the configured bound"
+            )
         last = progress[-1]
         if not isinstance(last, Mapping) or last.get("event") != "completed":
             raise ReviewInputError("durable convergence progress is invalid")
@@ -2216,6 +2240,10 @@ def record_admitted_blocker_progress(
             raise ReviewInputError("publication progress phase transition is invalid")
         if set(last) == set(item) and dict(last) != item:
             raise ReviewInputError("durable blocker progress does not match")
+        # Admission replaces the transaction's final checkpoint placeholder;
+        # it never appends a fourth lifecycle entry. The loader and this
+        # explicit guard keep a bypassed in-memory record from silently
+        # evicting or reordering older evidence.
         updated_history = dict(history)
         updated_history["progress"] = [*progress[:-1], item]
         next_transaction = (

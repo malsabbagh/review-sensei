@@ -60,6 +60,12 @@ still comparable evidence. Checkpoint placeholders are lifecycle-only entries
 and do not evict the bounded comparable blocker window; the admission CAS
 replaces the current transaction's placeholder with its owned marker.
 
+The application owns the canonical post-admission preparation step. A publisher
+adapter may expose only `publish`; in that case the application supplies the
+same admitted result rather than bypassing F3 or requiring an adapter-specific
+preparation method. The built-in GitHub publisher additionally rebinds the
+prepared artifact at its write boundary.
+
 ## Session witness
 
 Durable history is only meaningful while the record it describes exists, so F2

@@ -435,7 +435,13 @@ def verify_candidates(
 
 @dataclass(frozen=True)
 class PublishableReview:
-    """A review whose comments are safe for a publisher to emit as findings."""
+    """A review whose comments are safe for a publisher to emit as findings.
+
+    The GitHub publisher intentionally compares this whole dataclass when a
+    prepared artifact is rebound at the write boundary. Every admission field
+    must therefore be reproducible from the publisher arguments; additive
+    fields are fail-closed until that recomputation contract is updated.
+    """
 
     result: ReviewResult
     verifications: tuple[VerificationResult, ...]

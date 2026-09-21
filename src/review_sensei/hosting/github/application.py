@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
@@ -32,7 +32,7 @@ from ...session import (
     blocker_set_digest,
     complete_review_publication,
     complete_session_round,
-    convergence_progress_blocker_sets,
+    convergence_progress_blocker_markers,
     load_review_transaction_for_publication,
     prepare_session_round,
     record_admitted_blocker_progress,
@@ -51,7 +51,11 @@ from .conversation import (
 from .errors import GitHubPublicationError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher, LearningPRResult
-from .publication import PublicationResult, ReviewPublisher
+from .publication import (
+    PublicationResult,
+    ReviewPublisher,
+    prepare_publication_review,
+)
 
 
 @dataclass(frozen=True)
@@ -596,39 +600,50 @@ class GitHubApplication:
                 )
             ):
                 prepare = getattr(self.reviewer, "prepare", None)
-                if not callable(prepare):
-                    # A fresh operator transaction cannot safely fall back to
-                    # publish without the admission capability. Raise through
-                    # the normal cleanup path so a pending transaction becomes
-                    # retryable ``publication_failed`` rather than a handoff
-                    # that leaves durable work latched forever. A validated
-                    # checkpointed recovery skips this branch above because
-                    # its post-admission result is already durable.
-                    raise GitHubPublicationError(
-                        "review admission is unavailable: reviewer.prepare is required"
-                    )
                 # This is the sole post-admission result: its effective
                 # blockers are both recorded for F3 and passed unchanged to
-                # the publisher below. No caller flag or pre-admission model
-                # output can suppress a review event.
-                prepared_publishable = prepare(
-                    result=result,
-                    diff=diff,
-                    head_sha=head_sha,
-                    candidates=candidates,
-                    snapshot=snapshot,
-                    snapshot_sha256=snapshot_sha256,
-                    evidence_policy=evidence_policy,
-                    convergence_policy=convergence_policy,
-                    blocker_candidates=blocker_candidates,
-                    input_blocker_candidates=input_blocker_candidates,
-                    baseline=durable_baseline,
-                    current_key=current_key,
-                    changed_paths=changed_paths,
-                    related_paths=publication_related_paths,
-                    evidence_confirmed_concerns=evidence_confirmed_concerns,
-                    authorized_dispositions=authorized_dispositions,
-                )
+                # the publisher below. A publisher adapter may expose only
+                # ``publish``; use the shared preparation routine in that
+                # case rather than silently dropping the caller's blocker
+                # facts or bypassing admission.
+                if callable(prepare):
+                    prepared_publishable = prepare(
+                        result=result,
+                        diff=diff,
+                        head_sha=head_sha,
+                        candidates=candidates,
+                        snapshot=snapshot,
+                        snapshot_sha256=snapshot_sha256,
+                        evidence_policy=evidence_policy,
+                        convergence_policy=convergence_policy,
+                        blocker_candidates=blocker_candidates,
+                        input_blocker_candidates=input_blocker_candidates,
+                        baseline=durable_baseline,
+                        current_key=current_key,
+                        changed_paths=changed_paths,
+                        related_paths=publication_related_paths,
+                        evidence_confirmed_concerns=evidence_confirmed_concerns,
+                        authorized_dispositions=authorized_dispositions,
+                    )
+                else:
+                    prepared_publishable = prepare_publication_review(
+                        result=result,
+                        diff=diff,
+                        head_sha=head_sha,
+                        candidates=candidates,
+                        snapshot=snapshot,
+                        snapshot_sha256=snapshot_sha256,
+                        evidence_policy=evidence_policy,
+                        convergence_policy=convergence_policy,
+                        blocker_candidates=blocker_candidates,
+                        input_blocker_candidates=input_blocker_candidates,
+                        baseline=durable_baseline,
+                        current_key=current_key,
+                        changed_paths=changed_paths,
+                        related_paths=publication_related_paths,
+                        evidence_confirmed_concerns=evidence_confirmed_concerns,
+                        authorized_dispositions=authorized_dispositions,
+                    )
                 current_blockers = blocker_set_digest(
                     tuple(
                         finding_lifecycle_for_comment(comment).fingerprint
@@ -636,8 +651,11 @@ class GitHubApplication:
                         if comment.effective_blocking is True
                     )
                 )
-                prior_blockers = convergence_progress_blocker_sets(
+                prior_markers = convergence_progress_blocker_markers(
                     transaction_record.convergence_history
+                )
+                prior_blockers = tuple(
+                    (digest, count) for digest, count, _transaction_id in prior_markers
                 )
                 if validated_transaction_recovery and transaction_record.transaction:
                     history = transaction_record.convergence_history
@@ -658,21 +676,35 @@ class GitHubApplication:
                         # This result already has a durable blocker marker. It
                         # belongs to the recovery attempt being replayed, not
                         # to the prior round window used for no-progress.
-                        prior_blockers = prior_blockers[:-1]
+                        # Filter by ownership rather than by a projected list
+                        # position: lifecycle-only placeholders are omitted
+                        # from ``prior_markers``.
+                        prior_markers = tuple(
+                            marker
+                            for marker in prior_markers
+                            if marker[2]
+                            != transaction_record.transaction.transaction_id
+                        )
+                        prior_blockers = tuple(
+                            (digest, count)
+                            for digest, count, _transaction_id in prior_markers
+                        )
 
-                def blocker_identity(value: tuple[str, int]) -> tuple[str, ...]:
-                    # ``detect_no_progress`` treats an empty sequence as
-                    # verified progress. The digest/count pair is storage
-                    # metadata, so an empty admitted set must not become a
-                    # synthetic singleton identity.
+                def blocker_set_identity(value: tuple[str, int]) -> tuple[str, ...]:
+                    """Wrap the canonical whole-set digest for the detector."""
+
+                    # ``blocker_set_sha256`` already identifies the complete
+                    # admitted set; it is not one finding fingerprint. The
+                    # digest/count pair is storage metadata, so an empty
+                    # admitted set must not become a synthetic singleton.
                     return (value[0],) if value[1] else ()
 
                 no_progress = detect_no_progress(
-                    previous_blocking=(*blocker_identity(prior_blockers[-1]),)
+                    previous_blocking=(*blocker_set_identity(prior_blockers[-1]),)
                     if prior_blockers
                     else (),
-                    current_blocking=blocker_identity(current_blockers),
-                    earlier_blocking=(*blocker_identity(prior_blockers[-2]),)
+                    current_blocking=blocker_set_identity(current_blockers),
+                    earlier_blocking=(*blocker_set_identity(prior_blockers[-2]),)
                     if len(prior_blockers) >= 2
                     else (),
                 )
@@ -713,6 +745,40 @@ class GitHubApplication:
                             continuation_rounds=continuation_rounds,
                         ),
                     )
+            publisher_has_prepare = callable(getattr(self.reviewer, "prepare", None))
+            publisher_result = (
+                prepared_publishable.result
+                if prepared_publishable is not None and not publisher_has_prepare
+                else result
+            )
+            publisher_arguments: dict[str, Any] = {
+                "token": token,
+                "repository": repository,
+                "repository_id": repository_id,
+                "pull_request": pull_request,
+                "head_sha": head_sha,
+                "base_branch": base_branch,
+                "base_sha": base_sha,
+                "result": publisher_result,
+                "diff": diff,
+                "app_slug": app_slug,
+                "auto_approve": options.auto_approve,
+                "candidates": candidates,
+                "snapshot": snapshot,
+                "snapshot_sha256": snapshot_sha256,
+                "evidence_policy": evidence_policy,
+                "convergence_policy": convergence_policy,
+                "blocker_candidates": blocker_candidates,
+                "input_blocker_candidates": input_blocker_candidates,
+                "baseline": durable_baseline,
+                "current_key": current_key,
+                "changed_paths": changed_paths,
+                "related_paths": publication_related_paths,
+                "evidence_confirmed_concerns": evidence_confirmed_concerns,
+                "authorized_dispositions": authorized_dispositions,
+            }
+            if publisher_has_prepare:
+                publisher_arguments["prepared_review"] = prepared_publishable
             publication = (
                 PublicationResult(
                     status="handoff",
@@ -724,33 +790,7 @@ class GitHubApplication:
                     or (durable_baseline is not None and current_key is None)
                     or verification_transaction_recovery_required
                 )
-                else self.reviewer.publish(
-                    token=token,
-                    repository=repository,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_branch=base_branch,
-                    base_sha=base_sha,
-                    result=result,
-                    diff=diff,
-                    app_slug=app_slug,
-                    auto_approve=options.auto_approve,
-                    candidates=candidates,
-                    snapshot=snapshot,
-                    snapshot_sha256=snapshot_sha256,
-                    evidence_policy=evidence_policy,
-                    convergence_policy=convergence_policy,
-                    blocker_candidates=blocker_candidates,
-                    input_blocker_candidates=input_blocker_candidates,
-                    baseline=durable_baseline,
-                    current_key=current_key,
-                    changed_paths=changed_paths,
-                    related_paths=publication_related_paths,
-                    evidence_confirmed_concerns=evidence_confirmed_concerns,
-                    authorized_dispositions=authorized_dispositions,
-                    prepared_review=prepared_publishable,
-                )
+                else self.reviewer.publish(**publisher_arguments)
             )
         except BaseException as publication_error:
             if (

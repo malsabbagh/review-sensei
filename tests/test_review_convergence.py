@@ -747,6 +747,13 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertFalse(
             detect_no_progress(previous_blocking=("a",), current_blocking=("b",))
         )
+        self.assertFalse(
+            detect_no_progress(
+                earlier_blocking=("a",),
+                previous_blocking=(),
+                current_blocking=("b",),
+            )
+        )
         with self.assertRaisesRegex(ReviewInputError, "blocking identity"):
             detect_no_progress(current_blocking=("a", 1))  # type: ignore[arg-type]
 

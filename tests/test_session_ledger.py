@@ -49,6 +49,7 @@ from review_sensei.session import (
     SessionRecord,
     blocker_set_digest,
     complete_session_round,
+    convergence_progress_blocker_markers,
     convergence_progress_blocker_sets,
     issue_continuation_grant,
     migrate_session_document,
@@ -427,6 +428,29 @@ class SessionRecordTests(unittest.TestCase):
             ReviewInputError, "session convergence blocker digest is invalid"
         ):
             convergence_progress_blocker_sets(history)
+
+    def test_progress_marker_projection_retains_owner_across_placeholders(self):
+        history = self._history()
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "a" * 64,
+                "blocker_count": 1,
+            },
+            {"event": "completed", "generation": 2},
+            {
+                "event": "completed",
+                "generation": 3,
+                "blocker_set_sha256": "b" * 64,
+                "blocker_count": 1,
+                "transaction_id": "c" * 64,
+            },
+        ]
+        self.assertEqual(
+            convergence_progress_blocker_markers(history),
+            (("a" * 64, 1, None), ("b" * 64, 1, "c" * 64)),
+        )
 
     def test_convergence_history_rejects_unknown_nested_fields(self):
         history = self._history()
