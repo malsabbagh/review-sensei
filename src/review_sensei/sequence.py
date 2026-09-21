@@ -160,6 +160,7 @@ class ObservedSequenceReport:
     command_events: tuple[str, ...]
     finding_metrics: ObservedFindingMetrics
     execution_metrics: ObservedExecutionMetrics
+    shadow_isolated: bool
     approval_events: int | None
     cap_created_approval: bool | None
     cutover_status: str
@@ -179,6 +180,7 @@ class ObservedSequenceReport:
             "command_events": list(self.command_events),
             "finding_metrics": self.finding_metrics.to_dict(),
             "execution_metrics": self.execution_metrics.to_dict(),
+            "shadow_isolated": self.shadow_isolated,
             "approval_events": self.approval_events,
             "cap_created_approval": self.cap_created_approval,
             "cutover_status": self.cutover_status,
@@ -423,6 +425,7 @@ def run_observed_review_sequence(
     handoffs = 0
     provider_calls = 0
     cap_created_approval: bool | None = None
+    shadow_isolated = False
     with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
         ledger_root = Path(temporary_root)
         for index, step in enumerate(steps):
@@ -513,11 +516,9 @@ def run_observed_review_sequence(
                     result, cache_key=current_key, policy=policy
                 )
                 baseline_events += 1
-        loaded_record = (
-            LocalSessionLedger(ledger_root)
-            .load(SessionIdentity("owner/repo", 136, repository_id=136))
-            .record
-        )
+        identity = SessionIdentity("owner/repo", 136, repository_id=136)
+        ledger = LocalSessionLedger(ledger_root)
+        loaded_record = ledger.load(identity).record
         completed_rounds = (
             0
             if loaded_record is None
@@ -525,6 +526,19 @@ def run_observed_review_sequence(
             + loaded_record.completed_verification_rounds
         )
         failed_attempts = 0 if loaded_record is None else loaded_record.failed_attempts
+        publisher_calls_before_shadow = len(github.calls)
+        shadow_record_before = loaded_record
+        # C7 replay keeps its own in-memory ledger. Running it here verifies
+        # that the comparison fixture cannot mutate the enforced job state.
+        compare_sequence_policies(
+            tuple(steps),
+            current=policy,
+            proposed=ReviewConvergencePolicy(mode="strict"),
+        )
+        shadow_isolated = (
+            len(github.calls) == publisher_calls_before_shadow
+            and ledger.load(identity).record == shadow_record_before
+        )
         command_application = GitHubApplication(
             broker=cast(Any, _ObservedBroker()),
             http=github.http,
@@ -606,11 +620,15 @@ def run_observed_review_sequence(
             provider_calls=provider_calls,
             failed_attempts=failed_attempts,
         ),
+        shadow_isolated=shadow_isolated,
         approval_events=github.approval_events,
         cap_created_approval=cap_created_approval,
         cutover_status="not_ready",
         unmet_criteria=(
             "cap-created approval remains unknown until the supplied sequence exercises a round cap",
+            "duplicate, reopen, and contradiction finding metrics need labelled fixtures",
+            "installed source, package, and workflow identities are not captured by this offline harness",
+            "maintainer-approved cutover thresholds have not been recorded",
         ),
     )
     return report

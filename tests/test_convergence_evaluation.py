@@ -217,6 +217,7 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(report.command_events, ("pause:applied", "continue:applied"))
         self.assertEqual(report.execution_metrics.completed_rounds, 2)
         self.assertEqual(report.execution_metrics.provider_calls, 2)
+        self.assertTrue(report.shadow_isolated)
         self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
         self.assertTrue(report.unmet_criteria)

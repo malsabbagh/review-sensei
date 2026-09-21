@@ -4,7 +4,7 @@
   "title": "ReviewSensei observed convergence evidence report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "mode", "events", "baseline_events", "command_events", "finding_metrics", "execution_metrics", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
+  "required": ["schema_version", "mode", "events", "baseline_events", "command_events", "finding_metrics", "execution_metrics", "shadow_isolated", "approval_events", "cap_created_approval", "cutover_status", "unmet_criteria", "limitations"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "mode": {"type": "string", "enum": ["advisory", "merge-focused", "strict"]},
@@ -54,6 +54,7 @@
         "failed_attempts": {"type": "integer", "minimum": 0, "maximum": 32}
       }
     },
+    "shadow_isolated": {"type": "boolean"},
     "approval_events": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
     "cap_created_approval": {"type": ["boolean", "null"]},
     "cutover_status": {"type": "string", "enum": ["passed", "not_ready"]},
