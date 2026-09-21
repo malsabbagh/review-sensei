@@ -12,28 +12,33 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Literal, Sequence, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 from urllib.parse import urlparse
 
-from .baseline import ReviewBaseline, baseline_from_review
+from .baseline import baseline_from_history_document, baseline_from_review
 from .context import build_review_context_cache_key
 from .convergence import (
     DEFAULT_REVIEW_MODE,
     ReviewConvergencePolicy,
+    derive_blocker_candidate,
     detect_no_progress,
     resolve_review_convergence_policy,
 )
 from .errors import ReviewInputError
-from .models import ProviderResponse, ReviewRequest
+from .models import ProviderResponse, ReviewRequest, ReviewTransaction
 from .schemas import validate_public_document
 from .service import ReviewService
 from .session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    checkpoint_review_analysis,
     complete_session_round,
+    next_session_generation,
+    prepare_review_transaction,
     prepare_session_round,
     session_reservation_id,
+    should_skip_automation,
 )
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -50,6 +55,7 @@ class SequenceStep:
     latest_head_reviewed: bool = True
     label: str = "step"
     expected_material_finding_ids: tuple[str, ...] = ()
+    expected_non_material_finding_ids: tuple[str, ...] = ()
     fixture_material_finding_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -61,6 +67,7 @@ class SequenceStep:
             raise ReviewInputError("blocking identity must be a non-empty string")
         for label, values in (
             ("expected material finding", self.expected_material_finding_ids),
+            ("expected non-material finding", self.expected_non_material_finding_ids),
             ("fixture material finding", self.fixture_material_finding_ids),
         ):
             if (
@@ -72,9 +79,16 @@ class SequenceStep:
                     or len(item.encode("utf-8")) > 128
                     for item in values
                 )
-                or len(values) != len(set(values))
+                or (
+                    label != "fixture material finding"
+                    and len(values) != len(set(values))
+                )
             ):
                 raise ReviewInputError(f"{label} identities are invalid")
+        if set(self.expected_material_finding_ids) & set(
+            self.expected_non_material_finding_ids
+        ):
+            raise ReviewInputError("expected finding labels are contradictory")
 
 
 @dataclass(frozen=True)
@@ -472,11 +486,16 @@ def run_observed_review_sequence(
 
     github = _ObservedGitHub()
     events: list[ObservedSequenceEvent] = []
-    baseline: ReviewBaseline | None = None
     baseline_events = 0
     command_events: list[str] = []
     expected_material_finding_ids: set[str] = set()
+    expected_non_material_finding_ids: set[str] = set()
     observed_material_finding_ids: set[str] = set()
+    observed_material_finding_occurrences: list[str] = []
+    duplicate_findings = 0
+    reopened_findings = 0
+    contradictions = 0
+    last_observed_step: dict[str, int] = {}
     handoffs = 0
     provider_calls = 0
     cap_created_approval: bool | None = None
@@ -505,23 +524,149 @@ def run_observed_review_sequence(
             )
             if current_key is None:
                 raise ReviewInputError("observed cache identity is unavailable")
+            session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
+            ledger = LocalSessionLedger(ledger_root)
+            prior_record = ledger.load(session_identity).record
+            prior_history = (
+                None if prior_record is None else prior_record.convergence_history
+            )
+            baseline_loaded = bool(
+                isinstance(prior_history, Mapping)
+                and prior_history.get("state") == "completed"
+            )
+            durable_baseline = None
+            if baseline_loaded:
+                if not isinstance(prior_history, Mapping):
+                    raise ReviewInputError("observed durable baseline is invalid")
+                durable_baseline = baseline_from_history_document(
+                    prior_history.get("baseline")
+                )
+            configuration_context = {
+                "provider": {
+                    "name": provider.name,
+                    "profile": None,
+                    "base_url": None,
+                    "timeout_seconds": None,
+                    "max_output_tokens": None,
+                    "allow_custom_endpoint": False,
+                    "openrouter_policy": None,
+                },
+                "model": provider.model or "observed-fixture-model",
+                "stages": [
+                    {
+                        "name": stage.name,
+                        "outputs": list(stage.outputs),
+                        "categories": [category.id for category in stage.categories],
+                        "provider_profile": stage.provider_profile,
+                    }
+                    for stage in service.stages
+                ],
+                "category_policy": sorted(
+                    {
+                        category.id
+                        for stage in service.stages
+                        for category in stage.categories
+                    }
+                ),
+                "orchestration": {"enabled": False, "continue_rounds": 0},
+                "publication_mode": policy.mode,
+            }
+            evidence_context = {"evidence_policy": "legacy", "snapshot_sha256": None}
+            reservation = session_reservation_id(
+                repository="owner/repo",
+                pull_request=136,
+                head_sha=step.head_sha,
+                kind="publish",
+            )
+            prepared = prepare_review_transaction(
+                ledger,
+                session_identity,
+                policy,
+                reservation_id=reservation,
+                base_sha="f" * 40,
+                head_sha=step.head_sha,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    configuration_context
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(
+                    evidence_context
+                ),
+                coverage_complete=step.coverage_complete,
+                latest_head_reviewed=step.latest_head_reviewed,
+            )
+            github.head_sha = step.head_sha
+            approvals_before = github.approval_events
+            if should_skip_automation(prepared.decision, inference=True):
+                if prepared.decision.handoff_reason == "round-budget-exhausted":
+                    cap_created_approval = github.approval_events > approvals_before
+                handoffs += int(prepared.decision.handoff)
+                events.append(
+                    ObservedSequenceEvent(
+                        label=step.label or f"step-{index + 1}",
+                        provider_calls=0,
+                        baseline_loaded=baseline_loaded,
+                        publication_status="handoff",
+                    )
+                )
+                continue
             result = service.review(
                 request,
                 current_key=current_key,
             )
+            # These facts are the fixture's independently-checkable evidence
+            # edge.  The production publisher still performs C2 admission;
+            # no model ``blocking`` flag alone can turn into a blocker.
+            blocker_candidates = tuple(
+                derive_blocker_candidate(
+                    comment,
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_specific_violation=True,
+                )
+                for comment in result.comments
+            )
             provider_calls += provider.calls
             expected_material_finding_ids.update(step.expected_material_finding_ids)
-            observed_material_finding_ids.update(
+            expected_non_material_finding_ids.update(
+                step.expected_non_material_finding_ids
+            )
+            if expected_material_finding_ids & expected_non_material_finding_ids:
+                raise ReviewInputError("expected finding labels are contradictory")
+            material_ids = tuple(
                 comment.body.removeprefix("fixture-material:")
                 for comment in result.comments
                 if comment.body.startswith("fixture-material:")
                 and comment.severity in {"high", "critical"}
             )
+            observed_material_finding_occurrences.extend(material_ids)
+            observed_material_finding_ids.update(material_ids)
+            duplicate_findings += len(material_ids) - len(set(material_ids))
+            for finding_id in set(material_ids):
+                previous_step = last_observed_step.get(finding_id)
+                if previous_step is not None and previous_step < index - 1:
+                    reopened_findings += 1
+                last_observed_step[finding_id] = index
+            contradictions += sum(
+                finding_id in expected_non_material_finding_ids
+                for finding_id in material_ids
+            )
+            checkpoint_baseline = baseline_from_review(
+                result,
+                cache_key=current_key,
+                policy=policy,
+                generation=next_session_generation(prepared.record),
+            )
+            result = checkpoint_review_analysis(
+                ledger,
+                session_identity,
+                prepared,
+                result,
+                baseline=checkpoint_baseline,
+            )
+            baseline_events += 1
             from .hosting.github.publication import ReviewPublisher
 
-            github.head_sha = step.head_sha
-            approvals_before = github.approval_events
-            baseline_loaded = baseline is not None
             application = GitHubApplication(
                 # The GitHub transport and model response are bounded fixture
                 # edges. Publisher and finalizer remain production components.
@@ -547,9 +692,12 @@ def run_observed_review_sequence(
                 diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
                 app_slug="reviewsensei[bot]",
                 convergence_policy=policy,
-                baseline=baseline,
-                current_key=current_key if baseline is not None else None,
+                baseline=durable_baseline,
+                current_key=current_key,
                 changed_paths=("src/observed.py",),
+                blocker_candidates=blocker_candidates,
+                configuration_context=configuration_context,
+                evidence_context=evidence_context,
             )
             if (
                 outcome.status == "handoff"
@@ -566,11 +714,6 @@ def run_observed_review_sequence(
                     publication_status=outcome.status,
                 )
             )
-            if outcome.status == "published":
-                baseline = baseline_from_review(
-                    result, cache_key=current_key, policy=policy
-                )
-                baseline_events += 1
         session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
         ledger = LocalSessionLedger(ledger_root)
         loaded_record = ledger.load(session_identity).record
@@ -649,7 +792,7 @@ def run_observed_review_sequence(
         command_events=tuple(command_events),
         finding_metrics=ObservedFindingMetrics(
             expected_material_findings=len(expected_material_finding_ids),
-            observed_material_findings=len(observed_material_finding_ids),
+            observed_material_findings=len(observed_material_finding_occurrences),
             matched_material_findings=len(
                 expected_material_finding_ids & observed_material_finding_ids
             ),
@@ -661,13 +804,16 @@ def run_observed_review_sequence(
             ),
             blocker_precision=(
                 None
-                if not observed_material_finding_ids
+                if not observed_material_finding_occurrences
                 else len(expected_material_finding_ids & observed_material_finding_ids)
-                / len(observed_material_finding_ids)
+                / len(observed_material_finding_occurrences)
             ),
             seeded_material_regressions_detected=len(
                 expected_material_finding_ids & observed_material_finding_ids
             ),
+            duplicate_findings=duplicate_findings,
+            reopened_findings=reopened_findings,
+            contradictions=contradictions,
         ),
         execution_metrics=ObservedExecutionMetrics(
             completed_rounds=completed_rounds,
@@ -683,8 +829,11 @@ def run_observed_review_sequence(
         unmet_criteria=tuple(
             item
             for item in (
-                "cap-created approval remains unknown until the supplied sequence exercises a round cap",
-                "duplicate, reopen, and contradiction finding metrics need labelled fixtures",
+                (
+                    "cap-created approval remains unknown until the supplied sequence exercises a round cap"
+                    if cap_created_approval is None
+                    else None
+                ),
                 (
                     "installed source, package, and workflow identities are unavailable"
                     if "unavailable"

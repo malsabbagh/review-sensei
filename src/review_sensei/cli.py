@@ -2205,6 +2205,8 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             SequenceStep(
                 head_sha="a" * 40,
                 blocking_identities=("defect-a", "defect-b"),
+                expected_material_finding_ids=("material-a",),
+                fixture_material_finding_ids=("material-a",),
                 label="initial",
             ),
             SequenceStep(

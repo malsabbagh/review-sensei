@@ -193,11 +193,16 @@ class ObservedSequenceTests(unittest.TestCase):
     def test_observed_harness_records_real_service_and_publication_events(self):
         report = run_observed_review_sequence(
             (
-                SequenceStep(head_sha="a" * 40, label="initial"),
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                    label="initial-regression",
+                ),
                 SequenceStep(
                     head_sha="b" * 40,
                     independently_approval_eligible=True,
-                    label="verification",
+                    label="verification-fixed",
                 ),
             ),
             _policy(),
@@ -212,7 +217,9 @@ class ObservedSequenceTests(unittest.TestCase):
             [event.publication_status for event in report.events],
             ["published", "published"],
         )
-        self.assertEqual(report.approval_events, 2)
+        # The first review has a confirmed material blocker; the clean
+        # verification is the only observed approval event.
+        self.assertEqual(report.approval_events, 1)
         self.assertEqual(report.baseline_events, 2)
         self.assertEqual(report.command_events, ("pause:applied", "continue:applied"))
         self.assertEqual(report.execution_metrics.completed_rounds, 2)
@@ -225,6 +232,37 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(
             report.to_dict()["events"][0]["publication_status"], "published"
         )
+
+    def test_observed_harness_stops_inference_at_the_round_cap(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                    label="initial-regression",
+                ),
+                SequenceStep(head_sha="b" * 40, label="verification-fixed"),
+                SequenceStep(head_sha="c" * 40, label="no-progress"),
+                SequenceStep(head_sha="d" * 40, label="over-cap"),
+            ),
+            _policy(),
+        )
+        self.assertEqual(
+            [
+                (event.publication_status, event.provider_calls)
+                for event in report.events
+            ],
+            [
+                ("published", 1),
+                ("published", 1),
+                ("handoff", 1),
+                ("handoff", 0),
+            ],
+        )
+        self.assertEqual(report.execution_metrics.completed_rounds, 3)
+        self.assertEqual(report.execution_metrics.provider_calls, 3)
+        self.assertFalse(report.cap_created_approval)
 
     def test_observed_harness_compares_material_labels_to_fixture_output(self):
         report = run_observed_review_sequence(
@@ -247,7 +285,46 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(metrics.unjustified_late_blockers, 0)
         self.assertEqual(metrics.blocker_precision, 1.0)
         self.assertEqual(metrics.seeded_material_regressions_detected, 1)
-        self.assertIsNone(metrics.duplicate_findings)
+        self.assertEqual(metrics.duplicate_findings, 0)
+        self.assertEqual(metrics.reopened_findings, 0)
+        self.assertEqual(metrics.contradictions, 0)
+
+    def test_observed_harness_measures_deduplication_reopens_and_contradictions(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    # The real service normalizes this duplicate before it can
+                    # reach C2 or the publisher.
+                    fixture_material_finding_ids=("material-a", "material-a"),
+                    label="deduplicated",
+                ),
+                SequenceStep(head_sha="b" * 40, label="fixed"),
+                SequenceStep(
+                    head_sha="c" * 40,
+                    fixture_material_finding_ids=("material-a",),
+                    label="reopened",
+                ),
+                SequenceStep(
+                    head_sha="d" * 40,
+                    expected_non_material_finding_ids=("material-b",),
+                    fixture_material_finding_ids=("material-b",),
+                    label="contradiction",
+                ),
+            ),
+            ReviewConvergencePolicy(
+                mode="merge-focused",
+                max_completed_verification_rounds=4,
+            ),
+        )
+        metrics = report.finding_metrics
+        self.assertEqual(metrics.duplicate_findings, 0)
+        self.assertEqual(metrics.reopened_findings, 1)
+        self.assertEqual(metrics.contradictions, 1)
+        self.assertEqual(metrics.unjustified_late_blockers, 1)
+        self.assertEqual(metrics.observed_material_findings, 3)
+        self.assertEqual(metrics.blocker_precision, 1 / 3)
 
 
 class ShadowObservationTests(unittest.TestCase):
