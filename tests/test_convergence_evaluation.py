@@ -243,7 +243,7 @@ class ObservedSequenceTests(unittest.TestCase):
                     label="initial-regression",
                 ),
                 SequenceStep(head_sha="b" * 40, label="verification-fixed"),
-                SequenceStep(head_sha="c" * 40, label="no-progress"),
+                SequenceStep(head_sha="c" * 40, label="clean-repeat"),
                 SequenceStep(head_sha="d" * 40, label="over-cap"),
             ),
             _policy(),
@@ -256,7 +256,9 @@ class ObservedSequenceTests(unittest.TestCase):
             [
                 ("published", 1),
                 ("published", 1),
-                ("handoff", 1),
+                # An empty admitted blocker set is progress, not a repeated
+                # blocker set, so a second clean round still publishes.
+                ("published", 1),
                 ("handoff", 0),
             ],
         )
