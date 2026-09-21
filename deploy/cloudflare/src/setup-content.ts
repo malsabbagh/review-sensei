@@ -508,7 +508,6 @@ jobs:
       github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -686,6 +685,9 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\\S)@sensei\\s+(?:review\\s+(?:status|pause|continue(?:\\s+--rounds\\s+[01])?)|verify|(?:dismiss|defer|accept-risk)\\s+[a-f0-9]{16,64}\\s+--reason\\s+\\S.*)\\s*\\Z", comment_body, re.IGNORECASE):
+                  operation = "command"
+                  enable_review = "false"
               else:
                   operation = "reply"
                   enable_review = "false"
@@ -720,7 +722,6 @@ jobs:
       github.event.pull_request.draft != true &&
       github.event.pull_request.head.repo.full_name == github.repository) ||
       (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
       ((github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
@@ -754,6 +755,10 @@ jobs:
       source_comment_id: @@{{ inputs.source_comment_id || github.event.comment.id }}
       source_updated_at: @@{{ inputs.source_updated_at || github.event.comment.updated_at }}
       root_comment_id: @@{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
+      comment_body: @@{{ github.event.comment.body || '' }}
+      comment_actor: @@{{ github.event.comment.user.login || '' }}
+      comment_actor_type: @@{{ github.event.comment.user.type || 'User' }}
+      comment_association: @@{{ github.event.comment.author_association || '' }}
       review_sensei_version: @@{{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
       pull_request_title: @@{{ needs.resolve-trigger.outputs.pull_request_title || inputs.pull_request_title || github.event.pull_request.title }}
       stages_dir: @@{{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
