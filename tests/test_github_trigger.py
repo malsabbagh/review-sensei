@@ -112,6 +112,21 @@ class GitHubTriggerTests(unittest.TestCase):
         )
         self.assertEqual(resolution.operation, "reply")
 
+    def test_command_body_byte_boundary_is_inclusive_at_4096(self):
+        # 1359 ideographic spaces are 4077 bytes and are stripped by str.strip(),
+        # so the remainder still parses as a command. "@sensei"+"review pause"
+        # is 19 bytes, putting the body exactly on the 4096-byte ceiling.
+        padding = "\N{IDEOGRAPHIC SPACE}" * 1359
+        at_bound = "@sensei" + padding + "review pause"
+        self.assertEqual(len(at_bound.encode("utf-8")), 4096)
+        self.assertEqual(resolve_issue_comment(at_bound, _pull()).operation, "command")
+
+        # One extra ASCII space pushes the body to 4097 bytes; it is also
+        # stripped, so only the byte ceiling can route this one to reply.
+        over_bound = "@sensei" + padding + " " + "review pause"
+        self.assertEqual(len(over_bound.encode("utf-8")), 4097)
+        self.assertEqual(resolve_issue_comment(over_bound, _pull()).operation, "reply")
+
     def test_comment_mentions_sensei_matches_workflow_gate(self):
         self.assertTrue(comment_mentions_sensei("@sensei please re-scan"))
         self.assertFalse(comment_mentions_sensei("@SENSEI please re-scan"))

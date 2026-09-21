@@ -75,8 +75,11 @@ on:
         default: ''
         type: string
       comment_actor_type:
+        # No default: a command caller must state the actor type explicitly so
+        # an omitted value fails the maintainer gate instead of silently
+        # satisfying it.
         required: false
-        default: User
+        default: ''
         type: string
       comment_association:
         required: false
@@ -290,8 +293,16 @@ jobs:
           elif [[ "$OPERATION" == reply && "$ENABLE_GITHUB_WRITES" == true && "$ENABLE_MENTION_REPLIES" == true && ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
             echo '::error::pull request number is required for reply operations' >&2
             exit 1
-          elif [[ "$OPERATION" == command && "$ENABLE_GITHUB_WRITES" == true ]]; then
-            comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | wc -c)"
+          elif [[ "$OPERATION" == command ]]; then
+            # Command inputs are checked whether or not writes are enabled, so
+            # a caller cannot route command payloads through the workflow while
+            # the job that consumes them is skipped.
+            if [[ "$ENABLE_GITHUB_WRITES" != true ]]; then
+              echo '::error::command operations require enable_github_writes' >&2
+              exit 1
+            fi
+            # LC_ALL=C pins wc to byte counting instead of the runner locale.
+            comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | LC_ALL=C wc -c)"
             if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
               echo '::error::command operations require an explicit pull_request_number input' >&2
               exit 1
@@ -369,7 +380,10 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
         run: |
           set -euo pipefail
-          if [[ "$OPERATION" != "review" || "$ENABLE_REVIEW" != "true" ]]; then
+          # Command mutations reuse the live head/branch checks below, so a
+          # stale or fabricated head SHA fails here rather than only at the
+          # broker. Reviews need the fetch for their base SHA and title.
+          if [[ "$OPERATION" != "command" && ("$OPERATION" != "review" || "$ENABLE_REVIEW" != "true") ]]; then
             echo 'authoritative PR preflight not required for this operation'
             exit 0
           fi
@@ -466,7 +480,10 @@ jobs:
 
   command:
     needs: [validate-provider-mode, authoritative-preflight]
-    if: inputs.operation == 'command' && inputs.enable_github_writes == 'true' && needs.validate-provider-mode.result == 'success'
+    # authoritative-preflight re-reads the live PR and rejects a head SHA that
+    # no longer matches, so the mutation only runs against the commit the
+    # maintainer addressed.
+    if: inputs.operation == 'command' && inputs.enable_github_writes == 'true' && needs.validate-provider-mode.result == 'success' && needs.authoritative-preflight.result == 'success'
     concurrency:
       group: reviewsensei-command-${{ github.run_id }}
       cancel-in-progress: false
@@ -495,21 +512,31 @@ jobs:
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo '::error::The ReviewSensei reusable workflow identity is invalid.' >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
             install_source="PyPI"
-          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            "$python_bin" -m pip install --disable-pip-version-check "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
             install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
           else
-            echo '::error::PyPI installation failed for a reason other than an unavailable distribution.' >&2
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1
           fi
           installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
-          [[ "$installed_version" == "$expected_version" ]] || { echo '::error::ReviewSensei version mismatch.' >&2; exit 1; }
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
 
@@ -533,7 +560,7 @@ jobs:
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json, sys; value = json.load(sys.stdin).get("value"); assert isinstance(value, str) and value; print(value)')"
           attestation="$RUNNER_TEMP/review-sensei-command-attestation.json"
-          python - "$attestation" <<'PY'
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - "$attestation" <<'PY'
           import json
           import os
           import re

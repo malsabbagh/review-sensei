@@ -1508,6 +1508,9 @@ def _bind_hosted_command_attestation(
 
     The broker re-checks this binding against the OIDC claims; checking it here
     fails a mismatched attestation before any credential is exchanged.
+
+    `run_id` is intentionally not compared: the CLI has no trustworthy run
+    identity of its own, so the broker is the only place that can bind it.
     """
 
     if (
@@ -1518,6 +1521,8 @@ def _bind_hosted_command_attestation(
         or attestation.get("pull_request") != pull_request
         or attestation.get("head_sha") != head_sha
         or attestation.get("source_comment_id") != source_comment_id
+        or attestation.get("concurrency_group")
+        != f"reviewsensei-session-{repository_id}-{pull_request}"
     ):
         raise ReviewInputError(
             "session attestation does not match the hosted command identity"

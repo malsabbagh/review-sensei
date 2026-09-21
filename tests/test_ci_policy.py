@@ -928,11 +928,20 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("pull-requests: write", command)
         self.assertIn("id-token: write", command)
         validator = _job_section(text, "validate-provider-mode")
+        # The command branch is reached for every command operation: gating it
+        # on enable_github_writes leaves the command inputs unchecked when the
+        # consuming job is skipped.
+        self.assertNotIn(
+            'elif [[ "$OPERATION" == command && "$ENABLE_GITHUB_WRITES" == true ]]',
+            validator,
+        )
+        self.assertIn('elif [[ "$OPERATION" == command ]]; then', validator)
         self.assertIn(
             "command operations require an authorized human maintainer", validator
         )
+        self.assertIn("command operations require enable_github_writes", validator)
         self.assertIn(
-            'comment_body_bytes="$(printf \'%s\' "$COMMENT_BODY" | wc -c)"',
+            'comment_body_bytes="$(printf \'%s\' "$COMMENT_BODY" | LC_ALL=C wc -c)"',
             validator,
         )
         self.assertNotIn("${#COMMENT_BODY}", validator)
@@ -940,6 +949,15 @@ class ActionPinPolicyTests(unittest.TestCase):
             "command operations require an explicit pull_request_number input",
             validator,
         )
+        # An omitted actor type must not satisfy the maintainer gate, so the
+        # input carries no default.
+        self.assertIn("comment_actor_type:\n", text)
+        self.assertNotIn("default: User\n", text)
+        # A stale or fabricated head SHA must fail the live-PR preflight before
+        # the mutation is attempted.
+        self.assertIn("&& needs.authoritative-preflight.result == 'success'", command)
+        preflight = _job_section(text, "authoritative-preflight")
+        self.assertIn('"$OPERATION" != "command"', preflight)
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
         root = Path(__file__).resolve().parents[1]
