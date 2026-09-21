@@ -24,7 +24,7 @@ from review_sensei.planning import MAX_RELATED_PATHS
 from review_sensei.schemas import SCHEMA_DIR, validate_public_document
 from review_sensei.session import (
     MAX_CONVERGENCE_PROGRESS_ENTRIES,
-    MAX_SESSION_RECORD_BYTES,
+    MAX_DURABLE_BLOCKER_COUNT,
     MAX_STORED_CONTINUATION_GRANTS,
     SESSION_SHA256_PATTERN,
 )
@@ -139,11 +139,21 @@ class PublicSchemaTests(unittest.TestCase):
         )
         progress_properties = history["progress"]["items"]["properties"]
         self.assertEqual(
-            progress_properties["blocker_count"]["maximum"], MAX_SESSION_RECORD_BYTES
+            progress_properties["blocker_count"]["maximum"], MAX_DURABLE_BLOCKER_COUNT
         )
         self.assertEqual(
             progress_properties["blocker_set_sha256"]["pattern"],
             SESSION_SHA256_PATTERN,
+        )
+        self.assertEqual(
+            progress_properties["transaction_id"]["pattern"],
+            SESSION_SHA256_PATTERN,
+        )
+        self.assertEqual(
+            session_schema["properties"]["convergence_history"]["properties"][
+                "baseline"
+            ]["properties"]["findings"]["maxItems"],
+            MAX_HISTORY_READ_FINDINGS,
         )
 
     def test_later_finding_schema_enums_match_runtime_contract(self) -> None:

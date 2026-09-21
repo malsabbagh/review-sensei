@@ -391,6 +391,7 @@ class SessionRecordTests(unittest.TestCase):
                 "generation": generation,
                 "blocker_set_sha256": digest,
                 "blocker_count": count,
+                "transaction_id": str(generation) * 64,
             }
             for generation, (digest, count) in enumerate(
                 (first, second, third), start=1
@@ -2361,7 +2362,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             result=ReviewResult(summary="ok", comments=(), provider="fixture"),
             diff="diff",
             app_slug="reviewsensei[bot]",
-            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(publication.status, "published")
         self.assertEqual(
@@ -2370,15 +2371,6 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 "GET",
                 "GET",
                 "POST",
-                "GET",
-                "GET",
-                "GET",
-                "PATCH",
-                "GET",
-                "GET",
-                "GET",
-                "GET",
-                "PATCH",
                 "GET",
             ],
         )
@@ -2623,6 +2615,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                     result=ReviewResult(summary="ok", comments=(), provider="fixture"),
                     diff="diff",
                     app_slug="reviewsensei[bot]",
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
                 )
         self.assertTrue(
             any("cleanup failed" in note for note in caught.exception.__notes__)
@@ -2645,28 +2638,22 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             replier=object(),
             session_ledger=InMemorySessionLedger(),
         )
-        with patch(
-            "review_sensei.hosting.github.application.record_session_failed_attempt",
-            side_effect=ValueError("cleanup failed"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "publication failed") as caught:
-                application.publish_review(
-                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
-                    oidc_token="oidc",
-                    repository="owner/repo",
-                    repository_id=99,
-                    pull_request=136,
-                    head_sha="a" * 40,
-                    base_branch="main",
-                    base_sha="b" * 40,
-                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-                    diff="diff",
-                    app_slug="reviewsensei[bot]",
-                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
-                )
-        self.assertTrue(
-            any("cleanup failed" in note for note in caught.exception.__notes__)
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="a" * 40,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+            diff="diff",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "identity-bound transaction required")
 
     def test_publisher_base_exception_releases_a_reservation(self):
         class Broker:
@@ -2702,12 +2689,12 @@ class GitHubApplicationSessionTests(unittest.TestCase):
                 result=ReviewResult(summary="ok", comments=(), provider="fixture"),
                 diff="diff",
                 app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         loaded = ledger.load(IDENTITY)
         self.assertIsNone(loaded.record.reservation_id)
 
-    def test_operator_publish_commits_local_ledger(self):
+    def test_operator_publish_without_identity_bound_transaction_handoffs(self):
         class Broker:
             def request_oidc_token(self):
                 return "oidc-token"
@@ -2717,9 +2704,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
 
         class Reviewer:
             def publish(self, **kwargs):
-                from review_sensei.hosting.github import PublicationResult
-
-                return PublicationResult(status="published", review_id=1)
+                raise AssertionError("operator publisher must not run before admission")
 
         ledger = InMemorySessionLedger()
         application = GitHubApplication(
@@ -2744,18 +2729,11 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
             convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
-        self.assertEqual(result.status, "published")
+        self.assertEqual(result.status, "handoff")
+        self.assertEqual(result.diagnostic, "identity-bound transaction required")
         loaded = ledger.load(IDENTITY)
-        self.assertEqual(loaded.record.completed_initial_reviews, 1)
-        self.assertEqual(
-            loaded.record.last_committed_reservation_id,
-            session_reservation_id(
-                repository=IDENTITY.repository,
-                pull_request=IDENTITY.pull_request,
-                head_sha="a" * 40,
-                kind="publish",
-            ),
-        )
+        self.assertEqual(loaded.record.completed_initial_reviews, 0)
+        self.assertIsNone(loaded.record.reservation_id)
 
     def test_non_published_publication_aborts_without_counting(self):
         from review_sensei.hosting.github import PublicationResult
@@ -2789,7 +2767,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             result=ReviewResult(summary="ok", comments=(), provider="fixture"),
             diff="diff",
             app_slug="reviewsensei[bot]",
-            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(result.status, "skipped_stale")
         loaded = ledger.load(IDENTITY)

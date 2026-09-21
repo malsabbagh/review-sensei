@@ -24,7 +24,8 @@ The envelope contains only closed metadata:
 - reviewed base/head, policy and coverage digests;
 - at most two stable concern and resolution-criterion digests; and
 - three lifecycle progress markers, each of which can carry a canonical
-  admitted-blocker-set digest. These three markers are the durable F3
+  admitted-blocker-set digest and (for newly written markers) the owning
+  transaction id. These three markers are the durable F3
   repeat/oscillation window; they are independent of the two verification
   rounds governed by ADR 0048 and the round budget in ADR 0049.
 - an authenticated ledger digest.
@@ -47,6 +48,13 @@ admission and is reflected in the prepared result; evidence that leaves the
 same blocker identities admitted is not verified progress and cannot lift a
 terminal suppression. A maintainer may use the authenticated `@sensei review
 reenroll` recovery command when a new operator decision is required.
+
+Each F3-eligible transaction owns exactly one durable blocker marker. A
+recovery replay may exclude the last marker only when that marker carries the
+same transaction id; a marker from a prior round with the same blocker set is
+still comparable evidence. Checkpoint placeholders are lifecycle-only entries
+and do not evict the bounded comparable blocker window; the admission CAS
+replaces the current transaction's placeholder with its owned marker.
 
 ## Session witness
 

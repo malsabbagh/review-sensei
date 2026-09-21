@@ -48,6 +48,7 @@ from review_sensei.session import (
     blocker_set_digest,
     checkpoint_review_analysis,
     complete_review_publication,
+    convergence_progress_blocker_sets,
     load_review_transaction_for_publication,
     prepare_review_transaction,
     reclaim_abandoned_review_transaction,
@@ -116,6 +117,55 @@ def _checkpoint(ledger: InMemorySessionLedger) -> ReviewResult:
         now=NOW,
     )
     return checkpoint_review_analysis(ledger, IDENTITY, prepared, _result(), now=NOW)
+
+
+def _baseline(generation: int) -> ReviewBaseline:
+    return ReviewBaseline(
+        cache_key=ReviewContextCacheKey(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="1" * 64,
+            context_digest="2" * 64,
+            learning_digest="3" * 64,
+        ),
+        policy_digest=POLICY.digest(),
+        complete=True,
+        coverage_complete=True,
+        generation=generation,
+    )
+
+
+def _checkpoint_with_baseline(ledger: InMemorySessionLedger) -> ReviewResult:
+    reservation = session_reservation_id(
+        repository=IDENTITY.repository,
+        pull_request=IDENTITY.pull_request,
+        head_sha=HEAD_SHA,
+        kind="publish",
+    )
+    prepared = prepare_review_transaction(
+        ledger,
+        IDENTITY,
+        POLICY,
+        reservation_id=reservation,
+        base_sha=BASE_SHA,
+        head_sha=HEAD_SHA,
+        configuration_digest=CONFIGURATION_DIGEST,
+        evidence_digest=EVIDENCE_DIGEST,
+        now=NOW,
+    )
+    return checkpoint_review_analysis(
+        ledger,
+        IDENTITY,
+        prepared,
+        _result(),
+        baseline=_baseline(prepared.record.generation + 1),
+        now=NOW,
+    )
 
 
 class ReviewTransactionTests(unittest.TestCase):
@@ -441,6 +491,7 @@ class ReviewTransactionTests(unittest.TestCase):
                     "generation": result.transaction.generation,
                     "blocker_set_sha256": "a" * 64,
                     "blocker_count": 1,
+                    "transaction_id": result.transaction.transaction_id,
                 }
             ],
         )
@@ -552,6 +603,104 @@ class ReviewTransactionTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(succeeded_replay.generation, succeeded.generation)
+
+    def test_terminal_replay_requires_transaction_owned_progress_marker(self):
+        ledger = InMemorySessionLedger()
+        result = _checkpoint_with_baseline(ledger)
+        pending = record_admitted_blocker_progress(
+            ledger,
+            IDENTITY,
+            result.transaction,
+            blocker_set_sha256="a" * 64,
+            blocker_count=1,
+            suppress_publication=False,
+            now=NOW,
+        )
+        failed = complete_review_publication(
+            ledger, IDENTITY, pending.transaction, published=False, now=NOW
+        )
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        history = dict(record.convergence_history)
+        progress = list(history["progress"])
+        progress[-1] = {**progress[-1], "transaction_id": "f" * 64}
+        history["progress"] = progress
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                convergence_history=history,
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "does not match transaction"):
+            record_admitted_blocker_progress(
+                ledger,
+                IDENTITY,
+                failed.transaction,
+                blocker_set_sha256="a" * 64,
+                blocker_count=1,
+                suppress_publication=False,
+                now=NOW,
+            )
+
+    def test_checkpoint_preserves_comparable_blocker_window(self):
+        ledger = InMemorySessionLedger()
+        first = _checkpoint_with_baseline(ledger)
+        complete_review_publication(
+            ledger, IDENTITY, first.transaction, published=True, now=NOW
+        )
+        record = ledger.load(IDENTITY, now=NOW).record
+        assert record is not None
+        history = dict(record.convergence_history)
+        history["progress"] = [
+            {
+                "event": "completed",
+                "generation": 1,
+                "blocker_set_sha256": "a" * 64,
+                "blocker_count": 1,
+            },
+            {
+                "event": "completed",
+                "generation": 2,
+                "blocker_set_sha256": "b" * 64,
+                "blocker_count": 1,
+            },
+            {"event": "completed", "generation": 3},
+        ]
+        ledger.replace(
+            IDENTITY,
+            lambda current: current.evolve(
+                convergence_history=history,
+                now=NOW,
+            ),
+            now=NOW,
+        )
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id="f" * 64,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            configuration_digest=CONFIGURATION_DIGEST,
+            evidence_digest=EVIDENCE_DIGEST,
+            now=NOW,
+        )
+        checkpoint_review_analysis(
+            ledger,
+            IDENTITY,
+            prepared,
+            _result(),
+            baseline=_baseline(prepared.record.generation + 1),
+            now=NOW,
+        )
+        self.assertEqual(
+            convergence_progress_blocker_sets(
+                ledger.load(IDENTITY, now=NOW).record.convergence_history
+            ),
+            (("a" * 64, 1), ("b" * 64, 1)),
+        )
 
     def test_trusted_context_mismatch_fails_closed(self):
         ledger = InMemorySessionLedger()
@@ -2064,13 +2213,13 @@ class PublicationTransactionTests(unittest.TestCase):
         history["progress"] = [
             {
                 "event": "completed",
-                "generation": 0,
+                "generation": 1,
                 "blocker_set_sha256": digest,
                 "blocker_count": count,
             },
             {
                 "event": "completed",
-                "generation": 0,
+                "generation": 2,
                 "blocker_set_sha256": digest,
                 "blocker_count": count,
             },

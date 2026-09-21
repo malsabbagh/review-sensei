@@ -154,7 +154,8 @@ class GitHubApplication:
             if isinstance(convergence_policy, ReviewConvergencePolicy)
             else ReviewConvergencePolicy()
         )
-        operator_baseline_requested = policy.mode in OPERATOR_REVIEW_MODES and (
+        operator_mode = policy.mode in OPERATOR_REVIEW_MODES
+        operator_baseline_requested = operator_mode and (
             (isinstance(result, ReviewResult) and result.transaction is not None)
             or options.github_session_ledger
             or baseline is not None
@@ -517,6 +518,39 @@ class GitHubApplication:
                             )
                         except ReviewInputError:
                             baseline_recovery_required = True
+        if (
+            operator_mode
+            and ledger is not None
+            and (not isinstance(result, ReviewResult) or result.transaction is None)
+            and durable_baseline is None
+            and not baseline_recovery_required
+            and baseline is None
+            and current_key is None
+        ):
+            # F3 admission is bound to the durable transaction and its
+            # marker. A fresh operator-ledger call without a transaction or
+            # trusted baseline cannot safely infer or suppress a review, so
+            # release any reservation and hand off for the caller to create
+            # the identity-bound transaction first.
+            if prepared is not None and prepared.reservation_id is not None:
+                cleanup_error = self._abort_held_session_reservation(
+                    ledger, identity, prepared.reservation_id
+                )
+                if cleanup_error is not None:
+                    raise GitHubPublicationError(
+                        "operator transaction is unavailable and reservation "
+                        "cleanup failed"
+                    ) from cleanup_error
+            return _with_shadow(
+                PublicationResult(
+                    status="handoff",
+                    diagnostic="identity-bound transaction required",
+                ),
+                _shadow_observation(
+                    _shadow_state(prepared, flags),
+                    continuation_rounds=continuation_rounds,
+                ),
+            )
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
         # Falling back to the prior key would treat an unknown head/configuration
@@ -552,7 +586,7 @@ class GitHubApplication:
         try:
             prepared_publishable: PublishableReview | None = None
             if (
-                operator_baseline_requested
+                operator_mode
                 and ledger is not None
                 and transaction_record is not None
                 and transaction_record.transaction is not None
@@ -618,6 +652,8 @@ class GitHubApplication:
                         and isinstance(progress[-1], Mapping)
                         and "blocker_set_sha256" in progress[-1]
                         and "blocker_count" in progress[-1]
+                        and progress[-1].get("transaction_id")
+                        == transaction_record.transaction.transaction_id
                     ):
                         # This result already has a durable blocker marker. It
                         # belongs to the recovery attempt being replayed, not

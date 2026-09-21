@@ -297,7 +297,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
         self.assertEqual(result.diagnostic, "durable_baseline_recovery_required")
         self.assertEqual(reviewer.calls, [])
 
-    def test_provider_failure_records_failed_attempt(self):
+    def test_operator_without_identity_bound_transaction_handoffs_before_provider(self):
         class FailingReviewer:
             def publish(self, **kwargs):
                 raise RuntimeError("github down")
@@ -311,23 +311,24 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             replier=object(),
             session_ledger=ledger,
         )
-        with self.assertRaises(RuntimeError):
-            application.publish_review(
-                options=GitHubWriteOptions(auto_review=True, github_writes=True),
-                oidc_token="oidc",
-                repository=IDENTITY.repository,
-                repository_id=99,
-                pull_request=IDENTITY.pull_request,
-                head_sha=HEAD,
-                base_branch="main",
-                base_sha="b" * 40,
-                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-                diff="diff",
-                app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
-            )
+        outcome = application.publish_review(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=99,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+            diff="diff",
+            app_slug="reviewsensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertEqual(outcome.status, "handoff")
+        self.assertEqual(outcome.diagnostic, "identity-bound transaction required")
         loaded = ledger.load(IDENTITY)
-        self.assertEqual(loaded.record.failed_attempts, 1)
+        self.assertEqual(loaded.record.failed_attempts, 0)
         self.assertEqual(loaded.record.completed_initial_reviews, 0)
 
 

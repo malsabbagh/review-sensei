@@ -196,7 +196,8 @@
               "event": {"enum": ["completed", "invalidated", "recovery-required"]},
               "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
               "blocker_set_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-              "blocker_count": {"type": "integer", "minimum": 0, "maximum": 4096}
+              "blocker_count": {"type": "integer", "minimum": 0, "maximum": 4096},
+              "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
             },
             "allOf": [
               {
@@ -209,6 +210,13 @@
               {
                 "if": {"required": ["blocker_count"]},
                 "then": {"required": ["blocker_set_sha256"]}
+              },
+              {
+                "if": {"required": ["transaction_id"]},
+                "then": {
+                  "required": ["blocker_set_sha256", "blocker_count"],
+                  "properties": {"event": {"const": "completed"}}
+                }
               }
             ]
           }
