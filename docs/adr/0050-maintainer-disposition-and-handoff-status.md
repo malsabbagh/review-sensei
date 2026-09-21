@@ -142,6 +142,13 @@ Negative:
   reusable workflow re-parses the body and the hosted handler returns
   `not-a-command` without a write, so the residual cost is a wasted run
   rather than an unauthorized mutation.
+- On a caller that has not adopted the packaged trigger module path, that
+  inline prefilter is the only command gate, so `REVIEWSENSEI_GITHUB_WRITES=true`
+  alone enables the command surface even while `REVIEWSENSEI_MENTION_REPLIES`
+  is false: the prefilter does not consult the reply switch, and the switch
+  still governs conversational replies only. This widening from the previous
+  release is deliberate; a comment the caller does not classify as a command
+  still resolves as a conversational reply.
 - The caller workflow's `@sensei`, association, and user-type checks are a
   routing gate, not an authorization decision. Authority is re-derived
   inside the reusable workflow from the broker attestation and the durable

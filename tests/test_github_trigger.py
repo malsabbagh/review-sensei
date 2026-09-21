@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from review_sensei.disposition import parse_maintainer_command
+from review_sensei.disposition import MAINTAINER_ACTIONS, parse_maintainer_command
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.setup import _tagged_workflow
 from review_sensei.hosting.github.trigger import (
@@ -541,6 +541,61 @@ class InlineCallerResolverTests(unittest.TestCase):
                 "@sensei review\x1creenroll",
                 "@sensei review\x85reenroll",
                 "@sensei review\u2003reenroll",
+            },
+        )
+
+    def test_command_corpus_covers_every_maintainer_action(self):
+        """The corpus must exercise every action the parser can return.
+
+        The fixture pins accepted shapes for known bodies; this fails when the
+        grammar gains an action token the generated corpus does not spell, so
+        the derived accepted set cannot silently miss it.
+        """
+
+        actions: set[str] = set()
+        for body in command_corpus():
+            try:
+                command = parse_maintainer_command(body, actor="test-maintainer")
+            except ReviewInputError:
+                continue
+            if command is not None:
+                actions.add(command.action)
+        self.assertEqual(actions, set(MAINTAINER_ACTIONS))
+
+    def test_inline_command_prefilter_copies_are_enumerated(self):
+        """A new prefilter copy must be a deliberate act.
+
+        The grammar lives in four byte-locked artifacts plus the two tests
+        that read them; a copy added anywhere else should fail here with the
+        new path named instead of passing as an unguarded drift site.
+        """
+
+        marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
+        pruned = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+        }
+        found: set[str] = set()
+        for directory, subdirectories, files in os.walk(ROOT):
+            subdirectories[:] = [name for name in subdirectories if name not in pruned]
+            for name in files:
+                path = Path(directory) / name
+                if marker in path.read_bytes():
+                    found.add(path.relative_to(ROOT).as_posix())
+        self.assertEqual(
+            found,
+            {
+                ".github/workflows/review-sensei-review.yml",
+                "deploy/cloudflare/src/setup-content.ts",
+                "deploy/cloudflare/test/setup-content.test.ts",
+                "examples/github-actions/review-sensei-review.yml",
+                "src/review_sensei/hosting/github/setup.py",
+                "tests/test_github_trigger.py",
             },
         )
 

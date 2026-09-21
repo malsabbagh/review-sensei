@@ -29,8 +29,9 @@ const INLINE_COMMAND_PREFILTER_START =
  * evaluates it. The template stores the pattern in a Python raw string
  * literal, so the literal text is the regex source. Python's `(?m)` flag is
  * dropped and its `\Z` anchor becomes a JavaScript end-of-input `$` without
- * the `m` flag, which asserts the same thing for a pattern that uses neither
- * `^` nor `$` itself.
+ * the `m` flag. That translation is only equivalent while the pattern uses
+ * neither anchor itself, so an inner `^` or `$` is rejected below instead of
+ * silently changing what the pattern matches.
  */
 function inlineCommandPrefilter(text: string): string {
   const start = text.indexOf(INLINE_COMMAND_PREFILTER_START);
@@ -48,7 +49,13 @@ function inlineCommandPrefilter(text: string): string {
       "inline command prefilter anchors changed; update the JavaScript translation",
     );
   }
-  return literal.slice("(?m)".length, -"\\Z".length) + "$";
+  const translated = literal.slice("(?m)".length, -"\\Z".length);
+  if (/[\^$]/.test(translated)) {
+    throw new Error(
+      "inline command prefilter uses an inner anchor; the JavaScript translation is not equivalent",
+    );
+  }
+  return translated + "$";
 }
 
 interface CommandParityCase {

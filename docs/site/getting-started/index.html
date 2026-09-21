@@ -237,7 +237,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
             <td><strong>Conversations</strong></td>
             <td><code>REVIEWSENSEI_MENTION_REPLIES</code></td>
             <td class="no">false</td>
-            <td>Authorized <code>@sensei</code> mentions receive bounded thread replies (requires <code>REVIEWSENSEI_GITHUB_WRITES=true</code>). This switch controls only conversational replies: the maintainer commands <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> run whenever <code>REVIEWSENSEI_GITHUB_WRITES=true</code>.</td>
+            <td>Authorized <code>@sensei</code> mentions receive bounded thread replies (requires <code>REVIEWSENSEI_GITHUB_WRITES=true</code>). This switch controls only conversational replies: the maintainer commands <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> run whenever <code>REVIEWSENSEI_GITHUB_WRITES=true</code> and the comment body matches the caller workflow's <code>@sensei</code> routing gate. Those caller checks route the run; the mutation is re-authorized inside the reusable workflow against the broker-attested actor and the session ledger before any write.</td>
             <td>Leave disabled; mention events are ignored for reply publication, and maintainer commands stay unavailable until GitHub writes are enabled.</td>
           </tr>
           <tr>
