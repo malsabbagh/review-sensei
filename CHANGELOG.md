@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-09-21
+
+- Package cutoff pairing the movable public workflow channel `v5` with the
+  hosted maintainer-command interface: PyPI `review-sensei==0.6.0` and npm
+  `@reviewsensei/cli@0.6.0` with matching platform packages, published
+  through GitHub OIDC Trusted Publishing. Installed callers must move
+  `REVIEWSENSEI_VERSION` to `0.6.0`; the `0.5.0` package does not contain the
+  `github command` CLI or the session-ledger publication flags used by the
+  promoted reusable runner.
+
+- Added the issue #146 hosted maintainer-command path to the public reusable
+  runner: `@sensei` maintainer commands resolve to the `command` operation
+  through the new optional `comment_body`, `comment_actor`,
+  `comment_actor_type`, and `comment_association` inputs (existing callers
+  keep starting without them), run through the broker-attested session
+  ledger, and publish with `--github-session-ledger`. Generated setup
+  callers, command documentation, and the default-policy cutover remain
+  pending in issue #146.
+
+- Added the issue #146 convergence-integration foundation: review analysis
+  and publication share one checkpointed transaction bound to repository,
+  pull request, base/head, configuration, policy, evidence, reservation,
+  generation, and result digests, with retry and recovery from the stored
+  validated result without re-inference or double-counting, failing closed
+  on generation, ownership, identity, and schema mismatches (ADR 0052); a
+  durable, integrity-covered convergence history stores bounded PR-wide
+  round state with terminal, idempotent suppression and replay integrity
+  checks; no-progress handoff derives from post-admission blocker identities
+  in that history instead of caller-controlled `--no-progress` switches; and
+  maintainer commands carry durable identity, one-use continuation grants,
+  broker-issued hosted mutation grants, and ledger-side pre-write
+  verification scoped to repository, pull request, and head. Installed
+  defaults and the `legacy` publication path are unchanged.
 
 - Added the issue #136 C7 sequential evaluation and observation-only
   shadowing: `evaluate-convergence` replays frozen synthetic sequences

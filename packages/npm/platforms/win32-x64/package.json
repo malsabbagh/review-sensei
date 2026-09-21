@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli-win32-x64",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "ReviewSensei native CLI for Windows x64",
   "license": "MIT",
   "repository": {
