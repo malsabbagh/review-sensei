@@ -784,6 +784,48 @@ class SetupPullRequestServiceTests(unittest.TestCase):
                 ):
                     self.assertEqual(renderer(), expected)
 
+    def test_frozen_caller_reference_is_derived_from_the_fixture(self):
+        # The frozen bytes carry the run-workflow reference exactly once; the
+        # retag target must come from those bytes, never a parallel constant.
+        # The Cloudflare twin asserts the same substitution contract
+        # (deploy/cloudflare/test/setup-content.test.ts).
+        reference = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml"
+        caller = _merge_focused_v4_workflow("v5")
+        self.assertEqual(caller.count(reference + "@v5"), 1)
+        self.assertEqual(_merge_focused_v4_workflow("v5"), caller)
+        self.assertEqual(
+            _merge_focused_v4_workflow("stable"),
+            caller.replace(reference + "@v5", reference + "@stable"),
+        )
+        released = _released_runner_switch_v4_workflow("v4")
+        self.assertEqual(released.count(reference + "@v4"), 1)
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), released)
+        self.assertEqual(
+            _released_runner_switch_v4_workflow("stable"),
+            released.replace(reference + "@v4", reference + "@stable"),
+        )
+
+    def test_frozen_caller_reference_guard_rejects_ambiguous_fixtures(self):
+        from unittest.mock import patch
+
+        from review_sensei.hosting.github import setup as setup_module
+
+        reference = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml"
+        caller = _merge_focused_v4_workflow("v5")
+        cases = (
+            caller.replace(reference + "@v5", "example.invalid/other.yml@v5"),
+            caller + reference + "@v5\n",
+        )
+        for content in cases:
+            with self.subTest(references=content.count(reference)):
+                with patch.object(
+                    setup_module,
+                    "_merge_focused_v4_caller_bytes",
+                    return_value=content,
+                ):
+                    with self.assertRaises(GitHubSetupError):
+                        _merge_focused_v4_workflow("stable")
+
     def test_immediate_pre_cutover_v4_setup_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
         files = {file.path: file.content for file in plan.files}
@@ -800,6 +842,44 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(results[0].status, "created")
+        self.assertIn(
+            ("migrate_retired_review_mode_variable", "owner/repo", "ghs_opaque"),
+            transport.requests,
+        )
+
+    def test_missing_v4_companions_are_repaired_by_the_migration(self):
+        # The pre-cutover classifier (origin/main) already allowed a missing
+        # companion file; the migration PR writes only the three generated
+        # paths, so a companion that is absent is added, never overwritten.
+        transport = FileTransport(
+            files={WORKFLOW_PATH: _merge_focused_v4_workflow("v5")}
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_foreign_v4_companion_content_blocks_the_migration(self):
+        # A v4-managed workflow must not lift a foreign file at one of the
+        # known paths into the migration: the classifier fails closed.
+        transport = FileTransport(
+            files={
+                WORKFLOW_PATH: _merge_focused_v4_workflow("v5"),
+                CONFIG_PATH: "provider: custom\n",
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")

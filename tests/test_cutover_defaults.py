@@ -112,6 +112,26 @@ class CutoverDefaultTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+    def test_legacy_opt_in_does_not_admit_a_mismatched_prepared_artifact(self):
+        # The retired-policy opt-in and the prepared-artifact digest are
+        # independent gates: asking for the retired policy must not also
+        # accept an artifact prepared under a different publication context.
+        http, calls = make_http([])
+        publisher = ReviewPublisher(http=http)
+        prepared = publisher.prepare(
+            result=result(),
+            diff=DIFF,
+            head_sha=HEAD,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "publication context"):
+            publisher.publish(
+                **publication_arguments(prepared.result),
+                prepared_review=prepared,
+                allow_retired_legacy_policy=True,
+            )
+        self.assertEqual(calls, [])
+
     def test_default_policy_preserves_approval_opt_out_for_an_admitted_blocker(self):
         comment = ReviewComment(
             path="src/app.py",

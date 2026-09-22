@@ -87,17 +87,11 @@ PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
 RELEASED_RUNNER_SWITCH_V4_SHA256 = (
     "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
 )
-_RELEASED_RUNNER_SWITCH_V4_TAG_MARKER = (
-    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
-)
 # Frozen bytes of artifacts that already exist in installations. Recognition
 # must not be derived from the live templates: an edit to the current setup-v5
 # bytes must never change what these historical artifacts look like.
 MERGE_FOCUSED_V4_CALLER_SHA256 = (
     "ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742"
-)
-_MERGE_FOCUSED_V4_CALLER_TAG_MARKER = (
-    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
 )
 MERGE_FOCUSED_V4_CONFIG_SHA256 = (
     "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0"
@@ -1210,36 +1204,40 @@ def _merge_focused_v4_caller_bytes() -> str:
     return content
 
 
+def _retag_frozen_caller(content: str, public_workflow_tag: str) -> str:
+    """Point a frozen caller's single run-workflow reference at the live tag.
+
+    The reference is located in the frozen bytes instead of a parallel
+    constant, so a fixture edit can never be silently mis-substituted; a
+    fixture whose reference is missing or duplicated fails here instead.
+    """
+
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    references = [
+        match.group(0)
+        for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
+    ]
+    if len(references) != 1:
+        raise GitHubSetupError(
+            "frozen setup caller must reference the run workflow exactly once"
+        )
+    prefix, _, frozen_tag = references[0].rpartition("@")
+    if frozen_tag == tag:
+        return content
+    return content.replace(references[0], f"{prefix}@{tag}")
+
+
 def _merge_focused_v4_workflow(public_workflow_tag: str) -> str:
     """Return the immediate pre-cutover caller for managed v4 recognition."""
 
-    tag = _validate_public_workflow_tag(public_workflow_tag)
-    caller = _merge_focused_v4_caller_bytes()
-    if tag == "v5":
-        return caller
-    # The frozen bytes carry the tag exactly once, in their uses: line. A
-    # second occurrence would shift the recognized historical bytes, so a
-    # fixture edit that duplicates the marker fails here instead.
-    if caller.count(_MERGE_FOCUSED_V4_CALLER_TAG_MARKER) != 1:
-        raise GitHubSetupError(
-            "merge-focused v4 caller fixture must contain exactly one tag marker"
-        )
-    return caller.replace(
-        _MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
-        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
-    )
+    return _retag_frozen_caller(_merge_focused_v4_caller_bytes(), public_workflow_tag)
 
 
 def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
     """Return the released setup-v4 caller retained for managed migration."""
 
-    tag = _validate_public_workflow_tag(public_workflow_tag)
-    caller = _released_runner_switch_v4_caller_bytes()
-    if tag == "v4":
-        return caller
-    return caller.replace(
-        _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
+    return _retag_frozen_caller(
+        _released_runner_switch_v4_caller_bytes(), public_workflow_tag
     )
 
 

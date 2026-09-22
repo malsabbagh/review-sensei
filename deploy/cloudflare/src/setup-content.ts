@@ -8,15 +8,11 @@
  */
 
 import {
-  MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
   historicalV4UninstallBytes,
   mergeFocusedV4CallerBytes,
   mergeFocusedV4ConfigBytes,
 } from "./managed-v4-recognition-artifacts";
-import {
-  RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-  releasedRunnerSwitchV4CallerBytes,
-} from "./released-runner-switch-v4-caller";
+import { releasedRunnerSwitchV4CallerBytes } from "./released-runner-switch-v4-caller";
 
 const GITHUB_EXPRESSION = "@@";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
@@ -808,29 +804,37 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
-/** Immediate pre-cutover caller retained only for managed v4 recognition. */
-export function mergeFocusedV4WorkflowTemplate(publicWorkflowTag: string): string {
+const FROZEN_RUN_WORKFLOW_TAG_REFERENCE =
+  /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([A-Za-z0-9][A-Za-z0-9._-]{0,127})/g;
+
+/**
+ * Point a frozen caller's single run-workflow reference at the live tag.
+ *
+ * The reference is located in the frozen bytes instead of a parallel
+ * constant, so a fixture edit can never be silently mis-substituted; a
+ * fixture whose reference is missing or duplicated fails here instead.
+ */
+function retagFrozenCaller(content: string, publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  const caller = mergeFocusedV4CallerBytes();
-  if (tag === "v5") {
-    return caller;
-  }
-  // The frozen bytes carry the tag exactly once, in their uses: line. A
-  // second occurrence would shift the recognized historical bytes, so a
-  // fixture edit that duplicates the marker fails here instead.
-  if (countOccurrences(caller, MERGE_FOCUSED_V4_CALLER_TAG_MARKER) !== 1) {
+  const references = [...content.matchAll(FROZEN_RUN_WORKFLOW_TAG_REFERENCE)].map(
+    (match) => match[0],
+  );
+  const reference = references.length === 1 ? references[0] : undefined;
+  if (reference === undefined) {
     throw new Error(
-      "merge-focused v4 caller fixture must contain exactly one tag marker",
+      "frozen setup caller must reference the run workflow exactly once",
     );
   }
-  return caller.replace(
-    MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
-    `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
-  );
+  const separator = reference.lastIndexOf("@");
+  if (reference.slice(separator + 1) === tag) {
+    return content;
+  }
+  return content.replace(reference, `${reference.slice(0, separator)}@${tag}`);
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  return haystack.split(needle).length - 1;
+/** Immediate pre-cutover caller retained only for managed v4 recognition. */
+export function mergeFocusedV4WorkflowTemplate(publicWorkflowTag: string): string {
+  return retagFrozenCaller(mergeFocusedV4CallerBytes(), publicWorkflowTag);
 }
 
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
@@ -848,15 +852,7 @@ const PROVIDER_PARITY_DRAFT_SKIP =
 export function releasedRunnerSwitchV4WorkflowTemplate(
   publicWorkflowTag: string,
 ): string {
-  const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  const caller = releasedRunnerSwitchV4CallerBytes();
-  if (tag === "v4") {
-    return caller;
-  }
-  return caller.replaceAll(
-    RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-    `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
-  );
+  return retagFrozenCaller(releasedRunnerSwitchV4CallerBytes(), publicWorkflowTag);
 }
 
 export function providerParityWorkflowBeforeDraftSkip(

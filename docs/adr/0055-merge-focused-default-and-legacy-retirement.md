@@ -79,6 +79,12 @@ makes that installation a custom `unknown` no-write case. Operators should
 configure the generated caller through repository Actions variables; custom
 files require manual reconciliation, not a relaxed recognition rule.
 
+The frozen managed-v4 recognition fixtures (`merge-focused-v4-caller.yml`,
+`merge-focused-v4-config.yml`, `historical-v4-uninstall.yml`) are byte-pinned
+historical artifacts: their literal contents describe the setup-v4 era and are
+not documentation of current behavior, so they are read as recognition
+evidence only and never as a source of the live tag or template.
+
 ## Validation
 
 Exercise default and explicit-mode unit tests, generated workflow/setup tests,

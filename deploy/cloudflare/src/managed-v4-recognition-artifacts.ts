@@ -8,8 +8,6 @@ export const MERGE_FOCUSED_V4_CONFIG_SHA256 =
   "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0";
 export const HISTORICAL_V4_UNINSTALL_SHA256 =
   "e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec";
-export const MERGE_FOCUSED_V4_CALLER_TAG_MARKER =
-  "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5";
 
 /**
  * Frozen bytes of artifacts that already exist in installations. Recognition
