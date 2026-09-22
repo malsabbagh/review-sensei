@@ -70,6 +70,8 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy_line)
 
     def test_reusable_workflow_review_mode_case_rejects_legacy_at_runtime(self):
+        if os.name == "nt":
+            self.skipTest("the workflow guard executes under bash only")
         workflow = _reusable_workflow()
         # Execute the guard the workflow itself runs instead of trusting that
         # the literal is still wired the way the assertions above describe.
