@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import threading
+import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -23,7 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from ...convergence import LEGACY_REVIEW_MODE, migrate_review_mode
+from ...convergence import LEGACY_REVIEW_MODE, REVIEW_MODE_ENV, migrate_review_mode
 from .errors import (
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -75,8 +76,9 @@ SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 # guard fail every review. Only this variable and only the retired value
 # (``LEGACY_REVIEW_MODE``, replaced per ``migrate_review_mode`` in
 # ``review_sensei.convergence``) are migrated in place; every other
-# operator-set value is left as-is.
-RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE"
+# operator-set value is left as-is. The name is the same knob the CLI reads
+# from the environment, so it is an alias rather than a second literal.
+RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v5 update channel. The Worker validates the
@@ -2000,7 +2002,11 @@ class GitHubSetupClient:
         exact retired value is the only stored value rewritten; empty, unknown,
         or any other operator-set value stays untouched. The replacement is
         resolved by ``review_sensei.convergence.migrate_review_mode`` so the
-        migration rule lives with the mode table.
+        migration rule lives with the mode table. The written value is read
+        back and a mismatch emits a ``review_mode_migration_not_observed``
+        warning: the variables API has no conditional write, so a successful
+        status says nothing about what was stored, and setup must not report a
+        migration it cannot observe.
         """
 
         variable_path = (
@@ -2035,6 +2041,32 @@ class GitHubSetupClient:
         )
         if status < 200 or status >= 300:
             self._raise_for_status(status)
+        # No conditional write exists for Actions variables, so the GET/PATCH
+        # pair can race an operator change. Read back and surface the mismatch
+        # rather than reporting a migration that was not stored.
+        observed_status, observed_raw = self._open(
+            "GET",
+            variable_path,
+            installation_token=installation_token,
+        )
+        observed: object = None
+        if observed_status == 200 and observed_raw:
+            try:
+                observed_data = json.loads(
+                    bytes(observed_raw).decode("utf-8", errors="strict")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                observed_data = None
+            if isinstance(observed_data, dict):
+                observed = observed_data.get("value")
+        if observed != replacement:
+            warnings.warn(
+                "review_mode_migration_not_observed: "
+                f"{RETIRED_REVIEW_MODE_VARIABLE} for {repository} reads back as "
+                f"{observed!r}, expected {replacement!r}; re-run setup or set the "
+                "variable to merge-focused before the next review",
+                stacklevel=2,
+            )
 
     def list_pull_requests(
         self,

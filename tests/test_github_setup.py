@@ -4,10 +4,15 @@ import io
 import json
 import re
 import unittest
+import warnings
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-from review_sensei.convergence import LEGACY_REVIEW_MODE, migrate_review_mode
+from review_sensei.convergence import (
+    LEGACY_REVIEW_MODE,
+    REVIEW_MODE_ENV,
+    migrate_review_mode,
+)
 from review_sensei.hosting.github import (
     GitHubSetupClient,
     GitHubSetupError,
@@ -708,6 +713,17 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             {LEGACY_REVIEW_MODE: migrate_review_mode(LEGACY_REVIEW_MODE)},
         )
 
+    def test_retired_mode_variable_is_the_convergence_environment_constant(self):
+        # The repository variable and the CLI environment variable are the same
+        # operator knob, so setup aliases the `convergence` constant instead of
+        # declaring a second literal that could drift.
+        self.assertEqual(RETIRED_REVIEW_MODE_VARIABLE, REVIEW_MODE_ENV)
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/review_sensei/hosting/github/setup.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV", source)
+
     def test_legacy_setup_reuses_existing_content_addressed_branch(self):
         transport = FileTransport(
             branch_exists=True,
@@ -1200,6 +1216,45 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertEqual(results[0].status, "skipped_unknown_setup")
         self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
 
+    def test_v5_recognition_ignores_a_second_run_workflow_reference(self):
+        # Recognition is byte-exact against the rendered single-reference
+        # caller, so a file that mentions the run-workflow reference again (a
+        # comment, a duplicated `uses:` line) is a customer edit: it stays
+        # `unknown`, writes nothing, and the scoped reference matcher must not
+        # turn a mention into a live tag.
+        plan = SetupPlanBuilder().build("owner/repo")
+        caller = next(file.content for file in plan.files if file.path == WORKFLOW_PATH)
+        reference = (
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
+        )
+        variants = {
+            # Positive control: the unmodified rendered caller is recognized.
+            "current": (caller, "skipped_current"),
+            "comment_mention": (
+                caller + f"# pinned via {reference}\n",
+                "skipped_unknown_setup",
+            ),
+            "duplicated_uses": (
+                caller + f"      uses: {reference}\n",
+                "skipped_unknown_setup",
+            ),
+        }
+        for name, (content, expected) in variants.items():
+            with self.subTest(variant=name):
+                files = {file.path: file.content for file in plan.files}
+                files[WORKFLOW_PATH] = content
+                transport = FileTransport(branch_exists=True, files=files)
+
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertEqual(results[0].status, expected)
+                self.assertFalse(
+                    any(r[0] == "create_pull_request" for r in transport.requests)
+                )
+
     def test_marker_only_v3_setup_is_treated_as_custom(self):
         transport = FileTransport(
             files={
@@ -1641,25 +1696,28 @@ class GitHubSetupClientTests(unittest.TestCase):
 
     def test_client_migrates_retired_review_mode_variable_in_place(self):
         calls = []
+        state = {"value": "legacy"}
 
         def opener(request, timeout):
             body = json.loads(request.data.decode("utf-8")) if request.data else None
             calls.append((request.method, request.full_url, body))
-            if request.method == "GET":
-                return FakeHTTPResponse(
-                    b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'
-                )
+            if request.method == "PATCH" and isinstance(body, dict):
+                state["value"] = body["value"]
             return FakeHTTPResponse(
-                b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"merge-focused"}'
+                json.dumps(
+                    {"name": "REVIEWSENSEI_REVIEW_MODE", "value": state["value"]}
+                ).encode("utf-8")
             )
 
         client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
-        client.migrate_retired_review_mode_variable(
-            repository="owner/repo",
-            installation_token="ghs_opaque",
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
 
-        self.assertEqual([call[0] for call in calls], ["GET", "PATCH"])
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
         self.assertEqual(
             calls[0][1],
             "https://api.github.test/repos/owner/repo/actions/variables/"
@@ -1669,6 +1727,55 @@ class GitHubSetupClientTests(unittest.TestCase):
             calls[1][2],
             {"name": "REVIEWSENSEI_REVIEW_MODE", "value": "merge-focused"},
         )
+        # The read-back targets the same variable path as the initial GET.
+        self.assertEqual(calls[2][1], calls[0][1])
+
+    def test_client_warns_when_the_review_mode_migration_is_not_observed(self):
+        # The variables API has no conditional write, so the PATCH can succeed
+        # while another actor restores or rewrites the value. A migration that
+        # cannot be observed must be surfaced, not reported as done.
+        calls = []
+
+        def opener(request, timeout):
+            body = json.loads(request.data.decode("utf-8")) if request.data else None
+            calls.append((request.method, request.full_url, body))
+            return FakeHTTPResponse(
+                b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'
+            )
+
+        client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
+        with self.assertWarns(UserWarning) as raised:
+            client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
+
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
+        message = str(raised.warning)
+        self.assertIn("review_mode_migration_not_observed", message)
+        self.assertIn("owner/repo", message)
+        self.assertIn("'legacy'", message)
+        self.assertIn("'merge-focused'", message)
+
+    def test_client_warns_when_the_review_mode_read_back_fails(self):
+        # A read-back that cannot report a value is not evidence of success.
+        client, calls = self.make_client(
+            [
+                (200, b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'),
+                (204, b""),
+                (404, b""),
+            ]
+        )
+
+        with self.assertWarns(UserWarning) as raised:
+            client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("review_mode_migration_not_observed", str(raised.warning))
+        self.assertIn("None", str(raised.warning))
 
     def test_client_leaves_operator_review_mode_values_untouched(self):
         # The prototype-named values cover the JS twin's own-property guard:

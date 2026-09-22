@@ -1088,6 +1088,48 @@ class ActionPinPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_hosted_review_invocations_pin_the_review_mode_explicitly(self):
+        # The repository variable reaches the workflow only as the
+        # `review_mode` input, so every hosted invocation that resolves a
+        # review mode for review or publication passes it explicitly instead
+        # of depending on ambient resolution. The step must also map the env
+        # var: a run referencing $REVIEW_MODE without it expands to an empty
+        # string (an explicit empty mode, not an omitted one).
+        text = _reusable_workflow_text()
+        sites: set[tuple[str, str]] = set()
+        for job_id in _job_ids(text):
+            job = _job_section(text, job_id)
+            for name in _named_steps(job):
+                step = _step_block(job, name)
+                invocations = [
+                    run
+                    for run in _run_blocks(step)
+                    if "github review \\" in run or "--outcome outcome.json" in run
+                ]
+                if not invocations:
+                    continue
+                sites.add((job_id, name))
+                self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", step)
+                for run in invocations:
+                    self.assertIn('--review-mode "$REVIEW_MODE"', run)
+        # Pin the exact (job, step) invocation sites, so a new hosted review or
+        # publication path fails here by name instead of silently resolving
+        # its mode from the environment.
+        self.assertEqual(
+            sites,
+            {
+                ("cloud", "Run cloud-provider review"),
+                ("cloud", "Publish or promote validated review through the broker"),
+                ("openrouter", "Run OpenRouter-provider review"),
+                (
+                    "openrouter",
+                    "Publish or promote validated review through the broker",
+                ),
+                ("local", "Prepare and run trusted local review"),
+                ("local", "Publish or promote trusted local review and learnings"),
+            },
+        )
+
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
         root = Path(__file__).resolve().parents[1]
         ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(

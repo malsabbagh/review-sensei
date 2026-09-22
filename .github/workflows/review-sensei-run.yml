@@ -765,6 +765,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1192,6 +1193,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
@@ -1255,6 +1257,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -1334,6 +1337,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -1352,7 +1356,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish OpenRouter mention reply
         id: reply
@@ -1605,6 +1609,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1668,6 +1673,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -1750,6 +1756,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -1768,7 +1775,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish trusted local mention reply
         id: reply

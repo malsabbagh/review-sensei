@@ -37,6 +37,12 @@ installation cannot keep a retired value that the generated caller and its
 workflow guard would reject. Advisory, strict, and disabled policy choices
 retain their existing meaning.
 
+The retirement is not reversible by configuration. Writing `legacy` back into
+the repository variable feeds the generated caller and the workflow guard a
+rejected mode, so the run fails with the migration error, and the next setup
+run migrates the value again. Restoring the retired policy therefore requires
+a forward version change that reintroduces it, not an operator variable write.
+
 Implementation note: the one deliberate carve-out is a low-level embedder or
 historical-fixture replay that constructs `ReviewConvergencePolicy(mode="legacy")`
 directly. That carve-out is enforceable rather than conventional:

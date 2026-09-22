@@ -876,6 +876,37 @@ describe("setup repository reconciliation", () => {
     expect(mutationRequests(fake)).toEqual([]);
   });
 
+  it("recognizes only the exact caller bytes, not a re-mentioned run-workflow reference", async () => {
+    // Recognition is byte-exact against the rendered single-reference caller,
+    // so a comment or duplicated `uses:` line mentioning the same reference
+    // stays `unknown`: a mention must never be read as a live tag and
+    // rewritten.
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const current = files[SETUP_FILE_PATHS[0]]!;
+    const reference = `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${TAG}`;
+
+    const currentFake = new FakeGitHub();
+    currentFake.files = files;
+    expect(await serviceWith(currentFake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "skipped_current" },
+    ]);
+    expect(mutationRequests(currentFake)).toEqual([]);
+
+    for (const content of [
+      `${current}# pinned via ${reference}\n`,
+      `${current}      uses: ${reference}\n`,
+    ]) {
+      const fake = new FakeGitHub();
+      fake.files = { ...files, [SETUP_FILE_PATHS[0]]: content };
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "skipped_unknown_setup" },
+      ]);
+      expect(mutationRequests(fake)).toEqual([]);
+    }
+  });
+
   it("does not overwrite custom, malformed, or future setup", async () => {
     for (const content of [
       "name: Customer-owned workflow\n",
