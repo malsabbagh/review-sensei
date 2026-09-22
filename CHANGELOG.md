@@ -37,9 +37,17 @@
 - Changed issue #146 F7 review convergence defaults to `merge-focused` and
   retires live `legacy` selection. Generated GitHub setup is now version 5;
   byte-exact setup-v4 installations, including the immediate pre-cutover
-  merge-focused artifact, receive a reviewable migration PR. Existing session
-  ledgers and finding identities are preserved. Release and rollback readback
-  remain maintainer-operated gates.
+  merge-focused artifact, receive a reviewable migration PR, and setup
+  replaces a stored `REVIEWSENSEI_REVIEW_MODE=legacy` variable with
+  `merge-focused` in place. Blocking admission is a behavior change for
+  installations that relied on the implicit default: it now follows the
+  merge-focused evaluator, which requires admitted blocker evidence and
+  ignores free-form classification, so repositories that previously blocked
+  on critical/high severity or an explicit `blocking` flag may see fewer
+  request-changes events and should review the migration instructions for
+  `REVIEWSENSEI_REVIEW_MODE`. Existing session ledgers and finding identities
+  are preserved. Release and rollback readback remain maintainer-operated
+  gates.
 
 - Added the issue #136 C7 sequential evaluation and observation-only
   shadowing: `evaluate-convergence` replays frozen synthetic sequences

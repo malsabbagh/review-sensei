@@ -30,19 +30,26 @@ does not reset durable session-ledger state or finding identities.
 live runtime selection: explicit CLI or configuration use fails with an
 actionable migration error. The migration helper maps a historical `legacy`
 value to `merge-focused` idempotently; it does not reset the session ledger,
-finding identities, baseline, or counters. Advisory, strict, and disabled
-policy choices retain their existing meaning.
+finding identities, baseline, or counters. Setup additionally migrates an
+existing `REVIEWSENSEI_REVIEW_MODE=legacy` repository variable to
+`merge-focused` in place (only that variable, only that value), so a prior
+installation cannot keep a retired value that the generated caller and its
+workflow guard would reject. Advisory, strict, and disabled policy choices
+retain their existing meaning.
 
-Implementation note: `ReviewPublisher.publish` still honors an explicitly
-supplied `ReviewConvergencePolicy(mode="legacy")` for low-level embedders and
-replay of historical fixtures, and that exception is documented in
-`docs/public-contracts.md`. It is prevented from becoming a CLI-reachable
-path: every CLI and configuration surface resolves its policy through
-`resolve_review_mode`, which raises the migration error for `legacy` before
-preparation or any GitHub write, and the generated caller, Worker, and
-reusable workflow only ever pass the resolved operator mode. Preparation and
-publication must bind the same policy digest, so a legacy-bound prepared
-artifact cannot enter the default publication path.
+Implementation note: the one deliberate carve-out is a low-level embedder or
+historical-fixture replay that constructs `ReviewConvergencePolicy(mode="legacy")`
+directly. That carve-out is enforceable rather than conventional:
+`ReviewPublisher.publish` raises `GitHubPublicationError` for a `legacy`
+policy unless the caller also passes `allow_retired_legacy_policy=True`, so a
+future caller cannot re-enable the retired policy by passing the policy object
+alone. The carve-out is documented in `docs/public-contracts.md` and is not
+reachable from the CLI: every CLI and configuration surface resolves its
+policy through `resolve_review_mode`, which raises the migration error for
+`legacy` before preparation or any GitHub write, and the generated caller,
+Worker, and reusable workflow only ever pass the resolved operator mode.
+Preparation and publication must bind the same policy digest, so a
+legacy-bound prepared artifact cannot enter the default publication path.
 
 Package publication, workflow-channel promotion, Worker/config deployment,
 and managed-installation migration are release operations. They remain

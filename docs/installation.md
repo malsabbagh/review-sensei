@@ -134,7 +134,7 @@ environment used to run ReviewSensei. The CLI reads:
 | `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
 | `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
 | `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
-| `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; update it to `merge-focused`. |
+| `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; setup replaces a stored `legacy` value with `merge-focused` in place. |
 | `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
 | `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
 | `OLLAMA_API_KEY` | empty | Optional bearer credential |
@@ -354,8 +354,11 @@ pending App permission update or remove and re-add the repository to generate a
 fresh setup delivery. The bootstrap identifies older generated files, including
 a byte-exact managed v3 workflow (including its older SHA pin), and opens a
 migration PR that updates only those files to setup-v5. It also migrates a
-managed v4/v5 caller that follows an older tag. It skips custom or future versions
-for manual review and preserves learnings, existing variables, and secrets.
+managed v4/v5 caller that follows an older tag, and replaces a
+`REVIEWSENSEI_REVIEW_MODE` value of exactly `legacy` with `merge-focused` in
+place so the generated caller and its workflow guard keep working. It skips
+custom or future versions for manual review and preserves learnings, every
+other existing variable value, and secrets.
 
 ## Setup-v5 and tag-based reusable workflow
 
@@ -393,7 +396,11 @@ Setup reconciliation is PR-only and changes only the three generated paths.
 `installation_repositories.added` inspect absent, legacy, and v2 clients.
 They reuse an existing open setup PR and produce at most one deterministic
 `review-sensei/setup-v5-<base12>-<tag>` PR for the exact base and update
-channel. Current tag-following setup-v5 is a no-op. A byte-exact
+channel. Open setup PRs from an earlier setup version are not recognized,
+because lookup matches the current v5 branch name; a delivery after a version
+change therefore opens the v5 migration PR alongside an unresolved
+`review-sensei/setup-v4-...` PR, and operators should close the superseded
+one. Current tag-following setup-v5 is a no-op. A byte-exact
 managed v3/v4 workflow or a managed v5 workflow following another valid tag is
 stale and is migrated; custom,
 malformed, and future versions are skipped without writes. A deployment alone

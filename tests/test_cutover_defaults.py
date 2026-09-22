@@ -70,7 +70,9 @@ class CutoverDefaultTests(unittest.TestCase):
     def test_omitted_policy_is_merge_focused_without_ambient_reselection(self):
         for ambient in ("legacy", "merge-focused", "advisory", "strict"):
             with self.subTest(ambient=ambient):
-                http, calls = make_http(publication_responses())
+                responses = publication_responses()
+                expected_calls = len(responses)
+                http, calls = make_http(responses)
                 publisher = ReviewPublisher(http=http)
                 with patch.dict("os.environ", {REVIEW_MODE_ENV: ambient}):
                     prepared = publisher.prepare(
@@ -86,11 +88,14 @@ class CutoverDefaultTests(unittest.TestCase):
                 )
                 self.assertFalse(prepared.result.comments[0].blocks_approval)
                 self.assertEqual(outcome.status, "published")
-                body = json.loads(calls[-1][2].decode("utf-8"))
+                self.assertEqual(len(calls), expected_calls)
+                method, url, payload = calls[-1]
+                self.assertEqual(method, "POST")
+                self.assertTrue(url.endswith("/repos/owner/repo/pulls/2/reviews"))
+                body = json.loads(payload.decode("utf-8"))
                 self.assertEqual(body["event"], "COMMENT")
                 self.assertEqual(body["comments"], [])
                 self.assertIn("## Advisory observations", body["body"])
-                self.assertEqual(len(calls), 4)
 
     def test_legacy_prepared_artifact_cannot_enter_the_default_publication_path(self):
         http, calls = make_http([])
@@ -128,7 +133,9 @@ class CutoverDefaultTests(unittest.TestCase):
         review = ReviewResult(
             summary="Summary.", comments=(comment,), provider="fixture"
         )
-        http, calls = make_http(publication_responses(inline=True))
+        responses = publication_responses(inline=True)
+        expected_calls = len(responses)
+        http, calls = make_http(responses)
         outcome = ReviewPublisher(http=http).publish(
             **publication_arguments(review), blocker_candidates=(facts,)
         )
@@ -141,7 +148,7 @@ class CutoverDefaultTests(unittest.TestCase):
         self.assertEqual([body["event"] for body in writes], ["COMMENT"])
         self.assertEqual(len(writes[0]["comments"]), 1)
         self.assertIn("blocking=true", writes[0]["comments"][0]["body"])
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), expected_calls)
 
     def test_default_policy_admitted_blocker_forces_request_changes(self):
         comment = ReviewComment(

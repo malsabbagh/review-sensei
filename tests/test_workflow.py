@@ -75,7 +75,16 @@ class WorkflowValidationTests(unittest.TestCase):
         workflow = _reusable_workflow()
         # Execute the guard the workflow itself runs instead of trusting that
         # the literal is still wired the way the assertions above describe.
-        start = workflow.index('case "$REVIEW_MODE" in')
+        # The marker must occur exactly once and inside the named step, so a
+        # second copy elsewhere can never be sliced instead of the real guard.
+        marker = 'case "$REVIEW_MODE" in'
+        self.assertEqual(workflow.count(marker), 1)
+        step_start = workflow.index("      - name: Reject unsupported provider mode")
+        step_end = workflow.find("\n      - name:", step_start + 1)
+        self.assertNotEqual(step_end, -1)
+        guard_step = workflow[step_start:step_end]
+        self.assertIn(marker, guard_step)
+        start = step_start + guard_step.index(marker)
         end = workflow.index("esac", start) + len("esac")
         case_block = workflow[start:end]
 

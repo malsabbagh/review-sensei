@@ -69,6 +69,12 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_CATEGORIES_DIR", ""),
 )
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
+# The retired review mode survives in existing installations as a repository
+# variable that setup never overwrites, which would make the reusable-workflow
+# guard fail every review. Only this variable and only these exact values are
+# migrated in place; every other operator-set value is left as-is.
+RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE"
+RETIRED_REVIEW_MODE_MIGRATIONS = {"legacy": "merge-focused"}
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v5 update channel. The Worker validates the
@@ -1211,6 +1217,13 @@ def _merge_focused_v4_workflow(public_workflow_tag: str) -> str:
     caller = _merge_focused_v4_caller_bytes()
     if tag == "v5":
         return caller
+    # The frozen bytes carry the tag exactly once, in their uses: line. A
+    # second occurrence would shift the recognized historical bytes, so a
+    # fixture edit that duplicates the marker fails here instead.
+    if caller.count(_MERGE_FOCUSED_V4_CALLER_TAG_MARKER) != 1:
+        raise GitHubSetupError(
+            "merge-focused v4 caller fixture must contain exactly one tag marker"
+        )
     return caller.replace(
         _MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
         "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
@@ -1439,15 +1452,20 @@ def _historical_v4_uninstall_workflow() -> str:
 def _setup_pull_request_body() -> str:
     return (
         "This pull request adds or updates the ReviewSensei review workflow "
-        "(setup version 4), which follows the operator-managed public v4 git "
+        "(setup version 5), which follows the operator-managed public v5 git "
         "tag, with opt-in provider defaults and a "
         "manual uninstall-cleanup workflow. The installation bootstrap also "
-        "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
+        "creates the visible repository variables "
+        "REVIEWSENSEI_REVIEW_MODE (merge-focused), "
+        "REVIEWSENSEI_PROVIDER_MODE (local), "
         "REVIEWSENSEI_MODEL (empty; provider-specific defaults apply), "
         "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
         "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4.1-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
-        "values. Change the opt-in variables explicitly to enable publication. "
+        "values. A stored REVIEWSENSEI_REVIEW_MODE value of legacy is replaced "
+        "with merge-focused, because the retired legacy mode now fails the "
+        "workflow guard. Change the opt-in variables explicitly to enable "
+        "publication. "
         "The selected provider mode applies to automatic/manual reviews and "
         "authorized mention conversations: local-ollama uses the labelled "
         "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, and "
@@ -1628,6 +1646,14 @@ class GitHubSetupTransport(Protocol):
         variables: Sequence[tuple[str, str]],
     ) -> None:
         """Create missing plain-text Actions variables without overwriting values."""
+
+    def migrate_retired_review_mode_variable(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+    ) -> None:
+        """Replace a retired review-mode variable value in place."""
 
     def list_pull_requests(
         self,
@@ -1962,6 +1988,52 @@ class GitHubSetupClient:
             if status < 200 or status >= 300:
                 self._raise_for_status(status)
 
+    def migrate_retired_review_mode_variable(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+    ) -> None:
+        """Replace a retired review-mode variable value in place.
+
+        A missing variable is left to :meth:`ensure_repository_variables`, and
+        any value outside ``RETIRED_REVIEW_MODE_MIGRATIONS`` is operator intent
+        and stays untouched.
+        """
+
+        variable_path = (
+            f"/repos/{repository}/actions/variables/"
+            f"{quote(RETIRED_REVIEW_MODE_VARIABLE, safe='')}"
+        )
+        status, raw = self._open(
+            "GET",
+            variable_path,
+            installation_token=installation_token,
+        )
+        if status == 404:
+            return
+        if status < 200 or status >= 300:
+            self._raise_for_status(status)
+        if not raw:
+            return
+        try:
+            data = json.loads(bytes(raw).decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GitHubSetupError("GitHub setup response was invalid JSON") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("value"), str):
+            return
+        replacement = RETIRED_REVIEW_MODE_MIGRATIONS.get(data["value"])
+        if replacement is None:
+            return
+        status, _ = self._open(
+            "PATCH",
+            variable_path,
+            installation_token=installation_token,
+            body={"name": RETIRED_REVIEW_MODE_VARIABLE, "value": replacement},
+        )
+        if status < 200 or status >= 300:
+            self._raise_for_status(status)
+
     def list_pull_requests(
         self,
         *,
@@ -2274,6 +2346,14 @@ class SetupPullRequestService:
                         installation_token=installation_token,
                         variables=SETUP_VARIABLES,
                     )
+                    migrate_review_mode = getattr(
+                        self.transport, "migrate_retired_review_mode_variable", None
+                    )
+                    if callable(migrate_review_mode):
+                        migrate_review_mode(
+                            repository=repository,
+                            installation_token=installation_token,
+                        )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
                         repository=repository,

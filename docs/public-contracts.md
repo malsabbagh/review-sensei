@@ -880,11 +880,12 @@ The publication boundary resolves an omitted convergence policy to the
 prepared result bound to a different policy is rejected rather than silently
 republished. One deliberate exception exists for low-level embedders and
 replay: an explicitly supplied `ReviewConvergencePolicy(mode="legacy")` is
-honored as-is (ADR 0055). That exception is not reachable from the CLI,
+honored only when the caller also passes `allow_retired_legacy_policy=True`;
+without that opt-in the publication fails closed with
+`GitHubPublicationError`, so passing the retired policy object alone can never
+re-enable `legacy` (ADR 0055). That exception is not reachable from the CLI,
 generated configuration, or the hosted workflow, which all resolve `legacy`
-to the actionable migration error before preparation or writes; only
-embedders that construct the policy object directly can publish under the
-historical policy.
+to the actionable migration error before preparation or writes.
 
 Learning proposal files remain content-addressed by their full canonical
 SHA-256 digest at

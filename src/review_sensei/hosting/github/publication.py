@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from ...baseline import ReviewBaseline
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
+    LEGACY_REVIEW_MODE,
     BlockerCandidate,
     ReviewConvergencePolicy,
 )
@@ -1220,6 +1221,7 @@ class ReviewPublisher:
         snapshot_sha256: str | None = None,
         evidence_policy: str = "legacy",
         convergence_policy: ReviewConvergencePolicy | None = None,
+        allow_retired_legacy_policy: bool = False,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
         baseline: ReviewBaseline | None = None,
@@ -1251,14 +1253,26 @@ class ReviewPublisher:
             raise GitHubPublicationError("review result is invalid")
         # Omitted policies use the same deterministic default as preparation;
         # runtime configuration is resolved by the application, not from
-        # ambient environment variables at this publication boundary. An
-        # explicitly supplied policy is honored as-is, including the
-        # historical legacy policy a low-level embedder or replay supplies
-        # (ADR 0055); the CLI and configuration surfaces reject legacy.
+        # ambient environment variables at this publication boundary. The
+        # historical legacy policy is retired (ADR 0055): a low-level embedder
+        # or replay that still needs it must ask for it explicitly, so a
+        # future caller cannot re-enable legacy by passing the policy alone.
         if convergence_policy is None:
             convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")
+        if not isinstance(allow_retired_legacy_policy, bool):
+            raise GitHubPublicationError(
+                "review legacy policy opt-in must be a boolean"
+            )
+        if (
+            convergence_policy.mode == LEGACY_REVIEW_MODE
+            and not allow_retired_legacy_policy
+        ):
+            raise GitHubPublicationError(
+                "the legacy review mode is retired and cannot be published "
+                "without allow_retired_legacy_policy=True"
+            )
         # Operator modes may only withhold GitHub review events. The
         # conjunction cannot promote auto_approve=False to REQUEST_CHANGES
         # or APPROVE, including when REVIEWSENSEI_REVIEW_MODE is merge-focused.

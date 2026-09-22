@@ -93,6 +93,15 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_CATEGORIES_DIR", value: "" },
 ];
 
+// The retired review mode survives in existing installations as a repository
+// variable that setup never overwrites, which would make the reusable-workflow
+// guard fail every review. Only this variable and only these exact values are
+// migrated in place; every other operator-set value is left as-is.
+export const RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE";
+export const RETIRED_REVIEW_MODE_MIGRATIONS: Readonly<Record<string, string>> = {
+  legacy: "merge-focused",
+};
+
 export function validatePublicWorkflowSha(value: string): string {
   if (
     typeof value !== "string" ||
@@ -806,10 +815,22 @@ export function mergeFocusedV4WorkflowTemplate(publicWorkflowTag: string): strin
   if (tag === "v5") {
     return caller;
   }
-  return caller.replaceAll(
+  // The frozen bytes carry the tag exactly once, in their uses: line. A
+  // second occurrence would shift the recognized historical bytes, so a
+  // fixture edit that duplicates the marker fails here instead.
+  if (countOccurrences(caller, MERGE_FOCUSED_V4_CALLER_TAG_MARKER) !== 1) {
+    throw new Error(
+      "merge-focused v4 caller fixture must contain exactly one tag marker",
+    );
+  }
+  return caller.replace(
     MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
     `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
   );
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
 }
 
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {

@@ -151,6 +151,11 @@ class FakeTransport:
             )
         )
 
+    def migrate_retired_review_mode_variable(self, *, repository, installation_token):
+        self.requests.append(
+            ("migrate_retired_review_mode_variable", repository, installation_token)
+        )
+
     def list_pull_requests(self, *, repository, installation_token, head_branch):
         self.requests.append(
             ("list_pull_requests", repository, installation_token, head_branch)
@@ -641,6 +646,19 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
         self.assertFalse(
             any(r[0] == "ensure_repository_variables" for r in transport.requests)
+        )
+
+    def test_setup_migrates_the_retired_review_mode_variable(self):
+        transport = FakeTransport()
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertIn(
+            ("migrate_retired_review_mode_variable", "owner/repo", "ghs_opaque"),
+            transport.requests,
         )
 
     def test_legacy_setup_reuses_existing_content_addressed_branch(self):
@@ -1391,6 +1409,66 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "POST")
         self.assertIn("actions/variables", calls[1][1])
         self.assertEqual(calls[2][0], "GET")
+
+    def test_client_migrates_retired_review_mode_variable_in_place(self):
+        calls = []
+
+        def opener(request, timeout):
+            body = json.loads(request.data.decode("utf-8")) if request.data else None
+            calls.append((request.method, request.full_url, body))
+            if request.method == "GET":
+                return FakeHTTPResponse(
+                    b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'
+                )
+            return FakeHTTPResponse(
+                b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"merge-focused"}'
+            )
+
+        client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
+        client.migrate_retired_review_mode_variable(
+            repository="owner/repo",
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH"])
+        self.assertEqual(
+            calls[0][1],
+            "https://api.github.test/repos/owner/repo/actions/variables/"
+            "REVIEWSENSEI_REVIEW_MODE",
+        )
+        self.assertEqual(
+            calls[1][2],
+            {"name": "REVIEWSENSEI_REVIEW_MODE", "value": "merge-focused"},
+        )
+
+    def test_client_leaves_operator_review_mode_values_untouched(self):
+        for value in ("merge-focused", "advisory", "strict", ""):
+            with self.subTest(value=value):
+                client, calls = self.make_client(
+                    (
+                        200,
+                        json.dumps(
+                            {"name": "REVIEWSENSEI_REVIEW_MODE", "value": value}
+                        ).encode("utf-8"),
+                    )
+                )
+
+                client.migrate_retired_review_mode_variable(
+                    repository="owner/repo",
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertEqual([call[0] for call in calls], ["GET"])
+
+    def test_client_ignores_a_missing_review_mode_variable(self):
+        client, calls = self.make_client((404, b""))
+
+        client.migrate_retired_review_mode_variable(
+            repository="owner/repo",
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual([call[0] for call in calls], ["GET"])
 
     def test_client_maps_transient_and_sanitized_errors(self):
         error = HTTPError(

@@ -9,6 +9,7 @@ import {
   parseVerifiedDelivery,
 } from "../src/github-app";
 import {
+  RETIRED_REVIEW_MODE_VARIABLE,
   SETUP_FILE_PATHS,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
@@ -98,6 +99,7 @@ class FakeGitHub {
   refCollision = false;
   collisionObserved = false;
   missingVariables = false;
+  variableValues: Record<string, string | null> = {};
   existingPullRequest: number | null = null;
 
   async request(method: string, path: string, _token: string, requestBody?: Record<string, unknown>) {
@@ -167,12 +169,21 @@ class FakeGitHub {
           };
     }
     if (method === "GET" && path.includes("/actions/variables/")) {
-      return this.missingVariables
-        ? { status: 404, data: null }
-        : { status: 200, data: { value: "operator-owned" } };
+      if (this.missingVariables) {
+        return { status: 404, data: null };
+      }
+      const name = decodeURIComponent(path.split("/actions/variables/")[1].split("?", 1)[0]);
+      const value = this.variableValues[name];
+      if (value === null) {
+        return { status: 404, data: null };
+      }
+      return { status: 200, data: { value: value ?? "operator-owned" } };
     }
     if (method === "POST" && path.endsWith("/actions/variables")) {
       return { status: 201, data: null };
+    }
+    if (method === "PATCH" && path.includes("/actions/variables/")) {
+      return { status: 204, data: null };
     }
     if (method === "GET" && path.includes("/git/ref/heads/main")) {
       return { status: 200, data: { object: { sha: BASE_SHA } } };
@@ -418,6 +429,40 @@ describe("setup repository reconciliation", () => {
     expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
     expect(fake.requests.find(({ method, path }) => method === "POST" && path.endsWith("/pulls"))?.body)
       .toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates a retired legacy review mode variable in place", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    const variablePath = `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`;
+    const patch = fake.requests.find(({ method, path }) =>
+      method === "PATCH" && path.endsWith(variablePath),
+    );
+    expect(patch?.body).toEqual({ name: RETIRED_REVIEW_MODE_VARIABLE, value: "merge-focused" });
+  });
+
+  it("leaves operator review mode variable values untouched", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "advisory";
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+  });
+
+  it("ignores a missing review mode variable during migration", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = null;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
   });
 
   it("does not overwrite a customer-owned deterministic branch", async () => {

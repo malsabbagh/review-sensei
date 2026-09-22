@@ -7,6 +7,8 @@ import {
 } from "./github-api";
 import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
+  RETIRED_REVIEW_MODE_MIGRATIONS,
+  RETIRED_REVIEW_MODE_VARIABLE,
   SETUP_FILE_PATHS,
   SETUP_PULL_REQUEST_BODY,
   SETUP_PULL_REQUEST_TITLE,
@@ -771,6 +773,7 @@ export class GitHubSetupService {
       }
     }
     await this.ensureRepositoryVariables(repository, installationToken);
+    await this.migrateRetiredReviewModeVariable(repository, installationToken);
     const existingAfterBranch = await this.existingPullRequest(
       repository,
       installationToken,
@@ -875,6 +878,36 @@ export class GitHubSetupService {
       }
       requireSuccessful(created);
     }
+  }
+
+  private async migrateRetiredReviewModeVariable(
+    repository: string,
+    token: string,
+  ): Promise<void> {
+    const variablePath =
+      `/repos/${repositoryPath(repository)}/actions/variables/` +
+      encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE);
+    const existing = await this.request("GET", variablePath, token);
+    if (existing.status === 404) {
+      // A missing variable is left to ensureRepositoryVariables.
+      return;
+    }
+    const data = jsonObject(
+      requireSuccessful(existing),
+      "GitHub setup response was invalid",
+    );
+    if (typeof data.value !== "string") {
+      return;
+    }
+    const replacement = RETIRED_REVIEW_MODE_MIGRATIONS[data.value];
+    if (replacement === undefined) {
+      return;
+    }
+    const updated = await this.request("PATCH", variablePath, token, {
+      name: RETIRED_REVIEW_MODE_VARIABLE,
+      value: replacement,
+    });
+    requireSuccessful(updated);
   }
 
   private async defaultBranch(
