@@ -98,6 +98,15 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertIn(
             "review mode must be advisory, merge-focused, or strict", bogus.stderr
         )
+        # An empty value fails closed without the migration instruction; the
+        # caller resolves an unset `vars.REVIEWSENSEI_REVIEW_MODE` to
+        # merge-focused before this guard ever sees an empty string.
+        empty = run("")
+        self.assertEqual(empty.returncode, 1)
+        self.assertIn(
+            "review mode must be advisory, merge-focused, or strict", empty.stderr
+        )
+        self.assertNotIn("migrate", empty.stderr)
 
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(
