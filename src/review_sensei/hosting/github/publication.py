@@ -1250,10 +1250,10 @@ class ReviewPublisher:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
         if convergence_policy is None:
-            # This low-level publisher preserves its embedding compatibility
-            # contract; configured CLI and application entry points resolve
-            # the current merge-focused runtime default before reaching it.
-            convergence_policy = ReviewConvergencePolicy(mode="legacy")
+            # Use the same deterministic default as preparation. Runtime
+            # configuration is resolved by the application, not from ambient
+            # environment variables at this publication boundary.
+            convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")
         # Operator modes may only withhold GitHub review events. The

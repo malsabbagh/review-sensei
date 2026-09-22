@@ -215,7 +215,12 @@ class ReviewPublisherTests(unittest.TestCase):
         http, calls = make_http([])
         publisher = ReviewPublisher(http=http)
         head = "b" * 40
-        prepared = publisher.prepare(result=result(), diff=DIFF, head_sha=head)
+        prepared = publisher.prepare(
+            result=result(),
+            diff=DIFF,
+            head_sha=head,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+        )
 
         with self.assertRaisesRegex(GitHubPublicationError, "publication context"):
             publisher.publish(
@@ -230,6 +235,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 diff=DIFF.replace("+change", "+different-change"),
                 app_slug="reviewsensei[bot]",
                 prepared_review=prepared,
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         self.assertEqual(calls, [])
 
@@ -254,6 +260,7 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             prepared_review=prepared,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(published.status, "published")
         self.assertEqual(valid_calls[4][0], "POST")
@@ -278,6 +285,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
                 prepared_review=prepared,
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         self.assertEqual(calls, [])
 
@@ -738,6 +746,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=result(),
             diff=DIFF,
             app_slug="review-sensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.review_id, 5)
@@ -1056,6 +1065,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             )
         self.assertFalse(
             any(
@@ -1187,6 +1197,7 @@ class ReviewPublisherTests(unittest.TestCase):
                         result=result(),
                         diff=DIFF,
                         app_slug="reviewsensei[bot]",
+                        convergence_policy=ReviewConvergencePolicy(mode="legacy"),
                     )
                 self.assertFalse(
                     any(
@@ -1216,6 +1227,7 @@ class ReviewPublisherTests(unittest.TestCase):
             result=classified_result(),
             diff=DIFF,
             app_slug="review-sensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -1256,6 +1268,7 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
 
         self.assertEqual(outcome.status, "published")
@@ -1982,6 +1995,7 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -2009,6 +2023,7 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(blocking_outcome.status, "published")
         blocking_body = __import__("json").loads(blocking_calls[3][2].decode("utf-8"))
@@ -2055,6 +2070,7 @@ deleted file mode 100644
             diff=deletion,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -2099,6 +2115,7 @@ deleted file mode 100644
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -2142,6 +2159,7 @@ deleted file mode 100644
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -3129,7 +3147,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
                     auto_approve=False,
                 )
 
-    def test_omitted_policy_stays_legacy_when_env_is_merge_focused(self):
+    def test_explicit_legacy_policy_is_not_replaced_from_environment(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
             outcome, calls = self.publish(self._responses())
         self.assertEqual(outcome.status, "published")

@@ -247,18 +247,28 @@ The App creates repository variables for provider mode/model selection, package
 version, independent analysis/publication controls, learning proposals and
 learning PRs, mention replies, artifact upload, and optional trusted stage and
 category directories (`REVIEWSENSEI_STAGES_DIR`, `REVIEWSENSEI_CATEGORIES_DIR`).
-Feature switches default to `false`; empty stage/category paths preserve the
-packaged defaults. Manual dispatch may override those directories; both the
+The generated setup contains 15 repository variables, including 7 boolean
+controls, and 3 generated files. Boolean controls default to `false` except
+`REVIEWSENSEI_AUTO_APPROVE=true`, which remains gated by review and write
+settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
+boolean control. Empty stage/category paths preserve the packaged defaults. Manual dispatch may override those directories; both the
 variable and the input are repository-relative paths loaded from the trusted
 base checkout after authoritative PR preflight. Pull-request head edits to
 custom stage or category JSON cannot change the instructions used for that
 review. A stage whose lenses are all inactive for the diff makes zero provider
 calls; a category-less independent-output stage still runs once.
-The generated setup exposes nine independent operational controls so analysis,
-publication, approval, learning, replies, and artifact retention can be enabled
-separately.
-The five setup files and generated workflow references remain byte-addressed
-and are migrated only when their managed content matches exactly.
+The 7 boolean controls are `REVIEWSENSEI_AUTO_REVIEW`,
+`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
+`REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
+`REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`.
+The 3 generated files are `.github/workflows/review-sensei-review.yml`,
+`.github/workflows/review-sensei-uninstall.yml`, and
+`.github/review-sensei/config.yml`. They remain byte-addressed and are migrated
+only when their managed content matches exactly. Editing generated provider,
+model, or other configuration fields makes the installation custom (`unknown`)
+and prevents automatic overwrites, in both historical and current setup
+versions. Configure the generated caller through repository Actions variables;
+reconcile custom files manually rather than weakening managed-file recognition.
 The App does not create a placeholder secret or overwrite an existing variable.
 
 To enable automatic same-repository analysis, set

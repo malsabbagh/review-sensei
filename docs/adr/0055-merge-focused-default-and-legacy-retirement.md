@@ -44,6 +44,22 @@ Fresh installs use merge-focused behavior without a user-supplied flag.
 Existing explicit legacy configuration receives a deterministic migration
 instruction instead of silently changing policy. Historical tests and readers
 can still construct the legacy policy directly to validate compatibility.
+Omitting a policy in the low-level verifier or publisher also resolves to
+`merge-focused`; preparation and publication bind the same policy digest.
+Existing prepared output bound to a different policy is rejected rather than
+silently republished under the new default.
+
+Merge-focused round admission requires a trusted session ledger. Without one,
+`doctor` reports `status=action` and exits 2; `plan` includes
+`session-ledger-required` in `skip_reasons`. A plan's `status=ready` means its
+diff was analyzed, not that review execution is authorized. Neither diagnostic
+creates a ledger, grants a round, invokes inference, or performs a GitHub write.
+
+Managed setup recognition is byte-exact for both historical and current
+versions. Editing generated configuration (including provider or model fields)
+makes that installation a custom `unknown` no-write case. Operators should
+configure the generated caller through repository Actions variables; custom
+files require manual reconciliation, not a relaxed recognition rule.
 
 ## Validation
 

@@ -654,9 +654,7 @@ def _with_admission(
     authorized_dispositions: Sequence[object] = (),
     current_head_sha: str | None = None,
 ) -> ReviewResult:
-    # Direct verifier callers preserve historical semantics unless a
-    # configured entry point has supplied its resolved runtime policy.
-    policy = convergence_policy or ReviewConvergencePolicy(mode="legacy")
+    policy = convergence_policy or ReviewConvergencePolicy()
     return admit_review_result(
         result,
         policy,
@@ -718,9 +716,7 @@ def prepare_publishable_review(
         raise ReviewInputError("review result is invalid")
     if evidence_policy not in EVIDENCE_POLICIES:
         raise ReviewInputError("evidence policy is unsupported")
-    # Bind the same low-level fallback the publisher applies so omitted-policy
-    # preparation and publication agree on one digest.
-    policy_for_binding = convergence_policy or ReviewConvergencePolicy(mode="legacy")
+    policy_for_binding = convergence_policy or ReviewConvergencePolicy()
     convergence_policy_digest = (
         policy_for_binding.digest()
         if isinstance(policy_for_binding, ReviewConvergencePolicy)
@@ -731,7 +727,7 @@ def prepare_publishable_review(
             raise ReviewInputError(
                 "input blocker candidates require confirmed evidence policy"
             )
-        policy = convergence_policy or ReviewConvergencePolicy(mode="legacy")
+        policy = convergence_policy or ReviewConvergencePolicy()
         if blocker_candidates is not None and policy.enforcement != "publication":
             raise ReviewInputError("blocker candidates require publication enforcement")
         # Rebuild only when upstream tagged a non-legacy policy on the result.

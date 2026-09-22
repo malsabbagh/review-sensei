@@ -537,11 +537,13 @@ The GitHub App opens a setup-v5 PR containing a thin caller that follows the
 operator-managed `v5` public git tag. The reusable workflow prefers the
 requested exact package from PyPI and falls back to its executing workflow
 commit only when that package/version is unavailable. Unrelated PyPI
-installation failures remain fatal. All nine
-`REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
-review, GitHub writes, learning PRs, mention replies, and artifact upload are
-off, while automatic approval is `true` when those review and write gates are
-enabled. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
+installation failures remain fatal. Setup provisions 15 repository variables,
+including 7 boolean controls, and manages 3 generated files. Automatic review,
+GitHub writes, learning proposals, learning PRs, mention replies, and artifact
+upload default to `false`; automatic approval defaults to `true` but is effective
+only when review and write gates are enabled. `REVIEWSENSEI_REVIEW_MODE` is a
+policy selector, not a boolean control, and defaults to `merge-focused`.
+The App never creates the customer-owned `OLLAMA_API_KEY` secret.
 
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on

@@ -19,6 +19,15 @@ When `REVIEWSENSEI_REVIEW_SHADOW` is set to an operator mode, doctor reports
 an observation-only `review-shadow` check; publication stays on the resolved
 review mode. `legacy` is not a valid shadow target.
 
+The default `merge-focused` policy requires trusted session state for round
+admission. With no configured session ledger, `doctor` reports `status=action`
+and exits 2, even when its package/provider checks pass. `plan` includes
+`session-ledger-required` in `skip_reasons`. Its `status=ready` only says the
+diff was analyzed; it is not admission to execute a review. Supplying valid,
+identity-bound session state is an execution prerequisite, not a reason to
+fall back to legacy. These diagnostic commands do not initialize or mutate a
+ledger, reset counters, invoke a model, or write to GitHub.
+
 Offline runs do not open sockets. Passing `--network` enables read-only probes
 that distinguish:
 

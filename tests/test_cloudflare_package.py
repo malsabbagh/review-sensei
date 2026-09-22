@@ -328,18 +328,33 @@ class CloudflarePackageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(py_workflow, example)
 
-    def test_user_guidance_describes_setup_v4_publication_contract(self):
+    def test_user_guidance_describes_setup_v5_publication_contract(self):
+        from review_sensei.hosting.github.setup import (
+            SETUP_FILE_PATHS,
+            SETUP_VARIABLES,
+        )
+
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
+        controls = {
+            name for name, value in SETUP_VARIABLES if value in {"true", "false"}
+        }
         for content in (readme, installation):
+            normalized = " ".join(content.split())
             self.assertIn("setup-v5", content)
-            self.assertIn("nine", content)
-            self.assertIn("five", content)
+            self.assertIn(f"{len(SETUP_VARIABLES)} repository variables", normalized)
+            self.assertIn(f"{len(controls)} boolean controls", normalized)
+            self.assertIn(f"{len(SETUP_FILE_PATHS)} generated files", normalized)
             self.assertIn("automatic", content)
             self.assertIn("summary", content)
             self.assertIn("inline", content)
             self.assertIn("REVIEWSENSEI_UPLOAD_ARTIFACTS", content)
             self.assertNotIn("review-sensei-version.txt", content)
+        for name in controls:
+            self.assertIn(f"`{name}`", installation)
+        for path in SETUP_FILE_PATHS:
+            self.assertIn(f"`{path}`", installation)
+        self.assertNotIn("REVIEWSENSEI_REVIEW_MODE", controls)
 
     def test_worker_does_not_dispatch_reviews_or_invent_sha_concurrency_keys(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text(encoding="utf-8")
