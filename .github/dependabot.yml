@@ -4,6 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      # init and analyze reject a config written by another CodeQL version, so
+      # their bumps must arrive in one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
   - package-ecosystem: pip
     directory: "/"
     schedule:
