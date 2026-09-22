@@ -20,7 +20,14 @@
           "label": {"type": "string", "minLength": 1, "maxLength": 128},
           "provider_calls": {"type": "integer", "minimum": 0, "maximum": 32},
           "baseline_loaded": {"type": "boolean"},
-          "publication_status": {"type": "string", "enum": ["published", "handoff", "disabled", "already_published"]}
+          "publication_status": {"type": "string", "enum": ["published", "handoff", "disabled", "already_published"]},
+          "handoff_reason": {
+            "anyOf": [
+              {"type": "string", "minLength": 1, "maxLength": 128},
+              {"type": "null"}
+            ]
+          },
+          "approval_events": {"type": "integer", "minimum": 0, "maximum": 32}
         }
       }
     },

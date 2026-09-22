@@ -192,7 +192,7 @@ These imports are public and stable within a major version:
 - `review_sensei.ObservedSequenceEvent`
 - `review_sensei.SequenceStep`
 - `review_sensei.replay_review_sequence`
-- `review_sensei.run_observed_review_sequence`
+- `review_sensei.hosting.github.observed.run_observed_review_sequence`
 - `review_sensei.compare_sequence_policies`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`

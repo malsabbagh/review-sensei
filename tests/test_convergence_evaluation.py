@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from review_sensei.baseline import (
+    BaselineFinding,
+    ReviewBaseline,
+    baseline_history_document,
+)
 from review_sensei.cli import main
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import (
     DEFAULT_REVIEW_MODE,
     REVIEW_SHADOW_ENV,
@@ -20,13 +28,18 @@ from review_sensei.convergence import (
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
+from review_sensei.hosting.github.observed import (
+    _ObservedHTTPResponse,
+    restored_compatible_baseline,
+    run_observed_review_sequence,
+)
 from review_sensei.hosting.github.publication import PublicationResult
 from review_sensei.models import ReviewResult
 from review_sensei.sequence import (
+    UNAVAILABLE_EVIDENCE_IDENTITY,
     SequenceStep,
     compare_sequence_policies,
     replay_review_sequence,
-    run_observed_review_sequence,
 )
 from review_sensei.session import InMemorySessionLedger, SessionIdentity, SessionRecord
 
@@ -264,7 +277,22 @@ class ObservedSequenceTests(unittest.TestCase):
         )
         self.assertEqual(report.execution_metrics.completed_rounds, 3)
         self.assertEqual(report.execution_metrics.provider_calls, 3)
+        # Both in-budget clean rounds approve. The over-cap handoff adds none.
+        self.assertEqual(
+            [event.approval_events for event in report.events], [0, 1, 1, 0]
+        )
+        self.assertEqual(report.approval_events, 2)
+        self.assertEqual(report.events[-1].approval_events, 0)
+        self.assertEqual(report.events[-1].handoff_reason, "round-budget-exhausted")
         self.assertFalse(report.cap_created_approval)
+        self.assertNotIn(
+            "the configured round cap was not observed with zero new approval events",
+            report.unmet_criteria,
+        )
+        self.assertNotIn(
+            "an over-cap request did not prove zero new inference",
+            report.unmet_criteria,
+        )
 
     def test_observed_harness_compares_material_labels_to_fixture_output(self):
         report = run_observed_review_sequence(
@@ -327,6 +355,106 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(metrics.unjustified_late_blockers, 1)
         self.assertEqual(metrics.observed_material_findings, 3)
         self.assertEqual(metrics.blocker_precision, 1 / 3)
+
+    def test_observed_metrics_count_only_admitted_material_ids(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a", "material-missed"),
+                    fixture_material_finding_ids=("material-a",),
+                    label="partial-admission",
+                ),
+            ),
+            _policy(),
+        )
+        metrics = report.finding_metrics
+        self.assertEqual(metrics.observed_material_findings, 1)
+        self.assertEqual(metrics.matched_material_findings, 1)
+        self.assertEqual(metrics.missed_material_findings, 1)
+        self.assertIn(
+            "a labelled material regression was missed", report.unmet_criteria
+        )
+
+    def test_completed_history_without_a_compatible_baseline_stays_unloaded(self):
+        policy = _policy()
+        key = ReviewContextCacheKey(
+            repository="owner/repo",
+            pull_request=136,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            engine="ollama",
+            model="test",
+            profile="default",
+            stage_digest="c" * 64,
+            context_digest="d" * 64,
+            learning_digest="e" * 64,
+        )
+        baseline = ReviewBaseline(
+            cache_key=key,
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            findings=(
+                BaselineFinding(
+                    fingerprint="1" * 64,
+                    resolution_criterion="2" * 64,
+                    concern="3" * 64,
+                    path="src/observed.py",
+                    symbol="run",
+                    defect_kind="bug",
+                    generation=1,
+                    blocking=True,
+                ),
+            ),
+            reviewed_paths=("src/observed.py",),
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+        }
+        self.assertIsNotNone(
+            restored_compatible_baseline(history, current_key=key, policy=policy)
+        )
+        self.assertIsNone(
+            restored_compatible_baseline(
+                {"state": "completed"},
+                current_key=key,
+                policy=policy,
+            )
+        )
+        self.assertIsNone(
+            restored_compatible_baseline(
+                {"state": "completed", "baseline": {"tampered": True}},
+                current_key=key,
+                policy=policy,
+            )
+        )
+        incompatible = ReviewBaseline(
+            cache_key=key,
+            policy_digest="f" * 64,
+            complete=True,
+            coverage_complete=True,
+            findings=baseline.findings,
+            reviewed_paths=baseline.reviewed_paths,
+        )
+        self.assertIsNone(
+            restored_compatible_baseline(
+                {
+                    "state": "completed",
+                    "baseline": baseline_history_document(incompatible),
+                },
+                current_key=key,
+                policy=policy,
+            )
+        )
+
+    def test_observed_http_read_advances(self):
+        response = _ObservedHTTPResponse({"ok": True})
+        first = response.read(2)
+        rest = response.read(len(response.body))
+        self.assertEqual(first + rest, response.body)
+        self.assertEqual(response.read(8), b"")
 
 
 class ShadowObservationTests(unittest.TestCase):
@@ -440,9 +568,79 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         self.assertEqual(payload["events"][0]["provider_calls"], 1)
         self.assertEqual(payload["cutover_status"], "passed")
         self.assertEqual(payload["unmet_criteria"], [])
+        self.assertEqual(payload["events"][1]["label"], "verification-emits-nothing")
         self.assertEqual(payload["evidence_identity"]["source_identity"], "source-sha")
         self.assertEqual(
             payload["evidence_identity"]["workflow_identity"], "workflow-sha"
+        )
+
+    def test_cli_observed_default_identities_are_not_ready(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GITHUB_SHA", None)
+            os.environ.pop("GITHUB_WORKFLOW_REF", None)
+            with redirect_stderr(stderr):
+                with patch("sys.stdout", stdout):
+                    status = main(["evaluate-convergence", "--json", "--observed"])
+        self.assertEqual(status, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["cutover_status"], "not_ready")
+        self.assertIn(
+            "installed source, package, and workflow identities are unavailable",
+            payload["unmet_criteria"],
+        )
+        self.assertIn("unavailable sentinel", stderr.getvalue())
+
+    def test_cli_observed_rejects_compare_default(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with patch("sys.stdout", io.StringIO()):
+                status = main(
+                    [
+                        "evaluate-convergence",
+                        "--observed",
+                        "--compare-default",
+                        "--source-identity",
+                        "source-sha",
+                        "--package-identity",
+                        "review-sensei@0.5.0",
+                        "--workflow-identity",
+                        "workflow-sha",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertIn("cannot run in one report", stderr.getvalue())
+
+    def test_cli_observed_identity_may_contain_the_sentinel_word(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "evaluate-convergence",
+                        "--json",
+                        "--observed",
+                        "--source-identity",
+                        "source-identity: unavailable",
+                        "--package-identity",
+                        "review-sensei@0.5.0",
+                        "--workflow-identity",
+                        "workflow-sha",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["cutover_status"], "passed")
+        self.assertNotIn(
+            "installed source, package, and workflow identities are unavailable",
+            payload["unmet_criteria"],
+        )
+        self.assertNotIn("unavailable sentinel", stderr.getvalue())
+        self.assertNotEqual(
+            payload["evidence_identity"]["source_identity"],
+            UNAVAILABLE_EVIDENCE_IDENTITY,
         )
 
     def test_cli_replays_sentinel_and_keeps_legacy_default(self):
@@ -470,11 +668,18 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
 class PublicExportTests(unittest.TestCase):
     def test_sequence_exports_are_importable(self):
         import review_sensei
+        import review_sensei.sequence as sequence
 
         self.assertIs(review_sensei.SequenceStep, SequenceStep)
         self.assertIs(review_sensei.replay_review_sequence, replay_review_sequence)
+        self.assertFalse(hasattr(review_sensei, "run_observed_review_sequence"))
+        self.assertFalse(hasattr(sequence, "run_observed_review_sequence"))
+        self.assertNotIn("hosting.github", inspect.getsource(sequence))
+        import review_sensei.hosting.github.observed as observed_harness
+
         self.assertIs(
-            review_sensei.run_observed_review_sequence, run_observed_review_sequence
+            observed_harness.run_observed_review_sequence,
+            run_observed_review_sequence,
         )
         self.assertIs(review_sensei.observe_shadow_admission, observe_shadow_admission)
         self.assertIs(

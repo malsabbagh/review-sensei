@@ -2139,11 +2139,15 @@ def _run_learnings_command(arguments: list[str]) -> int:
 
 
 def _evaluate_convergence_parser() -> argparse.ArgumentParser:
+    from .sequence import UNAVAILABLE_EVIDENCE_IDENTITY
+
     parser = argparse.ArgumentParser(
         prog="review-sensei evaluate-convergence",
         description=(
             "Replay a frozen synthetic review sequence against a convergence "
-            "policy. Observation-only; does not publish or change the legacy default."
+            "policy. Observation-only; does not publish or change the legacy default. "
+            "With --observed, exit 0 only when cutover_status is passed. A not_ready "
+            "report is still written and the process exits 1."
         ),
     )
     parser.add_argument(
@@ -2165,12 +2169,18 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--observed",
         action="store_true",
-        help="Run the real-component offline evidence harness with mocked model and GitHub edges",
+        help=(
+            "Run the real-component offline evidence harness with mocked model "
+            "and GitHub edges. Exit 0 only when the cutover gate passes."
+        ),
     )
     parser.add_argument(
         "--source-identity",
-        default=os.getenv("GITHUB_SHA", "unavailable"),
-        help="Exact source revision for --observed evidence (default: GITHUB_SHA or unavailable)",
+        default=os.getenv("GITHUB_SHA", UNAVAILABLE_EVIDENCE_IDENTITY),
+        help=(
+            "Exact source revision for --observed evidence "
+            "(default: GITHUB_SHA, or the sentinel unavailable)"
+        ),
     )
     parser.add_argument(
         "--package-identity",
@@ -2179,8 +2189,11 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--workflow-identity",
-        default=os.getenv("GITHUB_WORKFLOW_REF", "unavailable"),
-        help="Exact workflow identity for --observed evidence (default: GITHUB_WORKFLOW_REF or unavailable)",
+        default=os.getenv("GITHUB_WORKFLOW_REF", UNAVAILABLE_EVIDENCE_IDENTITY),
+        help=(
+            "Exact workflow identity for --observed evidence "
+            "(default: GITHUB_WORKFLOW_REF, or the sentinel unavailable)"
+        ),
     )
     return parser
 
@@ -2192,12 +2205,13 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             DEFAULT_REVIEW_MODE,
             resolve_review_convergence_policy,
         )
+        from .hosting.github.observed import run_observed_review_sequence
         from .sequence import (
+            UNAVAILABLE_EVIDENCE_IDENTITY,
             ObservedEvidenceIdentity,
             SequenceStep,
             compare_sequence_policies,
             replay_review_sequence,
-            run_observed_review_sequence,
         )
 
         policy = resolve_review_convergence_policy(mode=args.review_mode)
@@ -2213,7 +2227,11 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 head_sha="b" * 40,
                 blocking_identities=(),
                 independently_approval_eligible=True,
-                label="verification-clean",
+                # Fixture emits nothing here. material-a is labelled on the
+                # initial step only, so dropping that emission fails the gate.
+                expected_material_finding_ids=("material-a",),
+                fixture_material_finding_ids=(),
+                label="verification-emits-nothing",
             ),
             SequenceStep(
                 head_sha="c" * 40,
@@ -2260,7 +2278,17 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                     f"approval_events={observed.approval_events} "
                     f"cap_created_approval={observed.cap_created_approval}\n"
                 )
-            return 0
+            if UNAVAILABLE_EVIDENCE_IDENTITY in {
+                args.source_identity,
+                args.package_identity,
+                args.workflow_identity,
+            }:
+                sys.stderr.write(
+                    "observed evidence identity uses the unavailable sentinel; "
+                    "cutover_status cannot pass until source, package, and "
+                    "workflow identities are explicit\n"
+                )
+            return 0 if observed.cutover_status == "passed" else 1
         report = replay_review_sequence(steps, policy)
         if args.compare_default:
             payload = compare_sequence_policies(steps, proposed=policy)

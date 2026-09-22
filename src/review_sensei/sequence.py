@@ -7,41 +7,28 @@ installed default or emit GitHub events. Shadow mode is observation-only.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any, Literal, Mapping, Sequence, cast
-from urllib.parse import urlparse
 
-from .baseline import baseline_from_history_document, baseline_from_review
-from .context import build_review_context_cache_key
 from .convergence import (
     DEFAULT_REVIEW_MODE,
     ReviewConvergencePolicy,
-    derive_blocker_candidate,
     detect_no_progress,
     resolve_review_convergence_policy,
 )
 from .errors import ReviewInputError
-from .models import ProviderResponse, ReviewRequest, ReviewTransaction
 from .schemas import validate_public_document
-from .service import ReviewService
 from .session import (
     InMemorySessionLedger,
-    LocalSessionLedger,
     SessionIdentity,
-    checkpoint_review_analysis,
     complete_session_round,
-    next_session_generation,
-    prepare_review_transaction,
     prepare_session_round,
     session_reservation_id,
-    should_skip_automation,
 )
 
 PUBLIC_SCHEMA_VERSION = "1.0"
+# Exact sentinel the observed CLI emits when a GitHub Actions identity is absent.
+UNAVAILABLE_EVIDENCE_IDENTITY = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -154,6 +141,8 @@ class ObservedSequenceEvent:
     provider_calls: int
     baseline_loaded: bool
     publication_status: str
+    handoff_reason: str | None = None
+    approval_events: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -161,6 +150,8 @@ class ObservedSequenceEvent:
             "provider_calls": self.provider_calls,
             "baseline_loaded": self.baseline_loaded,
             "publication_status": self.publication_status,
+            "handoff_reason": self.handoff_reason,
+            "approval_events": self.approval_events,
         }
 
 
@@ -293,584 +284,6 @@ class ObservedEvidenceIdentity:
         }
 
 
-class _ObservedProvider:
-    name = "observed-fixture"
-    model: str | None = "observed-fixture-model"
-
-    def __init__(self, material_finding_ids: tuple[str, ...] = ()) -> None:
-        self.calls = 0
-        self.material_finding_ids = material_finding_ids
-
-    def complete(self, request):
-        self.calls += 1
-        comments = [
-            {
-                "path": "src/observed.py",
-                "line": 1,
-                "body": f"fixture-material:{finding_id}",
-                "blocking": True,
-                "severity": "high",
-                "fix_effort": "small",
-                "category": "correctness",
-            }
-            for finding_id in self.material_finding_ids
-        ]
-        return ProviderResponse(
-            text=json.dumps(
-                {
-                    "summary": "Observed fixture review.",
-                    "comments": comments,
-                    "learning_proposals": [],
-                }
-            ),
-            provider=self.name,
-            model=self.model,
-        )
-
-
-class _ObservedBroker:
-    def request_oidc_token(self) -> str:
-        return "observed-oidc"
-
-    def exchange(self, token: str, *, capability: str | None = None) -> str:
-        return f"observed-{capability or 'session'}-token"
-
-
-class _ObservedHTTPResponse:
-    """Small response shape consumed by the real bounded GitHub adapter."""
-
-    def __init__(
-        self, payload: dict[str, object] | Sequence[object], status: int = 200
-    ):
-        self.body = json.dumps(payload).encode("utf-8")
-        self.status = status
-        self.reason = "observed fixture"
-        self.headers: dict[str, str] = {}
-
-    def __enter__(self) -> _ObservedHTTPResponse:
-        return self
-
-    def __exit__(
-        self, exc_type: object, exc_value: object, traceback: object
-    ) -> Literal[False]:
-        return False
-
-    def read(self, size: int) -> bytes:
-        return self.body[:size]
-
-
-class _ObservedGitHub:
-    """Stateful host double; the production HTTP and publisher code stay live."""
-
-    def __init__(self) -> None:
-        from .hosting.github.http import GitHubHttp
-
-        self.head_sha = "0" * 40
-        self.reviews: list[dict[str, object]] = []
-        self.calls: list[tuple[str, str, dict[str, object] | None]] = []
-        self.http = GitHubHttp(
-            api_url="https://observed.github.invalid", opener=self._open, timeout=1
-        )
-
-    @property
-    def approval_events(self) -> int:
-        return sum(
-            1
-            for method, path, body in self.calls
-            if method == "POST"
-            and path.endswith("/reviews")
-            and isinstance(body, dict)
-            and body.get("event") == "APPROVE"
-        )
-
-    def _pr_payload(self) -> dict[str, object]:
-        return {
-            "state": "open",
-            "draft": False,
-            "user": {"login": "maintainer", "type": "User"},
-            "head": {
-                "sha": self.head_sha,
-                "repo": {"full_name": "owner/repo", "fork": False},
-            },
-            "base": {
-                "ref": "main",
-                "sha": "f" * 40,
-                "repo": {"id": 136, "full_name": "owner/repo", "fork": False},
-            },
-        }
-
-    def _open(self, request: Any, timeout: int) -> _ObservedHTTPResponse:
-        parsed = urlparse(request.full_url)
-        path = parsed.path
-        raw = request.data
-        body = (
-            json.loads(raw.decode("utf-8"))
-            if isinstance(raw, (bytes, bytearray)) and raw
-            else None
-        )
-        if body is not None and not isinstance(body, dict):
-            raise ReviewInputError("observed GitHub request body is invalid")
-        self.calls.append((request.method, path, body))
-        if request.method == "GET" and path.endswith("/pulls/136"):
-            return _ObservedHTTPResponse(self._pr_payload())
-        if request.method == "GET" and path.endswith("/pulls/136/reviews"):
-            return _ObservedHTTPResponse(self.reviews)
-        if request.method == "POST" and path == "/graphql":
-            return _ObservedHTTPResponse(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": [],
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            )
-        if request.method == "POST" and path.endswith("/pulls/136/reviews"):
-            if body is None:
-                raise ReviewInputError("observed review publication body is missing")
-            review_id = len(self.reviews) + 1
-            self.reviews.append(
-                {
-                    "id": review_id,
-                    "body": body.get("body"),
-                    "commit_id": body.get("commit_id"),
-                    "state": body.get("event"),
-                    "user": {"login": "reviewsensei[bot]"},
-                }
-            )
-            return _ObservedHTTPResponse({"id": review_id})
-        raise ReviewInputError(
-            f"unexpected observed GitHub request: {request.method} {path}"
-        )
-
-
-def run_observed_review_sequence(
-    steps: Sequence[SequenceStep],
-    policy: ReviewConvergencePolicy,
-    *,
-    evidence_identity: ObservedEvidenceIdentity | None = None,
-) -> ObservedSequenceReport:
-    """Exercise service, durable admission, and publication across fresh jobs.
-
-    The harness deliberately owns only the provider and GitHub publisher fakes.
-    Each loop creates a fresh service and application instance while retaining
-    one ledger, which models the fresh-process boundary without claiming a
-    live provider or GitHub result.
-    """
-
-    if not isinstance(policy, ReviewConvergencePolicy):
-        raise ReviewInputError("review convergence policy is invalid")
-    if not isinstance(steps, Sequence) or not steps:
-        raise ReviewInputError("observed sequence requires at least one step")
-    report_identity = evidence_identity or ObservedEvidenceIdentity(
-        source_identity="unavailable",
-        package_identity="unavailable",
-        workflow_identity="unavailable",
-        configuration_digest=policy.digest(),
-        fixture_identity="observed-convergence-fixture-v1",
-        command="review-sensei evaluate-convergence --observed",
-    )
-    if not isinstance(report_identity, ObservedEvidenceIdentity):
-        raise ReviewInputError("observed evidence identity is invalid")
-    if report_identity.configuration_digest != policy.digest():
-        raise ReviewInputError("observed evidence configuration is stale")
-    from .hosting.github.application import GitHubApplication, GitHubWriteOptions
-
-    github = _ObservedGitHub()
-    events: list[ObservedSequenceEvent] = []
-    baseline_events = 0
-    command_events: list[str] = []
-    expected_material_finding_ids: set[str] = set()
-    expected_non_material_finding_ids: set[str] = set()
-    observed_material_finding_ids: set[str] = set()
-    observed_material_finding_occurrences: list[str] = []
-    duplicate_findings = 0
-    reopened_findings = 0
-    contradictions = 0
-    last_observed_step: dict[str, int] = {}
-    handoffs = 0
-    provider_calls = 0
-    cap_created_approval: bool | None = None
-    shadow_isolated = False
-    with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
-        ledger_root = Path(temporary_root)
-        for index, step in enumerate(steps):
-            if not isinstance(step, SequenceStep):
-                raise ReviewInputError("sequence step is invalid")
-            provider = _ObservedProvider(step.fixture_material_finding_ids)
-            service = ReviewService(provider)
-            request = ReviewRequest(
-                diff=(
-                    "diff --git a/src/observed.py b/src/observed.py\n"
-                    "--- a/src/observed.py\n+++ b/src/observed.py\n"
-                    "@@ -1 +1 @@\n-old\n+new\n"
-                ),
-                repository="owner/repo",
-                pull_request_number=136,
-                model=provider.model,
-                base_sha="f" * 40,
-                head_sha=step.head_sha,
-            )
-            current_key = build_review_context_cache_key(
-                request, provider_name=provider.name, stages=service.stages
-            )
-            if current_key is None:
-                raise ReviewInputError("observed cache identity is unavailable")
-            session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
-            ledger = LocalSessionLedger(ledger_root)
-            prior_record = ledger.load(session_identity).record
-            prior_history = (
-                None if prior_record is None else prior_record.convergence_history
-            )
-            baseline_loaded = bool(
-                isinstance(prior_history, Mapping)
-                and prior_history.get("state") == "completed"
-            )
-            durable_baseline = None
-            if baseline_loaded:
-                if not isinstance(prior_history, Mapping):
-                    raise ReviewInputError("observed durable baseline is invalid")
-                durable_baseline = baseline_from_history_document(
-                    prior_history.get("baseline")
-                )
-            configuration_context = {
-                "provider": {
-                    "name": provider.name,
-                    "profile": None,
-                    "base_url": None,
-                    "timeout_seconds": None,
-                    "max_output_tokens": None,
-                    "allow_custom_endpoint": False,
-                    "openrouter_policy": None,
-                },
-                "model": provider.model or "observed-fixture-model",
-                "stages": [
-                    {
-                        "name": stage.name,
-                        "outputs": list(stage.outputs),
-                        "categories": [category.id for category in stage.categories],
-                        "provider_profile": stage.provider_profile,
-                    }
-                    for stage in service.stages
-                ],
-                "category_policy": sorted(
-                    {
-                        category.id
-                        for stage in service.stages
-                        for category in stage.categories
-                    }
-                ),
-                "orchestration": {"enabled": False, "continue_rounds": 0},
-                "publication_mode": policy.mode,
-            }
-            evidence_context = {"evidence_policy": "legacy", "snapshot_sha256": None}
-            reservation = session_reservation_id(
-                repository="owner/repo",
-                pull_request=136,
-                head_sha=step.head_sha,
-                kind="publish",
-            )
-            prepared = prepare_review_transaction(
-                ledger,
-                session_identity,
-                policy,
-                reservation_id=reservation,
-                base_sha="f" * 40,
-                head_sha=step.head_sha,
-                configuration_digest=ReviewTransaction.compute_configuration_digest(
-                    configuration_context
-                ),
-                evidence_digest=ReviewTransaction.compute_evidence_digest(
-                    evidence_context
-                ),
-                coverage_complete=step.coverage_complete,
-                latest_head_reviewed=step.latest_head_reviewed,
-            )
-            github.head_sha = step.head_sha
-            approvals_before = github.approval_events
-            if should_skip_automation(prepared.decision, inference=True):
-                if prepared.decision.handoff_reason == "round-budget-exhausted":
-                    cap_created_approval = github.approval_events > approvals_before
-                handoffs += int(prepared.decision.handoff)
-                events.append(
-                    ObservedSequenceEvent(
-                        label=step.label or f"step-{index + 1}",
-                        provider_calls=0,
-                        baseline_loaded=baseline_loaded,
-                        publication_status="handoff",
-                    )
-                )
-                continue
-            result = service.review(
-                request,
-                current_key=current_key,
-            )
-            # These facts are the fixture's independently-checkable evidence
-            # edge.  The production publisher still performs C2 admission;
-            # no model ``blocking`` flag alone can turn into a blocker.
-            blocker_candidates = tuple(
-                derive_blocker_candidate(
-                    comment,
-                    on_changed_path=True,
-                    evidence_locations_validated=True,
-                    has_failure_condition=True,
-                    has_specific_violation=True,
-                )
-                for comment in result.comments
-            )
-            provider_calls += provider.calls
-            expected_material_finding_ids.update(step.expected_material_finding_ids)
-            expected_non_material_finding_ids.update(
-                step.expected_non_material_finding_ids
-            )
-            if expected_material_finding_ids & expected_non_material_finding_ids:
-                raise ReviewInputError("expected finding labels are contradictory")
-            material_ids = tuple(
-                comment.body.removeprefix("fixture-material:")
-                for comment in result.comments
-                if comment.body.startswith("fixture-material:")
-                and comment.severity in {"high", "critical"}
-            )
-            observed_material_finding_occurrences.extend(material_ids)
-            observed_material_finding_ids.update(material_ids)
-            duplicate_findings += len(material_ids) - len(set(material_ids))
-            for finding_id in set(material_ids):
-                previous_step = last_observed_step.get(finding_id)
-                if previous_step is not None and previous_step < index - 1:
-                    reopened_findings += 1
-                last_observed_step[finding_id] = index
-            contradictions += sum(
-                finding_id in expected_non_material_finding_ids
-                for finding_id in material_ids
-            )
-            checkpoint_baseline = baseline_from_review(
-                result,
-                cache_key=current_key,
-                policy=policy,
-                generation=next_session_generation(prepared.record),
-            )
-            result = checkpoint_review_analysis(
-                ledger,
-                session_identity,
-                prepared,
-                result,
-                baseline=checkpoint_baseline,
-            )
-            baseline_events += 1
-            from .hosting.github.publication import ReviewPublisher
-
-            application = GitHubApplication(
-                # The GitHub transport and model response are bounded fixture
-                # edges. Publisher and finalizer remain production components.
-                broker=cast(Any, _ObservedBroker()),
-                http=github.http,
-                reviewer=ReviewPublisher(http=github.http),
-                learner=cast(Any, object()),
-                replier=cast(Any, object()),
-                # Construct a new adapter for every event: only its on-disk record
-                # crosses the logical process boundary.
-                session_ledger=LocalSessionLedger(ledger_root),
-            )
-            outcome = application.publish_review(
-                options=GitHubWriteOptions(auto_review=True, github_writes=True),
-                oidc_token="observed-oidc",
-                repository="owner/repo",
-                repository_id=136,
-                pull_request=136,
-                head_sha=step.head_sha,
-                base_branch="main",
-                base_sha="f" * 40,
-                result=result,
-                diff="diff --git a/src/observed.py b/src/observed.py\n--- a/src/observed.py\n+++ b/src/observed.py\n@@ -1 +1 @@\n-old\n+new\n",
-                app_slug="reviewsensei[bot]",
-                convergence_policy=policy,
-                baseline=durable_baseline,
-                current_key=current_key,
-                changed_paths=("src/observed.py",),
-                blocker_candidates=blocker_candidates,
-                configuration_context=configuration_context,
-                evidence_context=evidence_context,
-            )
-            if (
-                outcome.status == "handoff"
-                and outcome.diagnostic == "round-budget-exhausted"
-            ):
-                cap_created_approval = github.approval_events > approvals_before
-            if outcome.status == "handoff":
-                handoffs += 1
-            events.append(
-                ObservedSequenceEvent(
-                    label=step.label or f"step-{index + 1}",
-                    provider_calls=provider.calls,
-                    baseline_loaded=baseline_loaded,
-                    publication_status=outcome.status,
-                )
-            )
-        session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
-        ledger = LocalSessionLedger(ledger_root)
-        loaded_record = ledger.load(session_identity).record
-        completed_rounds = (
-            0
-            if loaded_record is None
-            else loaded_record.completed_initial_reviews
-            + loaded_record.completed_verification_rounds
-        )
-        failed_attempts = 0 if loaded_record is None else loaded_record.failed_attempts
-        publisher_calls_before_shadow = len(github.calls)
-        shadow_record_before = loaded_record
-        # C7 replay keeps its own in-memory ledger. Running it here verifies
-        # that the comparison fixture cannot mutate the enforced job state.
-        compare_sequence_policies(
-            tuple(steps),
-            current=policy,
-            proposed=ReviewConvergencePolicy(mode="strict"),
-        )
-        shadow_isolated = (
-            len(github.calls) == publisher_calls_before_shadow
-            and ledger.load(session_identity).record == shadow_record_before
-        )
-        command_application = GitHubApplication(
-            broker=cast(Any, _ObservedBroker()),
-            http=github.http,
-            reviewer=ReviewPublisher(http=github.http),
-            learner=cast(Any, object()),
-            replier=cast(Any, object()),
-            session_ledger=LocalSessionLedger(ledger_root),
-        )
-        pause = command_application.apply_maintainer_command(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
-            oidc_token=None,
-            repository="owner/repo",
-            repository_id=136,
-            pull_request=136,
-            head_sha=steps[-1].head_sha,
-            body="@sensei review pause",
-            actor_login="maintainer",
-            actor_type="User",
-            association="OWNER",
-            app_slug="reviewsensei[bot]",
-        )
-        command_events.append(
-            f"{pause.action}:{'applied' if pause.applied else 'ignored'}"
-        )
-        continue_application = GitHubApplication(
-            broker=cast(Any, _ObservedBroker()),
-            http=github.http,
-            reviewer=ReviewPublisher(http=github.http),
-            learner=cast(Any, object()),
-            replier=cast(Any, object()),
-            session_ledger=LocalSessionLedger(ledger_root),
-        )
-        continued = continue_application.apply_maintainer_command(
-            options=GitHubWriteOptions(auto_review=True, github_writes=True),
-            oidc_token=None,
-            repository="owner/repo",
-            repository_id=136,
-            pull_request=136,
-            head_sha=steps[-1].head_sha,
-            body="@sensei review continue --rounds 1",
-            actor_login="maintainer",
-            actor_type="User",
-            association="OWNER",
-            app_slug="reviewsensei[bot]",
-        )
-        command_events.append(
-            f"{continued.action}:{'applied' if continued.applied else 'ignored'}"
-        )
-    cutover_unmet: list[str] = []
-    required_rounds = (
-        policy.max_completed_initial_reviews + policy.max_completed_verification_rounds
-    )
-    if cap_created_approval is not False:
-        cutover_unmet.append(
-            "the configured round cap was not observed with zero new approval events"
-        )
-    if completed_rounds < required_rounds or provider_calls < required_rounds:
-        cutover_unmet.append(
-            "the configured initial and verification round budget was not fully exercised"
-        )
-    if not events or events[-1].provider_calls != 0:
-        cutover_unmet.append("an over-cap request did not prove zero new inference")
-    if not any(event.baseline_loaded for event in events[1:]):
-        cutover_unmet.append("no fresh job loaded a durable completed baseline")
-    if not any(event.publication_status == "published" for event in events):
-        cutover_unmet.append("no successful application publication was observed")
-    if not shadow_isolated:
-        cutover_unmet.append("shadow comparison isolation was not observed")
-    if tuple(command_events) != ("pause:applied", "continue:applied"):
-        cutover_unmet.append("durable maintainer command evidence is incomplete")
-    if not expected_material_finding_ids:
-        cutover_unmet.append("no maintainer-labelled material regression was supplied")
-    if expected_material_finding_ids - observed_material_finding_ids:
-        cutover_unmet.append("a labelled material regression was missed")
-    if observed_material_finding_ids - expected_material_finding_ids:
-        cutover_unmet.append("an unjustified material blocker was observed")
-    if duplicate_findings or reopened_findings or contradictions:
-        cutover_unmet.append(
-            "duplicate, reopened, or contradictory finding evidence requires adjudication"
-        )
-    if "unavailable" in {
-        report_identity.source_identity,
-        report_identity.package_identity,
-        report_identity.workflow_identity,
-    }:
-        cutover_unmet.append(
-            "installed source, package, and workflow identities are unavailable"
-        )
-    report = ObservedSequenceReport(
-        mode=policy.mode,
-        events=tuple(events),
-        baseline_events=baseline_events,
-        command_events=tuple(command_events),
-        finding_metrics=ObservedFindingMetrics(
-            expected_material_findings=len(expected_material_finding_ids),
-            observed_material_findings=len(observed_material_finding_occurrences),
-            matched_material_findings=len(
-                expected_material_finding_ids & observed_material_finding_ids
-            ),
-            missed_material_findings=len(
-                expected_material_finding_ids - observed_material_finding_ids
-            ),
-            unjustified_late_blockers=len(
-                observed_material_finding_ids - expected_material_finding_ids
-            ),
-            blocker_precision=(
-                None
-                if not observed_material_finding_occurrences
-                else len(expected_material_finding_ids & observed_material_finding_ids)
-                / len(observed_material_finding_occurrences)
-            ),
-            seeded_material_regressions_detected=len(
-                expected_material_finding_ids & observed_material_finding_ids
-            ),
-            duplicate_findings=duplicate_findings,
-            reopened_findings=reopened_findings,
-            contradictions=contradictions,
-        ),
-        execution_metrics=ObservedExecutionMetrics(
-            completed_rounds=completed_rounds,
-            handoffs=handoffs,
-            provider_calls=provider_calls,
-            failed_attempts=failed_attempts,
-        ),
-        shadow_isolated=shadow_isolated,
-        evidence_identity=report_identity,
-        approval_events=github.approval_events,
-        cap_created_approval=cap_created_approval,
-        cutover_status="passed" if not cutover_unmet else "not_ready",
-        unmet_criteria=tuple(cutover_unmet),
-    )
-    return report
-
-
 def replay_review_sequence(
     steps: tuple[SequenceStep, ...] | list[SequenceStep],
     policy: ReviewConvergencePolicy,
@@ -984,6 +397,7 @@ def compare_sequence_policies(
 
 
 __all__ = [
+    "UNAVAILABLE_EVIDENCE_IDENTITY",
     "ObservedEvidenceIdentity",
     "ObservedExecutionMetrics",
     "ObservedFindingMetrics",
@@ -994,5 +408,4 @@ __all__ = [
     "SequenceStepOutcome",
     "compare_sequence_policies",
     "replay_review_sequence",
-    "run_observed_review_sequence",
 ]

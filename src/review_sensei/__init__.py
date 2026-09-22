@@ -142,7 +142,6 @@ from .sequence import (
     SequenceStepOutcome,
     compare_sequence_policies,
     replay_review_sequence,
-    run_observed_review_sequence,
 )
 from .service import ReviewRun, ReviewService
 from .session import (
@@ -293,7 +292,6 @@ __all__ = [
     "SequenceStepOutcome",
     "compare_sequence_policies",
     "replay_review_sequence",
-    "run_observed_review_sequence",
     "LargeChangePlan",
     "ReviewChunk",
     "TotalWorkBudget",
