@@ -47,6 +47,7 @@ from review_sensei.models import (
     build_transaction_configuration_context,
     transaction_stage_identity,
 )
+from review_sensei.schemas import validate_public_document
 from review_sensei.sequence import (
     UNAVAILABLE_EVIDENCE_IDENTITY,
     ObservedSequenceEvent,
@@ -260,8 +261,10 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertTrue(report.shadow_isolated)
         self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
-        self.assertTrue(report.unmet_criteria)
-        self.assertTrue(report.unmet_criteria)
+        self.assertIn(
+            "the configured round cap was not observed with zero new approval events",
+            report.unmet_criteria,
+        )
         self.assertEqual(
             report.to_dict()["events"][0]["publication_status"], "published"
         )
@@ -374,7 +377,8 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(metrics.contradictions, 1)
         self.assertEqual(metrics.unjustified_late_blockers, 1)
         self.assertEqual(metrics.observed_material_findings, 3)
-        self.assertEqual(metrics.blocker_precision, 1 / 3)
+        # Precision uses distinct admitted ids. Occurrences stay in the count above.
+        self.assertEqual(metrics.blocker_precision, 0.5)
 
     def test_observed_metrics_count_only_admitted_material_ids(self):
         report = run_observed_review_sequence(
@@ -800,6 +804,57 @@ class ObservedSequenceTests(unittest.TestCase):
                 **{**base, "observed_material_finding_ids": {"material-a", "extra"}}
             ),
         )
+        followed = base["events"] + (
+            ObservedSequenceEvent(
+                label="after-cap",
+                provider_calls=1,
+                baseline_loaded=True,
+                publication_status="published",
+            ),
+        )
+        self.assertEqual(
+            observed_cutover_gaps(**{**base, "events": followed}),
+            (),
+        )
+
+    def test_repeated_material_label_keeps_distinct_precision(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                ),
+                SequenceStep(
+                    head_sha="b" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                ),
+            ),
+            _policy(),
+        )
+        self.assertEqual(report.finding_metrics.observed_material_findings, 2)
+        self.assertEqual(report.finding_metrics.matched_material_findings, 1)
+        self.assertEqual(report.finding_metrics.blocker_precision, 1.0)
+
+    def test_published_event_rejects_a_handoff_reason(self):
+        with self.assertRaisesRegex(ReviewInputError, "handoff reason"):
+            ObservedSequenceEvent(
+                label="published",
+                provider_calls=1,
+                baseline_loaded=False,
+                publication_status="published",
+                handoff_reason="round-budget-exhausted",
+            )
+        document = json.loads(
+            (
+                Path(__file__).parent
+                / "fixtures/schemas/golden/observed-convergence-report.json"
+            ).read_text(encoding="utf-8")
+        )
+        document["events"][0]["handoff_reason"] = "round-budget-exhausted"
+        with self.assertRaisesRegex(ReviewInputError, "schema validation"):
+            validate_public_document(document, "observed-convergence-report")
 
 
 def report_metrics():
@@ -1000,6 +1055,7 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         self.assertEqual(payload["events"][0]["provider_calls"], 1)
         self.assertEqual(payload["cutover_status"], "passed")
         self.assertEqual(payload["unmet_criteria"], [])
+        validate_public_document(payload, "observed-convergence-report")
         self.assertEqual(payload["events"][1]["label"], "verification-emits-nothing")
         self.assertEqual(payload["evidence_identity"]["source_identity"], "source-sha")
         self.assertEqual(

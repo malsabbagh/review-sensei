@@ -177,6 +177,8 @@ class ObservedSequenceEvent:
             raise ReviewInputError("observed event baseline flag is invalid")
         if self.publication_status not in _OBSERVED_PUBLICATION_STATUSES:
             raise ReviewInputError("observed event publication status is invalid")
+        if self.publication_status != "handoff" and self.handoff_reason is not None:
+            raise ReviewInputError("observed event handoff reason requires a handoff")
         if self.handoff_reason is not None and (
             not isinstance(self.handoff_reason, str)
             or not self.handoff_reason.strip()

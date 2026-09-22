@@ -708,7 +708,9 @@ always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
 That runner is not a package-root import, so `import review_sensei` does
 not load the GitHub host adapter. In that report, `cap_created_approval:
 null` means the sequence never reached the round cap. A report with that
-null cannot have `cutover_status` `passed`.
+null cannot have `cutover_status` `passed`. `--source-identity` and
+`--workflow-identity` are recorded as the operator asserts them. The
+harness does not authenticate those values as a Git SHA or workflow ref.
 
 ```bash
 review-sensei evaluate-convergence --json --compare-default

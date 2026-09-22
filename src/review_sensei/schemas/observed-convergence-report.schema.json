@@ -15,7 +15,16 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["label", "provider_calls", "baseline_loaded", "publication_status"],
+        "required": ["label", "provider_calls", "baseline_loaded", "publication_status", "handoff_reason", "approval_events"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {"publication_status": {"const": "handoff"}},
+              "required": ["publication_status"]
+            },
+            "else": {"properties": {"handoff_reason": {"type": "null"}}}
+          }
+        ],
         "properties": {
           "label": {"type": "string", "minLength": 1, "maxLength": 128},
           "provider_calls": {"type": "integer", "minimum": 0, "maximum": 32},

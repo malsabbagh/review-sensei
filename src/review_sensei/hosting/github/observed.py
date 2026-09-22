@@ -221,6 +221,13 @@ class _ObservedBroker:
         return f"observed-{capability or 'session'}-token"
 
 
+class _UnusedCollaborator:
+    """Fail closed if a harness path reaches an adapter this fixture does not own."""
+
+    def __getattr__(self, name: str) -> object:
+        raise ReviewInputError(f"observed harness does not provide {name}")
+
+
 class _ObservedHTTPResponse:
     """Small response shape consumed by the real bounded GitHub adapter."""
 
@@ -429,13 +436,19 @@ def observed_cutover_gaps(
         gaps.append(
             "the configured initial and verification round budget was not fully exercised"
         )
-    last_event = events[-1] if events else None
+    cap_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.handoff_reason == "round-budget-exhausted"
+        ),
+        None,
+    )
     if (
-        last_event is None
-        or last_event.publication_status != "handoff"
-        or last_event.handoff_reason != "round-budget-exhausted"
-        or last_event.provider_calls != 0
-        or last_event.approval_events != 0
+        cap_event is None
+        or cap_event.publication_status != "handoff"
+        or cap_event.provider_calls != 0
+        or cap_event.approval_events != 0
     ):
         gaps.append("an over-cap request did not prove zero new inference")
     if not any(event.baseline_loaded for event in events[1:]):
@@ -674,8 +687,8 @@ def run_observed_review_sequence(
                 broker=cast(Any, _ObservedBroker()),
                 http=github.http,
                 reviewer=ReviewPublisher(http=github.http),
-                learner=cast(Any, object()),
-                replier=cast(Any, object()),
+                learner=cast(Any, _UnusedCollaborator()),
+                replier=cast(Any, _UnusedCollaborator()),
                 # Construct a new adapter for every event: only its on-disk record
                 # crosses the logical process boundary.
                 session_ledger=LocalSessionLedger(ledger_root),
@@ -739,8 +752,8 @@ def run_observed_review_sequence(
             broker=cast(Any, _ObservedBroker()),
             http=github.http,
             reviewer=ReviewPublisher(http=github.http),
-            learner=cast(Any, object()),
-            replier=cast(Any, object()),
+            learner=cast(Any, _UnusedCollaborator()),
+            replier=cast(Any, _UnusedCollaborator()),
             session_ledger=LocalSessionLedger(ledger_root),
         )
         pause = command_application.apply_maintainer_command(
@@ -763,8 +776,8 @@ def run_observed_review_sequence(
             broker=cast(Any, _ObservedBroker()),
             http=github.http,
             reviewer=ReviewPublisher(http=github.http),
-            learner=cast(Any, object()),
-            replier=cast(Any, object()),
+            learner=cast(Any, _UnusedCollaborator()),
+            replier=cast(Any, _UnusedCollaborator()),
             session_ledger=LocalSessionLedger(ledger_root),
         )
         continued = continue_application.apply_maintainer_command(
@@ -831,9 +844,9 @@ def run_observed_review_sequence(
             ),
             blocker_precision=(
                 None
-                if not observed_material_finding_occurrences
+                if not observed_material_finding_ids
                 else len(expected_material_finding_ids & observed_material_finding_ids)
-                / len(observed_material_finding_occurrences)
+                / len(observed_material_finding_ids)
             ),
             seeded_material_regressions_detected=len(
                 expected_material_finding_ids & observed_material_finding_ids

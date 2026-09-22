@@ -2185,7 +2185,8 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         default=os.getenv("GITHUB_SHA", UNAVAILABLE_EVIDENCE_IDENTITY),
         help=(
             "Exact source revision for --observed evidence "
-            "(default: GITHUB_SHA, or the sentinel unavailable)"
+            "(default: GITHUB_SHA, or the sentinel unavailable). "
+            "Recorded as asserted; not authenticated as a Git SHA."
         ),
     )
     parser.add_argument(
@@ -2198,7 +2199,8 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         default=os.getenv("GITHUB_WORKFLOW_REF", UNAVAILABLE_EVIDENCE_IDENTITY),
         help=(
             "Exact workflow identity for --observed evidence "
-            "(default: GITHUB_WORKFLOW_REF, or the sentinel unavailable)"
+            "(default: GITHUB_WORKFLOW_REF, or the sentinel unavailable). "
+            "Recorded as asserted; not authenticated as a workflow ref."
         ),
     )
     return parser
