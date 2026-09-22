@@ -2222,7 +2222,6 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             DEFAULT_REVIEW_MODE,
             resolve_review_convergence_policy,
         )
-        from .hosting.github.observed import run_observed_review_sequence
         from .sequence import (
             ObservedEvidenceIdentity,
             SequenceStep,
@@ -2270,6 +2269,8 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 "observed evidence and legacy comparison cannot run in one report"
             )
         if args.observed:
+            from .hosting.github.observed import run_observed_review_sequence
+
             source_identity = _asserted_observed_identity(args.source_identity)
             package_identity = _asserted_observed_identity(args.package_identity)
             workflow_identity = _asserted_observed_identity(args.workflow_identity)

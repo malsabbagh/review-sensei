@@ -216,6 +216,8 @@ class ObservedSequenceReport:
     execution_metrics: ObservedExecutionMetrics
     shadow_isolated: bool
     evidence_identity: ObservedEvidenceIdentity
+    # Whole-run APPROVE count, including in-budget rounds. Cap proof is
+    # cap_created_approval False plus zero approvals from the cap event on.
     approval_events: int | None
     cap_created_approval: bool | None
     cutover_status: str
@@ -281,6 +283,10 @@ class ObservedSequenceReport:
                 or len(item.encode("utf-8")) > 256
             ):
                 raise ReviewInputError("observed report limitations are invalid")
+        if self.cutover_status == "passed" and (
+            self.cap_created_approval is not False or self.unmet_criteria
+        ):
+            raise ReviewInputError("passed observed cutover requires an exercised cap")
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -363,6 +369,16 @@ class ObservedExecutionMetrics:
     handoffs: int
     provider_calls: int
     failed_attempts: int
+
+    def __post_init__(self) -> None:
+        if not _bounded_count(self.completed_rounds, maximum=32):
+            raise ReviewInputError("observed completed rounds are invalid")
+        if not _bounded_count(self.handoffs, maximum=32):
+            raise ReviewInputError("observed handoffs are invalid")
+        if not _bounded_count(self.provider_calls, maximum=512):
+            raise ReviewInputError("observed provider calls are invalid")
+        if not _bounded_count(self.failed_attempts, maximum=32):
+            raise ReviewInputError("observed failed attempts are invalid")
 
     def to_dict(self) -> dict[str, int]:
         return {

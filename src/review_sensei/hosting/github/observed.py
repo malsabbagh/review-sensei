@@ -366,6 +366,17 @@ class _ObservedGitHub:
         )
 
 
+def _enforced_record_unchanged(
+    ledger: LocalSessionLedger,
+    session_identity: SessionIdentity,
+    record_before: object,
+) -> bool:
+    loaded = ledger.load(session_identity)
+    if record_before is None:
+        return loaded.status == "missing" and loaded.record is None
+    return loaded.record == record_before
+
+
 def _shadow_is_isolated(
     *,
     github: _ObservedGitHub,
@@ -405,7 +416,7 @@ def _shadow_is_isolated(
         and len(github.calls) == calls_before
         and github.approval_events == approvals_before
         and len(github.reviews) == reviews_before
-        and ledger.load(session_identity).record == record_before
+        and _enforced_record_unchanged(ledger, session_identity, record_before)
     )
 
 
@@ -438,19 +449,25 @@ def observed_cutover_gaps(
         gaps.append(
             "the configured initial and verification round budget was not fully exercised"
         )
-    cap_event = next(
+    cap_index = next(
         (
-            event
-            for event in reversed(events)
+            index
+            for index, event in reversed(list(enumerate(events)))
             if event.handoff_reason == "round-budget-exhausted"
         ),
         None,
+    )
+    cap_event = None if cap_index is None else events[cap_index]
+    approvals_from_cap = (
+        0
+        if cap_index is None
+        else sum(event.approval_events for event in events[cap_index:])
     )
     if (
         cap_event is None
         or cap_event.publication_status != "handoff"
         or cap_event.provider_calls != 0
-        or cap_event.approval_events != 0
+        or approvals_from_cap != 0
     ):
         gaps.append("an over-cap request did not prove zero new inference")
     if not any(event.baseline_loaded for event in events[1:]):

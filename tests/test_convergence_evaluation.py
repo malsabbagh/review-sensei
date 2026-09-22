@@ -50,6 +50,7 @@ from review_sensei.models import (
 from review_sensei.schemas import validate_public_document
 from review_sensei.sequence import (
     UNAVAILABLE_EVIDENCE_IDENTITY,
+    ObservedExecutionMetrics,
     ObservedSequenceEvent,
     ObservedSequenceReport,
     SequenceStep,
@@ -816,6 +817,19 @@ class ObservedSequenceTests(unittest.TestCase):
             observed_cutover_gaps(**{**base, "events": followed}),
             (),
         )
+        approved_after_cap = base["events"] + (
+            ObservedSequenceEvent(
+                label="after-cap-approval",
+                provider_calls=1,
+                baseline_loaded=True,
+                publication_status="published",
+                approval_events=1,
+            ),
+        )
+        self.assertIn(
+            "an over-cap request did not prove zero new inference",
+            observed_cutover_gaps(**{**base, "events": approved_after_cap}),
+        )
 
     def test_repeated_material_label_keeps_distinct_precision(self):
         report = run_observed_review_sequence(
@@ -836,6 +850,32 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(report.finding_metrics.observed_material_findings, 2)
         self.assertEqual(report.finding_metrics.matched_material_findings, 1)
         self.assertEqual(report.finding_metrics.blocker_precision, 1.0)
+
+    def test_passed_cutover_requires_an_exercised_cap(self):
+        with self.assertRaisesRegex(ReviewInputError, "exercised cap"):
+            ObservedSequenceReport(
+                mode="merge-focused",
+                events=passing_cutover_inputs()["events"],
+                baseline_events=1,
+                command_events=("pause:applied", "continue:applied"),
+                finding_metrics=report_metrics(),
+                execution_metrics=report_execution(),
+                shadow_isolated=True,
+                evidence_identity=report_identity(),
+                approval_events=0,
+                cap_created_approval=None,
+                cutover_status="passed",
+                unmet_criteria=(),
+            )
+
+    def test_execution_metrics_reject_too_many_handoffs(self):
+        with self.assertRaisesRegex(ReviewInputError, "handoffs"):
+            ObservedExecutionMetrics(
+                completed_rounds=0,
+                handoffs=33,
+                provider_calls=0,
+                failed_attempts=0,
+            )
 
     def test_published_event_rejects_a_handoff_reason(self):
         with self.assertRaisesRegex(ReviewInputError, "handoff reason"):

@@ -712,7 +712,10 @@ does not re-export it. A completed `--observed` run with unmet gates
 writes the report and exits 1. Invalid input, including `--review-mode
 legacy`, exits 1 without a report. In that report, `cap_created_approval:
 null` means the sequence never reached the round cap. A report with that
-null cannot have `cutover_status` `passed`. `--source-identity` and
+null cannot have `cutover_status` `passed`. `approval_events` is the
+whole-run total, including approvals from in-budget rounds. The cap
+proof is `cap_created_approval` false together with zero approval events
+on the cap handoff and on every later event. `--source-identity` and
 `--workflow-identity` are recorded as the operator asserts them. The
 harness does not authenticate those values as a Git SHA or workflow ref.
 
