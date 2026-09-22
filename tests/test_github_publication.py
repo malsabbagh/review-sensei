@@ -2,6 +2,7 @@ import hashlib
 import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei.convergence import (
@@ -2213,6 +2214,119 @@ deleted file mode 100644
         self.assertIn("## Findings without a publishable inline location", body["body"])
         self.assertIn("`src/app.py`", body["body"])
         self.assertIn("tighter contract", body["body"])
+
+    def test_no_review_event_emits_a_subject_type_entry(self):
+        # Public contract: no review event may emit `subject_type`, because
+        # GitHub's batch create-review request type defines no file subject type
+        # and requires a position for every inline comment. A file-level finding
+        # therefore rides in the summary of the review that carries findings,
+        # which for an approval is the findings review, not the approval marker.
+        file_comment = ReviewComment(
+            path="src/app.py",
+            line=None,
+            side="FILE",
+            body="This file needs a tighter contract.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        blocking_comment = replace(file_comment, blocking=True)
+        head = "b" * 40
+        file_result = ReviewResult(
+            summary="File-wide finding.",
+            comments=(file_comment,),
+            provider="ollama",
+        )
+        approve = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ],
+            result=file_result,
+            auto_approve=True,
+        )
+        comment = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ],
+            result=file_result,
+            auto_approve=False,
+        )
+        request_changes = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ],
+            result=ReviewResult(
+                summary="File-wide finding.",
+                comments=(blocking_comment,),
+                provider="ollama",
+            ),
+            auto_approve=True,
+        )
+
+        cases = (
+            ("APPROVE", approve, 1, 0),
+            ("COMMENT", comment, 0, 0),
+            ("REQUEST_CHANGES", request_changes, 0, 0),
+        )
+        for event, (outcome, calls), event_index, finding_index in cases:
+            with self.subTest(event=event):
+                self.assertEqual(outcome.status, "published")
+                reviews = [
+                    body.decode("utf-8")
+                    for method, url, body in calls
+                    if method == "POST" and url.endswith("/reviews")
+                ]
+                self.assertTrue(reviews)
+                for payload in reviews:
+                    self.assertNotIn("subject_type", payload)
+                    parsed = json.loads(payload)
+                    if "comments" in parsed:
+                        self.assertEqual(parsed["comments"], [])
+                self.assertEqual(json.loads(reviews[event_index])["event"], event)
+                self.assertIn("tighter contract", reviews[finding_index])
+
+    def test_publication_sources_never_build_a_subject_type_key(self):
+        # Structural counterpart to the per-event payload contract: no review
+        # event may emit `subject_type`, so the key must not exist in the
+        # sources that build review payloads.
+        root = Path(__file__).resolve().parents[1]
+        for path in sorted((root / "src/review_sensei").rglob("*.py")):
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn('"subject_type"', source)
+                self.assertNotIn("'subject_type'", source)
+
+    def test_no_hosted_entry_point_can_opt_into_the_retired_policy(self):
+        # `allow_retired_legacy_policy` is an internal escape hatch for this
+        # package's tests and historical-fixture replay. No hosted entry point
+        # (CLI or GitHubApplication) may reach it, so the identifier must stay
+        # confined to the publication module that declares it.
+        root = Path(__file__).resolve().parents[1]
+        declaring = root / "src/review_sensei/hosting/github/publication.py"
+        self.assertTrue(declaring.is_file())
+        for path in sorted((root / "src/review_sensei").rglob("*.py")):
+            if path == declaring:
+                continue
+            with self.subTest(path=path.name):
+                self.assertNotIn(
+                    "allow_retired_legacy_policy",
+                    path.read_text(encoding="utf-8"),
+                )
 
     def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):
         head = "b" * 40

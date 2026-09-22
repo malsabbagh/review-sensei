@@ -100,6 +100,7 @@ class FakeGitHub {
   refCollision = false;
   collisionObserved = false;
   missingVariables = false;
+  variablePatchIgnored = false;
   variableValues: Record<string, string | null> = {};
   existingPullRequest: number | null = null;
 
@@ -193,6 +194,16 @@ class FakeGitHub {
       return { status: 201, data: null };
     }
     if (method === "PATCH" && path.includes("/actions/variables/")) {
+      // GitHub applies the update and answers 204 with no body; the flag
+      // simulates a write the API acknowledged but did not persist.
+      if (
+        !this.variablePatchIgnored &&
+        requestBody &&
+        typeof requestBody.name === "string" &&
+        typeof requestBody.value === "string"
+      ) {
+        this.variableValues[requestBody.name] = requestBody.value;
+      }
       return { status: 204, data: null };
     }
     if (method === "GET" && path.includes("/git/ref/heads/main")) {
@@ -453,6 +464,32 @@ describe("setup repository reconciliation", () => {
       method === "PATCH" && path.endsWith(variablePath),
     );
     expect(patch?.body).toEqual({ name: RETIRED_REVIEW_MODE_VARIABLE, value: "merge-focused" });
+    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe("merge-focused");
+  });
+
+  it("warns when the review mode migration is not observed on read-back", async () => {
+    // A 204 only says the PATCH was accepted, and the variables API has no
+    // conditional write, so the migration verifies what the API reports and
+    // warns instead of silently trusting the status.
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
+    fake.variablePatchIgnored = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        "review_mode_migration_not_observed",
+        expect.objectContaining({
+          repository: "acme/widgets",
+          expected: "merge-focused",
+          observed: "legacy",
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("leaves operator review mode variable values untouched", async () => {

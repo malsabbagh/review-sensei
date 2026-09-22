@@ -97,6 +97,39 @@ fold removes a latent `publication_failed` path without reducing what a
 non-blocking review conveys; the publisher contract in
 `docs/public-contracts.md` documents the behavior.
 
+## Rollback
+
+Rollback is a version rollback to the previous release (0.6.0), performed as a
+release operation and rehearsed before this cutover ships. At this commit, the
+verified properties of that rollback are:
+
+- The previous release's Worker classifies a managed file whose setup marker is
+  greater than its own `SETUP_VERSION` (`4`) as `unknown` and reports
+  `skipped_unknown_setup`; it writes and deletes nothing, so a v5 installation
+  is never rewritten or clobbered by the older Worker.
+- The previous release recognizes only its own rendered templates plus the
+  frozen `LEGACY_SHA256` and `RELEASED_RUNNER_SWITCH_V4_SHA256` artifacts.
+  Repositories holding this cutover's byte-frozen `merge-focused-v4-*` fixtures
+  remain `unknown` under it, so restoring the released v4 caller and
+  configuration set is a required rollback step before the previous release's
+  setup can reconcile them.
+- A migrated `merge-focused` repository variable is a valid operator value for
+  the previous release's mode resolver, and the previous release's reusable
+  workflow declares no `review_mode` input and never reads that variable, so the
+  stored value is inert under a rollback.
+- Restore the reusable workflow and the generated callers together: this
+  cutover's caller passes `review_mode`, an input only this cutover's workflow
+  declares, so a workflow-only rollback leaves every generated caller passing an
+  undeclared input and jobs fail before any step runs. The `v5` workflow channel
+  moves back to the released revision as part of that same operator operation.
+- No stored review data migration is needed in either direction: the session
+  ledger, baseline, counters, and finding identities are untouched by this
+  change.
+
+Rollback does not restore `legacy` as a selectable policy and does not rewrite
+the repository variable or any generated file; once the released caller set is
+restored, the previous release's own setup and recognition rules apply.
+
 ## Validation
 
 Exercise default and explicit-mode unit tests, generated workflow/setup tests,

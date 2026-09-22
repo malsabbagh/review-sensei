@@ -23,6 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from ...convergence import LEGACY_REVIEW_MODE, migrate_review_mode
 from .errors import (
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -71,10 +72,11 @@ SETUP_VARIABLES = (
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 # The retired review mode survives in existing installations as a repository
 # variable that setup never overwrites, which would make the reusable-workflow
-# guard fail every review. Only this variable and only these exact values are
-# migrated in place; every other operator-set value is left as-is.
+# guard fail every review. Only this variable and only the retired value
+# (``LEGACY_REVIEW_MODE``, replaced per ``migrate_review_mode`` in
+# ``review_sensei.convergence``) are migrated in place; every other
+# operator-set value is left as-is.
 RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE"
-RETIRED_REVIEW_MODE_MIGRATIONS = {"legacy": "merge-focused"}
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v5 update channel. The Worker validates the
@@ -1994,9 +1996,11 @@ class GitHubSetupClient:
     ) -> None:
         """Replace a retired review-mode variable value in place.
 
-        A missing variable is left to :meth:`ensure_repository_variables`, and
-        any value outside ``RETIRED_REVIEW_MODE_MIGRATIONS`` is operator intent
-        and stays untouched.
+        A missing variable is left to :meth:`ensure_repository_variables`. The
+        exact retired value is the only stored value rewritten; empty, unknown,
+        or any other operator-set value stays untouched. The replacement is
+        resolved by ``review_sensei.convergence.migrate_review_mode`` so the
+        migration rule lives with the mode table.
         """
 
         variable_path = (
@@ -2020,9 +2024,9 @@ class GitHubSetupClient:
             raise GitHubSetupError("GitHub setup response was invalid JSON") from exc
         if not isinstance(data, dict) or not isinstance(data.get("value"), str):
             return
-        replacement = RETIRED_REVIEW_MODE_MIGRATIONS.get(data["value"])
-        if replacement is None:
+        if data["value"] != LEGACY_REVIEW_MODE:
             return
+        replacement = migrate_review_mode(data["value"])
         status, _ = self._open(
             "PATCH",
             variable_path,
@@ -2344,14 +2348,14 @@ class SetupPullRequestService:
                         installation_token=installation_token,
                         variables=SETUP_VARIABLES,
                     )
-                    migrate_review_mode = getattr(
-                        self.transport, "migrate_retired_review_mode_variable", None
+                    # Protocol-required: a transport that can manage variables
+                    # must also migrate the retired value, otherwise the
+                    # generated caller keeps feeding the workflow guard a
+                    # retired mode and every review fails.
+                    self.transport.migrate_retired_review_mode_variable(
+                        repository=repository,
+                        installation_token=installation_token,
                     )
-                    if callable(migrate_review_mode):
-                        migrate_review_mode(
-                            repository=repository,
-                            installation_token=installation_token,
-                        )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
                         repository=repository,

@@ -884,14 +884,17 @@ fail closed.
 The publication boundary resolves an omitted convergence policy to the
 `merge-focused` default and binds the same policy digest as preparation; a
 prepared result bound to a different policy is rejected rather than silently
-republished. One deliberate exception exists for low-level embedders and
-replay: an explicitly supplied `ReviewConvergencePolicy(mode="legacy")` is
-honored only when the caller also passes `allow_retired_legacy_policy=True`;
-without that opt-in the publication fails closed with
-`GitHubPublicationError`, so passing the retired policy object alone can never
-re-enable `legacy` (ADR 0055). That exception is not reachable from the CLI,
-generated configuration, or the hosted workflow, which all resolve `legacy`
-to the actionable migration error before preparation or writes.
+republished. One deliberate exception exists, and it is internal to this
+package's own tests and to historical-fixture replay: an explicitly supplied
+`ReviewConvergencePolicy(mode="legacy")` is honored only when the caller also
+passes `allow_retired_legacy_policy=True`; without that opt-in the publication
+fails closed with `GitHubPublicationError`, so passing the retired policy
+object alone can never re-enable `legacy` (ADR 0055). The flag is not part of
+any supported hosting contract and no hosted path may pass it: the CLI,
+generated configuration, and the hosted workflow all resolve `legacy` to the
+actionable migration error before preparation or writes, and
+`tests/test_github_publication.py` asserts the identifier appears nowhere
+outside `review_sensei/hosting/github/publication.py`.
 
 Learning proposal files remain content-addressed by their full canonical
 SHA-256 digest at

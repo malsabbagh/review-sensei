@@ -294,6 +294,144 @@ class CliTests(unittest.TestCase):
         self.assertEqual(policy.mode, "merge-focused")
         self.assertEqual(policy.enforcement, "publication")
 
+    def test_github_review_cli_refuses_ambient_retired_mode_before_any_request(self):
+        # The retired-mode guard is a user-visible contract at the CLI
+        # boundary: the run must stop with the migration instruction and exit
+        # non-zero before any GitHub request, not fail inside the publication
+        # path after work has been done.
+        from review_sensei.convergence import REVIEW_MODE_ENV
+        from review_sensei.hosting import github as github_module
+
+        requests = []
+
+        class RecordingHttp:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                requests.append((args, kwargs))
+                raise AssertionError("HTTP request issued before mode resolution")
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result_path = root / "result.json"
+            diff_path = root / "diff.patch"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "summary": "Summary.",
+                        "comments": [],
+                        "provider": "fixture",
+                        "model": "fixture-model",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            diff_path.write_text(DIFF, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.multiple(
+                github_module,
+                BrokerClient=lambda: object(),
+                GitHubHttp=RecordingHttp,
+                ReviewPublisher=lambda **kwargs: object(),
+                LearningPRPublisher=lambda **kwargs: object(),
+                ConversationPublisher=lambda **kwargs: object(),
+                GitHubApplication=FakeApplication,
+            ):
+                with patch.dict("os.environ", {REVIEW_MODE_ENV: "legacy"}):
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "github",
+                                "review",
+                                "--result",
+                                str(result_path),
+                                "--diff",
+                                str(diff_path),
+                                "--repository",
+                                "owner/repo",
+                                "--repository-id",
+                                "1",
+                                "--pull-request",
+                                "2",
+                                "--head-sha",
+                                "a" * 40,
+                                "--base-branch",
+                                "main",
+                                "--base-sha",
+                                "b" * 40,
+                                "--allow-write",
+                                "--enable-review",
+                            ]
+                        )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "review-sensei: legacy review mode is retired; "
+            "migrate configuration to merge-focused\n",
+        )
+        self.assertEqual(requests, [])
+
+    def test_github_reply_cli_is_exempt_from_the_retired_mode_guard(self):
+        from review_sensei.convergence import REVIEW_MODE_ENV
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.calls = []
+                self.__class__.instance = self
+
+            def publish_reply(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(status="replied")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reply_path = Path(temp_dir) / "reply.json"
+            reply_path.write_text('{"body":"Thanks."}', encoding="utf-8")
+            with patch.multiple(
+                github_module,
+                BrokerClient=lambda: object(),
+                GitHubHttp=lambda: object(),
+                ReviewPublisher=lambda **kwargs: object(),
+                LearningPRPublisher=lambda **kwargs: object(),
+                ConversationPublisher=lambda **kwargs: object(),
+                GitHubApplication=FakeApplication,
+            ):
+                with patch.dict("os.environ", {REVIEW_MODE_ENV: "legacy"}):
+                    status = main(
+                        [
+                            "github",
+                            "reply",
+                            "--reply",
+                            str(reply_path),
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "2",
+                            "--source-comment-id",
+                            "10",
+                            "--source-updated-at",
+                            "2026-08-19T00:00:00Z",
+                            "--head-sha",
+                            "a" * 40,
+                            "--allow-write",
+                            "--enable-reply",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        (reply_call,) = FakeApplication.instance.calls
+        self.assertEqual(reply_call["reply"].body, "Thanks.")
+        # The reply path resolves no review mode, so an ambient retired value
+        # can neither fail nor downgrade the reply.
+        self.assertNotIn("convergence_policy", reply_call)
+
     def test_github_parser_allows_disabling_default_auto_approval(self):
         args = _github_parser().parse_args(
             [

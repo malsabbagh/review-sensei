@@ -25,8 +25,12 @@ and exits 2, even when its package/provider checks pass. `plan` includes
 `session-ledger-required` in `skip_reasons`. Its `status=ready` only says the
 diff was analyzed; it is not admission to execute a review. Supplying valid,
 identity-bound session state is an execution prerequisite, not a reason to
-fall back to legacy. These diagnostic commands do not initialize or mutate a
-ledger, reset counters, invoke a model, or write to GitHub.
+fall back to legacy. A default setup-v5 install never hits this case on the
+hosted path: its generated workflow passes `--github-session-ledger`, so a
+`status=action` result for a missing ledger means you are running the bare
+local CLI without that flag, not that a hosted install is broken. These
+diagnostic commands do not initialize or mutate a ledger, reset counters,
+invoke a model, or write to GitHub.
 
 Offline runs do not open sockets. Passing `--network` enables read-only probes
 that distinguish:

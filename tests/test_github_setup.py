@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
+from review_sensei.convergence import LEGACY_REVIEW_MODE, migrate_review_mode
 from review_sensei.hosting.github import (
     GitHubSetupClient,
     GitHubSetupError,
@@ -20,6 +21,7 @@ from review_sensei.hosting.github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
+    RETIRED_REVIEW_MODE_VARIABLE,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
     _broker_accepted_public_workflow_tags,
@@ -660,6 +662,50 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertIn(
             ("migrate_retired_review_mode_variable", "owner/repo", "ghs_opaque"),
             transport.requests,
+        )
+
+    def test_setup_requires_the_retired_mode_migration_from_managing_transports(self):
+        # The migration is part of the transport protocol, so a transport that
+        # manages variables but cannot perform it must fail setup loudly:
+        # tolerating its absence would leave `legacy` in place while the
+        # generated caller keeps feeding the workflow guard a retired mode.
+        # An attribute error is exactly what an older transport without the
+        # method raises, and it is what the tolerant `getattr` lookup used to
+        # swallow.
+        class _NoMigrationTransport(FakeTransport):
+            @property
+            def migrate_retired_review_mode_variable(self):
+                raise AttributeError
+
+        transport = _NoMigrationTransport()
+        with self.assertRaises(AttributeError):
+            SetupPullRequestService(transport).ensure_setup_pull_requests(
+                delivery(),
+                installation_token="ghs_opaque",
+            )
+
+    def test_worker_retired_mode_migration_matches_the_python_migration_rule(self):
+        # The Worker keeps its own TypeScript copy of the retired-mode
+        # migration map while the Python setup adapter derives its replacement
+        # from `convergence`; nothing couples the copies, so this guard reads
+        # the Worker literal and fails on drift, including a second retired
+        # mode added on only one side.
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "deploy/cloudflare/src/setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        variable = re.search(r'RETIRED_REVIEW_MODE_VARIABLE\s*=\s*"([^"]+)"', source)
+        self.assertIsNotNone(variable, "RETIRED_REVIEW_MODE_VARIABLE is missing")
+        self.assertEqual(variable.group(1), RETIRED_REVIEW_MODE_VARIABLE)
+        migrations = re.search(
+            r"RETIRED_REVIEW_MODE_MIGRATIONS[^=]*=\s*\{\s*"
+            r'legacy:\s*"([^"]+)",?\s*\}',
+            source,
+        )
+        self.assertIsNotNone(migrations, "RETIRED_REVIEW_MODE_MIGRATIONS is missing")
+        self.assertEqual(
+            {LEGACY_REVIEW_MODE: migrations.group(1)},
+            {LEGACY_REVIEW_MODE: migrate_review_mode(LEGACY_REVIEW_MODE)},
         )
 
     def test_legacy_setup_reuses_existing_content_addressed_branch(self):

@@ -911,6 +911,22 @@ export class GitHubSetupService {
       value: replacement,
     });
     requireSuccessful(updated);
+    // The variables API has no conditional write, so the GET/PATCH pair can
+    // race an operator change and a 204 says nothing about what was stored.
+    // Read back and surface a mismatch instead of trusting the status.
+    const readback = await this.request("GET", variablePath, token);
+    const observed =
+      readback.status === 200 && isObject(readback.data)
+        ? readback.data.value
+        : undefined;
+    if (observed !== replacement) {
+      console.warn("review_mode_migration_not_observed", {
+        repository,
+        expected: replacement,
+        observed: typeof observed === "string" ? observed : null,
+        status: readback.status,
+      });
+    }
   }
 
   private async defaultBranch(
