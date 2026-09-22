@@ -151,6 +151,10 @@ pinned to full commit SHAs with same-line release comments. The sole exception
 is the public ReviewSensei reusable workflow, which intentionally follows the
 protected `@v5` setup channel and is checked by the OIDC broker at runtime.
 The broker still accepts `@v4` during migration.
+Within one workflow, an Action repository must use a single commit pin: CodeQL's
+`init` and `analyze` reject a configuration written by another release, so
+dependabot groups those updates into one PR and the checker rejects any
+per-workflow version skew.
 Dependabot updates the pins weekly; review the resulting diff and rerun
 `python scripts/check_action_pins.py`. CI and tests must remain credential-free.
 
