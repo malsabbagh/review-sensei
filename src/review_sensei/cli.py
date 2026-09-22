@@ -28,7 +28,13 @@ from .learnings import (
     load_repository_learnings,
     summarize_learning_feedback,
 )
-from .models import LearningEntry, ReviewRequest, ReviewTransaction
+from .models import (
+    LearningEntry,
+    ReviewRequest,
+    ReviewTransaction,
+    build_transaction_configuration_context,
+    transaction_stage_identity,
+)
 from .outcomes import (
     DEFAULT_RECOVERY_TTL_SECONDS,
     RecoveryArtifact,
@@ -2139,11 +2145,16 @@ def _run_learnings_command(arguments: list[str]) -> int:
 
 
 def _evaluate_convergence_parser() -> argparse.ArgumentParser:
+    from .sequence import UNAVAILABLE_EVIDENCE_IDENTITY
+
     parser = argparse.ArgumentParser(
         prog="review-sensei evaluate-convergence",
         description=(
             "Replay a frozen synthetic review sequence against a convergence "
-            "policy. Observation-only; does not publish or change the legacy default."
+            "policy. Observation-only; does not publish or change the legacy default. "
+            "With --observed, exit 0 only when cutover_status is passed. A completed "
+            "not_ready report is still written and the process exits 1. Invalid "
+            "input, including a legacy review mode, exits 1 without a report."
         ),
     )
     parser.add_argument(
@@ -2162,7 +2173,46 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also replay the compatible legacy default for observation-only comparison",
     )
+    parser.add_argument(
+        "--observed",
+        action="store_true",
+        help=(
+            "Run the real-component offline evidence harness with mocked model "
+            "and GitHub edges. Exit 0 only when the cutover gate passes."
+        ),
+    )
+    parser.add_argument(
+        "--source-identity",
+        default=os.getenv("GITHUB_SHA", UNAVAILABLE_EVIDENCE_IDENTITY),
+        help=(
+            "Exact source revision for --observed evidence "
+            "(default: GITHUB_SHA, or the sentinel unavailable). "
+            "Recorded as asserted; not authenticated as a Git SHA."
+        ),
+    )
+    parser.add_argument(
+        "--package-identity",
+        default=_package_version(),
+        help="Exact package identity for --observed evidence",
+    )
+    parser.add_argument(
+        "--workflow-identity",
+        default=os.getenv("GITHUB_WORKFLOW_REF", UNAVAILABLE_EVIDENCE_IDENTITY),
+        help=(
+            "Exact workflow identity for --observed evidence "
+            "(default: GITHUB_WORKFLOW_REF, or the sentinel unavailable). "
+            "Recorded as asserted; not authenticated as a workflow ref."
+        ),
+    )
     return parser
+
+
+def _asserted_observed_identity(value: object) -> str:
+    from .sequence import UNAVAILABLE_EVIDENCE_IDENTITY
+
+    if not isinstance(value, str) or not value.strip():
+        return UNAVAILABLE_EVIDENCE_IDENTITY
+    return value
 
 
 def _run_evaluate_convergence_command(arguments: list[str]) -> int:
@@ -2173,8 +2223,10 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             resolve_review_convergence_policy,
         )
         from .sequence import (
+            ObservedEvidenceIdentity,
             SequenceStep,
             compare_sequence_policies,
+            identity_is_unavailable,
             replay_review_sequence,
         )
 
@@ -2183,13 +2235,19 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             SequenceStep(
                 head_sha="a" * 40,
                 blocking_identities=("defect-a", "defect-b"),
+                expected_material_finding_ids=("material-a",),
+                fixture_material_finding_ids=("material-a",),
                 label="initial",
             ),
             SequenceStep(
                 head_sha="b" * 40,
                 blocking_identities=(),
                 independently_approval_eligible=True,
-                label="verification-clean",
+                # Fixture emits nothing here. material-a is labelled on the
+                # initial step only, so dropping that emission fails the gate.
+                expected_material_finding_ids=("material-a",),
+                fixture_material_finding_ids=(),
+                label="verification-emits-nothing",
             ),
             SequenceStep(
                 head_sha="c" * 40,
@@ -2206,6 +2264,59 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 label="at-cap",
             ),
         )
+        if args.observed and args.compare_default:
+            raise ReviewInputError(
+                "observed evidence and legacy comparison cannot run in one report"
+            )
+        if args.observed:
+            from .hosting.github.observed import run_observed_review_sequence
+
+            source_identity = _asserted_observed_identity(args.source_identity)
+            package_identity = _asserted_observed_identity(args.package_identity)
+            workflow_identity = _asserted_observed_identity(args.workflow_identity)
+            observed = run_observed_review_sequence(
+                steps,
+                policy,
+                evidence_identity=ObservedEvidenceIdentity(
+                    source_identity=source_identity,
+                    package_identity=package_identity,
+                    workflow_identity=workflow_identity,
+                    configuration_digest=policy.digest(),
+                    fixture_identity="observed-convergence-fixture-v1",
+                    command=(
+                        "review-sensei evaluate-convergence --observed "
+                        f"--review-mode {policy.mode}"
+                    ),
+                ),
+            )
+            payload = observed.to_dict()
+            if args.as_json:
+                sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+            else:
+                sys.stdout.write(
+                    f"mode={observed.mode} events={len(observed.events)} "
+                    f"cutover_status={observed.cutover_status} "
+                    f"approval_events={observed.approval_events} "
+                    f"cap_created_approval={observed.cap_created_approval}\n"
+                )
+            unavailable_fields = [
+                label
+                for label, value in (
+                    ("source", source_identity),
+                    ("package", package_identity),
+                    ("workflow", workflow_identity),
+                )
+                if identity_is_unavailable(value)
+            ]
+            if unavailable_fields:
+                named = ", ".join(unavailable_fields)
+                verb = "is" if len(unavailable_fields) == 1 else "are"
+                sys.stderr.write(
+                    "observed evidence identity unavailable for "
+                    f"{named}; cutover_status cannot pass until {named} {verb} "
+                    "explicit\n"
+                )
+            return 0 if observed.cutover_status == "passed" else 1
         report = replay_review_sequence(steps, policy)
         if args.compare_default:
             payload = compare_sequence_policies(steps, proposed=policy)
@@ -2570,34 +2681,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             if transaction_requested:
                 effective_base_sha = resolved_base_sha or ""
-                stage_identity = [
-                    {
-                        "name": stage.name,
-                        "outputs": list(stage.outputs),
-                        "categories": [category.id for category in stage.categories],
-                        "provider_profile": stage.provider_profile,
-                    }
-                    for stage in (stages if stages is not None else DEFAULT_STAGES)
-                ]
-                transaction_configuration_context = {
-                    "provider": transaction_provider_identity,
-                    "model": transaction_model,
-                    "stages": stage_identity,
-                    "category_policy": sorted(
-                        {
-                            category.id
-                            for stage in (
-                                stages if stages is not None else DEFAULT_STAGES
-                            )
-                            for category in stage.categories
-                        }
-                    ),
-                    "orchestration": {
-                        "enabled": orchestrate,
-                        "continue_rounds": getattr(args, "continue_rounds", 0),
-                    },
-                    "publication_mode": policy.mode,
-                }
+                effective_stages = stages if stages is not None else DEFAULT_STAGES
+                stage_identity, category_policy = transaction_stage_identity(
+                    effective_stages
+                )
+                transaction_configuration_context = (
+                    build_transaction_configuration_context(
+                        provider=transaction_provider_identity,
+                        model=transaction_model,
+                        stages=stage_identity,
+                        category_policy=category_policy,
+                        publication_mode=policy.mode,
+                        orchestration_enabled=orchestrate,
+                        continue_rounds=getattr(args, "continue_rounds", 0),
+                    )
+                )
                 transaction_configuration_digest = (
                     ReviewTransaction.compute_configuration_digest(
                         transaction_configuration_context

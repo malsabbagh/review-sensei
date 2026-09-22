@@ -36,6 +36,7 @@ from review_sensei.models import (
     ReviewRequest,
     ReviewResult,
     ReviewTransaction,
+    build_transaction_configuration_context,
 )
 from review_sensei.outcomes import RunOutcome, run_outcome_exit_code
 from review_sensei.providers import ProviderSettings
@@ -1708,9 +1709,22 @@ diff --git a/src/helper.py b/src/helper.py
                 str(output_path),
                 "--no-learning-proposals",
             ]
-            with patch(
-                "review_sensei.cli.default_registry",
-                return_value=RecordingRegistry(),
+            contexts: list[dict[str, object]] = []
+
+            def capture_configuration(**kwargs: object) -> dict[str, object]:
+                context = build_transaction_configuration_context(**kwargs)
+                contexts.append(context)
+                return context
+
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=RecordingRegistry(),
+                ),
+                patch(
+                    "review_sensei.cli.build_transaction_configuration_context",
+                    side_effect=capture_configuration,
+                ),
             ):
                 self.assertEqual(main(argv), 0)
 
@@ -1719,6 +1733,10 @@ diff --git a/src/helper.py b/src/helper.py
             record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertEqual(record.transaction.phase, "publication_pending")
             self.assertIsNone(record.reservation_id)
+            self.assertEqual(
+                record.transaction.configuration_digest,
+                ReviewTransaction.compute_configuration_digest(contexts[0]),
+            )
 
     def test_cli_context_write_failure_does_not_persist_transaction(self):
         class RecordingProvider:

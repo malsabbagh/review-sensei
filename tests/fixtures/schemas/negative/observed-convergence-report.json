@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "mode": "merge-focused",
+  "events": [
+    {
+      "label": "initial",
+      "provider_calls": 1,
+      "baseline_loaded": false,
+      "publication_status": "approved",
+      "handoff_reason": null,
+      "approval_events": 0
+    }
+  ],
+  "baseline_events": 1,
+  "command_events": ["pause:applied", "continue:applied"],
+  "finding_metrics": {
+    "expected_material_findings": 1,
+    "observed_material_findings": 1,
+    "matched_material_findings": 1,
+    "missed_material_findings": 0,
+    "unjustified_late_blockers": 0,
+    "blocker_precision": 1,
+    "seeded_material_regressions_detected": 1,
+    "duplicate_findings": 0,
+    "reopened_findings": 0,
+    "contradictions": 0
+  },
+  "execution_metrics": {
+    "completed_rounds": 1,
+    "handoffs": 0,
+    "provider_calls": 1,
+    "failed_attempts": 0
+  },
+  "shadow_isolated": true,
+  "evidence_identity": {
+    "source_identity": "source",
+    "package_identity": "package",
+    "workflow_identity": "workflow",
+    "configuration_digest": "a",
+    "fixture_identity": "fixture",
+    "command": "review-sensei evaluate-convergence --observed"
+  },
+  "approval_events": 0,
+  "cap_created_approval": null,
+  "cutover_status": "not_ready",
+  "unmet_criteria": ["the configured round cap was not observed"],
+  "limitations": ["External model and GitHub APIs are mocked."]
+}

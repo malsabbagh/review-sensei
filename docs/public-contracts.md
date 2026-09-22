@@ -71,6 +71,7 @@ containing `/v1/`.
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
 | `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, limitations, and cap-never-approves flag |
+| `observed-convergence-report.schema.json` | F6 real-component evidence events and explicitly measured or unknown metrics |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
 | `channel-promotion.schema.json` | Audited workflow-channel promotion or rollback record (`v4_promotion` schema name is historical) |
@@ -184,8 +185,14 @@ These imports are public and stable within a major version:
 - `review_sensei.observe_shadow_admission`
 - `review_sensei.resolve_shadow_review_mode`
 - `review_sensei.SequenceReport`
+- `review_sensei.ObservedSequenceReport`
+- `review_sensei.ObservedEvidenceIdentity`
+- `review_sensei.ObservedExecutionMetrics`
+- `review_sensei.ObservedFindingMetrics`
+- `review_sensei.ObservedSequenceEvent`
 - `review_sensei.SequenceStep`
 - `review_sensei.replay_review_sequence`
+- `review_sensei.hosting.github.observed.run_observed_review_sequence`
 - `review_sensei.compare_sequence_policies`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`
@@ -695,6 +702,22 @@ synthetic sentinel against a convergence policy. It never constructs a
 provider or writes to GitHub. The compatible publication default remains
 `legacy`; `--compare-default` reports both arms. `cap_created_approval` is
 always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
+
+`--observed` writes an observed-convergence report through
+`review_sensei.hosting.github.observed.run_observed_review_sequence`.
+That runner is not a package-root import, so `import review_sensei` does
+not load the GitHub host adapter. Import it from
+`review_sensei.hosting.github.observed`. The `hosting.github` package
+does not re-export it. A completed `--observed` run with unmet gates
+writes the report and exits 1. Invalid input, including `--review-mode
+legacy`, exits 1 without a report. In that report, `cap_created_approval:
+null` means the sequence never reached the round cap. A report with that
+null cannot have `cutover_status` `passed`. `approval_events` is the
+whole-run total, including approvals from in-budget rounds. The cap
+proof is `cap_created_approval` false together with zero approval events
+on the cap handoff and on every later event. `--source-identity` and
+`--workflow-identity` are recorded as the operator asserts them. The
+harness does not authenticate those values as a Git SHA or workflow ref.
 
 ```bash
 review-sensei evaluate-convergence --json --compare-default
