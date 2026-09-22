@@ -975,6 +975,14 @@ function configFile(
   );
 }
 
+/** Released setup-v4 uninstall bytes retained for exact managed migration recognition. */
+export function historicalV4UninstallWorkflow(): string {
+  return uninstallWorkflowTemplate().replace(
+    "# ReviewSensei setup version: 3",
+    "# ReviewSensei setup version: 4",
+  );
+}
+
 /** Immediate pre-cutover config retained only for managed v4 recognition. */
 export function mergeFocusedV4ConfigFile(): string {
   return configFile(SETUP_VERSION, false, true).replace(
@@ -992,10 +1000,7 @@ export function buildPinnedV4SetupFiles(
     { path: SETUP_FILE_PATHS[0], content: pinnedV4WorkflowTemplate(sha) },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],
@@ -1039,10 +1044,7 @@ export function buildHistoricalTaggedV4SetupFiles(
     { path: SETUP_FILE_PATHS[0], content: taggedWorkflowTemplate(tag) },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],
@@ -1068,10 +1070,7 @@ export function buildHistoricalProviderParityV4SetupFiles(
     },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],

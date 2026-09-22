@@ -36,6 +36,16 @@ from review_sensei.hosting.github.setup import (
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
 
+# Byte-exact managed-v4 recognition contract shared with the Cloudflare Worker:
+# deploy/cloudflare/test/setup-content.test.ts asserts these same digests. The
+# bytes represent artifacts that already exist in installations, so an edit to
+# the current templates that changes them must be a deliberate decision.
+MANAGED_V4_RECOGNITION_SHA256 = {
+    "caller": "ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742",
+    "uninstall": "e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec",
+    "config": "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0",
+}
+
 
 class FakeHTTPResponse(io.BytesIO):
     def __init__(self, body=b"", status=200):
@@ -723,6 +733,18 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             branch_request[5],
             "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
+
+    def test_managed_v4_recognition_bytes_are_frozen_across_implementations(self):
+        for name, content in (
+            ("caller", _merge_focused_v4_workflow("v5")),
+            ("uninstall", _historical_v4_uninstall_workflow()),
+            ("config", _merge_focused_v4_config_file()),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hashlib.sha256(content.encode()).hexdigest(),
+                    MANAGED_V4_RECOGNITION_SHA256[name],
+                )
 
     def test_immediate_pre_cutover_v4_setup_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")

@@ -264,7 +264,7 @@ jobs:
           esac
           case "$REVIEW_MODE" in
             advisory|merge-focused|strict) ;;
-            legacy) echo '::error::legacy review mode is retired; migrate configuration to merge-focused' >&2; exit 1 ;;
+            legacy) echo '::error::legacy review mode is retired; migrate configuration to merge-focused (merge the pending setup-v5 pull request from the ReviewSensei App, then re-run)' >&2; exit 1 ;;
             *) echo '::error::review mode must be advisory, merge-focused, or strict' >&2; exit 1 ;;
           esac
           if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then

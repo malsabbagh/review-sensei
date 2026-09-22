@@ -17,6 +17,7 @@ import {
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
+  historicalV4UninstallWorkflow,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   previousProviderParityWorkflowTemplate,
@@ -289,10 +290,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
   }
   if (path === SETUP_FILE_PATHS[1]) {
-    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[1].content.replace(
-      "ReviewSensei setup version: 5",
-      "ReviewSensei setup version: 4",
-    );
+    return content === historicalV4UninstallWorkflow();
   }
   if (path === SETUP_FILE_PATHS[2]) {
     return (

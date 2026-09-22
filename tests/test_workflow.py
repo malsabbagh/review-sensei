@@ -58,6 +58,7 @@ class WorkflowValidationTests(unittest.TestCase):
             "legacy review mode is retired; migrate configuration to merge-focused",
             workflow,
         )
+        self.assertIn("merge the pending setup-v5 pull request", workflow)
 
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(

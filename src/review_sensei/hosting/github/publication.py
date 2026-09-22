@@ -1249,10 +1249,13 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        # Omitted policies use the same deterministic default as preparation;
+        # runtime configuration is resolved by the application, not from
+        # ambient environment variables at this publication boundary. An
+        # explicitly supplied policy is honored as-is, including the
+        # historical legacy policy a low-level embedder or replay supplies
+        # (ADR 0055); the CLI and configuration surfaces reject legacy.
         if convergence_policy is None:
-            # Use the same deterministic default as preparation. Runtime
-            # configuration is resolved by the application, not from ambient
-            # environment variables at this publication boundary.
             convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")

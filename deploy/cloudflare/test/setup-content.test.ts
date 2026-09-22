@@ -15,6 +15,9 @@ import {
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  historicalV4UninstallWorkflow,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   publicWorkflowTagFromJobRef,
   releasedRunnerSwitchV4WorkflowTemplate,
   validatePublicWorkflowTag,
@@ -244,6 +247,21 @@ describe("setup-v4 public boundary", () => {
       "utf8",
     );
     expect(releasedRunnerSwitchV4CallerBytes()).toBe(canonical);
+  });
+
+  it("keeps the managed v4 recognition bytes frozen across implementations", () => {
+    // The Python setup recognizer asserts these same digests
+    // (tests/test_github_setup.py::MANAGED_V4_RECOGNITION_SHA256), pinning the
+    // byte-exact contract for artifacts that already exist in installations.
+    expect(
+      createHash("sha256").update(mergeFocusedV4WorkflowTemplate("v5")).digest("hex"),
+    ).toBe("ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742");
+    expect(
+      createHash("sha256").update(historicalV4UninstallWorkflow()).digest("hex"),
+    ).toBe("e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec");
+    expect(
+      createHash("sha256").update(mergeFocusedV4ConfigFile()).digest("hex"),
+    ).toBe("2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0");
   });
 
   it("generates one provider-neutral reusable job with the supplied tag", () => {
