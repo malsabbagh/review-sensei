@@ -556,6 +556,22 @@ describe("setup repository reconciliation", () => {
     ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
+  it("migrates a managed v5 setup following an older public tag", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildSetupFiles("old-v4").map(({ path, content }) => [path, content]),
+    );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
   it("migrates the released resolve-trigger caller with the runner switch", async () => {
     const fake = new FakeGitHub();
     const files = Object.fromEntries(
