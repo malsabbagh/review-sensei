@@ -875,6 +875,17 @@ The marker, App slug, exact head commit, and repository identity form the
 idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
 fail closed.
 
+The publication boundary resolves an omitted convergence policy to the
+`merge-focused` default and binds the same policy digest as preparation; a
+prepared result bound to a different policy is rejected rather than silently
+republished. One deliberate exception exists for low-level embedders and
+replay: an explicitly supplied `ReviewConvergencePolicy(mode="legacy")` is
+honored as-is (ADR 0055). That exception is not reachable from the CLI,
+generated configuration, or the hosted workflow, which all resolve `legacy`
+to the actionable migration error before preparation or writes; only
+embedders that construct the policy object directly can publish under the
+historical policy.
+
 Learning proposal files remain content-addressed by their full canonical
 SHA-256 digest at
 `.github/review-sensei/learnings/sensei-<16-hex>.json`. The publisher now keeps

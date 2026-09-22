@@ -141,12 +141,12 @@ class CloudflarePackageTests(unittest.TestCase):
             'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
         )
 
-    def test_v4_config_matches_ts_builder_bytes(self):
+    def test_current_config_matches_ts_builder_bytes(self):
         from review_sensei.hosting.github.setup import (
             CURRENT_PACKAGE_VERSION,
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
-            _v4_config_file,
+            _current_config_file,
         )
 
         expected_ts = (
@@ -170,14 +170,14 @@ class CloudflarePackageTests(unittest.TestCase):
             "stages_dir: ''\n"
             "categories_dir: ''\n"
         )
-        self.assertEqual(_v4_config_file(), expected_ts)
+        self.assertEqual(_current_config_file(), expected_ts)
 
-    def test_v4_config_core_fields_match_ts_builder(self):
+    def test_current_config_core_fields_match_ts_builder(self):
         from review_sensei.hosting.github.setup import (
             CURRENT_PACKAGE_VERSION,
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
-            _v4_config_file,
+            _current_config_file,
         )
 
         def parse_fields(content: str) -> dict[str, str]:
@@ -189,7 +189,7 @@ class CloudflarePackageTests(unittest.TestCase):
                 fields[key.strip()] = value.strip()
             return fields
 
-        py_fields = parse_fields(_v4_config_file())
+        py_fields = parse_fields(_current_config_file())
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
             encoding="utf-8"
         )

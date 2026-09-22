@@ -33,6 +33,17 @@ value to `merge-focused` idempotently; it does not reset the session ledger,
 finding identities, baseline, or counters. Advisory, strict, and disabled
 policy choices retain their existing meaning.
 
+Implementation note: `ReviewPublisher.publish` still honors an explicitly
+supplied `ReviewConvergencePolicy(mode="legacy")` for low-level embedders and
+replay of historical fixtures, and that exception is documented in
+`docs/public-contracts.md`. It is prevented from becoming a CLI-reachable
+path: every CLI and configuration surface resolves its policy through
+`resolve_review_mode`, which raises the migration error for `legacy` before
+preparation or any GitHub write, and the generated caller, Worker, and
+reusable workflow only ever pass the resolved operator mode. Preparation and
+publication must bind the same policy digest, so a legacy-bound prepared
+artifact cannot enter the default publication path.
+
 Package publication, workflow-channel promotion, Worker/config deployment,
 and managed-installation migration are release operations. They remain
 operator-controlled and require exact-version/commit readback and a rollback

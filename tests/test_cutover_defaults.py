@@ -143,6 +143,42 @@ class CutoverDefaultTests(unittest.TestCase):
         self.assertIn("blocking=true", writes[0]["comments"][0]["body"])
         self.assertEqual(len(calls), 5)
 
+    def test_default_policy_admitted_blocker_forces_request_changes(self):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="Restore the authorization check before reading tenant data.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        review = ReviewResult(
+            summary="Summary.", comments=(comment,), provider="fixture"
+        )
+        http, calls = make_http(publication_responses(inline=True))
+        outcome = ReviewPublisher(http=http).publish(
+            **{**publication_arguments(review), "auto_approve": True},
+            blocker_candidates=(facts,),
+        )
+        self.assertEqual(outcome.status, "published")
+        writes = [
+            json.loads(body.decode("utf-8"))
+            for method, url, body in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews")
+        ]
+        self.assertEqual([body["event"] for body in writes], ["REQUEST_CHANGES"])
+        self.assertEqual(len(writes[0]["comments"]), 1)
+        self.assertIn("blocking=true", writes[0]["comments"][0]["body"])
+
     def test_verifier_omitted_policy_matches_explicit_merge_focused(self):
         snapshot = {"src/app.py": "keep\nchange\n"}
         digest = hashlib.sha256(

@@ -1038,6 +1038,23 @@ class ActionPinPolicyTests(unittest.TestCase):
         preflight = _job_section(text, "authoritative-preflight")
         self.assertIn('"$OPERATION" != "command"', preflight)
 
+    def test_hosted_review_invocations_supply_the_broker_attested_session_ledger(
+        self,
+    ):
+        # A default setup-v5 installation selects merge-focused, which needs a
+        # trusted session ledger for admission. Every hosted `github review`
+        # invocation supplies the broker-attested ledger, so a fresh
+        # installation completes reviews instead of skipping for a missing
+        # ledger. The local-CLI path without a ledger is the operator
+        # diagnostics case documented in docs/diagnostics.md and ADR 0055.
+        text = _reusable_workflow_text()
+        invocations = [
+            block for block in _run_blocks(text) if "github review \\" in block
+        ]
+        self.assertEqual(len(invocations), 3)
+        for block in invocations:
+            self.assertIn("--github-session-ledger", block)
+
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
         root = Path(__file__).resolve().parents[1]
         ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(

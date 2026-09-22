@@ -24,13 +24,13 @@ from review_sensei.hosting.github.setup import (
     _broker_accepted_public_workflow_tags,
     _historical_provider_parity_workflow,
     _historical_v4_uninstall_workflow,
-    _merge_focused_v4_config_file,
     _merge_focused_v4_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
     _public_workflow_tag_from_job_ref,
     _released_runner_switch_v4_workflow,
     _tagged_workflow,
+    _v4_with_review_mode_config_file,
 )
 
 BASE_SHA = "b" * 40
@@ -738,13 +738,33 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         for name, content in (
             ("caller", _merge_focused_v4_workflow("v5")),
             ("uninstall", _historical_v4_uninstall_workflow()),
-            ("config", _merge_focused_v4_config_file()),
+            ("config", _v4_with_review_mode_config_file()),
         ):
             with self.subTest(name=name):
                 self.assertEqual(
                     hashlib.sha256(content.encode()).hexdigest(),
                     MANAGED_V4_RECOGNITION_SHA256[name],
                 )
+
+    def test_managed_v4_recognition_does_not_read_the_current_templates(self):
+        from unittest.mock import patch
+
+        from review_sensei.hosting.github import setup as setup_module
+
+        cases = (
+            ("caller", lambda: _merge_focused_v4_workflow("v5"), "_tagged_workflow"),
+            ("uninstall", _historical_v4_uninstall_workflow, "_uninstall_workflow"),
+            ("config", _v4_with_review_mode_config_file, "_current_config_file"),
+        )
+        for name, renderer, live_source in cases:
+            with self.subTest(name=name):
+                expected = renderer()
+                with patch.object(
+                    setup_module,
+                    live_source,
+                    side_effect=AssertionError("live setup template was consulted"),
+                ):
+                    self.assertEqual(renderer(), expected)
 
     def test_immediate_pre_cutover_v4_setup_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
@@ -753,7 +773,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         files[".github/workflows/review-sensei-uninstall.yml"] = (
             _historical_v4_uninstall_workflow()
         )
-        files[CONFIG_PATH] = _merge_focused_v4_config_file()
+        files[CONFIG_PATH] = _v4_with_review_mode_config_file()
         transport = FileTransport(files=files)
 
         results = SetupPullRequestService(transport).ensure_setup_pull_requests(

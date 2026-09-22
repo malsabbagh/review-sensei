@@ -8,6 +8,12 @@
  */
 
 import {
+  MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
+  historicalV4UninstallBytes,
+  mergeFocusedV4CallerBytes,
+  mergeFocusedV4ConfigBytes,
+} from "./managed-v4-recognition-artifacts";
+import {
   RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
   releasedRunnerSwitchV4CallerBytes,
 } from "./released-runner-switch-v4-caller";
@@ -795,9 +801,15 @@ jobs:
 
 /** Immediate pre-cutover caller retained only for managed v4 recognition. */
 export function mergeFocusedV4WorkflowTemplate(publicWorkflowTag: string): string {
-  return resolveTriggerWorkflowTemplate(publicWorkflowTag)
-    .replace("# ReviewSensei setup version: 5", "# ReviewSensei setup version: 4")
-    .replace("public setup-v5 release action", "public setup-v4 release action");
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  const caller = mergeFocusedV4CallerBytes();
+  if (tag === "v5") {
+    return caller;
+  }
+  return caller.replaceAll(
+    MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
+    `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
+  );
 }
 
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
@@ -977,18 +989,12 @@ function configFile(
 
 /** Released setup-v4 uninstall bytes retained for exact managed migration recognition. */
 export function historicalV4UninstallWorkflow(): string {
-  return uninstallWorkflowTemplate().replace(
-    "# ReviewSensei setup version: 3",
-    "# ReviewSensei setup version: 4",
-  );
+  return historicalV4UninstallBytes();
 }
 
 /** Immediate pre-cutover config retained only for managed v4 recognition. */
 export function mergeFocusedV4ConfigFile(): string {
-  return configFile(SETUP_VERSION, false, true).replace(
-    "# ReviewSensei setup version: 5\nsetup_version: 5",
-    "# ReviewSensei setup version: 4\nsetup_version: 4",
-  );
+  return mergeFocusedV4ConfigBytes();
 }
 
 /** Exact setup-v4 output from the historical SHA-pinning contract. */

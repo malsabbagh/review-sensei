@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -41,14 +42,18 @@ def _init_repository(root: Path, name: str) -> Path:
     return repository
 
 
+def _reusable_workflow() -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "review-sensei-run.yml"
+    ).read_text(encoding="utf-8")
+
+
 class WorkflowValidationTests(unittest.TestCase):
     def test_reusable_workflow_defaults_and_rejects_retired_legacy_mode(self):
-        workflow = (
-            Path(__file__).resolve().parents[1]
-            / ".github"
-            / "workflows"
-            / "review-sensei-run.yml"
-        ).read_text(encoding="utf-8")
+        workflow = _reusable_workflow()
         self.assertIn(
             "review_mode:\n        required: false\n        default: merge-focused",
             workflow,
@@ -59,6 +64,40 @@ class WorkflowValidationTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("merge the pending setup-v5 pull request", workflow)
+        legacy_line = next(
+            line for line in workflow.splitlines() if "legacy) echo" in line
+        )
+        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy_line)
+
+    def test_reusable_workflow_review_mode_case_rejects_legacy_at_runtime(self):
+        workflow = _reusable_workflow()
+        # Execute the guard the workflow itself runs instead of trusting that
+        # the literal is still wired the way the assertions above describe.
+        start = workflow.index('case "$REVIEW_MODE" in')
+        end = workflow.index("esac", start) + len("esac")
+        case_block = workflow[start:end]
+
+        def run(mode: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["bash", "-c", case_block],
+                env={**os.environ, "REVIEW_MODE": mode},
+                capture_output=True,
+                text=True,
+            )
+
+        for mode in ("advisory", "merge-focused", "strict"):
+            with self.subTest(mode=mode):
+                completed = run(mode)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+        legacy = run("legacy")
+        self.assertEqual(legacy.returncode, 1)
+        self.assertIn("legacy review mode is retired", legacy.stderr)
+        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy.stderr)
+        bogus = run("bogus")
+        self.assertEqual(bogus.returncode, 1)
+        self.assertIn(
+            "review mode must be advisory, merge-focused, or strict", bogus.stderr
+        )
 
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(

@@ -998,6 +998,26 @@ class ShadowObservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
                 resolve_shadow_review_mode()
 
+    def test_shadow_resolution_ignores_the_ambient_review_mode_env(self):
+        # The shadow resolver reads only REVIEW_SHADOW_ENV. An ambient legacy
+        # REVIEWSENSEI_REVIEW_MODE must fail the runtime resolver without
+        # leaking its value into the observation-only shadow mode.
+        with patch.dict(
+            os.environ,
+            {REVIEW_MODE_ENV: "legacy", REVIEW_SHADOW_ENV: "merge-focused"},
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "legacy review mode is retired"
+            ):
+                resolve_review_mode()
+            self.assertEqual(resolve_shadow_review_mode(), "merge-focused")
+        with patch.dict(
+            os.environ,
+            {REVIEW_MODE_ENV: "advisory", REVIEW_SHADOW_ENV: "merge-focused"},
+        ):
+            self.assertEqual(resolve_review_mode(), "advisory")
+            self.assertEqual(resolve_shadow_review_mode(), "merge-focused")
+
     def test_shadow_rejects_legacy_and_is_observation_only(self):
         with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
             resolve_shadow_review_mode("legacy")

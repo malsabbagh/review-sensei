@@ -84,6 +84,21 @@ RELEASED_RUNNER_SWITCH_V4_SHA256 = (
 _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER = (
     "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
 )
+# Frozen bytes of artifacts that already exist in installations. Recognition
+# must not be derived from the live templates: an edit to the current setup-v5
+# bytes must never change what these historical artifacts look like.
+MERGE_FOCUSED_V4_CALLER_SHA256 = (
+    "ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742"
+)
+_MERGE_FOCUSED_V4_CALLER_TAG_MARKER = (
+    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
+)
+MERGE_FOCUSED_V4_CONFIG_SHA256 = (
+    "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0"
+)
+HISTORICAL_V4_UNINSTALL_SHA256 = (
+    "e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec"
+)
 # Retained for exact setup-v3 and SHA-pinned setup-v4 migration recognition.
 DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
 SETUP_VERSION_PATTERN = re.compile(
@@ -179,8 +194,8 @@ def _looks_like_current_setup(
 
     expected = {
         WORKFLOW_PATH: _tagged_workflow(public_workflow_tag),
-        UNINSTALL_WORKFLOW_PATH: _v4_uninstall_workflow(),
-        CONFIG_PATH: _v4_config_file(),
+        UNINSTALL_WORKFLOW_PATH: _current_uninstall_workflow(),
+        CONFIG_PATH: _current_config_file(),
     }
     return expected.get(path) == content
 
@@ -280,7 +295,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         return content == _historical_v4_uninstall_workflow()
     if path == CONFIG_PATH:
         return content in {
-            _merge_focused_v4_config_file(),
+            _v4_with_review_mode_config_file(),
             _historical_v4_config_file(),
         }
     return False
@@ -1173,15 +1188,32 @@ def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> 
     return _resolve_trigger_workflow(public_workflow_tag)
 
 
+def _merge_focused_v4_caller_bytes() -> str:
+    """Return the frozen immediate pre-cutover v4 caller bytes."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("merge-focused-v4-caller.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != MERGE_FOCUSED_V4_CALLER_SHA256:
+        raise GitHubSetupError("merge-focused v4 caller fixture digest mismatch")
+    return content
+
+
 def _merge_focused_v4_workflow(public_workflow_tag: str) -> str:
     """Return the immediate pre-cutover caller for managed v4 recognition."""
 
-    return (
-        _tagged_workflow(public_workflow_tag)
-        .replace(
-            "# ReviewSensei setup version: 5", "# ReviewSensei setup version: 4", 1
-        )
-        .replace("public setup-v5 release action", "public setup-v4 release action", 1)
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    caller = _merge_focused_v4_caller_bytes()
+    if tag == "v5":
+        return caller
+    return caller.replace(
+        _MERGE_FOCUSED_V4_CALLER_TAG_MARKER,
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
     )
 
 
@@ -1261,7 +1293,7 @@ upload_artifacts: false
 """
 
 
-def _v4_config_file() -> str:
+def _current_config_file() -> str:
     """Return the current setup-v5 configuration."""
 
     return (
@@ -1287,14 +1319,20 @@ def _v4_config_file() -> str:
     )
 
 
-def _merge_focused_v4_config_file() -> str:
-    """Return the pre-cutover v4 configuration with an explicit mode."""
+def _v4_with_review_mode_config_file() -> str:
+    """Return the frozen pre-cutover v4 configuration with an explicit mode."""
 
-    return _v4_config_file().replace(
-        "# ReviewSensei setup version: 5\nsetup_version: 5",
-        "# ReviewSensei setup version: 4\nsetup_version: 4",
-        1,
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("merge-focused-v4-config.yml")
+        .read_text(encoding="utf-8")
     )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != MERGE_FOCUSED_V4_CONFIG_SHA256:
+        raise GitHubSetupError("merge-focused v4 config fixture digest mismatch")
+    return content
 
 
 def _historical_v4_config_file() -> str:
@@ -1374,7 +1412,9 @@ jobs:
 """
 
 
-def _v4_uninstall_workflow() -> str:
+def _current_uninstall_workflow() -> str:
+    """Return the current setup-v5 uninstall workflow."""
+
     return _uninstall_workflow().replace(
         "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 5", 1
     )
@@ -1383,9 +1423,17 @@ def _v4_uninstall_workflow() -> str:
 def _historical_v4_uninstall_workflow() -> str:
     """Return the released setup-v4 uninstall workflow bytes."""
 
-    return _uninstall_workflow().replace(
-        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("historical-v4-uninstall.yml")
+        .read_text(encoding="utf-8")
     )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != HISTORICAL_V4_UNINSTALL_SHA256:
+        raise GitHubSetupError("historical v4 uninstall fixture digest mismatch")
+    return content
 
 
 def _setup_pull_request_body() -> str:
@@ -1473,8 +1521,8 @@ class SetupPlanBuilder:
             config = _config_file()
         else:
             workflow = _tagged_workflow(self.public_workflow_tag)
-            uninstall = _v4_uninstall_workflow()
-            config = _v4_config_file()
+            uninstall = _current_uninstall_workflow()
+            config = _current_config_file()
         files = (
             SetupFile(path=WORKFLOW_PATH, content=workflow),
             SetupFile(path=UNINSTALL_WORKFLOW_PATH, content=uninstall),

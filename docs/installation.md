@@ -251,7 +251,17 @@ The generated setup contains 15 repository variables, including 7 boolean
 controls, and 3 generated files. Boolean controls default to `false` except
 `REVIEWSENSEI_AUTO_APPROVE=true`, which remains gated by review and write
 settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
-boolean control. Empty stage/category paths preserve the packaged defaults. Manual dispatch may override those directories; both the
+boolean control. Merge-focused requires a trusted session ledger for admission
+and round enforcement: every hosted review runs through the reusable workflow,
+which invokes `review-sensei github review` with the broker-attested
+`--github-session-ledger`. A default setup-v5 installation therefore completes
+reviews without any additional ledger provisioning. The ledger requirement is
+operator-visible only on the local CLI path: `review-sensei github review`
+without `--session-ledger` or `--github-session-ledger` reports `doctor`
+`status=action` (exit 2) and `plan` lists `session-ledger-required`, and an
+unadmitted round is skipped with zero provider calls rather than silently
+downgraded. See [`docs/diagnostics.md`](diagnostics.md) and
+[ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md). Empty stage/category paths preserve the packaged defaults. Manual dispatch may override those directories; both the
 variable and the input are repository-relative paths loaded from the trusted
 base checkout after authoritative PR preflight. Pull-request head edits to
 custom stage or category JSON cannot change the instructions used for that
