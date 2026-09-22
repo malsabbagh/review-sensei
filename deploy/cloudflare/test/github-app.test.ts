@@ -12,6 +12,7 @@ import {
   SETUP_FILE_PATHS,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
+  buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   mergeFocusedV4ConfigFile,
@@ -554,6 +555,34 @@ describe("setup repository reconciliation", () => {
         ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
       )?.body,
     ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates a released historical v4 file set with the shipped uninstall bytes", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildHistoricalTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
+    );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+  });
+
+  it("does not migrate an edited managed v5 uninstall or config file", async () => {
+    for (const index of [1, 2]) {
+      const fake = new FakeGitHub();
+      const files = Object.fromEntries(
+        buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+      );
+      const path = SETUP_FILE_PATHS[index]!;
+      files[path] = `${files[path]!}\n# customer note\n`;
+      fake.files = files;
+
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "skipped_unknown_setup" },
+      ]);
+      expect(mutationRequests(fake)).toEqual([]);
+    }
   });
 
   it("migrates a managed v5 setup following an older public tag", async () => {

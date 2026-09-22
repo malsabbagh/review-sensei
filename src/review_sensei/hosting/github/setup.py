@@ -240,7 +240,12 @@ def _looks_like_managed_v3_setup(path: str, content: str) -> bool:
 
 
 def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
-    """Recognize setup-v4 artifacts from either pinning contract."""
+    """Recognize setup-v4 artifacts from either pinning contract.
+
+    The workflow accepts the pre-cutover and released caller variants. The
+    uninstall has a single shipped shape (the historical bytes), while the
+    config has two (pre-cutover and historical).
+    """
 
     if path == WORKFLOW_PATH:
         sha_matches = [
@@ -1376,6 +1381,8 @@ def _v4_uninstall_workflow() -> str:
 
 
 def _historical_v4_uninstall_workflow() -> str:
+    """Return the released setup-v4 uninstall workflow bytes."""
+
     return _uninstall_workflow().replace(
         "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
     )
