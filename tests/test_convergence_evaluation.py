@@ -32,6 +32,7 @@ from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.observed import (
+    _admitted_material_ids,
     _ObservedHTTPResponse,
     _ObservedProvider,
     observed_cutover_gaps,
@@ -602,6 +603,67 @@ class ObservedSequenceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ReviewInputError, "event limit"):
             run_observed_review_sequence(steps, _policy())
+
+    def test_material_labels_match_across_the_sequence(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    label="early-expect",
+                    expected_material_finding_ids=("material-late",),
+                ),
+                SequenceStep(
+                    head_sha="b" * 40,
+                    label="late-emit",
+                    fixture_material_finding_ids=("material-late",),
+                ),
+            ),
+            _policy(),
+        )
+        metrics = report.finding_metrics
+        self.assertEqual(metrics.missed_material_findings, 0)
+        self.assertEqual(metrics.matched_material_findings, 1)
+        self.assertEqual(metrics.unjustified_late_blockers, 0)
+
+    def test_admitted_unqualified_comment_is_not_a_material_match(self):
+        comment = type(
+            "Comment",
+            (),
+            {
+                "body": "fixture-unqualified:material-weak",
+                "effective_blocking": True,
+            },
+        )()
+        self.assertEqual(
+            _admitted_material_ids((comment,)),
+            ("unqualified:material-weak",),
+        )
+
+    def test_event_rejects_an_unknown_publication_status(self):
+        with self.assertRaisesRegex(ReviewInputError, "publication status"):
+            ObservedSequenceEvent(
+                label="step",
+                provider_calls=0,
+                baseline_loaded=False,
+                publication_status="approved",
+            )
+
+    def test_report_rejects_an_empty_event_list(self):
+        with self.assertRaisesRegex(ReviewInputError, "events"):
+            ObservedSequenceReport(
+                mode="merge-focused",
+                events=(),
+                baseline_events=0,
+                command_events=("pause:applied", "continue:applied"),
+                finding_metrics=report_metrics(),
+                execution_metrics=report_execution(),
+                shadow_isolated=False,
+                evidence_identity=report_identity(),
+                approval_events=0,
+                cap_created_approval=None,
+                cutover_status="not_ready",
+                unmet_criteria=("not ready",),
+            )
 
     def test_unresolved_blocking_thread_withholds_approval(self):
         step = (

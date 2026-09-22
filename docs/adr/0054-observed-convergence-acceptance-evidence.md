@@ -52,6 +52,9 @@ or routing behavior changes.
 
 Shadow comparison remains an isolated validation technique. It must not share
 the enforced ledger, publisher trace, grants, counters, or command path.
+Command-path isolation is by construction: the shadow replay never invokes
+the maintainer command applicator. Pause and continue are recorded on the
+enforced ledger, outside that replay.
 
 ## Consequences
 

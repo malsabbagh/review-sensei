@@ -703,6 +703,13 @@ provider or writes to GitHub. The compatible publication default remains
 `legacy`; `--compare-default` reports both arms. `cap_created_approval` is
 always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
 
+`--observed` writes an observed-convergence report through
+`review_sensei.hosting.github.observed.run_observed_review_sequence`.
+That runner is not a package-root import, so `import review_sensei` does
+not load the GitHub host adapter. In that report, `cap_created_approval:
+null` means the sequence never reached the round cap. A report with that
+null cannot have `cutover_status` `passed`.
+
 ```bash
 review-sensei evaluate-convergence --json --compare-default
 ```

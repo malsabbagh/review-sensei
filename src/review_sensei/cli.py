@@ -2213,10 +2213,10 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
         )
         from .hosting.github.observed import run_observed_review_sequence
         from .sequence import (
-            UNAVAILABLE_EVIDENCE_IDENTITY,
             ObservedEvidenceIdentity,
             SequenceStep,
             compare_sequence_policies,
+            identity_is_unavailable,
             replay_review_sequence,
         )
 
@@ -2291,7 +2291,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                     ("package", args.package_identity),
                     ("workflow", args.workflow_identity),
                 )
-                if value == UNAVAILABLE_EVIDENCE_IDENTITY
+                if identity_is_unavailable(value)
             ]
             if unavailable_fields:
                 named = ", ".join(unavailable_fields)

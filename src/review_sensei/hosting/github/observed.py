@@ -39,6 +39,7 @@ from ...sequence import (
     ObservedSequenceReport,
     SequenceStep,
     compare_sequence_policies,
+    identity_is_unavailable,
 )
 from ...service import ReviewService
 from ...session import (
@@ -110,10 +111,11 @@ def _admitted_material_ids(comments: Sequence[Any]) -> tuple[str, ...]:
         body = comment.body
         if comment.effective_blocking is not True or not isinstance(body, str):
             continue
-        for prefix in ("fixture-material:", "fixture-unqualified:"):
-            if body.startswith(prefix):
-                admitted.append(body.removeprefix(prefix))
-                break
+        if body.startswith("fixture-material:"):
+            admitted.append(body.removeprefix("fixture-material:"))
+        elif body.startswith("fixture-unqualified:"):
+            # An admitted unqualified comment is not a material oracle match.
+            admitted.append("unqualified:" + body.removeprefix("fixture-unqualified:"))
     return tuple(admitted)
 
 
@@ -454,11 +456,10 @@ def observed_cutover_gaps(
         gaps.append(
             "duplicate, reopened, or contradictory finding evidence requires adjudication"
         )
-    if UNAVAILABLE_EVIDENCE_IDENTITY in {
-        source_identity,
-        package_identity,
-        workflow_identity,
-    }:
+    if any(
+        identity_is_unavailable(identity)
+        for identity in (source_identity, package_identity, workflow_identity)
+    ):
         gaps.append(
             "installed source, package, and workflow identities are unavailable"
         )
@@ -558,6 +559,9 @@ def run_observed_review_sequence(
                 current_key=current_key,
                 policy=policy,
             )
+            # True only when this job restored a compatible baseline. That
+            # same object is what publication consumes. A missing or
+            # incompatible history stays unloaded.
             baseline_loaded = durable_baseline is not None
             configuration_context = observed_publication_configuration(
                 provider, service.stages, policy
@@ -613,7 +617,13 @@ def run_observed_review_sequence(
             blocker_candidates = tuple(
                 _blocker_candidate_for_comment(comment) for comment in result.comments
             )
+            # Fixture responses are structurally valid, so each logical step
+            # records one provider completion. A structural retry is not part
+            # of this harness.
             provider_calls += provider.calls
+            # Material labels match across the sequence. A later admission
+            # satisfies an earlier oracle, including the verification step
+            # that expects material-a and emits nothing.
             expected_material_finding_ids.update(step.expected_material_finding_ids)
             expected_non_material_finding_ids.update(
                 step.expected_non_material_finding_ids

@@ -30,6 +30,15 @@ from .session import (
 PUBLIC_SCHEMA_VERSION = "1.0"
 # Exact sentinel the observed CLI emits when a GitHub Actions identity is absent.
 UNAVAILABLE_EVIDENCE_IDENTITY = "unavailable"
+_OBSERVED_PUBLICATION_STATUSES = frozenset(
+    {"published", "handoff", "disabled", "already_published"}
+)
+
+
+def identity_is_unavailable(value: str) -> bool:
+    """Return whether an evidence identity is the exact unavailable sentinel."""
+
+    return value == UNAVAILABLE_EVIDENCE_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -155,6 +164,28 @@ class ObservedSequenceEvent:
     handoff_reason: str | None = None
     approval_events: int = 0
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.label, str)
+            or not self.label.strip()
+            or len(self.label.encode("utf-8")) > 128
+        ):
+            raise ReviewInputError("observed event label is invalid")
+        if not _bounded_count(self.provider_calls, maximum=32):
+            raise ReviewInputError("observed event provider calls are invalid")
+        if not isinstance(self.baseline_loaded, bool):
+            raise ReviewInputError("observed event baseline flag is invalid")
+        if self.publication_status not in _OBSERVED_PUBLICATION_STATUSES:
+            raise ReviewInputError("observed event publication status is invalid")
+        if self.handoff_reason is not None and (
+            not isinstance(self.handoff_reason, str)
+            or not self.handoff_reason.strip()
+            or len(self.handoff_reason.encode("utf-8")) > 128
+        ):
+            raise ReviewInputError("observed event handoff reason is invalid")
+        if not _bounded_count(self.approval_events, maximum=32):
+            raise ReviewInputError("observed event approval events are invalid")
+
     def to_dict(self) -> dict[str, object]:
         return {
             "label": self.label,
@@ -189,6 +220,27 @@ class ObservedSequenceReport:
     )
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.events, tuple)
+            or not 1 <= len(self.events) <= 32
+            or any(
+                not isinstance(event, ObservedSequenceEvent) for event in self.events
+            )
+        ):
+            raise ReviewInputError("observed report events are invalid")
+        if not _bounded_count(self.baseline_events, maximum=32):
+            raise ReviewInputError("observed report baseline events are invalid")
+        if (
+            not isinstance(self.command_events, tuple)
+            or not 2 <= len(self.command_events) <= 8
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item.encode("utf-8")) > 128
+                for item in self.command_events
+            )
+        ):
+            raise ReviewInputError("observed report command events are invalid")
         if self.mode not in {"advisory", "merge-focused", "strict"}:
             raise ReviewInputError("observed report mode is invalid")
         if self.cutover_status not in {"passed", "not_ready"}:
