@@ -43,7 +43,12 @@ def identity_is_unavailable(value: str) -> bool:
 
 @dataclass(frozen=True)
 class SequenceStep:
-    """One recorded review/verification attempt. No raw source."""
+    """One recorded review/verification attempt. No raw source.
+
+    Expected finding labels must be unique. Fixture material and unqualified
+    labels may repeat so a harness can show that the service deduplicates
+    them before admission.
+    """
 
     head_sha: str
     blocking_identities: tuple[str, ...] = ()

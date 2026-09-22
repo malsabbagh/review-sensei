@@ -2152,8 +2152,9 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         description=(
             "Replay a frozen synthetic review sequence against a convergence "
             "policy. Observation-only; does not publish or change the legacy default. "
-            "With --observed, exit 0 only when cutover_status is passed. A not_ready "
-            "report is still written and the process exits 1."
+            "With --observed, exit 0 only when cutover_status is passed. A completed "
+            "not_ready report is still written and the process exits 1. Invalid "
+            "input, including a legacy review mode, exits 1 without a report."
         ),
     )
     parser.add_argument(
@@ -2204,6 +2205,14 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _asserted_observed_identity(value: object) -> str:
+    from .sequence import UNAVAILABLE_EVIDENCE_IDENTITY
+
+    if not isinstance(value, str) or not value.strip():
+        return UNAVAILABLE_EVIDENCE_IDENTITY
+    return value
 
 
 def _run_evaluate_convergence_command(arguments: list[str]) -> int:
@@ -2261,13 +2270,16 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 "observed evidence and legacy comparison cannot run in one report"
             )
         if args.observed:
+            source_identity = _asserted_observed_identity(args.source_identity)
+            package_identity = _asserted_observed_identity(args.package_identity)
+            workflow_identity = _asserted_observed_identity(args.workflow_identity)
             observed = run_observed_review_sequence(
                 steps,
                 policy,
                 evidence_identity=ObservedEvidenceIdentity(
-                    source_identity=args.source_identity,
-                    package_identity=args.package_identity,
-                    workflow_identity=args.workflow_identity,
+                    source_identity=source_identity,
+                    package_identity=package_identity,
+                    workflow_identity=workflow_identity,
                     configuration_digest=policy.digest(),
                     fixture_identity="observed-convergence-fixture-v1",
                     command=(
@@ -2289,9 +2301,9 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             unavailable_fields = [
                 label
                 for label, value in (
-                    ("source", args.source_identity),
-                    ("package", args.package_identity),
-                    ("workflow", args.workflow_identity),
+                    ("source", source_identity),
+                    ("package", package_identity),
+                    ("workflow", workflow_identity),
                 )
                 if identity_is_unavailable(value)
             ]

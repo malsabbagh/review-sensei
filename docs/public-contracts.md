@@ -706,7 +706,11 @@ always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
 `--observed` writes an observed-convergence report through
 `review_sensei.hosting.github.observed.run_observed_review_sequence`.
 That runner is not a package-root import, so `import review_sensei` does
-not load the GitHub host adapter. In that report, `cap_created_approval:
+not load the GitHub host adapter. Import it from
+`review_sensei.hosting.github.observed`. The `hosting.github` package
+does not re-export it. A completed `--observed` run with unmet gates
+writes the report and exits 1. Invalid input, including `--review-mode
+legacy`, exits 1 without a report. In that report, `cap_created_approval:
 null` means the sequence never reached the round cap. A report with that
 null cannot have `cutover_status` `passed`. `--source-identity` and
 `--workflow-identity` are recorded as the operator asserts them. The

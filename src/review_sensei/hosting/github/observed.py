@@ -237,7 +237,9 @@ class _ObservedHTTPResponse:
         self.body = json.dumps(payload).encode("utf-8")
         self.status = status
         self.reason = "observed fixture"
-        self.headers: dict[str, str] = {}
+        # GitHubHttp caps the body with read(MAX_GITHUB_RESPONSE_BYTES + 1).
+        # It does not consult Content-Length; the header records the fixture size.
+        self.headers = {"Content-Length": str(len(self.body))}
         self._offset = 0
 
     def __enter__(self) -> _ObservedHTTPResponse:
@@ -496,6 +498,8 @@ def run_observed_review_sequence(
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
+    if policy.mode not in {"advisory", "merge-focused", "strict"}:
+        raise ReviewInputError("observed evidence requires an operator review mode")
     if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)) or not steps:
         raise ReviewInputError("observed sequence requires at least one step")
     if len(steps) > 32:
@@ -693,6 +697,10 @@ def run_observed_review_sequence(
                 # crosses the logical process boundary.
                 session_ledger=LocalSessionLedger(ledger_root),
             )
+            # Publication prepares this analysis result again through
+            # ReviewPublisher.prepare. The harness admission above uses the
+            # same result and the same inputs, so the counted comments are
+            # the ones publication acts on.
             outcome = application.publish_review(
                 options=GitHubWriteOptions(auto_review=True, github_writes=True),
                 oidc_token="observed-oidc",

@@ -1081,6 +1081,50 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         self.assertIn("unavailable for source, workflow", stderr.getvalue())
         self.assertNotIn("package", stderr.getvalue())
 
+    def test_cli_observed_blank_environment_identities_are_not_ready(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"GITHUB_SHA": "", "GITHUB_WORKFLOW_REF": ""},
+            clear=False,
+        ):
+            with redirect_stderr(stderr):
+                with patch("sys.stdout", stdout):
+                    status = main(["evaluate-convergence", "--json", "--observed"])
+        self.assertEqual(status, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["cutover_status"], "not_ready")
+        self.assertEqual(
+            payload["evidence_identity"]["source_identity"],
+            UNAVAILABLE_EVIDENCE_IDENTITY,
+        )
+        self.assertIn("unavailable for source, workflow", stderr.getvalue())
+
+    def test_cli_observed_rejects_legacy_review_mode(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with patch("sys.stdout", stdout):
+                status = main(
+                    [
+                        "evaluate-convergence",
+                        "--json",
+                        "--observed",
+                        "--review-mode",
+                        "legacy",
+                        "--source-identity",
+                        "source-sha",
+                        "--package-identity",
+                        "review-sensei@0.5.0",
+                        "--workflow-identity",
+                        "workflow-sha",
+                    ]
+                )
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("operator review mode", stderr.getvalue())
+
     def test_cli_observed_rejects_compare_default(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
