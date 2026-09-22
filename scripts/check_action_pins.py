@@ -4,7 +4,8 @@ The checker intentionally reads workflow text without executing or resolving
 any workflow expressions. Local actions and Docker actions are valid without a
 commit SHA; third-party actions must carry a full 40-character SHA and an
 inline release-tag comment, except for the public ReviewSensei reusable
-workflow whose protected `@v5` tag is the setup-v4 update channel.
+workflow whose protected `@v5` tag is the setup-v4 update channel. A single
+workflow must also pin each Action repository at exactly one commit.
 """
 
 from __future__ import annotations
@@ -43,10 +44,48 @@ def iter_workflow_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(set(candidates)))
 
 
+def _action_repository(action: str) -> str:
+    """Return the ``owner/repo`` of an Action reference, ignoring any subpath."""
+
+    return "/".join(action.split("/")[:2])
+
+
+def _version_parity_violations(
+    pins_by_repository: dict[str, list[tuple[str, str, int]]], *, source: str
+) -> list[str]:
+    """Flag one Action repository pinned at several versions in one workflow.
+
+    CodeQL's ``init`` and ``analyze`` sub-actions reject a configuration written
+    by another release, so a per-workflow version skew fails the job that pins
+    it. Bump tooling that edits one sub-action at a time trips this.
+    """
+
+    violations: list[str] = []
+    for repository, entries in sorted(pins_by_repository.items()):
+        if len({pin for pin, _, _ in entries}) > 1:
+            rendered = ", ".join(
+                f"{pin} (#{tag}) at line {line_number}"
+                for pin, tag, line_number in entries
+            )
+            violations.append(
+                f"{source}: Action {repository} must use one commit pin per "
+                f"workflow: {rendered}"
+            )
+            continue
+        tags = sorted({tag for _, tag, _ in entries})
+        if len(tags) > 1:
+            violations.append(
+                f"{source}: Action {repository} pins one commit but documents "
+                f"several release tags: {', '.join(tags)}"
+            )
+    return violations
+
+
 def check_workflow_text(text: str, *, source: str = "workflow") -> list[str]:
     """Return policy violations found in one workflow document."""
 
     violations: list[str] = []
+    pins_by_repository: dict[str, list[tuple[str, str, int]]] = {}
     for line_number, line in enumerate(text.splitlines(), start=1):
         match = _USES.match(line)
         if match is None:
@@ -75,6 +114,11 @@ def check_workflow_text(text: str, *, source: str = "workflow") -> list[str]:
             violations.append(
                 f"{source}:{line_number}: pinned Action must document its release tag inline"
             )
+            continue
+        pins_by_repository.setdefault(_action_repository(action), []).append(
+            (pin, tag, line_number)
+        )
+    violations.extend(_version_parity_violations(pins_by_repository, source=source))
     return violations
 
 

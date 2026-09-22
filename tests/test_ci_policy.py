@@ -292,6 +292,54 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("40-character commit SHA", violations[0])
         self.assertIn("release tag", violations[1])
 
+    def test_one_action_pinned_to_two_commits_in_a_workflow_is_rejected(self):
+        text = """
+        steps:
+          - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+          - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        """
+        violations = check_workflow_text(text, source="ci.yml")
+        self.assertEqual(len(violations), 1)
+        self.assertIn("one commit pin per workflow", violations[0])
+        self.assertIn("1c5b675653bb5c22dbe9b12b556ec555138e09fd", violations[0])
+        self.assertIn("b96794f015dfd88f77b49b1c93e0fa7110f94c63", violations[0])
+
+    def test_matching_subpath_pins_are_accepted(self):
+        text = """
+        steps:
+          - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+          - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        """
+        self.assertEqual(check_workflow_text(text), [])
+
+    def test_one_commit_documented_with_two_tags_is_rejected(self):
+        text = """
+        steps:
+          - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+          - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.37.0
+        """
+        violations = check_workflow_text(text, source="ci.yml")
+        self.assertEqual(len(violations), 1)
+        self.assertIn("several release tags", violations[0])
+
+    def test_version_skew_is_scoped_to_a_single_workflow_document(self):
+        # The shipped examples deliberately use different checkout versions.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "one.yml").write_text(
+                "steps:\n  - uses: actions/checkout@"
+                "d23441a48e516b6c34aea4fa41551a30e30af803 # v6\n",
+                encoding="utf-8",
+            )
+            (workflows / "two.yml").write_text(
+                "steps:\n  - uses: actions/checkout@"
+                "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(check_action_pins(root), [])
+
     def test_repository_scan_is_recursive_and_stable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
