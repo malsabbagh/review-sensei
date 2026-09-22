@@ -189,6 +189,27 @@ class ObservedSequenceReport:
     )
 
     def __post_init__(self) -> None:
+        if self.mode not in {"advisory", "merge-focused", "strict"}:
+            raise ReviewInputError("observed report mode is invalid")
+        if self.cutover_status not in {"passed", "not_ready"}:
+            raise ReviewInputError("observed report cutover status is invalid")
+        if not _bounded_count(self.approval_events, maximum=32, allow_none=True):
+            raise ReviewInputError("observed report approval events are invalid")
+        if self.cap_created_approval is not None and not isinstance(
+            self.cap_created_approval, bool
+        ):
+            raise ReviewInputError("observed report cap approval is invalid")
+        if (
+            not isinstance(self.unmet_criteria, tuple)
+            or len(self.unmet_criteria) > 16
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item.encode("utf-8")) > 256
+                for item in self.unmet_criteria
+            )
+        ):
+            raise ReviewInputError("observed report unmet criteria are invalid")
         if (
             not isinstance(self.limitations, tuple)
             or not 1 <= len(self.limitations) <= 8
@@ -240,13 +261,25 @@ class ObservedFindingMetrics:
 
     def __post_init__(self) -> None:
         for label in (
+            "expected_material_findings",
+            "observed_material_findings",
+            "matched_material_findings",
+            "missed_material_findings",
+            "unjustified_late_blockers",
+            "seeded_material_regressions_detected",
             "duplicate_findings",
             "reopened_findings",
             "contradictions",
         ):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if not _bounded_count(getattr(self, label), maximum=512):
                 raise ReviewInputError(f"observed {label.replace('_', ' ')} is invalid")
+        precision = self.blocker_precision
+        if precision is not None and (
+            isinstance(precision, bool)
+            or not isinstance(precision, (int, float))
+            or not 0 <= precision <= 1
+        ):
+            raise ReviewInputError("observed blocker precision is invalid")
 
     def to_dict(self) -> dict[str, int | float | None]:
         return {
@@ -411,6 +444,14 @@ def replay_review_sequence(
     )
 
 
+def _bounded_count(value: object, *, maximum: int, allow_none: bool = False) -> bool:
+    if allow_none and value is None:
+        return True
+    return (
+        not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
+    )
+
+
 def compare_sequence_policies(
     steps: tuple[SequenceStep, ...] | list[SequenceStep],
     *,
@@ -421,18 +462,35 @@ def compare_sequence_policies(
     """Compare the compatible default with a proposed operator policy.
 
     Observation-only. Neither report publishes GitHub events, and
-    ``cap_created_approval`` stays false on both arms.
+    ``cap_created_approval`` stays false on both arms. Each factory call
+    must return a fresh in-memory ledger; a repeated instance fails closed.
     """
 
     current_policy = current or resolve_review_convergence_policy()
     proposed_policy = proposed or resolve_review_convergence_policy(
         mode="merge-focused"
     )
+    created: list[InMemorySessionLedger] = []
+
+    def isolated_factory() -> InMemorySessionLedger:
+        if ledger_factory is None:
+            ledger = InMemorySessionLedger()
+        else:
+            if not callable(ledger_factory):
+                raise ReviewInputError("sequence replay ledger factory is invalid")
+            ledger = ledger_factory()
+        if not isinstance(ledger, InMemorySessionLedger):
+            raise ReviewInputError("sequence replay ledger must be in-memory")
+        if any(ledger is item for item in created):
+            raise ReviewInputError("sequence replay ledgers must be distinct")
+        created.append(ledger)
+        return ledger
+
     current_report = replay_review_sequence(
-        steps, current_policy, ledger_factory=ledger_factory
+        steps, current_policy, ledger_factory=isolated_factory
     )
     proposed_report = replay_review_sequence(
-        steps, proposed_policy, ledger_factory=ledger_factory
+        steps, proposed_policy, ledger_factory=isolated_factory
     )
     return {
         "publication_default": DEFAULT_REVIEW_MODE,

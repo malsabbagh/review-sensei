@@ -248,8 +248,9 @@ class _ObservedHTTPResponse:
 class _ObservedGitHub:
     """Stateful host double; the production HTTP and publisher code stay live."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, unresolved_blocking_thread: bool = False) -> None:
         self.head_sha = "0" * 40
+        self.unresolved_blocking_thread = unresolved_blocking_thread
         self.reviews: list[dict[str, object]] = []
         self.calls: list[tuple[str, str, dict[str, object] | None]] = []
         self.http = GitHubHttp(
@@ -300,13 +301,31 @@ class _ObservedGitHub:
         if request.method == "GET" and path.endswith("/pulls/136/reviews"):
             return _ObservedHTTPResponse(self.reviews)
         if request.method == "POST" and path == "/graphql":
+            nodes: list[dict[str, object]] = []
+            operation = body.get("operationName") if isinstance(body, dict) else None
+            if operation == "ReviewThreads" and self.unresolved_blocking_thread:
+                nodes.append(
+                    {
+                        "isResolved": False,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "body": "[🚫 Blocking] fixture open root",
+                                    "path": "src/observed.py",
+                                    "line": 1,
+                                    "author": {"login": "reviewsensei[bot]"},
+                                }
+                            ]
+                        },
+                    }
+                )
             return _ObservedHTTPResponse(
                 {
                     "data": {
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
-                                    "nodes": [],
+                                    "nodes": nodes,
                                     "pageInfo": {
                                         "hasNextPage": False,
                                         "endCursor": None,
@@ -451,6 +470,7 @@ def run_observed_review_sequence(
     policy: ReviewConvergencePolicy,
     *,
     evidence_identity: ObservedEvidenceIdentity | None = None,
+    unresolved_blocking_thread: bool = False,
 ) -> ObservedSequenceReport:
     """Exercise service, durable admission, and publication across fresh jobs.
 
@@ -464,6 +484,18 @@ def run_observed_review_sequence(
         raise ReviewInputError("review convergence policy is invalid")
     if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)) or not steps:
         raise ReviewInputError("observed sequence requires at least one step")
+    if len(steps) > 32:
+        raise ReviewInputError("observed sequence exceeds the event limit")
+    expected_material_ids: set[str] = set()
+    fixture_finding_ids: set[str] = set()
+    for step in steps:
+        if not isinstance(step, SequenceStep):
+            raise ReviewInputError("sequence step is invalid")
+        expected_material_ids.update(step.expected_material_finding_ids)
+        fixture_finding_ids.update(step.fixture_material_finding_ids)
+        fixture_finding_ids.update(step.fixture_unqualified_finding_ids)
+    if len(expected_material_ids) > 512 or len(fixture_finding_ids) > 512:
+        raise ReviewInputError("observed material findings exceed the metric limit")
     report_identity = evidence_identity or ObservedEvidenceIdentity(
         source_identity=UNAVAILABLE_EVIDENCE_IDENTITY,
         package_identity=UNAVAILABLE_EVIDENCE_IDENTITY,
@@ -476,7 +508,7 @@ def run_observed_review_sequence(
         raise ReviewInputError("observed evidence identity is invalid")
     if report_identity.configuration_digest != policy.digest():
         raise ReviewInputError("observed evidence configuration is stale")
-    github = _ObservedGitHub()
+    github = _ObservedGitHub(unresolved_blocking_thread=unresolved_blocking_thread)
     events: list[ObservedSequenceEvent] = []
     baseline_events = 0
     command_events: list[str] = []

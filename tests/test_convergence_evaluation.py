@@ -557,6 +557,67 @@ class ObservedSequenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "duplicate findings"):
             replace(report_metrics(), duplicate_findings=None)
 
+    def test_finding_metrics_reject_negative_and_imprecise_values(self):
+        with self.assertRaisesRegex(ReviewInputError, "expected material findings"):
+            replace(report_metrics(), expected_material_findings=-1)
+        with self.assertRaisesRegex(ReviewInputError, "blocker precision"):
+            replace(report_metrics(), blocker_precision=1.5)
+
+    def test_report_rejects_an_unknown_cutover_status(self):
+        with self.assertRaisesRegex(ReviewInputError, "cutover status"):
+            ObservedSequenceReport(
+                mode="merge-focused",
+                events=(
+                    ObservedSequenceEvent(
+                        label="step",
+                        provider_calls=0,
+                        baseline_loaded=False,
+                        publication_status="handoff",
+                    ),
+                ),
+                baseline_events=0,
+                command_events=("pause:applied", "continue:applied"),
+                finding_metrics=report_metrics(),
+                execution_metrics=report_execution(),
+                shadow_isolated=False,
+                evidence_identity=report_identity(),
+                approval_events=0,
+                cap_created_approval=None,
+                cutover_status="maybe",
+                unmet_criteria=("not ready",),
+            )
+
+    def test_shared_replay_ledger_fails_closed(self):
+        shared = InMemorySessionLedger()
+        with self.assertRaisesRegex(ReviewInputError, "distinct"):
+            compare_sequence_policies(
+                (SequenceStep(head_sha="a" * 40, label="only"),),
+                ledger_factory=lambda: shared,
+            )
+
+    def test_observed_sequence_rejects_more_steps_than_the_schema(self):
+        steps = tuple(
+            SequenceStep(head_sha=f"{index:040x}", label=f"step-{index}")
+            for index in range(33)
+        )
+        with self.assertRaisesRegex(ReviewInputError, "event limit"):
+            run_observed_review_sequence(steps, _policy())
+
+    def test_unresolved_blocking_thread_withholds_approval(self):
+        step = (
+            SequenceStep(
+                head_sha="b" * 40,
+                label="clean",
+                expected_material_finding_ids=("material-a",),
+            ),
+        )
+        closed = run_observed_review_sequence(step, _policy())
+        opened = run_observed_review_sequence(
+            step, _policy(), unresolved_blocking_thread=True
+        )
+        self.assertEqual(closed.events[0].approval_events, 1)
+        self.assertEqual(opened.events[0].approval_events, 0)
+
     def test_empty_limitations_raise_review_input_error(self):
         with self.assertRaisesRegex(ReviewInputError, "limitations"):
             ObservedSequenceReport(
