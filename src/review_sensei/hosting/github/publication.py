@@ -1444,20 +1444,16 @@ class ReviewPublisher:
                     else:
                         advisory_folded.append(entry[0])
                 prepared_comments = kept_inline
-            # GitHub rejects batch review comments with subject_type=file on
-            # REQUEST_CHANGES reviews (HTTP 422). Retain them in the summary
-            # instead; COMMENT reviews may still publish file-level threads.
-            if auto_approve and has_blocking_findings(result):
-                file_level: list[ReviewComment] = []
-                inline_prepared: list[tuple[ReviewComment, str, str, str]] = []
-                for entry in prepared_comments:
-                    if entry[3] == "file":
-                        file_level.append(entry[0])
-                    else:
-                        inline_prepared.append(entry)
-                if file_level:
-                    unanchored.extend(file_level)
-                prepared_comments = inline_prepared
+            # The batch create-review input type defines no file subject type
+            # (a subject_type=file comment is rejected with HTTP 422), so a
+            # finding anchored to the file itself is always retained in the
+            # summary rather than published as an inline thread.
+            file_level = [entry[0] for entry in prepared_comments if entry[3] == "file"]
+            if file_level:
+                unanchored.extend(file_level)
+                prepared_comments = [
+                    entry for entry in prepared_comments if entry[3] != "file"
+                ]
             if unanchored:
                 summary = (
                     f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
@@ -1512,9 +1508,7 @@ class ReviewPublisher:
                 "path": comment.path,
                 "body": comment_body,
             }
-            if anchor == "file":
-                comment_payload["subject_type"] = "file"
-            elif anchor == "left":
+            if anchor == "left":
                 comment_payload["line"] = comment.line
                 comment_payload["side"] = "LEFT"
             else:

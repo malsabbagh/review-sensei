@@ -2125,7 +2125,7 @@ deleted file mode 100644
         self.assertIn("`src/app.py`", body["body"])
         self.assertIn("tighter contract", body["body"])
 
-    def test_file_level_comment_is_published_with_subject_type_file(self):
+    def test_file_level_comment_is_retained_in_summary_without_subject_type(self):
         result = ReviewResult(
             summary="File-wide finding.",
             comments=(
@@ -2143,7 +2143,6 @@ deleted file mode 100644
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
-            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -2162,11 +2161,16 @@ deleted file mode 100644
             convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertEqual(body["comments"][0]["path"], "src/app.py")
-        self.assertEqual(body["comments"][0]["subject_type"], "file")
-        self.assertNotIn("line", body["comments"][0])
-        self.assertNotIn("side", body["comments"][0])
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        # GitHub's batch create-review input type defines no file subject type
+        # and rejects a subject_type=file comment with HTTP 422, so a
+        # file-level finding is folded into the summary instead.
+        self.assertEqual(body["comments"], [])
+        self.assertNotIn("subject_type", calls[3][2].decode("utf-8"))
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("`src/app.py`", body["body"])
+        self.assertIn("tighter contract", body["body"])
 
     def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):
         head = "b" * 40
@@ -2866,6 +2870,49 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])
         self.assertIn("Proposed: Non-blocking", body["comments"][0]["body"])
+
+    def test_merge_focused_folds_admitted_file_level_blocker_without_auto_approve(
+        self,
+    ):
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        comment = ReviewComment(
+            path="src/app.py",
+            line=None,
+            side="FILE",
+            body="This file needs a tighter contract.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        # An admitted blocker stays inline in operator mode even without
+        # auto_approve, but a file-level target is not publishable inline.
+        outcome, calls = self.publish(
+            self._comment_only_responses(),
+            result=ReviewResult(
+                summary="Summary.", comments=(comment,), provider="ollama"
+            ),
+            convergence_policy=policy,
+            blocker_candidates=(facts,),
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertNotIn("subject_type", calls[-1][2].decode("utf-8"))
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["comments"], [])
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("tighter contract", body["body"])
 
     def test_confirmed_merge_focused_does_not_invent_failure_conditions(self):
         snapshot = {"src/app.py": "keep\nchange\n"}
