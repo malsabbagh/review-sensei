@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping, Sequence, cast
 
 from .context import ReviewContextCacheKey, finding_lifecycle_for_comment
-from .errors import ReviewInputError
+from .errors import ReviewInputError, ReviewModeRetiredError
 from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
 
@@ -204,7 +204,7 @@ def resolve_review_mode(explicit: str | None = None) -> str:
     raw = explicit if explicit is not None else os.getenv(REVIEW_MODE_ENV)
     mode = normalize_review_mode(raw)
     if mode == LEGACY_REVIEW_MODE:
-        raise ReviewInputError(
+        raise ReviewModeRetiredError(
             "legacy review mode is retired; migrate configuration to merge-focused"
         )
     return mode

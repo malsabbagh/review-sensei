@@ -411,7 +411,12 @@ enumeration use ``partial``. Both values block auto-approval via
 legacy right-side contract. `LEFT` is a deleted old-file line. `FILE` is a
 path-level concern and omits `line`. The GitHub publisher validates those
 locations against the exact snapshot and retains unrepresentable findings in
-the review body instead of dropping them.
+the review body instead of dropping them. File-level (`FILE`) findings are
+always folded into the review summary body for every review event: GitHub's
+batch create-review request type defines no file subject type and requires a
+`position`, so a file-level entry is rejected with HTTP 422 regardless of the
+review event. Inline threads are reserved for findings that carry a valid
+snapshot line.
 
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
@@ -536,7 +541,7 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
-| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `merge-focused` (default), `advisory`, or `strict`. Explicit historical `legacy` configuration must migrate to `merge-focused` before inference or writes. |
+| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `merge-focused` (default), `advisory`, or `strict`. Explicit historical `legacy` configuration must migrate to `merge-focused` before inference or writes; resolution raises `ReviewModeRetiredError` (a `ReviewInputError` subclass) at flag/env resolution time, before `run_doctor`, `build_plan`, or inference work begins. |
 | `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; `github review` write-through). The GitHub review flag does not affect `reply` or other GitHub subcommands. Requires repository and pull-request identity |
  | none | `REVIEWSENSEI_REVIEW_SHADOW` | Observation-only operator mode (`advisory`, `merge-focused`, or `strict`). Never changes GitHub publication; `legacy` is rejected |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
@@ -739,6 +744,7 @@ Expected failures expose `error_category` on the exception class:
 | Class | Category |
 | --- | --- |
 | `ReviewInputError` | `input` |
+| `ReviewModeRetiredError` (subclass of `ReviewInputError`) | `input` |
 | `ReviewFormatError` | `format` |
 | `LearningLoadError` | `learning` |
 | `ContextLoadError` | `context` |

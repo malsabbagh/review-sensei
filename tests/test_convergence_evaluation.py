@@ -30,7 +30,7 @@ from review_sensei.convergence import (
     resolve_shadow_review_mode,
 )
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewInputError, ReviewModeRetiredError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.observed import (
     _admitted_material_ids,
@@ -992,11 +992,21 @@ class ShadowObservationTests(unittest.TestCase):
             {REVIEW_MODE_ENV: "legacy", REVIEW_SHADOW_ENV: "legacy"},
         ):
             with self.assertRaisesRegex(
-                ReviewInputError, "legacy review mode is retired"
+                ReviewModeRetiredError, "legacy review mode is retired"
             ):
                 resolve_review_mode()
             with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
                 resolve_shadow_review_mode()
+
+    def test_retired_mode_error_is_a_distinguishable_input_subclass(self):
+        # Embedders that only catch ReviewInputError around inference keep
+        # working, while callers that want to special-case retirement can
+        # catch the dedicated subclass for the earlier env/flag resolution.
+        self.assertTrue(issubclass(ReviewModeRetiredError, ReviewInputError))
+        self.assertFalse(issubclass(ReviewInputError, ReviewModeRetiredError))
+        with self.assertRaises(ReviewModeRetiredError):
+            resolve_review_mode("legacy")
+        self.assertEqual(ReviewModeRetiredError.error_category, "input")
 
     def test_shadow_resolution_ignores_the_ambient_review_mode_env(self):
         # The shadow resolver reads only REVIEW_SHADOW_ENV. An ambient legacy

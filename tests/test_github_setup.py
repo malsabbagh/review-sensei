@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -764,6 +765,49 @@ class SetupPullRequestServiceTests(unittest.TestCase):
                     MANAGED_V4_RECOGNITION_SHA256[name],
                 )
 
+    def test_frozen_digests_match_the_worker_sources_and_fixture_bytes(self):
+        # The frozen digests are declared in the Python module, the Worker
+        # sources, and this suite. Nothing keeps the copies in sync
+        # automatically, so this guard reads the Worker sources and the
+        # rendered fixture bytes and fails on any drift between the three.
+        root = Path(__file__).resolve().parents[1]
+        managed_source = (
+            root / "deploy/cloudflare/src/managed-v4-recognition-artifacts.ts"
+        ).read_text(encoding="utf-8")
+        released_source = (
+            root / "deploy/cloudflare/src/released-runner-switch-v4-caller.ts"
+        ).read_text(encoding="utf-8")
+
+        def declared(source: str, name: str) -> str:
+            match = re.search(rf'{name}_SHA256\s*=\s*"([0-9a-f]{{64}})"', source)
+            self.assertIsNotNone(match, f"{name}_SHA256 is missing from {source!r}")
+            return match.group(1)
+
+        worker_constants = {
+            "caller": declared(managed_source, "MERGE_FOCUSED_V4_CALLER"),
+            "uninstall": declared(managed_source, "HISTORICAL_V4_UNINSTALL"),
+            "config": declared(managed_source, "MERGE_FOCUSED_V4_CONFIG"),
+        }
+        self.assertEqual(set(worker_constants), set(MANAGED_V4_RECOGNITION_SHA256))
+        for name, content in (
+            ("caller", _merge_focused_v4_workflow("v5")),
+            ("uninstall", _historical_v4_uninstall_workflow()),
+            ("config", _v4_with_review_mode_config_file()),
+        ):
+            digest = hashlib.sha256(content.encode()).hexdigest()
+            with self.subTest(name=name):
+                self.assertEqual(digest, MANAGED_V4_RECOGNITION_SHA256[name])
+                self.assertEqual(digest, worker_constants[name])
+        released = _released_runner_switch_v4_workflow("v4")
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            declared(released_source, "RELEASED_RUNNER_SWITCH_V4"),
+        )
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+        )
+
     def test_managed_v4_recognition_does_not_read_the_current_templates(self):
         from unittest.mock import patch
 
@@ -825,6 +869,65 @@ class SetupPullRequestServiceTests(unittest.TestCase):
                 ):
                     with self.assertRaises(GitHubSetupError):
                         _merge_focused_v4_workflow("stable")
+
+    def test_marker_reverted_current_workflow_is_not_recognized_as_managed_v4(self):
+        # A manually reverted marker must not turn live setup-v5 bytes into
+        # managed-v4 content: the marker==4 branch accepts only the frozen
+        # historical templates, and no live renderer's bytes are among them.
+        from review_sensei.hosting.github import setup as setup_module
+
+        tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
+        current = _tagged_workflow(tag)
+        self.assertEqual(current, setup_module._resolve_trigger_workflow(tag))
+        reverted = current.replace(
+            "# ReviewSensei setup version: 5",
+            "# ReviewSensei setup version: 4",
+            1,
+        )
+        self.assertNotEqual(reverted, current)
+        self.assertFalse(
+            setup_module._looks_like_managed_v4_setup(
+                WORKFLOW_PATH,
+                reverted,
+            )
+        )
+        self.assertNotIn(
+            current,
+            {
+                _merge_focused_v4_workflow(tag),
+                _released_runner_switch_v4_workflow(tag),
+                _provider_parity_workflow(tag),
+                _provider_parity_workflow_before_draft_skip(tag),
+                setup_module._historical_tagged_v4_workflow(tag),
+                setup_module._previous_provider_parity_workflow(tag),
+                _historical_provider_parity_workflow(tag),
+            },
+        )
+        self.assertFalse(
+            setup_module._looks_like_managed_v4_setup(
+                CONFIG_PATH,
+                setup_module._current_config_file().replace(
+                    "# ReviewSensei setup version: 5",
+                    "# ReviewSensei setup version: 4",
+                    1,
+                ),
+            )
+        )
+        # The uninstall is the one reverted-marker shape that matches, because
+        # the shipped v4 uninstall is byte-identical to the current bytes apart
+        # from the marker line: recognition there is exact, not a fail-open.
+        self.assertEqual(
+            setup_module._current_uninstall_workflow().replace(
+                "# ReviewSensei setup version: 5",
+                "# ReviewSensei setup version: 4",
+                1,
+            ),
+            _historical_v4_uninstall_workflow(),
+        )
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = reverted
+        self.assertEqual(setup_module._classify_setup_files(files), "unknown")
 
     def test_immediate_pre_cutover_v4_setup_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
@@ -1522,7 +1625,18 @@ class GitHubSetupClientTests(unittest.TestCase):
         )
 
     def test_client_leaves_operator_review_mode_values_untouched(self):
-        for value in ("merge-focused", "advisory", "strict", ""):
+        # The prototype-named values cover the JS twin's own-property guard:
+        # the Python mapping is a dict, so a lookup can never resolve an
+        # inherited member for them either.
+        for value in (
+            "merge-focused",
+            "advisory",
+            "strict",
+            "",
+            "__proto__",
+            "constructor",
+            "toString",
+        ):
             with self.subTest(value=value):
                 client, calls = self.make_client(
                     (

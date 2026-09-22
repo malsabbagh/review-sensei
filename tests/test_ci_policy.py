@@ -68,6 +68,22 @@ def _job_section(text: str, job_id: str) -> str:
     return text[start:end]
 
 
+def _job_ids(text: str) -> list[str]:
+    """Return every job id defined under the workflow's `jobs:` mapping."""
+
+    match = re.search(r"^jobs:\n", text, flags=re.M)
+    if match is None:
+        raise AssertionError("the workflow defines no jobs")
+    ids: list[str] = []
+    for candidate in text[match.end() :].splitlines():
+        if candidate and not candidate.startswith(" "):
+            break
+        key = re.match(r"^  ([A-Za-z0-9_-]+):$", candidate)
+        if key is not None:
+            ids.append(key.group(1))
+    return ids
+
+
 def _named_steps(job_text: str) -> list[str]:
     return [
         match.group(1)
@@ -1048,12 +1064,29 @@ class ActionPinPolicyTests(unittest.TestCase):
         # ledger. The local-CLI path without a ledger is the operator
         # diagnostics case documented in docs/diagnostics.md and ADR 0055.
         text = _reusable_workflow_text()
-        invocations = [
-            block for block in _run_blocks(text) if "github review \\" in block
-        ]
-        self.assertEqual(len(invocations), 3)
-        for block in invocations:
-            self.assertIn("--github-session-ledger", block)
+        sites: set[tuple[str, str]] = set()
+        for job_id in _job_ids(text):
+            job = _job_section(text, job_id)
+            for name in _named_steps(job):
+                for run in _run_blocks(_step_block(job, name)):
+                    if "github review \\" not in run:
+                        continue
+                    sites.add((job_id, name))
+                    self.assertIn("--github-session-ledger", run)
+        # Pin the exact (job, step) invocation sites instead of a bare count,
+        # so a new or split job fails here by name while a future job added
+        # elsewhere is still swept by the loop above.
+        self.assertEqual(
+            sites,
+            {
+                ("cloud", "Publish or promote validated review through the broker"),
+                (
+                    "openrouter",
+                    "Publish or promote validated review through the broker",
+                ),
+                ("local", "Publish or promote trusted local review and learnings"),
+            },
+        )
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
         root = Path(__file__).resolve().parents[1]

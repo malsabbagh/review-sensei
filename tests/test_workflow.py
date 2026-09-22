@@ -59,6 +59,9 @@ class WorkflowValidationTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", workflow)
+        # The positive form above would still pass if a second, later default
+        # re-enabled the retired mode, so pin the retired value out entirely.
+        self.assertNotIn("default: legacy", workflow)
         self.assertIn(
             "legacy review mode is retired; migrate configuration to merge-focused",
             workflow,

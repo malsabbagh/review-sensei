@@ -899,10 +899,13 @@ export class GitHubSetupService {
     if (typeof data.value !== "string") {
       return;
     }
-    const replacement = RETIRED_REVIEW_MODE_MIGRATIONS[data.value];
-    if (replacement === undefined) {
+    // Own-property check: a bare index into the migration record resolves
+    // inherited members for "__proto__"/"constructor"/"toString" instead of
+    // returning undefined, which would PATCH a non-string value.
+    if (!Object.hasOwn(RETIRED_REVIEW_MODE_MIGRATIONS, data.value)) {
       return;
     }
+    const replacement = RETIRED_REVIEW_MODE_MIGRATIONS[data.value];
     const updated = await this.request("PATCH", variablePath, token, {
       name: RETIRED_REVIEW_MODE_VARIABLE,
       value: replacement,

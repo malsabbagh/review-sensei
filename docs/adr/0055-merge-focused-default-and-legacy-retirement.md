@@ -85,6 +85,18 @@ historical artifacts: their literal contents describe the setup-v4 era and are
 not documentation of current behavior, so they are read as recognition
 evidence only and never as a source of the live tag or template.
 
+File-level findings are folded into the review summary body on every review
+event. The previous publisher folded them only when the event would be
+`REQUEST_CHANGES`; the batch create-review request type defines no file
+subject type and requires a `position`, and a direct probe on a `COMMENT`
+review rejects a file-level entry with HTTP 422
+(`subjectType` is not defined on `DraftPullRequestReviewComment`, `position`
+is required). Because the schema is event-independent, the conditional could
+never have produced a per-file thread on a non-blocking review. Unifying the
+fold removes a latent `publication_failed` path without reducing what a
+non-blocking review conveys; the publisher contract in
+`docs/public-contracts.md` documents the behavior.
+
 ## Validation
 
 Exercise default and explicit-mode unit tests, generated workflow/setup tests,

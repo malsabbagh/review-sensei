@@ -11,6 +11,7 @@ import {
 import {
   RETIRED_REVIEW_MODE_VARIABLE,
   SETUP_FILE_PATHS,
+  SETUP_VARIABLES,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
@@ -180,6 +181,15 @@ class FakeGitHub {
       return { status: 200, data: { value: value ?? "operator-owned" } };
     }
     if (method === "POST" && path.endsWith("/actions/variables")) {
+      // GitHub persists the created variable, so a later read returns the
+      // created value instead of a second 404.
+      if (
+        requestBody &&
+        typeof requestBody.name === "string" &&
+        typeof requestBody.value === "string"
+      ) {
+        this.variableValues[requestBody.name] = requestBody.value;
+      }
       return { status: 201, data: null };
     }
     if (method === "PATCH" && path.includes("/actions/variables/")) {
@@ -455,9 +465,45 @@ describe("setup repository reconciliation", () => {
     expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
   });
 
-  it("ignores a missing review mode variable during migration", async () => {
+  it("leaves prototype-named review mode values untouched", async () => {
+    for (const value of ["__proto__", "constructor", "toString"]) {
+      const fake = new FakeGitHub();
+      // The entry is defined directly because a plain assignment through the
+      // fake's record is not guaranteed to create an own property for every
+      // value name the API could return.
+      Object.defineProperty(fake.variableValues, RETIRED_REVIEW_MODE_VARIABLE, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+      ]);
+      expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+    }
+  });
+
+  it("leaves a freshly created default review mode variable untouched", async () => {
     const fake = new FakeGitHub();
     fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = null;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    // A fresh install creates the variable with the generated default, so
+    // the migration pass reads that value and issues no PATCH at all.
+    const created = SETUP_VARIABLES.find(
+      ({ name }) => name === RETIRED_REVIEW_MODE_VARIABLE,
+    );
+    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe(created?.value);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+  });
+
+  it("ignores a review mode variable still absent after migration read", async () => {
+    const fake = new FakeGitHub();
+    fake.missingVariables = true;
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
