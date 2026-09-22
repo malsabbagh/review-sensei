@@ -5,7 +5,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Mapping, cast
+from typing import Any, Mapping, Sequence, cast
 from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
@@ -295,6 +295,53 @@ def _validate_configuration_context(value: Mapping[str, object]) -> None:
     publication_mode = value.get("publication_mode")
     if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
         raise ReviewInputError("review transaction publication_mode is invalid")
+
+
+def transaction_stage_identity(
+    stages: Sequence[Any],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Stage and category identity used by the transaction configuration digest."""
+
+    stage_identity = [
+        {
+            "name": stage.name,
+            "outputs": list(stage.outputs),
+            "categories": [category.id for category in stage.categories],
+            "provider_profile": stage.provider_profile,
+        }
+        for stage in stages
+    ]
+    category_policy = sorted(
+        {category.id for stage in stages for category in stage.categories}
+    )
+    return stage_identity, category_policy
+
+
+def build_transaction_configuration_context(
+    *,
+    provider: Mapping[str, object],
+    model: str | None,
+    stages: Sequence[Mapping[str, object]],
+    category_policy: Sequence[str],
+    publication_mode: str,
+    orchestration_enabled: bool,
+    continue_rounds: int,
+) -> dict[str, object]:
+    """Closed configuration identity shared by analysis and publication."""
+
+    context: dict[str, object] = {
+        "provider": dict(provider),
+        "model": model,
+        "stages": [dict(stage) for stage in stages],
+        "category_policy": sorted(category_policy),
+        "orchestration": {
+            "enabled": orchestration_enabled,
+            "continue_rounds": continue_rounds,
+        },
+        "publication_mode": publication_mode,
+    }
+    _validate_configuration_context(context)
+    return context
 
 
 def _validate_policy_context(value: Mapping[str, object]) -> None:

@@ -28,7 +28,13 @@ from .learnings import (
     load_repository_learnings,
     summarize_learning_feedback,
 )
-from .models import LearningEntry, ReviewRequest, ReviewTransaction
+from .models import (
+    LearningEntry,
+    ReviewRequest,
+    ReviewTransaction,
+    build_transaction_configuration_context,
+    transaction_stage_identity,
+)
 from .outcomes import (
     DEFAULT_RECOVERY_TTL_SECONDS,
     RecoveryArtifact,
@@ -2278,15 +2284,22 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                     f"approval_events={observed.approval_events} "
                     f"cap_created_approval={observed.cap_created_approval}\n"
                 )
-            if UNAVAILABLE_EVIDENCE_IDENTITY in {
-                args.source_identity,
-                args.package_identity,
-                args.workflow_identity,
-            }:
+            unavailable_fields = [
+                label
+                for label, value in (
+                    ("source", args.source_identity),
+                    ("package", args.package_identity),
+                    ("workflow", args.workflow_identity),
+                )
+                if value == UNAVAILABLE_EVIDENCE_IDENTITY
+            ]
+            if unavailable_fields:
+                named = ", ".join(unavailable_fields)
+                verb = "is" if len(unavailable_fields) == 1 else "are"
                 sys.stderr.write(
-                    "observed evidence identity uses the unavailable sentinel; "
-                    "cutover_status cannot pass until source, package, and "
-                    "workflow identities are explicit\n"
+                    "observed evidence identity unavailable for "
+                    f"{named}; cutover_status cannot pass until {named} {verb} "
+                    "explicit\n"
                 )
             return 0 if observed.cutover_status == "passed" else 1
         report = replay_review_sequence(steps, policy)
@@ -2653,34 +2666,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             if transaction_requested:
                 effective_base_sha = resolved_base_sha or ""
-                stage_identity = [
-                    {
-                        "name": stage.name,
-                        "outputs": list(stage.outputs),
-                        "categories": [category.id for category in stage.categories],
-                        "provider_profile": stage.provider_profile,
-                    }
-                    for stage in (stages if stages is not None else DEFAULT_STAGES)
-                ]
-                transaction_configuration_context = {
-                    "provider": transaction_provider_identity,
-                    "model": transaction_model,
-                    "stages": stage_identity,
-                    "category_policy": sorted(
-                        {
-                            category.id
-                            for stage in (
-                                stages if stages is not None else DEFAULT_STAGES
-                            )
-                            for category in stage.categories
-                        }
-                    ),
-                    "orchestration": {
-                        "enabled": orchestrate,
-                        "continue_rounds": getattr(args, "continue_rounds", 0),
-                    },
-                    "publication_mode": policy.mode,
-                }
+                effective_stages = stages if stages is not None else DEFAULT_STAGES
+                stage_identity, category_policy = transaction_stage_identity(
+                    effective_stages
+                )
+                transaction_configuration_context = (
+                    build_transaction_configuration_context(
+                        provider=transaction_provider_identity,
+                        model=transaction_model,
+                        stages=stage_identity,
+                        category_policy=category_policy,
+                        publication_mode=policy.mode,
+                        orchestration_enabled=orchestrate,
+                        continue_rounds=getattr(args, "continue_rounds", 0),
+                    )
+                )
                 transaction_configuration_digest = (
                     ReviewTransaction.compute_configuration_digest(
                         transaction_configuration_context

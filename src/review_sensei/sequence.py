@@ -7,6 +7,7 @@ installed default or emit GitHub events. Shadow mode is observation-only.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -44,6 +45,7 @@ class SequenceStep:
     expected_material_finding_ids: tuple[str, ...] = ()
     expected_non_material_finding_ids: tuple[str, ...] = ()
     fixture_material_finding_ids: tuple[str, ...] = ()
+    fixture_unqualified_finding_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.head_sha, str) or not self.head_sha.strip():
@@ -56,6 +58,7 @@ class SequenceStep:
             ("expected material finding", self.expected_material_finding_ids),
             ("expected non-material finding", self.expected_non_material_finding_ids),
             ("fixture material finding", self.fixture_material_finding_ids),
+            ("fixture unqualified finding", self.fixture_unqualified_finding_ids),
         ):
             if (
                 not isinstance(values, tuple)
@@ -68,6 +71,7 @@ class SequenceStep:
                 )
                 or (
                     label != "fixture material finding"
+                    and label != "fixture unqualified finding"
                     and len(values) != len(set(values))
                 )
             ):
@@ -76,6 +80,10 @@ class SequenceStep:
             self.expected_non_material_finding_ids
         ):
             raise ReviewInputError("expected finding labels are contradictory")
+        if set(self.fixture_material_finding_ids) & set(
+            self.fixture_unqualified_finding_ids
+        ):
+            raise ReviewInputError("fixture finding labels are contradictory")
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,9 @@ class SequenceReport:
         return payload
 
 
+# Observed report types are provider-neutral evidence documents. The runner
+# that produces them lives beside the host adapter, so this module stays free
+# of host imports and can be imported without that adapter.
 @dataclass(frozen=True)
 class ObservedSequenceEvent:
     """One actual service-to-publication attempt captured by the F6 harness."""
@@ -177,6 +188,20 @@ class ObservedSequenceReport:
         "This harness is evidence for deterministic component behavior, not real-world model recall.",
     )
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.limitations, tuple)
+            or not 1 <= len(self.limitations) <= 8
+        ):
+            raise ReviewInputError("observed report limitations are invalid")
+        for item in self.limitations:
+            if (
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item.encode("utf-8")) > 256
+            ):
+                raise ReviewInputError("observed report limitations are invalid")
+
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "schema_version": PUBLIC_SCHEMA_VERSION,
@@ -209,9 +234,19 @@ class ObservedFindingMetrics:
     unjustified_late_blockers: int
     blocker_precision: float | None
     seeded_material_regressions_detected: int
-    duplicate_findings: int | None = None
-    reopened_findings: int | None = None
-    contradictions: int | None = None
+    duplicate_findings: int = 0
+    reopened_findings: int = 0
+    contradictions: int = 0
+
+    def __post_init__(self) -> None:
+        for label in (
+            "duplicate_findings",
+            "reopened_findings",
+            "contradictions",
+        ):
+            value = getattr(self, label)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ReviewInputError(f"observed {label.replace('_', ' ')} is invalid")
 
     def to_dict(self) -> dict[str, int | float | None]:
         return {
@@ -291,12 +326,20 @@ def replay_review_sequence(
     repository: str = "owner/repo",
     pull_request: int = 136,
     now: datetime | None = None,
+    ledger_factory: Callable[[], InMemorySessionLedger] | None = None,
 ) -> SequenceReport:
     """Replay bounded review attempts against C1/C5 admission."""
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
-    ledger = InMemorySessionLedger()
+    if ledger_factory is None:
+        ledger: InMemorySessionLedger = InMemorySessionLedger()
+    else:
+        if not callable(ledger_factory):
+            raise ReviewInputError("sequence replay ledger factory is invalid")
+        ledger = ledger_factory()
+        if not isinstance(ledger, InMemorySessionLedger):
+            raise ReviewInputError("sequence replay ledger must be in-memory")
     identity = SessionIdentity(repository, pull_request)
     current = now or datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
     outcomes: list[SequenceStepOutcome] = []
@@ -373,6 +416,7 @@ def compare_sequence_policies(
     *,
     current: ReviewConvergencePolicy | None = None,
     proposed: ReviewConvergencePolicy | None = None,
+    ledger_factory: Callable[[], InMemorySessionLedger] | None = None,
 ) -> dict[str, object]:
     """Compare the compatible default with a proposed operator policy.
 
@@ -384,8 +428,12 @@ def compare_sequence_policies(
     proposed_policy = proposed or resolve_review_convergence_policy(
         mode="merge-focused"
     )
-    current_report = replay_review_sequence(steps, current_policy)
-    proposed_report = replay_review_sequence(steps, proposed_policy)
+    current_report = replay_review_sequence(
+        steps, current_policy, ledger_factory=ledger_factory
+    )
+    proposed_report = replay_review_sequence(
+        steps, proposed_policy, ledger_factory=ledger_factory
+    )
     return {
         "publication_default": DEFAULT_REVIEW_MODE,
         "current": current_report.to_dict(),

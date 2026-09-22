@@ -6,7 +6,10 @@ import json
 import os
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from review_sensei.baseline import (
@@ -30,18 +33,34 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.observed import (
     _ObservedHTTPResponse,
+    _ObservedProvider,
+    observed_cutover_gaps,
+    observed_publication_configuration,
     restored_compatible_baseline,
     run_observed_review_sequence,
 )
 from review_sensei.hosting.github.publication import PublicationResult
-from review_sensei.models import ReviewResult
+from review_sensei.models import (
+    ReviewResult,
+    ReviewTransaction,
+    build_transaction_configuration_context,
+    transaction_stage_identity,
+)
 from review_sensei.sequence import (
     UNAVAILABLE_EVIDENCE_IDENTITY,
+    ObservedSequenceEvent,
+    ObservedSequenceReport,
     SequenceStep,
     compare_sequence_policies,
     replay_review_sequence,
 )
-from review_sensei.session import InMemorySessionLedger, SessionIdentity, SessionRecord
+from review_sensei.service import ReviewService
+from review_sensei.session import (
+    InMemorySessionLedger,
+    LocalSessionLedger,
+    SessionIdentity,
+    SessionRecord,
+)
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -456,6 +475,296 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(first + rest, response.body)
         self.assertEqual(response.read(8), b"")
 
+    def test_unqualified_fixture_comments_are_rejected_by_admission(self):
+        report = run_observed_review_sequence(
+            (
+                SequenceStep(
+                    head_sha="a" * 40,
+                    expected_material_finding_ids=("material-a",),
+                    fixture_material_finding_ids=("material-a",),
+                    fixture_unqualified_finding_ids=("material-weak",),
+                    label="mixed-evidence",
+                ),
+            ),
+            _policy(),
+        )
+        metrics = report.finding_metrics
+        self.assertEqual(metrics.observed_material_findings, 1)
+        self.assertEqual(metrics.matched_material_findings, 1)
+        self.assertEqual(metrics.unjustified_late_blockers, 0)
+        self.assertEqual(metrics.missed_material_findings, 0)
+
+    def test_harness_configuration_matches_the_shared_transaction_builder(self):
+        provider = _ObservedProvider()
+        service = ReviewService(provider)
+        policy = _policy()
+        context = observed_publication_configuration(provider, service.stages, policy)
+        stages, categories = transaction_stage_identity(service.stages)
+        production = build_transaction_configuration_context(
+            provider={
+                "name": provider.name,
+                "profile": None,
+                "base_url": None,
+                "timeout_seconds": None,
+                "max_output_tokens": None,
+                "allow_custom_endpoint": False,
+                "openrouter_policy": None,
+            },
+            model=provider.model,
+            stages=stages,
+            category_policy=categories,
+            publication_mode=policy.mode,
+            orchestration_enabled=False,
+            continue_rounds=0,
+        )
+        self.assertEqual(context, production)
+        self.assertEqual(
+            ReviewTransaction.compute_configuration_digest(context),
+            ReviewTransaction.compute_configuration_digest(production),
+        )
+
+    def test_local_ledger_load_rereads_disk(self):
+        identity = SessionIdentity("owner/repo", 136, repository_id=136)
+        with TemporaryDirectory() as root:
+            writer = LocalSessionLedger(Path(root))
+            created = writer.initialize(identity, now=FIXED_NOW)
+            reader = LocalSessionLedger(Path(root))
+            loaded = reader.load(identity, now=FIXED_NOW)
+        self.assertIsNotNone(loaded.record)
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.record_sha256, created.record_sha256)
+        self.assertIsNot(reader, writer)
+
+    def test_shadow_factory_failure_does_not_replace_ledger_classes(self):
+        original_memory = InMemorySessionLedger.__init__
+        original_local = LocalSessionLedger.__init__
+        original_application = GitHubApplication.__init__
+
+        def fail_factory() -> InMemorySessionLedger:
+            raise ReviewInputError("shadow factory failed")
+
+        with self.assertRaisesRegex(ReviewInputError, "shadow factory failed"):
+            compare_sequence_policies(
+                (SequenceStep(head_sha="a" * 40, label="only"),),
+                ledger_factory=fail_factory,
+            )
+        self.assertIs(InMemorySessionLedger.__init__, original_memory)
+        self.assertIs(LocalSessionLedger.__init__, original_local)
+        self.assertIs(GitHubApplication.__init__, original_application)
+        self.assertIsInstance(InMemorySessionLedger(), InMemorySessionLedger)
+
+    def test_null_finding_counters_raise_review_input_error(self):
+        with self.assertRaisesRegex(ReviewInputError, "duplicate findings"):
+            replace(report_metrics(), duplicate_findings=None)
+
+    def test_empty_limitations_raise_review_input_error(self):
+        with self.assertRaisesRegex(ReviewInputError, "limitations"):
+            ObservedSequenceReport(
+                mode="merge-focused",
+                events=(
+                    ObservedSequenceEvent(
+                        label="step",
+                        provider_calls=0,
+                        baseline_loaded=False,
+                        publication_status="handoff",
+                    ),
+                ),
+                baseline_events=0,
+                command_events=("pause:applied", "continue:applied"),
+                finding_metrics=report_metrics(),
+                execution_metrics=report_execution(),
+                shadow_isolated=False,
+                evidence_identity=report_identity(),
+                approval_events=0,
+                cap_created_approval=None,
+                cutover_status="not_ready",
+                unmet_criteria=("not ready",),
+                limitations=(),
+            )
+
+    def test_each_cutover_gate_has_its_own_message(self):
+        base = passing_cutover_inputs()
+        self.assertEqual(observed_cutover_gaps(**base), ())
+        published = ObservedSequenceEvent(
+            label="published",
+            provider_calls=1,
+            baseline_loaded=True,
+            publication_status="published",
+            approval_events=0,
+        )
+        cases = {
+            "cap_created_approval": (
+                None,
+                "the configured round cap was not observed with zero new approval events",
+            ),
+            "completed_rounds": (
+                0,
+                "the configured initial and verification round budget was not fully exercised",
+            ),
+            "events": (
+                (published,),
+                "an over-cap request did not prove zero new inference",
+            ),
+            "shadow_isolated": (
+                False,
+                "shadow comparison isolation was not observed",
+            ),
+            "command_events": (
+                ("pause:ignored", "continue:applied"),
+                "durable maintainer command evidence is incomplete",
+            ),
+            "expected_material_finding_ids": (
+                set(),
+                "no maintainer-labelled material regression was supplied",
+            ),
+            "observed_material_finding_ids": (
+                set(),
+                "a labelled material regression was missed",
+            ),
+            "duplicate_findings": (
+                1,
+                "duplicate, reopened, or contradictory finding evidence requires adjudication",
+            ),
+            "source_identity": (
+                UNAVAILABLE_EVIDENCE_IDENTITY,
+                "installed source, package, and workflow identities are unavailable",
+            ),
+        }
+        no_baseline = tuple(
+            ObservedSequenceEvent(
+                label=event.label,
+                provider_calls=event.provider_calls,
+                baseline_loaded=False,
+                publication_status=event.publication_status,
+                handoff_reason=event.handoff_reason,
+                approval_events=event.approval_events,
+            )
+            for event in base["events"]
+        )
+        cases_with_events = {
+            "no fresh job loaded a durable completed baseline": no_baseline,
+            "no successful application publication was observed": tuple(
+                ObservedSequenceEvent(
+                    label=event.label,
+                    provider_calls=event.provider_calls,
+                    baseline_loaded=event.baseline_loaded,
+                    publication_status="handoff",
+                    handoff_reason=event.handoff_reason or "round-budget-exhausted",
+                    approval_events=0,
+                )
+                for event in base["events"]
+            ),
+            "an unjustified material blocker was observed": None,
+        }
+        for field, (value, message) in cases.items():
+            kwargs = dict(base)
+            kwargs[field] = value
+            self.assertIn(message, observed_cutover_gaps(**kwargs), field)
+        self.assertIn(
+            "no fresh job loaded a durable completed baseline",
+            observed_cutover_gaps(**{**base, "events": no_baseline}),
+        )
+        handoffs = cases_with_events[
+            "no successful application publication was observed"
+        ]
+        self.assertIn(
+            "no successful application publication was observed",
+            observed_cutover_gaps(**{**base, "events": handoffs}),
+        )
+        self.assertIn(
+            "an unjustified material blocker was observed",
+            observed_cutover_gaps(
+                **{**base, "observed_material_finding_ids": {"material-a", "extra"}}
+            ),
+        )
+
+
+def report_metrics():
+    from review_sensei.sequence import ObservedFindingMetrics
+
+    return ObservedFindingMetrics(
+        expected_material_findings=0,
+        observed_material_findings=0,
+        matched_material_findings=0,
+        missed_material_findings=0,
+        unjustified_late_blockers=0,
+        blocker_precision=None,
+        seeded_material_regressions_detected=0,
+    )
+
+
+def report_execution():
+    from review_sensei.sequence import ObservedExecutionMetrics
+
+    return ObservedExecutionMetrics(
+        completed_rounds=0,
+        handoffs=0,
+        provider_calls=0,
+        failed_attempts=0,
+    )
+
+
+def report_identity():
+    from review_sensei.sequence import ObservedEvidenceIdentity
+
+    return ObservedEvidenceIdentity(
+        source_identity="source",
+        package_identity="package",
+        workflow_identity="workflow",
+        configuration_digest="a" * 64,
+        fixture_identity="fixture",
+        command="review-sensei evaluate-convergence --observed",
+    )
+
+
+def passing_cutover_inputs() -> dict[str, object]:
+    events = (
+        ObservedSequenceEvent(
+            label="initial",
+            provider_calls=1,
+            baseline_loaded=False,
+            publication_status="published",
+        ),
+        ObservedSequenceEvent(
+            label="verification",
+            provider_calls=1,
+            baseline_loaded=True,
+            publication_status="published",
+            approval_events=1,
+        ),
+        ObservedSequenceEvent(
+            label="repeat",
+            provider_calls=1,
+            baseline_loaded=True,
+            publication_status="published",
+            approval_events=1,
+        ),
+        ObservedSequenceEvent(
+            label="over-cap",
+            provider_calls=0,
+            baseline_loaded=True,
+            publication_status="handoff",
+            handoff_reason="round-budget-exhausted",
+        ),
+    )
+    return {
+        "events": events,
+        "cap_created_approval": False,
+        "completed_rounds": 3,
+        "required_rounds": 3,
+        "provider_calls": 3,
+        "shadow_isolated": True,
+        "command_events": ("pause:applied", "continue:applied"),
+        "expected_material_finding_ids": {"material-a"},
+        "observed_material_finding_ids": {"material-a"},
+        "duplicate_findings": 0,
+        "reopened_findings": 0,
+        "contradictions": 0,
+        "source_identity": "source",
+        "package_identity": "package",
+        "workflow_identity": "workflow",
+    }
+
 
 class ShadowObservationTests(unittest.TestCase):
     def test_shadow_rejects_legacy_and_is_observation_only(self):
@@ -590,7 +899,8 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
             "installed source, package, and workflow identities are unavailable",
             payload["unmet_criteria"],
         )
-        self.assertIn("unavailable sentinel", stderr.getvalue())
+        self.assertIn("unavailable for source, workflow", stderr.getvalue())
+        self.assertNotIn("package", stderr.getvalue())
 
     def test_cli_observed_rejects_compare_default(self):
         stderr = io.StringIO()
@@ -637,7 +947,7 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
             "installed source, package, and workflow identities are unavailable",
             payload["unmet_criteria"],
         )
-        self.assertNotIn("unavailable sentinel", stderr.getvalue())
+        self.assertNotIn("unavailable for", stderr.getvalue())
         self.assertNotEqual(
             payload["evidence_identity"]["source_identity"],
             UNAVAILABLE_EVIDENCE_IDENTITY,

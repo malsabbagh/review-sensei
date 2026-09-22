@@ -23,7 +23,13 @@ from ...baseline import (
 from ...context import ReviewContextCacheKey, build_review_context_cache_key
 from ...convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from ...errors import ReviewInputError
-from ...models import ProviderResponse, ReviewRequest, ReviewTransaction
+from ...models import (
+    ProviderResponse,
+    ReviewRequest,
+    ReviewTransaction,
+    build_transaction_configuration_context,
+    transaction_stage_identity,
+)
 from ...sequence import (
     UNAVAILABLE_EVIDENCE_IDENTITY,
     ObservedEvidenceIdentity,
@@ -102,36 +108,95 @@ def _admitted_material_ids(comments: Sequence[Any]) -> tuple[str, ...]:
     admitted: list[str] = []
     for comment in comments:
         body = comment.body
-        if (
-            comment.effective_blocking is True
-            and isinstance(body, str)
-            and body.startswith("fixture-material:")
-        ):
-            admitted.append(body.removeprefix("fixture-material:"))
+        if comment.effective_blocking is not True or not isinstance(body, str):
+            continue
+        for prefix in ("fixture-material:", "fixture-unqualified:"):
+            if body.startswith(prefix):
+                admitted.append(body.removeprefix(prefix))
+                break
     return tuple(admitted)
+
+
+def observed_publication_configuration(
+    provider: Any,
+    stages: Sequence[Any],
+    policy: ReviewConvergencePolicy,
+) -> dict[str, object]:
+    """Configuration identity the production transaction digest also uses."""
+
+    stage_identity, category_policy = transaction_stage_identity(stages)
+    return build_transaction_configuration_context(
+        provider={
+            "name": provider.name,
+            "profile": None,
+            "base_url": None,
+            "timeout_seconds": None,
+            "max_output_tokens": None,
+            "allow_custom_endpoint": False,
+            "openrouter_policy": None,
+        },
+        model=provider.model or "observed-fixture-model",
+        stages=stage_identity,
+        category_policy=category_policy,
+        publication_mode=policy.mode,
+        orchestration_enabled=False,
+        continue_rounds=0,
+    )
+
+
+def _fixture_comment(finding_id: str, *, qualified: bool) -> dict[str, object]:
+    prefix = "fixture-material" if qualified else "fixture-unqualified"
+    return {
+        "path": "src/observed.py",
+        "line": 1,
+        "body": f"{prefix}:{finding_id}",
+        "blocking": True,
+        "severity": "high",
+        "fix_effort": "small",
+        "category": "correctness",
+    }
+
+
+def _blocker_candidate_for_comment(comment: Any) -> Any:
+    """Trusted evidence only for fixture-material comments.
+
+    Unqualified fixture comments keep a high blocking proposal so C2 can
+    reject them. Their evidence and attribution flags stay false.
+    """
+
+    qualified = isinstance(comment.body, str) and comment.body.startswith(
+        "fixture-material:"
+    )
+    return derive_blocker_candidate(
+        comment,
+        on_changed_path=qualified,
+        evidence_locations_validated=qualified,
+        has_failure_condition=qualified,
+        has_specific_violation=qualified,
+    )
 
 
 class _ObservedProvider:
     name = "observed-fixture"
     model: str | None = "observed-fixture-model"
 
-    def __init__(self, material_finding_ids: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        material_finding_ids: tuple[str, ...] = (),
+        unqualified_finding_ids: tuple[str, ...] = (),
+    ) -> None:
         self.calls = 0
         self.material_finding_ids = material_finding_ids
+        self.unqualified_finding_ids = unqualified_finding_ids
 
     def complete(self, request: object) -> ProviderResponse:
         self.calls += 1
         comments = [
-            {
-                "path": "src/observed.py",
-                "line": 1,
-                "body": f"fixture-material:{finding_id}",
-                "blocking": True,
-                "severity": "high",
-                "fix_effort": "small",
-                "category": "correctness",
-            }
+            _fixture_comment(finding_id, qualified=True)
             for finding_id in self.material_finding_ids
+        ] + [
+            _fixture_comment(finding_id, qualified=False)
+            for finding_id in self.unqualified_finding_ids
         ]
         return ProviderResponse(
             text=json.dumps(
@@ -271,7 +336,7 @@ class _ObservedGitHub:
         )
 
 
-def _prove_shadow_isolation(
+def _shadow_is_isolated(
     *,
     github: _ObservedGitHub,
     ledger: LocalSessionLedger,
@@ -280,78 +345,105 @@ def _prove_shadow_isolation(
     policy: ReviewConvergencePolicy,
     record_before: object,
 ) -> bool:
-    """Prove C7 replay used its own ledger and did not touch the host path.
+    """Prove C7 replay used ledgers the harness injected.
 
-    The comparison must construct distinct in-memory ledgers, leave the
-    enforced local record and GitHub call log unchanged, and must not
-    construct a GitHub application, a local ledger, or call the fixture
-    provider.
+    The comparison receives a factory and must build exactly two in-memory
+    ledgers from it. Host call logs and the enforced file record stay
+    unchanged. No class objects are patched.
     """
+
+    created: list[InMemorySessionLedger] = []
+
+    def ledger_factory() -> InMemorySessionLedger:
+        shadow_ledger = InMemorySessionLedger()
+        created.append(shadow_ledger)
+        return shadow_ledger
 
     calls_before = len(github.calls)
     approvals_before = github.approval_events
     reviews_before = len(github.reviews)
-    memory_ledger_ids: list[int] = []
-    local_builds = 0
-    application_builds = 0
-    provider_calls = 0
-    enforced_ledger_id = id(ledger)
-    original_memory_init: Any = InMemorySessionLedger.__init__
-    original_local_init: Any = LocalSessionLedger.__init__
-    original_app_init: Any = GitHubApplication.__init__
-    original_complete: Any = _ObservedProvider.complete
-
-    def memory_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        memory_ledger_ids.append(id(self))
-        original_memory_init(self, *args, **kwargs)
-
-    def local_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        nonlocal local_builds
-        local_builds += 1
-        original_local_init(self, *args, **kwargs)
-
-    def app_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        nonlocal application_builds
-        application_builds += 1
-        original_app_init(self, *args, **kwargs)
-
-    def complete(self: Any, request: object) -> ProviderResponse:
-        nonlocal provider_calls
-        provider_calls += 1
-        return cast(ProviderResponse, original_complete(self, request))
-
-    setattr(InMemorySessionLedger, "__init__", memory_init)
-    setattr(LocalSessionLedger, "__init__", local_init)
-    setattr(GitHubApplication, "__init__", app_init)
-    setattr(_ObservedProvider, "complete", complete)
-    try:
-        compare_sequence_policies(
-            steps,
-            current=policy,
-            proposed=ReviewConvergencePolicy(mode="strict"),
-        )
-    finally:
-        setattr(InMemorySessionLedger, "__init__", original_memory_init)
-        setattr(LocalSessionLedger, "__init__", original_local_init)
-        setattr(GitHubApplication, "__init__", original_app_init)
-        setattr(_ObservedProvider, "complete", original_complete)
-    # compare_sequence_policies replays the current and proposed policies,
-    # so the shadow path owns exactly two ledgers.
-    distinct_shadow_ledgers = (
-        len(memory_ledger_ids) == 2
-        and len(set(memory_ledger_ids)) == 2
-        and all(ledger_id != enforced_ledger_id for ledger_id in memory_ledger_ids)
+    compare_sequence_policies(
+        steps,
+        current=policy,
+        proposed=ReviewConvergencePolicy(mode="strict"),
+        ledger_factory=ledger_factory,
     )
     return (
-        distinct_shadow_ledgers
-        and local_builds == 0
-        and application_builds == 0
-        and provider_calls == 0
+        len(created) == 2
+        and len({id(item) for item in created}) == 2
+        and all(id(item) != id(ledger) for item in created)
         and len(github.calls) == calls_before
         and github.approval_events == approvals_before
         and len(github.reviews) == reviews_before
         and ledger.load(session_identity).record == record_before
     )
+
+
+def observed_cutover_gaps(
+    *,
+    events: Sequence[ObservedSequenceEvent],
+    cap_created_approval: bool | None,
+    completed_rounds: int,
+    required_rounds: int,
+    provider_calls: int,
+    shadow_isolated: bool,
+    command_events: Sequence[str],
+    expected_material_finding_ids: set[str],
+    observed_material_finding_ids: set[str],
+    duplicate_findings: int,
+    reopened_findings: int,
+    contradictions: int,
+    source_identity: str,
+    package_identity: str,
+    workflow_identity: str,
+) -> tuple[str, ...]:
+    """Return the F6 cutover messages for one observed run."""
+
+    gaps: list[str] = []
+    if cap_created_approval is not False:
+        gaps.append(
+            "the configured round cap was not observed with zero new approval events"
+        )
+    if completed_rounds < required_rounds or provider_calls < required_rounds:
+        gaps.append(
+            "the configured initial and verification round budget was not fully exercised"
+        )
+    last_event = events[-1] if events else None
+    if (
+        last_event is None
+        or last_event.publication_status != "handoff"
+        or last_event.handoff_reason != "round-budget-exhausted"
+        or last_event.provider_calls != 0
+        or last_event.approval_events != 0
+    ):
+        gaps.append("an over-cap request did not prove zero new inference")
+    if not any(event.baseline_loaded for event in events[1:]):
+        gaps.append("no fresh job loaded a durable completed baseline")
+    if not any(event.publication_status == "published" for event in events):
+        gaps.append("no successful application publication was observed")
+    if not shadow_isolated:
+        gaps.append("shadow comparison isolation was not observed")
+    if tuple(command_events) != ("pause:applied", "continue:applied"):
+        gaps.append("durable maintainer command evidence is incomplete")
+    if not expected_material_finding_ids:
+        gaps.append("no maintainer-labelled material regression was supplied")
+    if expected_material_finding_ids - observed_material_finding_ids:
+        gaps.append("a labelled material regression was missed")
+    if observed_material_finding_ids - expected_material_finding_ids:
+        gaps.append("an unjustified material blocker was observed")
+    if duplicate_findings or reopened_findings or contradictions:
+        gaps.append(
+            "duplicate, reopened, or contradictory finding evidence requires adjudication"
+        )
+    if UNAVAILABLE_EVIDENCE_IDENTITY in {
+        source_identity,
+        package_identity,
+        workflow_identity,
+    }:
+        gaps.append(
+            "installed source, package, and workflow identities are unavailable"
+        )
+    return tuple(gaps)
 
 
 def run_observed_review_sequence(
@@ -398,22 +490,17 @@ def run_observed_review_sequence(
     last_observed_step: dict[str, int] = {}
     handoffs = 0
     provider_calls = 0
-    cap_handoff_observations = 0
-    approvals_during_cap_handoffs = 0
     shadow_isolated = False
-
-    def note_cap(created_approvals: int) -> None:
-        nonlocal cap_handoff_observations, approvals_during_cap_handoffs
-        cap_handoff_observations += 1
-        if created_approvals > 0:
-            approvals_during_cap_handoffs += created_approvals
 
     with TemporaryDirectory(prefix="reviewsensei-observed-") as temporary_root:
         ledger_root = Path(temporary_root)
         for index, step in enumerate(steps):
             if not isinstance(step, SequenceStep):
                 raise ReviewInputError("sequence step is invalid")
-            provider = _ObservedProvider(step.fixture_material_finding_ids)
+            provider = _ObservedProvider(
+                step.fixture_material_finding_ids,
+                step.fixture_unqualified_finding_ids,
+            )
             service = ReviewService(provider)
             request = ReviewRequest(
                 diff=_OBSERVED_DIFF,
@@ -440,36 +527,9 @@ def run_observed_review_sequence(
                 policy=policy,
             )
             baseline_loaded = durable_baseline is not None
-            configuration_context = {
-                "provider": {
-                    "name": provider.name,
-                    "profile": None,
-                    "base_url": None,
-                    "timeout_seconds": None,
-                    "max_output_tokens": None,
-                    "allow_custom_endpoint": False,
-                    "openrouter_policy": None,
-                },
-                "model": provider.model or "observed-fixture-model",
-                "stages": [
-                    {
-                        "name": stage.name,
-                        "outputs": list(stage.outputs),
-                        "categories": [category.id for category in stage.categories],
-                        "provider_profile": stage.provider_profile,
-                    }
-                    for stage in service.stages
-                ],
-                "category_policy": sorted(
-                    {
-                        category.id
-                        for stage in service.stages
-                        for category in stage.categories
-                    }
-                ),
-                "orchestration": {"enabled": False, "continue_rounds": 0},
-                "publication_mode": policy.mode,
-            }
+            configuration_context = observed_publication_configuration(
+                provider, service.stages, policy
+            )
             evidence_context = {"evidence_policy": "legacy", "snapshot_sha256": None}
             reservation = session_reservation_id(
                 repository="owner/repo",
@@ -497,8 +557,6 @@ def run_observed_review_sequence(
             approvals_before = github.approval_events
             if should_skip_automation(prepared.decision, inference=True):
                 created_approvals = github.approval_events - approvals_before
-                if prepared.decision.handoff_reason == "round-budget-exhausted":
-                    note_cap(created_approvals)
                 handoffs += int(prepared.decision.handoff)
                 events.append(
                     ObservedSequenceEvent(
@@ -517,18 +575,11 @@ def run_observed_review_sequence(
                 request,
                 current_key=current_key,
             )
-            # These facts are the fixture's independently-checkable evidence
-            # edge. The production publisher still performs C2 admission;
-            # no model ``blocking`` flag alone can turn into a blocker.
+            # fixture-material comments carry trusted evidence. Unqualified
+            # comments stay high and blocking in the model output so C2 can
+            # reject them instead of admitting every fixture body.
             blocker_candidates = tuple(
-                derive_blocker_candidate(
-                    comment,
-                    on_changed_path=True,
-                    evidence_locations_validated=True,
-                    has_failure_condition=True,
-                    has_specific_violation=True,
-                )
-                for comment in result.comments
+                _blocker_candidate_for_comment(comment) for comment in result.comments
             )
             provider_calls += provider.calls
             expected_material_finding_ids.update(step.expected_material_finding_ids)
@@ -608,11 +659,6 @@ def run_observed_review_sequence(
                 evidence_context=evidence_context,
             )
             created_approvals = github.approval_events - approvals_before
-            if (
-                outcome.status == "handoff"
-                and outcome.diagnostic == "round-budget-exhausted"
-            ):
-                note_cap(created_approvals)
             if outcome.status == "handoff":
                 handoffs += 1
             events.append(
@@ -639,7 +685,7 @@ def run_observed_review_sequence(
             + loaded_record.completed_verification_rounds
         )
         failed_attempts = 0 if loaded_record is None else loaded_record.failed_attempts
-        shadow_isolated = _prove_shadow_isolation(
+        shadow_isolated = _shadow_is_isolated(
             github=github,
             ledger=ledger,
             session_identity=session_identity,
@@ -695,56 +741,35 @@ def run_observed_review_sequence(
         command_events.append(
             f"{continued.action}:{'applied' if continued.applied else 'ignored'}"
         )
-    cap_created_approval = (
-        None if cap_handoff_observations == 0 else approvals_during_cap_handoffs > 0
+    cap_step = next(
+        (
+            event
+            for event in reversed(events)
+            if event.handoff_reason == "round-budget-exhausted"
+        ),
+        None,
     )
-    cutover_unmet: list[str] = []
+    cap_created_approval = None if cap_step is None else cap_step.approval_events > 0
     required_rounds = (
         policy.max_completed_initial_reviews + policy.max_completed_verification_rounds
     )
-    if cap_created_approval is not False:
-        cutover_unmet.append(
-            "the configured round cap was not observed with zero new approval events"
-        )
-    if completed_rounds < required_rounds or provider_calls < required_rounds:
-        cutover_unmet.append(
-            "the configured initial and verification round budget was not fully exercised"
-        )
-    last_event = events[-1] if events else None
-    if (
-        last_event is None
-        or last_event.publication_status != "handoff"
-        or last_event.handoff_reason != "round-budget-exhausted"
-        or last_event.provider_calls != 0
-        or last_event.approval_events != 0
-    ):
-        cutover_unmet.append("an over-cap request did not prove zero new inference")
-    if not any(event.baseline_loaded for event in events[1:]):
-        cutover_unmet.append("no fresh job loaded a durable completed baseline")
-    if not any(event.publication_status == "published" for event in events):
-        cutover_unmet.append("no successful application publication was observed")
-    if not shadow_isolated:
-        cutover_unmet.append("shadow comparison isolation was not observed")
-    if tuple(command_events) != ("pause:applied", "continue:applied"):
-        cutover_unmet.append("durable maintainer command evidence is incomplete")
-    if not expected_material_finding_ids:
-        cutover_unmet.append("no maintainer-labelled material regression was supplied")
-    if expected_material_finding_ids - observed_material_finding_ids:
-        cutover_unmet.append("a labelled material regression was missed")
-    if observed_material_finding_ids - expected_material_finding_ids:
-        cutover_unmet.append("an unjustified material blocker was observed")
-    if duplicate_findings or reopened_findings or contradictions:
-        cutover_unmet.append(
-            "duplicate, reopened, or contradictory finding evidence requires adjudication"
-        )
-    if UNAVAILABLE_EVIDENCE_IDENTITY in {
-        report_identity.source_identity,
-        report_identity.package_identity,
-        report_identity.workflow_identity,
-    }:
-        cutover_unmet.append(
-            "installed source, package, and workflow identities are unavailable"
-        )
+    cutover_unmet = observed_cutover_gaps(
+        events=events,
+        cap_created_approval=cap_created_approval,
+        completed_rounds=completed_rounds,
+        required_rounds=required_rounds,
+        provider_calls=provider_calls,
+        shadow_isolated=shadow_isolated,
+        command_events=command_events,
+        expected_material_finding_ids=expected_material_finding_ids,
+        observed_material_finding_ids=observed_material_finding_ids,
+        duplicate_findings=duplicate_findings,
+        reopened_findings=reopened_findings,
+        contradictions=contradictions,
+        source_identity=report_identity.source_identity,
+        package_identity=report_identity.package_identity,
+        workflow_identity=report_identity.workflow_identity,
+    )
     report = ObservedSequenceReport(
         mode=policy.mode,
         events=tuple(events),
