@@ -1,14 +1,25 @@
 # Architecture Index
 
 Project: ReviewSensei
-Last updated: 2026-09-19
+Last updated: 2026-09-22
+
+## Product direction and implementation status
+
+See [Product and source direction](../product-direction.md) and the
+[September 22 audit](../audits/2026-09-22-review-sensei.md). The owner-approved
+replacement default is `merge-focused` (#146); audited main still uses `legacy`,
+and #155 is pending. Historical ADR rollout notes are not authorization to keep
+a second legacy engine. DecisionProvider (#161) is planned, not a delivered
+capability. Source, release, deployment and qualification evidence are distinct.
 
 ## System Overview
 
 ReviewSensei is a provider-neutral Python review engine. It parses untrusted
 unified diffs, combines them with operator-controlled stages and trusted
 target-branch context, calls a replaceable model provider, and validates the
-result before a future publisher can consume it.
+result before the existing host publisher consumes it. Structural validation
+is not behavioral proof or approval eligibility; #114/#115 track current gaps
+at the real publication/finalization boundary.
 
 ## Modules And Boundaries
 
@@ -20,8 +31,10 @@ result before a future publisher can consume it.
 | Portable workflow boundary | Ref/repository validation, bounded diff preparation, and installed-package workflow composition | Maintainers | `src/review_sensei/workflow.py`, `examples/github-actions/review-sensei-review.yml` | Must not execute head code or interpolate untrusted refs into shell commands |
 | Public schemas | Versioned JSON Schema documents and local validation helpers | Maintainers | `src/review_sensei/schemas/`, `src/review_sensei/schemas.py` | Packaged defaults, examples, and golden fixtures validate against v1 schemas |
 | Trusted context | Target-branch learnings, lens documents, and opt-in Python symbol-aware excerpts | Maintainers | `src/review_sensei/{learnings,context}.py` | Inputs are bounded and explicitly rooted; symbol-aware selection is disabled by default |
-| Provider adapters | Authentication, transport, and provider envelopes | Maintainers | `src/review_sensei/providers/` | Ollama is the first adapter |
-| CLI | Host-neutral command-line composition | Maintainers | `src/review_sensei/cli.py` | Primary user path is running the CLI in the user's own GitHub Actions workflow |
+| Provider adapters | Authentication, transport, and provider envelopes | Maintainers | `src/review_sensei/providers/` | Ollama, OpenAI-compatible and named OpenRouter adapters exist; transport availability is not model qualification |
+| Convergence and session state | Deterministic review admission, durable transactions/history and human dispositions | Maintainers | `src/review_sensei/{convergence,session,disposition,context}.py` | Reuse current implementation; #146 owns integrated default/cutover acceptance |
+| Planned decision triage | Provider-neutral closed-choice assessments and bounded targeted follow-up | Maintainers | #161; existing service/verifier/provider seams | Planned, not implemented; cannot authorize approval or bypass existing policy |
+| CLI | Host-neutral command-line composition | Maintainers | `src/review_sensei/cli.py` | Reusable local/library and user-owned GitHub Actions paths; keep host policy out of the domain core |
 | Concurrency policy | Deterministic scheduling keys and optional in-process admission leases | Maintainers | `src/review_sensei/concurrency.py` | GitHub-hosted enforcement uses workflow concurrency groups; no global lock |
 | Release engineering | Reproducible package metadata, artifact validation, and provenance-backed publication | Release maintainers | `pyproject.toml`, `MANIFEST.in`, `.github/workflows/release.yml`, `scripts/validate_release.py` | External PyPI/GitHub release writes stay behind maintainer-owned tag/environment authority |
 | GitHub App auth and approval boundary | JWT and installation-token authentication, exact-head review publication, and idempotent approval finalization | Maintainers | `src/review_sensei/hosting/github/` | Unresolved blocking ReviewSensei roots request changes and withhold approval; GraphQL classification sweep is bounded and fail-closed |
@@ -34,15 +47,18 @@ result before a future publisher can consume it.
 The CLI composes the review core, trusted-context loaders, and provider
 adapters. The provider-neutral core depends only on domain contracts and the
 `ReviewProvider` protocol. Provider adapters translate validated requests to
-transport calls; future GitHub publishers consume only validated
-`ReviewResult` values and remain outside the core.
+transport calls. Existing GitHub publishers remain outside the core and must
+consume validated results plus trustworthy head-bound eligibility; validating
+`ReviewResult` alone does not prove completeness or model qualification. The
+planned DecisionProvider supplies assessments, not host actions or merge authority.
 
 ## External Integrations
 
 | Integration | Direction | Contract | Notes |
 | --- | --- | --- | --- |
 | Ollama API | Outbound | `src/review_sensei/providers/ollama.py` | Local and cloud endpoints share the adapter contract |
-| Future publisher | Outbound | Validated `ReviewResult` | No GitHub SDK dependency exists in the core |
+| GitHub publisher/finalizer | Outbound | Validated result and exact-head publication/approval policy | Existing adapter; #114/#115 strengthen trusted eligibility across delayed finalization |
+| OpenRouter review API | Outbound | `src/review_sensei/providers/openrouter.py` | Implemented transport; #92/#99 own exact configuration qualification and installed acceptance |
 | GitHub learning pull requests | Outbound GitHub REST Git-object and pull-request reconciliation | `src/review_sensei/hosting/github/learning_pr.py` | One draft per source PR while open; merged generations and unsafe/manual artifacts are handled deterministically |
 | GitHub App identity | Optional outbound installation-authenticated comments/reviews | `src/review_sensei/hosting/github/auth.py` | Custom App name/icon plus narrow JWT/installation-token auth; see `docs/github-app-auth.md` |
 | GitHub App setup webhooks | Optional inbound installation events and outbound setup PR creation | `src/review_sensei/hosting/github/{webhooks.py,setup.py}` | Signature-verified setup bootstrap; see `docs/github-app-registration.md` |
@@ -56,7 +72,7 @@ transport calls; future GitHub publishers consume only validated
 | Repository-local learnings | `LearningEntry` JSON files | Repository maintainers | Loaded only from the trusted target/base checkout |
 | Learning PR provenance | v2 marker and commit trailer | ReviewSensei publisher | Binds repository/PR, pending batch, reviewed source head, latest base, exact title/body hashes, and the rendered source-title line; no provider or private review data |
 | Review configuration | Stage and category JSON files | Repository operators | Treated as trusted configuration but structurally bounded |
-| Review session ledger | `SessionRecord` JSON / GitHub issue comment | Maintainers | Bounded PR-wide round counters plus identity-bound `ReviewTransaction` phase/digest metadata; no source/result body; ADRs 0047 and 0052 |
+| Review session ledger | `SessionRecord` JSON / GitHub issue comment | Maintainers | Bounded counters, identity-bound transaction and convergence-history metadata; no raw source/result archive; ADRs 0047, 0052 and 0053 |
 | Supplemental context | Explicit Markdown/text sources and opt-in Python symbol-aware excerpts | Repository operators | Documents/learnings by default; symbol-aware selection requires trusted-base policy |
 
 
@@ -97,13 +113,15 @@ transport calls; future GitHub publishers consume only validated
 | [`0041`](../adr/0041-production-provider-adapters-and-per-stage-profiles.md) | Proposed | Production adapters, per-stage profiles, and shared conformance | #42; openai-compatible remains the additional production adapter; local runs cannot select remote stage profiles |
 | [`0042`](../adr/0042-incremental-reviews-and-finding-lifecycle.md) | Proposed | Incremental reviews and stable finding lifecycle identities | #38; coverage modes, fingerprint lifecycle, optional in-memory metadata cache |
 | [`0043`](../adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36; `ReviewService.run`, hard budgets, publication-only recovery |
-| [`0046`](../adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136; C1/C2; `legacy` unchanged |
+| [`0046`](../adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 C1/C2 implementation history; replacement-default direction superseded by #146 |
 | [`0047`](../adr/0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 C3; local JSON and GitHub issue-comment adapters |
 | [`0048`](../adr/0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification | #136 C4; IncrementalReviewPlan + late classification |
 | [`0049`](../adr/0049-automation-admission-and-handoff.md) | Proposed | Automation admission and handoff | #136 C5; cap never mints approval |
 | [`0050`](../adr/0050-maintainer-disposition-and-handoff-status.md) | Proposed | Maintainer disposition and handoff status | #136 C6; `action_required` for handoff |
-| [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` |
+| [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7 lower-level simulator; permanent legacy-default wording superseded by #146 |
 | [`0052`](../adr/0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 F1; one reservation, one checkpoint, retryable publication phases |
+| [`0053`](../adr/0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2/F3; identity-bound metadata and explicit missing-history handling |
+| [`0054`](../adr/0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6; real internal components with fixture external edges, not live deployment proof |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),
@@ -133,4 +151,4 @@ Versioned JSON run, evidence, verifier-result, and final-evaluation records are 
 
 - Build: python3 -m compileall -q src
 - Test: python3 -m unittest discover -s tests -v
-- Deploy: optional Cloudflare package under `deploy/cloudflare/`; no live account or deployment is configured in this repository
+- Deploy: optional Cloudflare package under `deploy/cloudflare/`; deployment credentials and live deployment state are not established by source inspection
