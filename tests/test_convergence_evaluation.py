@@ -21,6 +21,7 @@ from review_sensei.cli import main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import (
     DEFAULT_REVIEW_MODE,
+    REVIEW_MODE_ENV,
     REVIEW_SHADOW_ENV,
     ReviewConvergencePolicy,
     RoundSessionState,
@@ -985,6 +986,18 @@ def passing_cutover_inputs() -> dict[str, object]:
 
 
 class ShadowObservationTests(unittest.TestCase):
+    def test_ambient_legacy_env_is_rejected_by_runtime_and_shadow_resolvers(self):
+        with patch.dict(
+            os.environ,
+            {REVIEW_MODE_ENV: "legacy", REVIEW_SHADOW_ENV: "legacy"},
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "legacy review mode is retired"
+            ):
+                resolve_review_mode()
+            with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
+                resolve_shadow_review_mode()
+
     def test_shadow_rejects_legacy_and_is_observation_only(self):
         with self.assertRaisesRegex(ReviewInputError, "cannot be legacy"):
             resolve_shadow_review_mode("legacy")
