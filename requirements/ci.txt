@@ -1,5 +1,5 @@
 build==1.6.1
-coverage==7.16.0
+coverage==7.16.1
 cryptography==50.0.1
 jsonschema==4.26.0
 mypy==2.3.1
