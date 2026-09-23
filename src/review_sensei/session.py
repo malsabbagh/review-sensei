@@ -47,8 +47,20 @@ DEFAULT_SESSION_TTL = timedelta(days=30)
 # still in the future, so a writable v0.1 file cannot force an immediate reset.
 MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
-MAX_SESSION_RECORD_BYTES = 4096
-MAX_CONVERGENCE_HISTORY_BYTES = 2048
+# The record bound stays twice the envelope bound. The largest members that
+# are not the envelope (a publication transaction, four maximal dispositions,
+# and four maximal continuation grants) measured 5704 bytes, so a realistic
+# record still binds on the envelope while a pathological combination of both
+# is refused rather than silently truncated.
+MAX_SESSION_RECORD_BYTES = 8192
+# ADR 0053 reserves room in the envelope for two findings and three trusted
+# blocker-set identities. Measured with repository-realistic identity content
+# that reserved shape needs 2294 bytes with no path evidence and 3202 bytes for
+# a twenty-four path checkpoint (see
+# test_repository_realistic_checkpoint_fits_the_component_bound), so the
+# original 2048-byte bound refused every realistic completion. 4096 holds the
+# reserved shape with recorded headroom and keeps the envelope metadata-only.
+MAX_CONVERGENCE_HISTORY_BYTES = 4096
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
 SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 # This is a deliberately coarse structural ceiling, independent of the byte

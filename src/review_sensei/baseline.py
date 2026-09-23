@@ -99,7 +99,7 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# ADR 0053 reserves room in the 2 KiB envelope for three trusted blocker-set
+# ADR 0053 reserves room in the 4096-byte envelope for three trusted blocker-set
 # identities, so the persisted baseline retains at most two findings. The
 # runtime baseline keeps the wider shared metadata budget; only its persisted
 # projection is narrowed here.

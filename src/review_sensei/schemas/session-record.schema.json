@@ -131,7 +131,7 @@
     },
     "convergence_history": {
       "type": "object",
-      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects an envelope whose canonical UTF-8 encoding exceeds MAX_CONVERGENCE_HISTORY_BYTES (2048), which JSON Schema cannot express.",
+      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects an envelope whose canonical UTF-8 encoding exceeds MAX_CONVERGENCE_HISTORY_BYTES (4096), which JSON Schema cannot express.",
       "additionalProperties": false,
       "required": ["state", "progress", "provenance"],
       "properties": {
