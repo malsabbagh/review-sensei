@@ -2965,5 +2965,286 @@ class PromotionCliTests(unittest.TestCase):
         self.assertIn("unrecognized arguments", stderr.getvalue())
 
 
+class HostedPublicationCliTests(unittest.TestCase):
+    """The hosted publication boundary reads the analysis artifacts."""
+
+    class FakeApplication:
+        instances: list = []
+
+        def __init__(self, **kwargs):
+            del kwargs
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def publish_review(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(status="published")
+
+    def _publish(self, root: Path, extra: list[str]) -> int:
+        result_path = root / "result.json"
+        diff_path = root / "diff.patch"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "summary": "Summary.",
+                    "comments": [],
+                    "provider": "fixture",
+                    "model": "fixture-model",
+                }
+            ),
+            encoding="utf-8",
+        )
+        diff_path.write_text(DIFF, encoding="utf-8")
+        from review_sensei.hosting import github as github_module
+
+        self.FakeApplication.instances = []
+        with patch.multiple(
+            github_module,
+            BrokerClient=lambda: object(),
+            GitHubHttp=lambda: object(),
+            ReviewPublisher=lambda **kwargs: object(),
+            LearningPRPublisher=lambda **kwargs: object(),
+            ConversationPublisher=lambda **kwargs: object(),
+            GitHubApplication=self.FakeApplication,
+        ):
+            return main(
+                [
+                    "github",
+                    "review",
+                    "--result",
+                    str(result_path),
+                    "--diff",
+                    str(diff_path),
+                    "--repository",
+                    "owner/repo",
+                    "--repository-id",
+                    "1",
+                    "--pull-request",
+                    "2",
+                    "--head-sha",
+                    "a" * 40,
+                    "--base-branch",
+                    "main",
+                    "--base-sha",
+                    "b" * 40,
+                    "--session-ledger",
+                    str(root / "ledger"),
+                    "--review-mode",
+                    "merge-focused",
+                    "--allow-write",
+                    "--enable-review",
+                    *extra,
+                ]
+            )
+
+    def test_forwards_admission_context_to_publication(self):
+        from review_sensei.baseline import ReviewBaseline, admission_context_document
+        from review_sensei.context import ReviewContextCacheKey
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            baseline = ReviewBaseline(
+                cache_key=ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=2,
+                    base_sha="c" * 40,
+                    head_sha="d" * 40,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest="1" * 64,
+                    context_digest="2" * 64,
+                    learning_digest="3" * 64,
+                ),
+                policy_digest="4" * 64,
+                complete=True,
+                coverage_complete=True,
+            )
+            current_key = ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=2,
+                base_sha="b" * 40,
+                head_sha="a" * 40,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="5" * 64,
+                context_digest="6" * 64,
+                learning_digest="7" * 64,
+            )
+            configuration_path = root / "configuration.json"
+            configuration_path.write_text(
+                json.dumps({"provider": {"name": "fixture"}}), encoding="utf-8"
+            )
+            admission_path = root / "admission.json"
+            admission_path.write_text(
+                json.dumps(admission_context_document(baseline, current_key)),
+                encoding="utf-8",
+            )
+            status = self._publish(
+                root,
+                [
+                    "--configuration-context",
+                    str(configuration_path),
+                    "--admission-context",
+                    str(admission_path),
+                ],
+            )
+
+        self.assertEqual(status, 0)
+        call = self.FakeApplication.instances[0].calls[0]
+        self.assertEqual(call["baseline"], baseline)
+        self.assertEqual(call["current_key"], current_key)
+        self.assertEqual(
+            call["configuration_context"], {"provider": {"name": "fixture"}}
+        )
+
+    def test_refuses_admission_context_without_a_configuration_context(self):
+        from review_sensei.baseline import admission_context_document
+        from review_sensei.context import ReviewContextCacheKey
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            admission_path = root / "admission.json"
+            admission_path.write_text(
+                json.dumps(
+                    admission_context_document(
+                        None,
+                        ReviewContextCacheKey(
+                            repository="owner/repo",
+                            pull_request=2,
+                            base_sha="b" * 40,
+                            head_sha="a" * 40,
+                            engine="fixture",
+                            model="fixture-model",
+                            profile="default",
+                            stage_digest="5" * 64,
+                            context_digest="6" * 64,
+                            learning_digest="7" * 64,
+                        ),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = self._publish(
+                    root, ["--admission-context", str(admission_path)]
+                )
+
+        self.assertEqual(status, 1)
+        # Accepting admission inputs without the identity-bound configuration
+        # context would let a hosted caller supply the classification state.
+        self.assertIn(
+            "admission context requires an identity-bound configuration context",
+            stderr.getvalue(),
+        )
+        self.assertEqual(
+            [
+                call
+                for instance in self.FakeApplication.instances
+                for call in instance.calls
+            ],
+            [],
+        )
+
+    def test_wraps_an_unreadable_admission_context_as_input_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configuration_path = root / "configuration.json"
+            configuration_path.write_text(
+                json.dumps({"provider": {"name": "fixture"}}), encoding="utf-8"
+            )
+            admission_path = root / "admission.json"
+            admission_path.write_text(json.dumps({"baseline": None}), encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = self._publish(
+                    root,
+                    [
+                        "--configuration-context",
+                        str(configuration_path),
+                        "--admission-context",
+                        str(admission_path),
+                    ],
+                )
+
+        self.assertEqual(status, 1)
+        self.assertIn("admission context is invalid", stderr.getvalue())
+        self.assertEqual(
+            [
+                call
+                for instance in self.FakeApplication.instances
+                for call in instance.calls
+            ],
+            [],
+        )
+
+
+class HostedSessionLedgerFlagTests(unittest.TestCase):
+    """Analysis-side hosted flags cannot be mixed with local invocation."""
+
+    def _run(self, extra: list[str]) -> tuple[int, str]:
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            diff_path = root / "diff.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            with redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--provider",
+                        "fixture",
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "2",
+                        "--base-sha",
+                        "b" * 40,
+                        "--head-sha",
+                        "a" * 40,
+                        "--review-mode",
+                        "merge-focused",
+                        "--no-learning-proposals",
+                        *extra,
+                    ]
+                )
+        return status, stderr.getvalue()
+
+    def test_rejects_oidc_token_without_a_hosted_ledger(self):
+        status, stderr = self._run(
+            ["--session-ledger", "ledger", "--oidc-token", "token"]
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("--oidc-token requires --github-session-ledger", stderr)
+
+    def test_rejects_a_hosted_ledger_without_a_transaction(self):
+        status, stderr = self._run(["--github-session-ledger", "--repository-id", "1"])
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "--github-session-ledger requires an identity-bound transaction", stderr
+        )
+
+    def test_rejects_a_transaction_without_an_attributable_ledger(self):
+        # The local file ledger is deliberately absent, so the hosted ledger
+        # must carry the repository id the comment marker is scoped to.
+        status, stderr = self._run(
+            [
+                "--transaction",
+                "--configuration-context-output",
+                "configuration.json",
+            ]
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("--transaction requires a session ledger", stderr)
+
+    def test_rejects_a_hosted_transaction_without_a_repository_id(self):
+        status, stderr = self._run(["--transaction", "--github-session-ledger"])
+        self.assertEqual(status, 1)
+        self.assertIn("--transaction requires a session ledger", stderr)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

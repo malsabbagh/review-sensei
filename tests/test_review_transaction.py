@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from review_sensei.baseline import (
     ReviewBaseline,
+    admission_context_from_document,
     baseline_from_history_document,
     baseline_history_document,
 )
@@ -2873,6 +2874,129 @@ class PublicationTransactionTests(unittest.TestCase):
 
         self.assertEqual(broker.exchanges, 1)
         self.assertEqual(reviewer.calls, 0)
+
+
+class HostedAnalysisCliTests(unittest.TestCase):
+    """Hosted analysis emits the trusted artifacts its publication re-reads."""
+
+    ANALYSIS_DIFF = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1 +1,2 @@\n keep\n+change\n"
+    )
+
+    class _Provider:
+        name = "fixture"
+        model = "fixture-v1"
+
+        def complete(self, request):
+            del request
+            return ProviderResponse(
+                text=json.dumps({"summary": "ok", "comments": []}),
+                provider=self.name,
+                model=self.model,
+            )
+
+    class _Registry:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def create(self, settings):
+            del settings
+            return self.provider
+
+    def _argv(self, root: Path, *, admission_context_output: Path) -> list[str]:
+        diff_path = root / "review.patch"
+        response_path = root / "response.json"
+        diff_path.write_text(self.ANALYSIS_DIFF, encoding="utf-8")
+        response_path.write_text(
+            json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
+        )
+        return [
+            "--diff",
+            str(diff_path),
+            "--provider",
+            "fixture",
+            "--fixture-response",
+            str(response_path),
+            "--model",
+            "fixture-v1",
+            "--repository",
+            IDENTITY.repository,
+            "--pull-request",
+            str(IDENTITY.pull_request),
+            "--base-sha",
+            BASE_SHA,
+            "--head-sha",
+            HEAD_SHA,
+            "--review-mode",
+            "merge-focused",
+            "--transaction",
+            "--session-ledger",
+            str(root / "ledger"),
+            "--output",
+            str(root / "review.json"),
+            "--outcome",
+            str(root / "outcome.json"),
+            "--configuration-context-output",
+            str(root / "configuration.json"),
+            "--admission-context-output",
+            str(admission_context_output),
+            "--no-learning-proposals",
+        ]
+
+    def test_analysis_writes_admission_context_for_a_fresh_round(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            admission_path = root / "admission.json"
+            argv = self._argv(root, admission_context_output=admission_path)
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=self._Registry(self._Provider()),
+            ):
+                self.assertEqual(main(argv), 0)
+
+            document = json.loads(admission_path.read_text(encoding="utf-8"))
+            # An initial round has no prior baseline to classify against, so
+            # the durable baseline half stays null and only the key is bound.
+            self.assertIsNone(document["baseline"])
+            self.assertEqual(document["current_key"]["repository"], IDENTITY.repository)
+            self.assertEqual(
+                document["current_key"]["pull_request"], IDENTITY.pull_request
+            )
+            self.assertEqual(document["current_key"]["base_sha"], BASE_SHA)
+            self.assertEqual(document["current_key"]["head_sha"], HEAD_SHA)
+            self.assertEqual(document["current_key"]["engine"], "fixture")
+            self.assertEqual(document["current_key"]["model"], "fixture-v1")
+            # The artifact must satisfy the trusted parser the publication
+            # boundary uses, so a written artifact cannot fail on read.
+            baseline, current_key = admission_context_from_document(document)
+            self.assertIsNone(baseline)
+            self.assertEqual(current_key.model, "fixture-v1")
+
+    def test_failed_artifact_write_leaves_no_checkpointed_round(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            # A directory is not a writable artifact path, so the write fails
+            # after the reservation has already been taken.
+            admission_path = root / "admission.json"
+            admission_path.mkdir()
+            argv = self._argv(root, admission_context_output=admission_path)
+            with patch(
+                "review_sensei.cli.default_registry",
+                return_value=self._Registry(self._Provider()),
+            ):
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(argv), 1)
+
+            ledger = LocalSessionLedger(root / "ledger")
+            loaded = ledger.load(IDENTITY)
+            # Nothing durable may claim a round that has no admission inputs.
+            self.assertIn(loaded.status, {"missing", "ok"})
+            if loaded.record is not None:
+                self.assertIsNone(loaded.record.transaction)
+                self.assertEqual(loaded.record.reservation_id, None)
 
 
 if __name__ == "__main__":

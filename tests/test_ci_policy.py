@@ -1088,6 +1088,81 @@ class ActionPinPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_hosted_analysis_emits_the_transaction_artifacts_publication_reads(
+        self,
+    ):
+        # Operator modes need the identity-bound transaction ledger and its
+        # trusted artifacts, so each analysis lane reserves the transaction
+        # through the broker-attested comment ledger and writes the
+        # configuration and admission documents its own publication re-reads.
+        # Without them the lane hands off with `identity-bound transaction
+        # required` and exits 1 instead of reviewing.
+        text = _reusable_workflow_text()
+        sites: set[tuple[str, str]] = set()
+        for job_id in _job_ids(text):
+            job = _job_section(text, job_id)
+            for name in _named_steps(job):
+                step = _step_block(job, name)
+                invocations = [
+                    run
+                    for run in _run_blocks(step)
+                    if "--transaction --github-session-ledger" in run
+                ]
+                if not invocations:
+                    continue
+                sites.add((job_id, name))
+                # The hosted ledger scopes its comment marker to the numeric
+                # repository id, so the step must map the input it consumes.
+                self.assertIn("REPOSITORY_ID: ${{ inputs.repository_id }}", step)
+                for run in invocations:
+                    self.assertIn('--repository-id "$REPOSITORY_ID"', run)
+                    self.assertIn(
+                        "--configuration-context-output configuration-context.json",
+                        run,
+                    )
+                    self.assertIn(
+                        "--admission-context-output admission-context.json", run
+                    )
+        self.assertEqual(
+            sites,
+            {
+                ("cloud", "Run cloud-provider review"),
+                ("openrouter", "Run OpenRouter-provider review"),
+                ("local", "Prepare and run trusted local review"),
+            },
+        )
+
+    def test_hosted_publication_consumes_the_analysis_artifacts(self):
+        # The publication boundary must read the same transaction context the
+        # analysis lane admitted with. A publish step that omits either
+        # artifact falls back to a durable-baseline handoff on every later
+        # round of a pull request.
+        text = _reusable_workflow_text()
+        sites: set[tuple[str, str]] = set()
+        for job_id in _job_ids(text):
+            job = _job_section(text, job_id)
+            for name in _named_steps(job):
+                for run in _run_blocks(_step_block(job, name)):
+                    if "--outcome publication-outcome.json" not in run:
+                        continue
+                    sites.add((job_id, name))
+                    self.assertIn("--github-session-ledger", run)
+                    self.assertIn(
+                        "--configuration-context configuration-context.json", run
+                    )
+                    self.assertIn("--admission-context admission-context.json", run)
+        self.assertEqual(
+            sites,
+            {
+                ("cloud", "Publish or promote validated review through the broker"),
+                (
+                    "openrouter",
+                    "Publish or promote validated review through the broker",
+                ),
+                ("local", "Publish or promote trusted local review and learnings"),
+            },
+        )
+
     def test_hosted_review_invocations_pin_the_review_mode_explicitly(self):
         # The repository variable reaches the workflow only as the
         # `review_mode` input, so every hosted invocation that resolves a
