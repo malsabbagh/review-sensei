@@ -272,37 +272,19 @@ class GitHubApplication:
         # (a failed marker create) can require recovery; that state is what
         # `reenroll` and the enrollment retention window exist for.
         if hosted_session_ledger:
-            session = self.broker.open_session(
+            session_token, session_state = _open_broker_session(
+                self.broker,
                 exchange_input,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
             )
-            session_token = session.token
-            session_state = session.state
-            if not isinstance(session_token, str) or not session_token.strip():
-                raise GitHubPublicationError(
-                    "hosted session ledger requires a broker-attested session token"
-                )
         ledger = self._session_ledger_for_token(
             session_token if session_token is not None else token,
             options=options,
             app_slug=app_slug,
         )
-        if (
-            ledger is not None
-            and session_state == "known"
-            and ledger.load(identity).status == "missing"
-        ):
-            # The broker's authenticated witness says this session already
-            # exists, so a missing marker means the comment was deleted. Fail
-            # closed before any ledger call below can re-create it, and name
-            # the recovery command so an operator does not have to infer it.
-            raise GitHubPublicationError(
-                "session ledger marker is missing; authenticated recovery is "
-                "required: a maintainer must comment `@sensei review reenroll` "
-                "to re-establish this session"
-            )
+        _require_present_marker(ledger, identity, session_state)
         if (
             transaction_record is None
             and ledger is not None
@@ -1402,6 +1384,101 @@ class GitHubApplication:
                 source_kind=prepared.source_kind,
                 reaction_id=reaction.reaction_id,
             )
+
+
+def _open_broker_session(
+    broker: BrokerClient,
+    exchange_input: str | None,
+    *,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+) -> tuple[str, str]:
+    """Open one broker session witness and require a usable session token."""
+
+    session = broker.open_session(
+        exchange_input if exchange_input is not None else broker.request_oidc_token(),
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+    )
+    token = session.token
+    if not isinstance(token, str) or not token.strip():
+        raise GitHubPublicationError(
+            "hosted session ledger requires a broker-attested session token"
+        )
+    return token, session.state
+
+
+def _require_present_marker(
+    ledger: SessionLedger | None,
+    identity: SessionIdentity,
+    session_state: str | None,
+) -> None:
+    """Fail closed when the broker witnessed a marker the ledger cannot find."""
+
+    if (
+        ledger is not None
+        and session_state == "known"
+        and ledger.load(identity).status == "missing"
+    ):
+        # The broker's authenticated witness says this session already
+        # exists, so a missing marker means the comment was deleted. Fail
+        # closed before any ledger call below can re-create it, and name
+        # the recovery command so an operator does not have to infer it.
+        raise GitHubPublicationError(
+            "session ledger marker is missing; authenticated recovery is "
+            "required: a maintainer must comment `@sensei review reenroll` "
+            "to re-establish this session"
+        )
+
+
+def resolve_hosted_session_ledger(
+    *,
+    broker: BrokerClient,
+    http: GitHubHttp,
+    oidc_token: str | None,
+    repository: str,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    app_slug: str | None = None,
+) -> SessionLedger:
+    """Open the broker-attested comment ledger for one hosted identity.
+
+    Publication reads the identity-bound transaction from this durability
+    adapter, and the analysis checkpoint writes it there, so both boundaries
+    of one logical review resolve the same issue comment. A fresh hosted job
+    therefore continues the rounds, baselines, and grants durable earlier
+    jobs recorded instead of depending on a runner-local file that the next
+    runner cannot read.
+    """
+
+    from .session_ledger import GitHubIssueCommentSessionLedger
+
+    session_token, session_state = _open_broker_session(
+        broker,
+        oidc_token,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+    )
+    # No mutation grant is bound here: this is an unattended analysis job, not
+    # an attested maintainer command, so the ledger constructor takes only the
+    # broker's head-scoped session token. That is the same authority the
+    # publication boundary of the same logical review writes with.
+    ledger = GitHubIssueCommentSessionLedger(
+        http,
+        token=session_token,
+        app_slug=app_slug,
+    )
+    identity = SessionIdentity(
+        repository=repository,
+        pull_request=pull_request,
+        repository_id=repository_id,
+    )
+    _require_present_marker(ledger, identity, session_state)
+    return ledger
 
 
 def _command_from_broker_attestation(

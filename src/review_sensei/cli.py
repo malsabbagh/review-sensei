@@ -10,7 +10,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
-from .baseline import baseline_from_history_document, plan_verification_scope
+from .baseline import (
+    admission_context_document,
+    admission_context_from_document,
+    baseline_from_history_document,
+    plan_verification_scope,
+)
 from .context import (
     ContextSnapshot,
     RepositoryContextStore,
@@ -770,6 +775,17 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--admission-context-output",
+        type=Path,
+        help=(
+            "Write the trusted, secret-free admission context (prior baseline "
+            "and current review context cache key) needed to publish a later "
+            "verification round; this also opts into the transaction. Protect "
+            "the emitted file: it becomes trusted admission input for the "
+            "later github review command"
+        ),
+    )
+    parser.add_argument(
         "--outcome",
         type=Path,
         help="Write the structured run-outcome JSON for this invocation",
@@ -801,6 +817,33 @@ def _parser() -> argparse.ArgumentParser:
             "Local directory for the issue #136 durable session ledger. "
             "Operator modes reserve before inference and refuse unadmitted rounds."
         ),
+    )
+    parser.add_argument(
+        "--github-session-ledger",
+        action="store_true",
+        help=(
+            "Checkpoint the identity-bound transaction into the "
+            "broker-attested GitHub issue-comment session ledger; the hosted "
+            "publication boundary reads that same comment, so a fresh runner "
+            "continues the durable rounds and baselines. Requires --transaction."
+        ),
+    )
+    parser.add_argument(
+        "--repository-id",
+        type=int,
+        help="GitHub repository database ID required for the hosted session ledger",
+    )
+    parser.add_argument(
+        "--app-slug",
+        default="reviewsensei[bot]",
+        help=(
+            "App login whose issue comments are trusted as the hosted session "
+            "marker"
+        ),
+    )
+    parser.add_argument(
+        "--oidc-token",
+        help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
     )
     parser.add_argument(
         "--continue-rounds",
@@ -1294,6 +1337,16 @@ def _github_parser() -> argparse.ArgumentParser:
         "--evidence-context",
         type=Path,
         help="Optional trusted evidence-context JSON for an identity-bound result",
+    )
+    review.add_argument(
+        "--admission-context",
+        type=Path,
+        help=(
+            "Trusted admission-context JSON (prior baseline and current review "
+            "context cache key) emitted by the analysis that produced this "
+            "result; required to publish a verification round, which cannot "
+            "reconstruct either input from the durable transaction alone"
+        ),
     )
     review.add_argument("--diff", type=Path, required=True)
     review.add_argument("--repository", required=True)
@@ -1842,6 +1895,26 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             if args.evidence_context is not None
             else None
         )
+        admission_baseline = None
+        admission_current_key = None
+        if args.admission_context is not None:
+            if configuration_context is None:
+                # The identity-bound transaction is what makes the admission
+                # inputs meaningful; accepting them without it would let a
+                # hosted caller bypass F3 admission with caller-supplied state.
+                raise ReviewInputError(
+                    "admission context requires an identity-bound configuration context"
+                )
+            try:
+                admission_baseline, admission_current_key = (
+                    admission_context_from_document(
+                        _load_context_document(
+                            args.admission_context, label="admission context"
+                        )
+                    )
+                )
+            except ReviewInputError as exc:
+                raise ReviewInputError(f"admission context is invalid: {exc}") from exc
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
@@ -1864,6 +1937,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 continuation_rounds=getattr(args, "continue_rounds", 0),
                 configuration_context=configuration_context,
                 evidence_context=evidence_context,
+                baseline=admission_baseline,
+                current_key=admission_current_key,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
@@ -2439,9 +2514,23 @@ def main(argv: list[str] | None = None) -> int:
         if not args.diff:
             raise ReviewInputError("--diff is required")
         _validate_live_profile_gates(args, args_list)
-        transaction_requested = bool(getattr(args, "transaction", False)) or (
-            args.configuration_context_output is not None
+        hosted_session_ledger = bool(getattr(args, "github_session_ledger", False))
+        transaction_requested = (
+            bool(getattr(args, "transaction", False))
+            or args.configuration_context_output is not None
+            or args.admission_context_output is not None
         )
+        if not hosted_session_ledger:
+            for flag, value in (
+                ("--oidc-token", getattr(args, "oidc_token", None)),
+                ("--repository-id", getattr(args, "repository_id", None)),
+            ):
+                if value is not None:
+                    raise ReviewInputError(f"{flag} requires --github-session-ledger")
+        elif not transaction_requested:
+            raise ReviewInputError(
+                "--github-session-ledger requires an identity-bound transaction"
+            )
         if transaction_requested:
             from .convergence import (
                 OPERATOR_REVIEW_MODES,
@@ -2456,9 +2545,10 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise ReviewInputError("--transaction requires an operator review mode")
             if (
-                args.session_ledger is None
+                (args.session_ledger is None and not hosted_session_ledger)
                 or not args.repository
                 or args.pull_request is None
+                or (hosted_session_ledger and not isinstance(args.repository_id, int))
                 or not isinstance(args.base_sha, str)
                 or len(args.base_sha) != 40
                 or any(
@@ -2471,7 +2561,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ):
                 raise ReviewInputError(
-                    "--transaction requires an explicit session ledger, "
+                    "--transaction requires a session ledger "
+                    "(--session-ledger or --github-session-ledger), "
                     "repository/PR identity, and 40-character base/head SHAs"
                 )
         provider_name = str(args.provider).strip().lower()
@@ -2538,6 +2629,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         from .session import (
             SessionIdentity,
+            SessionLedger,
             admission_diagnostic,
             checkpoint_review_analysis,
             prepare_review_transaction,
@@ -2571,7 +2663,26 @@ def main(argv: list[str] | None = None) -> int:
         transaction_provider_identity, transaction_model = (
             _transaction_provider_identity(provider_settings)
         )
-        ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
+        ledger: SessionLedger | None = resolve_local_session_ledger(
+            getattr(args, "session_ledger", None)
+        )
+        if ledger is None and hosted_session_ledger:
+            assert resolved_head_sha is not None
+            assert isinstance(args.repository_id, int)
+            from .hosting.github.application import resolve_hosted_session_ledger
+            from .hosting.github.broker_client import BrokerClient
+            from .hosting.github.http import GitHubHttp
+
+            ledger = resolve_hosted_session_ledger(
+                broker=BrokerClient(),
+                http=GitHubHttp(),
+                oidc_token=getattr(args, "oidc_token", None),
+                repository=args.repository,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=resolved_head_sha,
+                app_slug=getattr(args, "app_slug", None),
+            )
         identity = None
         reservation = None
         held_reservation: str | None = None
@@ -2673,6 +2784,11 @@ def main(argv: list[str] | None = None) -> int:
             identity = SessionIdentity(
                 repository=args.repository,
                 pull_request=args.pull_request,
+                repository_id=(
+                    getattr(args, "repository_id", None)
+                    if hosted_session_ledger
+                    else None
+                ),
             )
             reservation = session_reservation_id(
                 repository=args.repository,
@@ -2819,6 +2935,7 @@ def main(argv: list[str] | None = None) -> int:
         incremental = None
         current_key = None
         verification_scope = None
+        admission_baseline = None
         # F3 durable-baseline enforcement is explicitly opted into by the
         # identity-bound transaction/artifact request. Legacy operator runs
         # keep their prior full-review behavior until that flag is selected.
@@ -2840,6 +2957,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except ReviewInputError:
                 return emit_durable_baseline_recovery()
+            # This round classifies the new head against the durable baseline,
+            # so the publication boundary of the same run needs the exact
+            # baseline and current key this analysis admitted with. The
+            # transaction alone cannot reconstruct either.
+            admission_baseline = persisted_baseline
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
@@ -2928,30 +3050,65 @@ def main(argv: list[str] | None = None) -> int:
                     "identity-bound analysis currently supports only legacy evidence"
                 )
             else:
-                if args.configuration_context_output is not None:
+                cache_key = build_review_context_cache_key(
+                    _checkpoint_cache_request(
+                        request,
+                        base_sha=resolved_base_sha,
+                        head_sha=resolved_head_sha,
+                    ),
+                    provider_name=service.provider.name,
+                    stages=service.stages,
+                    profile=effective_profile,
+                )
+                if (
+                    args.configuration_context_output is not None
+                    or args.admission_context_output is not None
+                ):
                     try:
-                        if transaction_configuration_context is None:
-                            raise ReviewInputError(
-                                "configuration context is unavailable"
+                        if args.configuration_context_output is not None:
+                            if transaction_configuration_context is None:
+                                raise ReviewInputError(
+                                    "configuration context is unavailable"
+                                )
+                            if (
+                                ReviewTransaction.compute_configuration_digest(
+                                    transaction_configuration_context
+                                )
+                                != prepared_transaction.configuration_digest
+                            ):
+                                raise ReviewInputError(
+                                    "configuration context does not match the "
+                                    "identity-bound transaction"
+                                )
+                            args.configuration_context_output.write_text(
+                                json.dumps(transaction_configuration_context, indent=2)
+                                + "\n",
+                                encoding="utf-8",
                             )
-                        if (
-                            ReviewTransaction.compute_configuration_digest(
-                                transaction_configuration_context
+                        if args.admission_context_output is not None:
+                            # A verification round publishes the exact key it
+                            # admitted with, so the artifact can never carry a
+                            # key the classification did not see.
+                            artifact_key = (
+                                current_key if current_key is not None else cache_key
                             )
-                            != prepared_transaction.configuration_digest
-                        ):
-                            raise ReviewInputError(
-                                "configuration context does not match the "
-                                "identity-bound transaction"
+                            if artifact_key is None:
+                                raise ReviewInputError(
+                                    "admission context is unavailable"
+                                )
+                            args.admission_context_output.write_text(
+                                json.dumps(
+                                    admission_context_document(
+                                        admission_baseline, artifact_key
+                                    ),
+                                    indent=2,
+                                )
+                                + "\n",
+                                encoding="utf-8",
                             )
-                        # Persist the context before checkpointing the ledger.
-                        # A failed write must not leave a durable transaction
-                        # that publication cannot reconstruct.
-                        args.configuration_context_output.write_text(
-                            json.dumps(transaction_configuration_context, indent=2)
-                            + "\n",
-                            encoding="utf-8",
-                        )
+                        # Persist every trusted artifact before checkpointing
+                        # the ledger. A failed write must not leave a durable
+                        # transaction that publication cannot reconstruct.
                     except BaseException as cleanup_error:
                         try:
                             cleanup_analysis_reservation(charge_failed_attempt=True)
@@ -2970,16 +3127,6 @@ def main(argv: list[str] | None = None) -> int:
                         raise ReviewInputError(
                             "prepared review transaction has no session record"
                         )
-                    cache_key = build_review_context_cache_key(
-                        _checkpoint_cache_request(
-                            request,
-                            base_sha=resolved_base_sha,
-                            head_sha=resolved_head_sha,
-                        ),
-                        provider_name=service.provider.name,
-                        stages=service.stages,
-                        profile=effective_profile,
-                    )
                     verification_related_paths = (
                         verification_scope.related_paths
                         if verification_scope is not None
@@ -3022,6 +3169,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.configuration_context_output is not None:
             raise ReviewInputError(
                 "configuration context requires an admitted review transaction"
+            )
+        elif args.admission_context_output is not None:
+            raise ReviewInputError(
+                "admission context requires an admitted review transaction"
             )
         emit_host_outcome(outcome, output_path=args.outcome)
         rendered = json.dumps(result.to_dict(), indent=2) + "\n"

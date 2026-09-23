@@ -261,7 +261,12 @@ policy. Merge-focused requires a trusted session ledger for admission
 and round enforcement: every hosted review runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes
-reviews without any additional ledger provisioning. The ledger requirement is
+reviews without any additional ledger provisioning. The analysis job and the
+publication job of one run resolve the same broker-attested comment ledger, so
+rounds, baselines, and grants recorded by one job are visible to the next
+instead of living on a runner filesystem no later job can read; the first job
+of a fresh installation enrolls the marker when the broker reports no prior
+session. The ledger requirement is
 operator-visible only on the local CLI path: `review-sensei github review`
 without `--session-ledger` or `--github-session-ledger` reports `doctor`
 `status=action` (exit 2) and `plan` lists `session-ledger-required`, and an

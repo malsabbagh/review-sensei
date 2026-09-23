@@ -315,10 +315,11 @@ identity, expiry, integrity, and current publication policy, and never invokes
 a model or writes trusted learnings or configuration.
 
 `github review` accepts the matching `--configuration-context` JSON emitted
-alongside an operator-ledger analysis and an optional `--evidence-context`
-JSON. These are trusted admission inputs from the authenticated workflow or
-operator boundary, not arbitrary request data; integrations crossing that
-boundary must derive them from the trusted checkout and effective settings.
+alongside an operator-ledger analysis, an optional `--evidence-context`
+JSON, and an optional `--admission-context` JSON. These are trusted admission
+inputs from the authenticated workflow or operator boundary, not arbitrary
+request data; integrations crossing that boundary must derive them from the
+trusted checkout and effective settings.
 Only their canonical digests are persisted in the session ledger. Review
 limits and stage prompt/source details are intentionally not part of the
 configuration digest because publication does not re-run analysis; the
@@ -332,13 +333,42 @@ Hosted integrations that restore a durable baseline must also construct the
 effective provider/model/profile/stage settings used by that request; the
 GitHub application rejects a key bound to a different publication identity.
 
+The admission context is the closed two-field document that carries those
+verification-round inputs across the analysis/publication boundary:
+`baseline` is the durable baseline document (or null on an initial round) and
+`current_key` is the cache key the analysis actually admitted the round with.
+Neither is reconstructible from the ledger record alone — the durable
+transaction binds configuration, evidence, and policy digests, not the stage,
+context, and learning digests that identify a review context — so an
+operator-ledger analysis emits them for the publication of the same run. It
+carries no prompt, diff, provider output, or rendered finding text.
+`--admission-context` requires `--configuration-context`: the identity-bound
+transaction is what makes the inputs meaningful, so a caller cannot supply the
+classification state without it. On an initial round the null baseline makes
+the key inert, and passing the artifact is harmless.
+
 The analysis CLI keeps the existing `--session-ledger` reservation path
 compatible by default. Pass `--transaction` to opt into the identity-bound
 checkpoint independently of filesystem artifact export. Passing
 `--configuration-context-output` also opts into that transaction and writes the
 secret-free context artifact; omitting it is supported when the later
 publisher can obtain the same trusted context through another operator
-boundary.
+boundary. `--admission-context-output` writes the admission context described
+above and, like the configuration artifact, opts into the transaction; both
+artifacts are written before the round is checkpointed, so a failed write
+cannot leave a durable round that publication cannot reconstruct.
+
+An analysis that runs inside a GitHub-hosted job can resolve its session
+ledger from the broker instead of the runner filesystem. `--github-session-ledger`
+opens a broker-attested `review_session` for `--repository-id`, pull request,
+and head, and reads and writes the same issue-comment marker the hosted
+publication boundary uses, so rounds, baselines, and grants stay durable
+across jobs that share no local disk. `--repository-id` and `--oidc-token`
+are valid only with `--github-session-ledger`, and the broker session needs an
+operator `--review-mode`; a session whose broker verdict is `known` but whose
+marker is absent fails closed and requires a maintainer
+`@sensei review reenroll` rather than silently re-enrolling.
+The local `--session-ledger` file stays the default for operator diagnostics.
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
@@ -547,8 +577,13 @@ The command is `review-sensei`. Supported flags are:
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
 | `--stages-dir` | `REVIEWSENSEI_STAGES_DIR` | Trusted-base stage directory |
 | `--output` | none | Write JSON to a file instead of stdout |
-| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and an explicit `--session-ledger`. Protect the emitted file because it becomes trusted admission input for the later `github review` command |
-| `--transaction` | none | Explicitly opt into the identity-bound analysis/publication checkpoint without requiring a local configuration-context file; requires an operator `--review-mode`, an explicit `--session-ledger`, and exact repository/PR/base/head identity |
+| `--configuration-context-output` | none | Write the trusted, secret-free configuration context needed to publish an identity-bound result; requires an operator `--review-mode` and a session ledger (`--session-ledger` or `--github-session-ledger`). Protect the emitted file because it becomes trusted admission input for the later `github review` command |
+| `--admission-context-output` | none | Write the trusted admission context (durable baseline plus current cache key) that the later `github review` of the same run needs to classify a verification round; implies the identity-bound transaction and shares its ledger, mode, and identity requirements |
+| `--transaction` | none | Explicitly opt into the identity-bound analysis/publication checkpoint without requiring a local configuration-context file; requires an operator `--review-mode`, a session ledger (`--session-ledger` or `--github-session-ledger`), and exact repository/PR/base/head identity |
+| `--github-session-ledger` | none | Resolve the identity-bound session ledger from a broker-attested `review_session` for the comment marker of `--repository-id`/`--pull-request`/`--head-sha` instead of the runner filesystem; requires `--transaction` (or an artifact-output flag) and an operator `--review-mode` |
+| `--repository-id` | none | Numeric repository id the hosted session marker is scoped to; valid only with `--github-session-ledger` |
+| `--oidc-token` | none | OIDC token used to open the hosted session; the environment's token request is used when omitted; valid only with `--github-session-ledger` |
+| `--app-slug` | none | App login whose comments are trusted as session markers (default `reviewsensei[bot]`); consulted only when `--github-session-ledger` resolves a hosted ledger |
 
 Stage and category catalogs are trusted operator configuration. Hosted reviews
 read them only from the reviewed trusted base checkout (the validated base

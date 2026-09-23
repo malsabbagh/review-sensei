@@ -333,20 +333,8 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
         :MAX_HISTORY_FINDINGS
     ]
-    key = baseline.cache_key
     return {
-        "cache_key": {
-            "repository": key.repository,
-            "pull_request": key.pull_request,
-            "base_sha": key.base_sha,
-            "head_sha": key.head_sha,
-            "engine": key.engine,
-            "model": key.model,
-            "profile": key.profile,
-            "stage_digest": key.stage_digest,
-            "context_digest": key.context_digest,
-            "learning_digest": key.learning_digest,
-        },
+        "cache_key": baseline_cache_key_document(baseline.cache_key),
         "policy_digest": baseline.policy_digest,
         "complete": baseline.complete,
         "coverage_complete": baseline.coverage_complete,
@@ -397,6 +385,36 @@ _BASELINE_FINDING_FIELDS = frozenset(
 )
 
 
+def baseline_cache_key_document(key: ReviewContextCacheKey) -> dict[str, object]:
+    """Return the closed identity document for one review context cache key."""
+
+    if not isinstance(key, ReviewContextCacheKey):
+        raise ReviewInputError("review cache key is invalid")
+    return {
+        "repository": key.repository,
+        "pull_request": key.pull_request,
+        "base_sha": key.base_sha,
+        "head_sha": key.head_sha,
+        "engine": key.engine,
+        "model": key.model,
+        "profile": key.profile,
+        "stage_digest": key.stage_digest,
+        "context_digest": key.context_digest,
+        "learning_digest": key.learning_digest,
+    }
+
+
+def cache_key_from_document(value: object) -> ReviewContextCacheKey:
+    """Rebuild one cache key from a closed trusted or persisted document."""
+
+    if not isinstance(value, dict) or set(value) != _BASELINE_CACHE_KEY_FIELDS:
+        raise ReviewInputError("review cache key has an invalid shape")
+    try:
+        return ReviewContextCacheKey(**value)
+    except (KeyError, TypeError, ContextLoadError, ReviewInputError) as exc:
+        raise ReviewInputError("review cache key is invalid") from exc
+
+
 def baseline_from_history_document(value: object) -> ReviewBaseline:
     """Rebuild one bounded baseline after a fresh durable-ledger load."""
 
@@ -440,6 +458,43 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
         )
     except (KeyError, TypeError, ContextLoadError, ReviewInputError) as exc:
         raise ReviewInputError("persisted baseline is invalid") from exc
+
+
+def admission_context_document(
+    baseline: ReviewBaseline | None, current_key: ReviewContextCacheKey
+) -> dict[str, object]:
+    """Return the trusted publication admission inputs for one identity.
+
+    F3 admission needs the prior baseline a verification round classifies
+    against and the independently constructed cache key for the exact head and
+    configuration being published. Neither is recoverable from the durable
+    transaction alone, so an analysis emits them as one closed document for
+    the trusted publication boundary of the same run. The document carries no
+    prompt, diff, provider output, or rendered finding text.
+    """
+
+    if baseline is not None and not isinstance(baseline, ReviewBaseline):
+        raise ReviewInputError("review baseline is invalid")
+    return {
+        "baseline": (None if baseline is None else baseline_history_document(baseline)),
+        "current_key": baseline_cache_key_document(current_key),
+    }
+
+
+def admission_context_from_document(
+    value: object,
+) -> tuple[ReviewBaseline | None, ReviewContextCacheKey]:
+    """Rebuild the trusted publication admission inputs from one document."""
+
+    if not isinstance(value, dict) or set(value) != {"baseline", "current_key"}:
+        raise ReviewInputError("admission context has an invalid shape")
+    baseline_value = value["baseline"]
+    baseline = (
+        None
+        if baseline_value is None
+        else baseline_from_history_document(baseline_value)
+    )
+    return baseline, cache_key_from_document(value["current_key"])
 
 
 def baseline_from_review(

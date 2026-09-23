@@ -12,6 +12,8 @@ from unittest.mock import patch
 from review_sensei.baseline import (
     BaselineFinding,
     ReviewBaseline,
+    admission_context_document,
+    admission_context_from_document,
     baseline_from_history_document,
     baseline_history_document,
 )
@@ -2864,6 +2866,259 @@ class DiagnosticSessionTests(unittest.TestCase):
                 self.assertEqual(
                     missing_check["detail"],
                     "session ledger is not yet initialized",
+                )
+
+
+class AdmissionContextDocumentTests(unittest.TestCase):
+    """The trusted F3 admission artifact handed from analysis to publication."""
+
+    def _cache_key(self, head_sha: str = "b" * 40) -> ReviewContextCacheKey:
+        return ReviewContextCacheKey(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="c" * 64,
+            context_digest="d" * 64,
+            learning_digest="e" * 64,
+        )
+
+    def _baseline(self) -> ReviewBaseline:
+        return ReviewBaseline(
+            cache_key=self._cache_key(),
+            policy_digest="f" * 64,
+            complete=True,
+            coverage_complete=True,
+        )
+
+    def test_round_trips_a_baseline_and_current_key(self):
+        baseline = self._baseline()
+        current_key = self._cache_key(head_sha="c" * 40)
+        document = admission_context_document(baseline, current_key)
+        self.assertEqual(set(document), {"baseline", "current_key"})
+        # The baseline half must be exactly the durable document, so a
+        # publication-boundary reconstruction can never diverge from the one
+        # the ledger itself persists.
+        self.assertEqual(document["baseline"], baseline_history_document(baseline))
+        restored_baseline, restored_key = admission_context_from_document(
+            json.loads(json.dumps(document))
+        )
+        self.assertEqual(restored_baseline, baseline)
+        self.assertEqual(restored_key, current_key)
+
+    def test_round_trips_an_initial_round_without_a_baseline(self):
+        current_key = self._cache_key()
+        document = admission_context_document(None, current_key)
+        self.assertIsNone(document["baseline"])
+        restored_baseline, restored_key = admission_context_from_document(
+            json.loads(json.dumps(document))
+        )
+        self.assertIsNone(restored_baseline)
+        self.assertEqual(restored_key, current_key)
+
+    def test_rejects_unclosed_shapes(self):
+        document = admission_context_document(None, self._cache_key())
+        with self.assertRaisesRegex(ReviewInputError, "admission context"):
+            admission_context_from_document([])
+        # An extra top-level field must not be silently dropped.
+        broken = json.loads(json.dumps(document))
+        broken["baseline_current_key"] = "field"
+        with self.assertRaisesRegex(ReviewInputError, "admission context"):
+            admission_context_from_document(broken)
+        # A missing admission input must not be defaulted to a null baseline.
+        broken = json.loads(json.dumps(document))
+        del broken["baseline"]
+        with self.assertRaisesRegex(ReviewInputError, "admission context"):
+            admission_context_from_document(broken)
+        # The cache key is the F3 identity, so its closed shape is enforced
+        # by the same validator that reads a persisted baseline.
+        broken = json.loads(json.dumps(document))
+        broken["current_key"]["head_sha_extra"] = "0" * 40
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            admission_context_from_document(broken)
+        broken = json.loads(json.dumps(document))
+        del broken["current_key"]["stage_digest"]
+        with self.assertRaisesRegex(ReviewInputError, "invalid shape"):
+            admission_context_from_document(broken)
+        # A nested baseline document is reconstructed with the durable
+        # validator, so an unclosed baseline fails here rather than reaching
+        # the convergence classifier.
+        broken = json.loads(
+            json.dumps(admission_context_document(self._baseline(), self._cache_key()))
+        )
+        del broken["baseline"]["cache_key"]["model"]
+        with self.assertRaisesRegex(ReviewInputError, "persisted baseline"):
+            admission_context_from_document(broken)
+
+
+class HostedSessionLedgerResolutionTests(unittest.TestCase):
+    """Analysis-side construction of the broker-attested hosted ledger."""
+
+    class _Broker:
+        def __init__(self, *, token: str = "session-token", state: str = "known"):
+            self.token = token
+            self.state = state
+            self.oidc_tokens: list[str] = []
+            self.scopes: list[dict[str, object]] = []
+
+        def request_oidc_token(self) -> str:
+            return "requested-oidc-token"
+
+        def open_session(self, oidc_token, **kwargs):
+            self.oidc_tokens.append(oidc_token)
+            self.scopes.append(dict(kwargs))
+            return type("Session", (), {"token": self.token, "state": self.state})()
+
+    class _Transport:
+        """Recording opener that serves a fixed comment list."""
+
+        def __init__(self, comments: list[dict[str, object]]):
+            self.comments = comments
+            self.calls: list[tuple[str, str, str]] = []
+
+        def __call__(self, request, timeout):
+            del timeout
+            self.calls.append(
+                (request.method, request.full_url, request.headers["Authorization"])
+            )
+            return FakeHTTPResponse(
+                json.dumps(self.comments).encode("utf-8"), status=200
+            )
+
+    def _http(self, comments: list[dict[str, object]]) -> tuple[GitHubHttp, _Transport]:
+        transport = self._Transport(comments)
+        return (
+            GitHubHttp(api_url="https://api.github.test", opener=transport),
+            transport,
+        )
+
+    def _marker_comment(self, *, head_sha: str, now: datetime = FIXED_NOW):
+        record = SessionRecord.create(IDENTITY, now=now)
+        return {
+            "id": 4242,
+            "body": render_session_comment(
+                repository_id=99, pull_request=IDENTITY.pull_request, record=record
+            ),
+            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+        }
+
+    def test_opens_a_broker_session_and_returns_an_attested_ledger(self):
+        from review_sensei.hosting.github.application import (
+            resolve_hosted_session_ledger,
+        )
+
+        broker = self._Broker()
+        http, transport = self._http([self._marker_comment(head_sha="a" * 40)])
+        ledger = resolve_hosted_session_ledger(
+            broker=broker,
+            http=http,
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha="a" * 40,
+            app_slug="reviewsensei[bot]",
+        )
+        self.assertIsInstance(ledger, GitHubIssueCommentSessionLedger)
+        self.assertEqual(
+            broker.scopes,
+            [
+                {
+                    "repository_id": IDENTITY.repository_id,
+                    "pull_request": IDENTITY.pull_request,
+                    "head_sha": "a" * 40,
+                }
+            ],
+        )
+        # The returned ledger is bound to the broker session token, so its
+        # writes carry the session capability rather than a caller credential.
+        self.assertTrue(transport.calls)
+        self.assertEqual(
+            {authorization for _method, _url, authorization in transport.calls},
+            {"Bearer session-token"},
+        )
+        self.assertEqual(
+            transport.calls[0][1],
+            "https://api.github.test/repos/owner/repo/issues/136/comments"
+            "?per_page=100&page=1",
+        )
+        self.assertEqual(ledger.load(IDENTITY).status, "ok")
+
+    def test_requests_an_oidc_token_when_the_caller_has_none(self):
+        from review_sensei.hosting.github.application import (
+            resolve_hosted_session_ledger,
+        )
+
+        broker = self._Broker()
+        http, _transport = self._http([self._marker_comment(head_sha="a" * 40)])
+        resolve_hosted_session_ledger(
+            broker=broker,
+            http=http,
+            oidc_token=None,
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha="a" * 40,
+        )
+        self.assertEqual(broker.oidc_tokens, ["requested-oidc-token"])
+
+    def test_fails_closed_when_a_known_session_marker_is_missing(self):
+        from review_sensei.hosting.github.application import (
+            resolve_hosted_session_ledger,
+        )
+        from review_sensei.hosting.github.errors import GitHubPublicationError
+
+        http, _transport = self._http([])
+        with self.assertRaisesRegex(GitHubPublicationError, "reenroll"):
+            resolve_hosted_session_ledger(
+                broker=self._Broker(state="known"),
+                http=http,
+                oidc_token="oidc",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha="a" * 40,
+            )
+
+    def test_first_enrollment_is_not_blocked_by_a_missing_marker(self):
+        from review_sensei.hosting.github.application import (
+            resolve_hosted_session_ledger,
+        )
+
+        http, _transport = self._http([])
+        ledger = resolve_hosted_session_ledger(
+            broker=self._Broker(state="enrolled"),
+            http=http,
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha="a" * 40,
+        )
+        # Enrollment is the analysis lane creating the durable record, so a
+        # missing marker is expected rather than an authenticated recovery.
+        self.assertEqual(ledger.load(IDENTITY).status, "missing")
+
+    def test_rejects_a_blank_or_missing_session_token(self):
+        from review_sensei.hosting.github.application import (
+            resolve_hosted_session_ledger,
+        )
+        from review_sensei.hosting.github.errors import GitHubPublicationError
+
+        for token in ("", "   "):
+            http, _transport = self._http([])
+            with self.assertRaisesRegex(GitHubPublicationError, "session token"):
+                resolve_hosted_session_ledger(
+                    broker=self._Broker(token=token),
+                    http=http,
+                    oidc_token="oidc",
+                    repository=IDENTITY.repository,
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha="a" * 40,
                 )
 
 

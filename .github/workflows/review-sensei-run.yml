@@ -783,6 +783,7 @@ jobs:
       - name: Run cloud-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
           REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
@@ -853,6 +854,16 @@ jobs:
           if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
+          # Reserve the round, checkpoint the identity-bound transaction, and
+          # emit the trusted admission artifacts before inference results are
+          # published. The transaction lives in the broker-attested comment
+          # ledger rather than a runner-local file, so the publication step of
+          # this run and the analysis of the next run read the same durable
+          # rounds, baselines, and grants.
+          review_args+=(--transaction --github-session-ledger \
+            --repository-id "$REPOSITORY_ID" \
+            --configuration-context-output configuration-context.json \
+            --admission-context-output admission-context.json)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" \
@@ -945,6 +956,8 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
+            --configuration-context configuration-context.json \
+            --admission-context admission-context.json \
             --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish cloud mention reply
@@ -1211,6 +1224,7 @@ jobs:
       - name: Run OpenRouter-provider review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
           REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
@@ -1286,6 +1300,16 @@ jobs:
           if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
+          # Reserve the round, checkpoint the identity-bound transaction, and
+          # emit the trusted admission artifacts before inference results are
+          # published. The transaction lives in the broker-attested comment
+          # ledger rather than a runner-local file, so the publication step of
+          # this run and the analysis of the next run read the same durable
+          # rounds, baselines, and grants.
+          review_args+=(--transaction --github-session-ledger \
+            --repository-id "$REPOSITORY_ID" \
+            --configuration-context-output configuration-context.json \
+            --admission-context-output admission-context.json)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --provider openrouter --model "$MODEL" \
@@ -1375,6 +1399,8 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
+            --configuration-context configuration-context.json \
+            --admission-context admission-context.json \
             --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish OpenRouter mention reply
@@ -1627,6 +1653,7 @@ jobs:
       - name: Prepare and run trusted local review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
+          REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
           REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
@@ -1702,6 +1729,16 @@ jobs:
           if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
+          # Reserve the round, checkpoint the identity-bound transaction, and
+          # emit the trusted admission artifacts before inference results are
+          # published. The transaction lives in the broker-attested comment
+          # ledger rather than a runner-local file, so the publication step of
+          # this run and the analysis of the next run read the same durable
+          # rounds, baselines, and grants.
+          review_args+=(--transaction --github-session-ledger \
+            --repository-id "$REPOSITORY_ID" \
+            --configuration-context-output configuration-context.json \
+            --admission-context-output admission-context.json)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" \
@@ -1794,6 +1831,8 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
+            --configuration-context configuration-context.json \
+            --admission-context admission-context.json \
             --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish trusted local mention reply
