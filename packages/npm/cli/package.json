@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "ReviewSensei launcher for the native standalone CLI",
   "license": "MIT",
   "repository": {
@@ -14,11 +14,11 @@
     "review-sensei": "bin/review-sensei.js"
   },
   "optionalDependencies": {
-    "@reviewsensei/cli-darwin-arm64": "0.6.6",
-    "@reviewsensei/cli-darwin-x64": "0.6.6",
-    "@reviewsensei/cli-linux-arm64-gnu": "0.6.6",
-    "@reviewsensei/cli-linux-x64-gnu": "0.6.6",
-    "@reviewsensei/cli-win32-x64": "0.6.6"
+    "@reviewsensei/cli-darwin-arm64": "0.6.7",
+    "@reviewsensei/cli-darwin-x64": "0.6.7",
+    "@reviewsensei/cli-linux-arm64-gnu": "0.6.7",
+    "@reviewsensei/cli-linux-x64-gnu": "0.6.7",
+    "@reviewsensei/cli-win32-x64": "0.6.7"
   },
   "publishConfig": {
     "access": "public"

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.7 - 2026-09-23
+
+- Prepare a new immutable PyPI and npm package cutoff after the published
+  `0.6.6` Linux npm binaries failed on Debian 12 because their bundled Python
+  required `GLIBC_2.38`. Both Linux architectures now build on Debian 12
+  (glibc 2.36) and run a clean Debian 12 consumer smoke test in the tag and
+  manual npm release paths. The same checks are required in pull-request CI
+  (#174).
+
+- Route the default OpenRouter model `deepseek/deepseek-v4.1-flash` through
+  upstream `morph` after the former `deepseek` upstream returned HTTP 404 under
+  the existing strict routing policy. Keep no fallbacks, denied data
+  collection, ZDR, and required parameters (#174). The Python and npm package
+  versions and generated setup defaults advance to `0.6.7`; the movable `v5`
+  reusable-workflow channel remains separate.
+
 ## 0.6.6 - 2026-09-23
 
 - Prepare a new immutable Python and npm package cutoff after the `v0.6.5`
