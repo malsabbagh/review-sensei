@@ -38,7 +38,7 @@ Precedence remains deterministic:
    routing policy, credential env var).
 2. Explicit CLI flags must match the profile or are rejected.
 3. Unprofiled `--provider openrouter` uses allowlisted defaults and
-   `OPENROUTER_UPSTREAM_PROVIDER` (default `deepseek`) for the routing policy.
+   `OPENROUTER_UPSTREAM_PROVIDER` (initially `deepseek`) for the routing policy.
 4. `REVIEWSENSEI_PROVIDER_MODE=local|cloud` continues to map only to Ollama
    defaults; it is not reinterpreted as OpenRouter.
 
@@ -95,6 +95,17 @@ slug.
 Callers forward `REVIEWSENSEI_PROVIDER_MODE`, `REVIEWSENSEI_MODEL`, and
 `OPENROUTER_API_KEY` after the public `v5` tag includes this contract. `v4`
 remains accepted during migration.
+
+## Amendment (2026-09-23) - route the default model through Morph
+
+The published `deepseek/deepseek-v4.1-flash` model returned HTTP 404 when pinned
+to upstream `deepseek`: OpenRouter's data-policy filter removed that endpoint
+under the existing `data_collection=deny`, ZDR, required-parameters, and
+no-fallback contract. A live review with the same model and constraints passed
+when pinned to upstream `morph`. Set the unprofiled CLI and hosted default
+upstream to `morph`; keep the strict routing policy and model allowlist. A
+future endpoint change must fail closed and be requalified before changing the
+trusted upstream mapping.
 
 ## Alternatives considered
 

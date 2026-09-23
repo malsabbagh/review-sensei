@@ -116,16 +116,21 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
       - name: Set up Python
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Install standalone smoke oracle
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python -m pip install --disable-pip-version-check .
       - name: Install pinned PyInstaller
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
       - name: Build one-folder standalone executable
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
       - name: Run native standalone smoke equivalence
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
         shell: bash
         env:
           PYTHONPATH: src
@@ -144,6 +149,10 @@ jobs:
             --fixture-response evaluation/v1/responses/off-by-one.json \
             --base-ref "$base_ref" \
             --head-ref "$head_ref"
+      - name: Build and smoke Linux standalone on Debian 12
+        if: ${{ startsWith(matrix.target, 'linux-') }}
+        shell: bash
+        run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"
       - name: Upload native bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.provider_config import (
@@ -8,6 +9,7 @@ from review_sensei.provider_config import (
     DEFAULT_OPENROUTER_UPSTREAM,
     HOSTED_OPENROUTER_DEFAULTS,
     hosted_openrouter_upstream,
+    openrouter_policy_from_env,
     published_hosted_openrouter_models,
     resolve_hosted_job_model,
     resolve_hosted_workflow_model,
@@ -132,9 +134,24 @@ class HostedWorkflowModelValidationTests(unittest.TestCase):
                 )
 
     def test_hosted_openrouter_upstream_resolves_default(self) -> None:
+        self.assertEqual(DEFAULT_OPENROUTER_UPSTREAM, "morph")
         self.assertEqual(
             hosted_openrouter_upstream(DEFAULT_OPENROUTER_MODEL),
             DEFAULT_OPENROUTER_UPSTREAM,
+        )
+
+    def test_unprofiled_default_keeps_strict_openrouter_routing(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            request_policy = openrouter_policy_from_env().to_request_provider()
+        self.assertEqual(
+            request_policy,
+            {
+                "order": ["morph"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+                "data_collection": "deny",
+                "zdr": True,
+            },
         )
 
     def test_hosted_openrouter_upstream_rejects_unknown(self) -> None:

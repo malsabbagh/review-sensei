@@ -14,6 +14,6 @@ or contacts a provider. Install the exact version and invoke it with:
 npx --yes @reviewsensei/cli@0.6.6 --version
 ```
 
-Supported targets are macOS arm64/x64, Linux arm64/x64 with glibc, and
-Windows x64. Linux musl systems and other architectures fail with a bounded
-unsupported-target error.
+Supported targets are macOS arm64/x64, Linux arm64/x64 with glibc 2.36 or
+newer, and Windows x64. Linux musl systems and other architectures fail with a
+bounded unsupported-target error.

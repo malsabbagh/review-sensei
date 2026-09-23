@@ -83,7 +83,7 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
+DEFAULT_OPENROUTER_UPSTREAM = "morph"
 
 
 def _provider_mode() -> str:

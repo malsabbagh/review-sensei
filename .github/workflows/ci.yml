@@ -231,6 +231,25 @@ jobs:
         if: ${{ hashFiles('.publication/exclusions.json') != '' }}
         run: python scripts/validate_publication_boundary.py --print-files
 
+  linux-standalone:
+    name: Linux standalone baseline (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-arm64-gnu
+            os: ubuntu-24.04-arm
+          - target: linux-x64-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Build and smoke on Debian 12
+        shell: bash
+        run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"
+
   workers:
     name: Cloudflare Worker
     runs-on: ubuntu-latest
@@ -299,7 +318,7 @@ jobs:
   required-checks:
     name: Required checks
     if: ${{ !cancelled() }}
-    needs: [compatibility, quality, schemas, package, npm, workers, codeql]
+    needs: [compatibility, quality, schemas, package, npm, linux-standalone, workers, codeql]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate
@@ -317,5 +336,6 @@ jobs:
           require_success "${{ needs.schemas.result }}"
           require_success "${{ needs.package.result }}"
           require_success "${{ needs.npm.result }}"
+          require_success "${{ needs.linux-standalone.result }}"
           require_success "${{ needs.workers.result }}"
           require_success "${{ needs.codeql.result }}"

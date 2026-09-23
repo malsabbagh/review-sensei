@@ -389,6 +389,56 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch", self.workflow)
 
 
+class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
+    def test_both_publish_paths_build_linux_on_debian_12(self):
+        for workflow_name in ("release.yml", "publish-npm.yml"):
+            with self.subTest(workflow=workflow_name):
+                workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
+                    encoding="utf-8"
+                )
+                native = workflow.split("  native-build:", 1)[1].split(
+                    "  assemble-npm:", 1
+                )[0]
+                self.assertIn(
+                    "- name: Build and smoke Linux standalone on Debian 12\n"
+                    "        if: ${{ startsWith(matrix.target, 'linux-') }}\n"
+                    "        shell: bash\n"
+                    '        run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"',
+                    native,
+                )
+                for step in (
+                    "Set up Python",
+                    "Install standalone smoke oracle",
+                    "Install pinned PyInstaller",
+                    "Build one-folder standalone executable",
+                    "Run native standalone smoke equivalence",
+                ):
+                    self.assertIn(
+                        f"- name: {step}\n"
+                        "        if: ${{ !startsWith(matrix.target, 'linux-') }}",
+                        native,
+                    )
+
+    def test_linux_builder_uses_pinned_baseline_and_clean_consumer(self):
+        script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("python:3.11-bookworm@sha256:", script)
+        self.assertIn("debian:12-slim@sha256:", script)
+        self.assertEqual(script.count("getconf GNU_LIBC_VERSION"), 2)
+        self.assertIn("--network none", script)
+        self.assertIn('"$executable" plan', script)
+
+    def test_ci_requires_both_linux_consumer_lanes(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        lane = workflow.split("  linux-standalone:", 1)[1].split("  workers:", 1)[0]
+        self.assertIn("target: linux-arm64-gnu", lane)
+        self.assertIn("target: linux-x64-gnu", lane)
+        self.assertIn("fetch-depth: 2", lane)
+        self.assertIn("bash scripts/build_linux_standalone_in_container.sh", lane)
+        self.assertIn("linux-standalone", workflow.split("  required-checks:", 1)[1])
+
+
 class NpmReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text(

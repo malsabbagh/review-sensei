@@ -87,6 +87,15 @@ configuration, and registry readback. Native clean-machine and registry
 evidence remains a maintainer gate after merge; this change does not publish
 packages or reserve the npm scope.
 
+## Amendment (2026-09-23) - Linux glibc baseline
+
+PyInstaller bundles the build host's Python shared library, which can require
+newer glibc symbols than an older consumer has. Both Linux targets now build on
+the matching architecture in a pinned Python 3.11 Debian 12 image (glibc 2.36)
+and run a second smoke in a pinned minimal Debian 12 image with no Python,
+Node.js, or network. This baseline applies to the tag and manual npm release
+paths. macOS and Windows continue to build directly on their native runners.
+
 ## Partial release and rollback
 
 The launcher is never published against a partial platform set. If a platform

@@ -2,6 +2,10 @@
 
 The release workflow builds one-folder executables with the exact PyInstaller
 version in `requirements.txt` on a native runner for each supported target.
+Linux targets build inside a pinned Python 3.11 Debian 12 container and then
+run a second smoke test in a minimal Debian 12 consumer container (glibc 2.36).
+This keeps the bundled Python compatible with that baseline; the macOS and
+Windows targets still build directly on native runners.
 The entrypoint remains `review_sensei.cli:main`; the bundle includes the
 package's JSON defaults and distribution metadata so `--version` works when
 Python is absent from `PATH`.
