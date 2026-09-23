@@ -97,7 +97,9 @@ Negative or tradeoffs:
   `--configuration-context-output`, which implies it). This keeps the F1
   transaction opt-in independent from whether the current host can write a
   context file; publication still requires the equivalent trusted context at
-  its boundary.
+  its boundary. A caller that requested those artifacts is publishing from
+  them, so a round that cannot be checkpointed exits non-zero instead of
+  reporting success without the files it promised.
 - Policy and evidence digest inputs use closed, versioned identity shapes.
   Caller-supplied context keys outside those shapes are rejected before any
   digest is accepted for publication admission.

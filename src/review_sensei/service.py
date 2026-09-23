@@ -130,7 +130,6 @@ class _ValidatedStageOutput:
     summary: str | None
     comments: tuple[ReviewComment, ...]
     proposals: tuple[LearningProposal, ...]
-    omitted_inline_comments: int = 0
 
 
 @dataclass(frozen=True)
@@ -710,7 +709,6 @@ class ReviewService:
         last_provider: str = active_provider.name
         last_model: str | None = request.model
         skipped_stages = 0
-        omitted_inline_comments = 0
         executed_comment_stage = False
         self._provider_calls = 0 if tracker is None else tracker.provider_calls
         stage_summary: dict[str, str] = {}
@@ -1047,7 +1045,6 @@ class ReviewService:
                     stage_text = stage_output.summary
                     stage_comments = stage_output.comments
                     stage_proposals = stage_output.proposals
-                    omitted_inline_comments += stage_output.omitted_inline_comments
                 except ReviewFormatError as exc:
                     if (
                         attempt + 1 >= _MAX_PROVIDER_OUTPUT_ATTEMPTS
@@ -1101,9 +1098,14 @@ class ReviewService:
             # comments from the checkpoint carries stable first-wins
             # deduplication into the next stage.
             try:
+                # A retained file-level finding is still a carried finding, so
+                # comment placement never makes a pass partial; only a stage
+                # that never ran does.  Status is what the checkpoint,
+                # publication, and approval boundaries gate on, and those gates
+                # are about coverage of the reviewed paths.
                 checkpoint_status = (
                     "partial"
-                    if skipped_stages or omitted_inline_comments
+                    if skipped_stages
                     else "summary-only"
                     if not executed_comment_stage
                     else "complete"
@@ -1142,7 +1144,7 @@ class ReviewService:
         final_summary = accumulated_summary or "Review complete."
         review_status = (
             "partial"
-            if skipped_stages or omitted_inline_comments
+            if skipped_stages
             else "summary-only"
             if not executed_comment_stage
             else "complete"
@@ -1505,7 +1507,6 @@ class ReviewService:
         stage_summary: str | None = None
         stage_comments: list[ReviewComment] = []
         stage_proposals: list[LearningProposal] = []
-        omitted_inline_comments = 0
 
         if "summary" in stage.outputs:
             summary = payload.get("summary")
@@ -1547,7 +1548,6 @@ class ReviewService:
                             "location because its target is not in the reviewed snapshot",
                             index,
                         )
-                    omitted_inline_comments += 1
                     stage_comments.append(retained)
                     continue
                 stage_comments.append(comment)
@@ -1573,7 +1573,6 @@ class ReviewService:
             stage_summary,
             tuple(stage_comments),
             tuple(stage_proposals),
-            omitted_inline_comments,
         )
 
     @staticmethod
