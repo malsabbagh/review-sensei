@@ -47,7 +47,7 @@ REQUIRED_SETUP_PERMISSIONS = frozenset(
 )
 SETUP_VERSION = 5
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
-CURRENT_PACKAGE_VERSION = "0.6.0"
+CURRENT_PACKAGE_VERSION = "0.6.5"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
@@ -60,7 +60,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_MODEL", ""),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
-    ("REVIEWSENSEI_VERSION", "0.6.0"),
+    ("REVIEWSENSEI_VERSION", "0.6.5"),
     ("REVIEWSENSEI_REVIEW_MODE", "merge-focused"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_AUTO_APPROVE", "true"),
