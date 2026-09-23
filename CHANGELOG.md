@@ -1,12 +1,27 @@
 # Changelog
 
+## 0.6.6 - 2026-09-23
+
+- Prepare a new immutable Python and npm package cutoff after the `v0.6.5`
+  tag's npm deployment was rejected by the protected `npm` environment. The
+  package manifests and installed setup defaults advance to `0.6.6`; the
+  `v5` reusable-workflow channel remains separate.
+
+- Include the npm release-path fixes merged in #172: tag and manual publishes
+  share a version-scoped concurrency group, and manual bundle resume checks
+  authoritative REST run metadata before accepting the original artifacts.
+  The `npm` environment now permits `v*.*.*` tags as well as `main` dispatches;
+  tag publication still requires npm Trusted Publisher registration for
+  `release.yml` and maintainer environment approval.
+
 ## 0.6.5 - 2026-09-22
 
 - Package cutoff pairing the movable public workflow channel `v5` with the
   merge-focused default: PyPI `review-sensei==0.6.5` and npm
-  `@reviewsensei/cli@0.6.5` with matching platform packages, published
-  through GitHub OIDC Trusted Publishing. Installed callers must move
-  `REVIEWSENSEI_VERSION` to `0.6.5`.
+  `@reviewsensei/cli@0.6.5` with matching platform packages. PyPI published
+  through GitHub OIDC Trusted Publishing, but the initial npm tag job was
+  rejected by the protected `npm` environment. Installed PyPI callers must
+  move `REVIEWSENSEI_VERSION` to `0.6.5`.
 
 - Merge-focused is now the runtime default and live `legacy` selection is
   retired (ADR 0055, issue #146 F7): new runtime configuration, CLI
