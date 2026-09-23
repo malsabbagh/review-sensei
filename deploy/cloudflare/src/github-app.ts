@@ -114,10 +114,13 @@ export interface SetupResult {
   repository: string;
   status: string;
   pull_request_number?: number;
-  // A legacy-value migration whose read-back did not observe the write is
-  // reported here as well as in the log: the delivery result is what reaches
-  // the operator, and the variables API has no conditional write.
-  review_mode_migration?: "not_observed";
+  // The retired-value migration outcome is reported here as well as in the
+  // log: the delivery result is what reaches the operator. "observed" means
+  // the replacement was read back; "not_observed" means the write could not
+  // be observed (the variables API has no conditional write), which is also
+  // logged as a warning. The field is absent when no retired value was
+  // present.
+  review_mode_migration?: "observed" | "not_observed";
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -782,9 +785,9 @@ export class GitHubSetupService {
       installationToken,
     );
     const migrationReport =
-      reviewModeMigration === "not_observed"
-        ? { review_mode_migration: "not_observed" as const }
-        : {};
+      reviewModeMigration === null
+        ? {}
+        : { review_mode_migration: reviewModeMigration };
     const existingAfterBranch = await this.existingPullRequest(
       repository,
       installationToken,
@@ -901,7 +904,7 @@ export class GitHubSetupService {
   private async migrateRetiredReviewModeVariable(
     repository: string,
     token: string,
-  ): Promise<"not_observed" | null> {
+  ): Promise<"observed" | "not_observed" | null> {
     const variablePath =
       `/repos/${repositoryPath(repository)}/actions/variables/` +
       encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE);
@@ -946,7 +949,10 @@ export class GitHubSetupService {
       });
       return "not_observed";
     }
-    return null;
+    // The replacement was read back, so the migration is reported as done in
+    // the structured setup result rather than only implied by the absence of a
+    // warning.
+    return "observed";
   }
 
   private async defaultBranch(

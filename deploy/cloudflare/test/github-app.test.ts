@@ -461,7 +461,15 @@ describe("setup repository reconciliation", () => {
     fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+      {
+        repository: "acme/widgets",
+        status: "created",
+        pull_request_number: 42,
+        // A confirmed migration is reported in the structured result too, so
+        // the delivery result is self-verifying instead of only silent on the
+        // happy path.
+        review_mode_migration: "observed",
+      },
     ]);
     const variablePath = `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`;
     const patch = fake.requests.find(({ method, path }) =>

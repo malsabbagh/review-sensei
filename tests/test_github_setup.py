@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from review_sensei.convergence import (
     LEGACY_REVIEW_MODE,
     REVIEW_MODE_ENV,
-    migrate_stored_review_mode,
+    supported_mode_for_stored_value,
 )
 from review_sensei.hosting.github import (
     GitHubSetupClient,
@@ -29,6 +29,7 @@ from review_sensei.hosting.github.setup import (
     RELEASED_RUNNER_SWITCH_V4_SHA256,
     RETIRED_REVIEW_MODE_VARIABLE,
     REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+    REVIEW_MODE_MIGRATION_OBSERVED,
     SETUP_FILE_PATHS,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
@@ -693,6 +694,22 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             results[0].review_mode_migration, REVIEW_MODE_MIGRATION_NOT_OBSERVED
         )
 
+    def test_setup_result_carries_a_confirmed_review_mode_migration(self):
+        # A confirmed migration is reported in the structured field too, so a
+        # delivery result is self-verifying: the operator can see that the
+        # retired value was rewritten rather than assuming the migration ran.
+        transport = FakeTransport(review_mode_migration=REVIEW_MODE_MIGRATION_OBSERVED)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_OBSERVED
+        )
+
     def test_setup_result_carries_the_migration_on_the_existing_pr_skip(self):
         # The setup PR can already exist when the migration runs, so the
         # outcome is reported on that skip result too instead of being dropped.
@@ -757,20 +774,22 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         # manages variables but cannot perform it must fail setup loudly:
         # tolerating its absence would leave `legacy` in place while the
         # generated caller keeps feeding the workflow guard a retired mode.
-        # An attribute error is exactly what an older transport without the
-        # method raises, and it is what the tolerant `getattr` lookup used to
-        # swallow.
+        # An older transport without the method raises an attribute error from
+        # a direct call; the service turns that absence into an actionable
+        # protocol-change error naming the required method instead.
         class _NoMigrationTransport(FakeTransport):
             @property
             def migrate_retired_review_mode_variable(self):
                 raise AttributeError
 
         transport = _NoMigrationTransport()
-        with self.assertRaises(AttributeError):
+        with self.assertRaises(GitHubSetupError) as raised:
             SetupPullRequestService(transport).ensure_setup_pull_requests(
                 delivery(),
                 installation_token="ghs_opaque",
             )
+        self.assertIn("migrate_retired_review_mode_variable", str(raised.exception))
+        self.assertIn("docs/public-contracts.md", str(raised.exception))
 
     def test_worker_retired_mode_migration_matches_the_python_migration_rule(self):
         # The Worker keeps its own TypeScript copy of the retired-mode
@@ -793,7 +812,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertIsNotNone(migrations, "RETIRED_REVIEW_MODE_MIGRATIONS is missing")
         self.assertEqual(
             {LEGACY_REVIEW_MODE: migrations.group(1)},
-            {LEGACY_REVIEW_MODE: migrate_stored_review_mode(LEGACY_REVIEW_MODE)},
+            {LEGACY_REVIEW_MODE: supported_mode_for_stored_value(LEGACY_REVIEW_MODE)},
         )
 
     def test_retired_mode_variable_is_the_convergence_environment_constant(self):
@@ -1800,7 +1819,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 installation_token="ghs_opaque",
             )
 
-        self.assertIsNone(observed)
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_OBSERVED)
         self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
         self.assertEqual(
             calls[0][1],

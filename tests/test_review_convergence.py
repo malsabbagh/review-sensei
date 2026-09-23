@@ -22,9 +22,9 @@ from review_sensei.convergence import (
     REQUIRED_CONTRACT_KINDS,
     REVIEW_MODE_ENV,
     comment_targets_pr_change,
-    migrate_stored_review_mode,
     policy_from_mapping,
     resolve_review_mode,
+    supported_mode_for_stored_value,
 )
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
 from review_sensei.disposition import FindingDisposition
@@ -63,8 +63,13 @@ class ReviewModeResolutionTests(unittest.TestCase):
             self.assertEqual(resolve_review_mode("  "), "merge-focused")
         with self.assertRaisesRegex(ReviewInputError, "retired"):
             resolve_review_mode("legacy")
-        self.assertEqual(migrate_stored_review_mode("legacy"), "merge-focused")
-        self.assertEqual(migrate_stored_review_mode("merge-focused"), "merge-focused")
+        # The stored-value reader maps the historical value while the runtime
+        # resolver above rejects it: opposite outcomes, deliberately distinct
+        # names.
+        self.assertEqual(supported_mode_for_stored_value("legacy"), "merge-focused")
+        self.assertEqual(
+            supported_mode_for_stored_value("merge-focused"), "merge-focused"
+        )
 
     def test_cli_overrides_environment(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "strict"}):

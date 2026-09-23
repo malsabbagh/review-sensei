@@ -254,7 +254,10 @@ settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
 boolean control. The reusable workflow's `review_mode` input is optional and
 defaults to `merge-focused`, and the generated caller maps an unset or empty
 repository variable to that default, so an absent or blank value resolves like
-the CLI rather than failing the workflow guard. Merge-focused requires a trusted session ledger for admission
+the CLI rather than failing the workflow guard. Only review operations fail
+closed on a retired stored value: reply and command runs warn and continue on
+`merge-focused`, matching the CLI reply path, which never resolves a review
+policy. Merge-focused requires a trusted session ledger for admission
 and round enforcement: every hosted review runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes
@@ -359,7 +362,8 @@ a byte-exact managed v3 workflow (including its older SHA pin), and opens a
 migration PR that updates only those files to setup-v5. It also migrates a
 managed v4/v5 caller that follows an older tag, and replaces a
 `REVIEWSENSEI_REVIEW_MODE` value of exactly `legacy` with `merge-focused` in
-place so the generated caller and its workflow guard keep working. It skips
+place so the generated caller and its workflow guard keep working, and reports
+`review_mode_migration: observed` or `not_observed` in the setup result. It skips
 custom or future versions for manual review and preserves learnings, every
 other existing variable value, and secrets.
 

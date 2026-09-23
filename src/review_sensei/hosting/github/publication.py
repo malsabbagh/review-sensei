@@ -1458,10 +1458,16 @@ class ReviewPublisher:
                     else:
                         advisory_folded.append(entry[0])
                 prepared_comments = kept_inline
-            # The batch create-review input type defines no file subject type
-            # (a subject_type=file comment is rejected with HTTP 422), so a
-            # finding anchored to the file itself is always retained in the
-            # summary rather than published as an inline thread.
+            # The batch create-review input type defines no file subject type:
+            # a live probe on a COMMENT review rejects a file-level entry with
+            # HTTP 422 ("Field is not defined on DraftPullRequestReviewComment",
+            # "0.position Expected value to not be null"), and an isolating
+            # probe with identical coordinates rejects only the entry carrying
+            # subject_type ("Field is not defined on
+            # DraftPullRequestReviewThread") while the same entry without it
+            # returns HTTP 200 COMMENTED, so a finding anchored to the file
+            # itself is always retained in the summary rather than published as
+            # an inline thread.
             file_level = [entry[0] for entry in prepared_comments if entry[3] == "file"]
             if file_level:
                 unanchored.extend(file_level)

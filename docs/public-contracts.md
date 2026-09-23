@@ -841,6 +841,24 @@ writing, and never includes private keys, installation tokens, raw webhook
 bodies, authorization headers, or GitHub API bodies in generated files or PR
 bodies.
 
+`SetupPullRequestService` talks to GitHub through a transport that implements
+the documented setup protocol. A transport that implements
+`ensure_repository_variables` must also implement
+`migrate_retired_review_mode_variable`, added by the merge-focused cutover:
+the method rewrites only an exact retired `REVIEWSENSEI_REVIEW_MODE` value to
+its supported replacement and reads the stored value back, because the Actions
+variables API has no conditional write and a write status is not evidence of
+what was stored. A transport that predates the method fails setup with an
+explicit `github_setup` error naming the required method instead of an
+attribute error, so the added method is a detectable, required protocol change
+when upgrading.
+
+The structured setup result carries `review_mode_migration` when a retired
+value was present: `"observed"` when the rewrite read back as the replacement
+and `"not_observed"` when it did not (which also emits a
+`review_mode_migration_not_observed` warning). The field is absent when there
+was no retired value to migrate.
+
 Setup and webhook errors expose the stable categories listed above. Webhook
 signature failures use `github_webhook_signature`; malformed or duplicate
 deliveries use `github_webhook`; setup validation failures use `github_setup`;

@@ -20,22 +20,66 @@ from review_sensei.verifier import (
 
 try:
     from fake_github_http import json_response, make_http
-    from test_github_publication import (
-        DIFF,
-        graphql_review_threads_response,
-        pr_payload,
-        result,
-    )
 except ModuleNotFoundError:
     from tests.fake_github_http import json_response, make_http
-    from tests.test_github_publication import (
-        DIFF,
-        graphql_review_threads_response,
-        pr_payload,
-        result,
-    )
 
 HEAD = "b" * 40
+
+# Local copies of the small fixtures this suite needs, deliberately not
+# imported from another test module: a module-scope mutation there, or an
+# edit to its shared fixtures, must not silently change what these cutover
+# regressions exercise.
+DIFF = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ keep
++change
+"""
+
+
+def result():
+    return ReviewResult(
+        summary="Summary.",
+        comments=(
+            ReviewComment(path="src/app.py", line=2, body="finding", blocking=True),
+        ),
+        provider="ollama",
+    )
+
+
+def pr_payload(*, head_sha):
+    return {
+        "state": "open",
+        "draft": False,
+        "user": {"login": "alice", "type": "User"},
+        "head": {
+            "sha": head_sha,
+            "repo": {"full_name": "owner/repo", "fork": False},
+        },
+        "base": {
+            "ref": "main",
+            "sha": "a" * 40,
+            "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+        },
+    }
+
+
+def graphql_review_threads_response():
+    return json_response(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+    )
 
 
 def publication_arguments(review):

@@ -5,6 +5,12 @@ Date: 2026-09-21
 GitHub Issue: #146 F7
 Owners/Reviewers: Maintainers
 
+Status note: this record stays `Proposed` deliberately at merge time. The ADR
+process requires explicit maintainer approval to mark a record `Accepted`
+(`docs/process/adr-process.md`), so this cutover ships as an intentional
+pre-acceptance change; the approval step is tracked as part of the F7 rollout
+on issue #146, and the index row carries the matching `Proposed` status.
+
 ## Context
 
 The sequential-evaluation rollout kept `legacy` as the runtime default while
@@ -97,11 +103,17 @@ event. The previous publisher folded them only when the event would be
 subject type and requires a `position`, and a direct probe on a `COMMENT`
 review rejects a file-level entry with HTTP 422
 (`subjectType` is not defined on `DraftPullRequestReviewComment`, `position`
-is required). Because the schema is event-independent, the conditional could
-never have produced a per-file thread on a non-blocking review. Unifying the
-fold removes a latent `publication_failed` path without reducing what a
-non-blocking review conveys; the publisher contract in
-`docs/public-contracts.md` documents the behavior.
+is required). A second probe isolated the two fields: submitted with
+identical coordinates, the entry carrying `subject_type: "file"` is rejected
+with HTTP 422 naming only `0.subjectType` (`Field is not defined on
+DraftPullRequestReviewThread`), while the same entry without `subject_type`
+succeeds with HTTP 200 `COMMENTED`. The subject type is therefore rejected on
+its own, not because of the coordinates, and because the schema is
+event-independent the conditional could never have produced a per-file
+thread on a non-blocking review. Unifying the fold removes a latent
+`publication_failed` path without reducing what a non-blocking review
+conveys; the publisher contract in `docs/public-contracts.md` documents the
+behavior.
 
 ## Rollback
 

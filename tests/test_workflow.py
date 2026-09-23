@@ -69,7 +69,9 @@ class WorkflowValidationTests(unittest.TestCase):
         )
         self.assertIn("merge the pending setup-v5 pull request", workflow)
         legacy_line = next(
-            line for line in workflow.splitlines() if "legacy) echo" in line
+            line
+            for line in workflow.splitlines()
+            if "legacy review mode is retired; migrate configuration" in line
         )
         self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy_line)
 
@@ -108,10 +110,10 @@ class WorkflowValidationTests(unittest.TestCase):
             + workflow[case_start:case_end]
         )
 
-        def run(mode: str) -> subprocess.CompletedProcess:
+        def run(mode: str, operation: str = "review") -> subprocess.CompletedProcess:
             return subprocess.run(
                 [bash, "-c", guard],
-                env={**os.environ, "REVIEW_MODE": mode},
+                env={**os.environ, "REVIEW_MODE": mode, "OPERATION": operation},
                 capture_output=True,
                 text=True,
             )
@@ -132,6 +134,21 @@ class WorkflowValidationTests(unittest.TestCase):
                 normalized_legacy = run(mode)
                 self.assertEqual(normalized_legacy.returncode, 1)
                 self.assertIn("legacy review mode is retired", normalized_legacy.stderr)
+        # Reply and command operations never resolve a review policy, so a
+        # retired stored value warns and continues instead of failing the run;
+        # only a review fails closed, matching the CLI reply exemption.
+        for operation in ("reply", "command"):
+            with self.subTest(operation=operation):
+                retired_non_review = run("legacy", operation=operation)
+                self.assertEqual(
+                    retired_non_review.returncode, 0, retired_non_review.stderr
+                )
+                self.assertIn("::warning::", retired_non_review.stderr)
+                self.assertNotIn("::error::", retired_non_review.stderr)
+                self.assertIn(
+                    f"retired and ignored for {operation} operations",
+                    retired_non_review.stderr,
+                )
         for mode in (" MERGE-FOCUSED ", "Merge-Focused"):
             with self.subTest(mode=mode):
                 normalized_supported = run(mode)

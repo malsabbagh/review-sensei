@@ -157,8 +157,11 @@ unreviewed or unpublished snapshot.
 
 Keep these names distinct:
 
-- **setup-v5** is the generated caller format (`SETUP_VERSION = 5`). It is not
-  the git tag.
+- **The generated caller format** is versioned by `SETUP_VERSION` (currently
+  `5`), the setup marker version written into generated files. That number is
+  not a tag: it currently matches the workflow tag below only because the
+  cutover promoted both, and a later tag move must not renumber the caller
+  format.
 - **`v5`** is the movable public workflow channel. Generated callers use
   `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.
 - **`0.6.0` / `v0.6.0`** is the immutable Python and npm package cutoff.
@@ -166,8 +169,8 @@ Keep these names distinct:
   named `v5.0.0`; that would collide with the `v*.*.*` release trigger and
   confuse the workflow channel with a library version.
 
-The broker still accepts both `v4` and `v5` during migration. New setup output
-follows `v5`.
+The broker still accepts both the `v4` and `v5` workflow tags during
+migration. New generated callers pin the `v5` workflow tag.
 
 After the audited public snapshot is published, configure the Cloudflare
 Worker with `PUBLIC_WORKFLOW_TAG=v5` and deploy it. Move `v5` to the reviewed

@@ -27,7 +27,7 @@ from urllib.request import Request, urlopen
 from ...convergence import (
     LEGACY_REVIEW_MODE,
     REVIEW_MODE_ENV,
-    migrate_stored_review_mode,
+    supported_mode_for_stored_value,
 )
 from .errors import (
     GitHubSetupError,
@@ -78,15 +78,22 @@ SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 # The retired review mode survives in existing installations as a repository
 # variable that setup never overwrites, which would make the reusable-workflow
 # guard fail every review. Only this variable and only the retired value
-# (``LEGACY_REVIEW_MODE``, replaced per ``migrate_stored_review_mode`` in
+# (``LEGACY_REVIEW_MODE``, replaced per ``supported_mode_for_stored_value`` in
 # ``review_sensei.convergence``) are migrated in place; every other
 # operator-set value is left as-is. The name is the same knob the CLI reads
 # from the environment, so it is an alias rather than a second literal.
 RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV
-# The variables API has no conditional write, so a migration that cannot be
-# read back is reported as not observed rather than assumed: the value is
-# surfaced in the structured setup result and in a warning.
+# The variables API has no conditional write, so the migration reports the
+# stored value it read back rather than the write status: `observed` when the
+# replacement was read back, `not_observed` when it was not (the value is
+# surfaced in the structured setup result and in a warning), and no field at
+# all when there was no retired value to migrate.
+REVIEW_MODE_MIGRATION_OBSERVED = "observed"
 REVIEW_MODE_MIGRATION_NOT_OBSERVED = "not_observed"
+SETUP_MIGRATION_OUTCOMES = (
+    REVIEW_MODE_MIGRATION_OBSERVED,
+    REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+)
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v5 update channel. The Worker validates the
@@ -1319,6 +1326,13 @@ upload_artifacts: false
 def _current_config_file() -> str:
     """Return the current setup-v5 configuration."""
 
+    # Deliberately asymmetric with the Worker builder, which branches on the
+    # setup version inline while this side renders the live template and reads
+    # frozen fixtures only for v4 bytes. The current config's byte equivalence
+    # with the TS builder is pinned by
+    # test_current_config_matches_ts_builder_bytes and the v4 artifacts by
+    # MERGE_FOCUSED_V4_CONFIG_SHA256, so a future version bump must update both
+    # implementations rather than only the rendering here.
     return (
         "# ReviewSensei setup version: 5\n"
         "setup_version: 5\n"
@@ -1665,8 +1679,13 @@ class GitHubSetupTransport(Protocol):
     ) -> str | None:
         """Replace a retired review-mode variable value in place.
 
-        Returns ``"not_observed"`` when the write could not be read back, so
-        the caller can report it in the structured setup result.
+        Required alongside :meth:`ensure_repository_variables`: this method
+        was added by the merge-focused cutover, so a transport that predates
+        it fails setup with an explicit error rather than the attribute error
+        a bare call would raise. Returns ``"observed"`` when the replacement
+        was read back and ``"not_observed"`` when the write could not be read
+        back, so the caller can report the outcome in the structured setup
+        result; ``None`` means there was no retired value to migrate.
         """
 
     def list_pull_requests(
@@ -2013,14 +2032,15 @@ class GitHubSetupClient:
         A missing variable is left to :meth:`ensure_repository_variables`. The
         exact retired value is the only stored value rewritten; empty, unknown,
         or any other operator-set value stays untouched. The replacement is
-        resolved by ``review_sensei.convergence.migrate_stored_review_mode`` so
-        the migration rule lives with the mode table. The written value is read
-        back: the variables API has no conditional write, so a successful
+        resolved by ``review_sensei.convergence.supported_mode_for_stored_value``
+        so the migration rule lives with the mode table. The written value is
+        read back: the variables API has no conditional write, so a successful
         status says nothing about what was stored, and setup must not report a
-        migration it cannot observe. A mismatch emits a
+        migration it cannot observe. A read-back mismatch emits a
         ``review_mode_migration_not_observed`` warning and returns
-        ``"not_observed"`` so the structured setup result carries the outcome
-        too, where an operator can see it.
+        ``"not_observed"``; a confirmed replacement returns ``"observed"``. Both
+        outcomes reach the structured setup result, where an operator can see
+        that the migration ran or did not.
         """
 
         variable_path = (
@@ -2046,7 +2066,7 @@ class GitHubSetupClient:
             return None
         if data["value"] != LEGACY_REVIEW_MODE:
             return None
-        replacement = migrate_stored_review_mode(data["value"])
+        replacement = supported_mode_for_stored_value(data["value"])
         status, _ = self._open(
             "PATCH",
             variable_path,
@@ -2082,7 +2102,7 @@ class GitHubSetupClient:
                 stacklevel=2,
             )
             return REVIEW_MODE_MIGRATION_NOT_OBSERVED
-        return None
+        return REVIEW_MODE_MIGRATION_OBSERVED
 
     def list_pull_requests(
         self,
@@ -2239,12 +2259,14 @@ class SetupPullRequestResult:
             raise GitHubSetupError("Setup result repository must be an owner/repo slug")
         if not self.status:
             raise GitHubSetupError("Setup result status must be non-empty")
-        # Only the single diagnosed outcome is representable: an unobserved
-        # migration must reach the operator, but no other state is meaningful.
-        if self.review_mode_migration not in (None, REVIEW_MODE_MIGRATION_NOT_OBSERVED):
+        # Only the diagnosed migration outcomes are representable, for both
+        # directions: a confirmed migration is as reportable as one that could
+        # not be read back, and no other state is meaningful.
+        if self.review_mode_migration not in (None, *SETUP_MIGRATION_OUTCOMES):
             raise GitHubSetupError(
-                "Setup result review_mode_migration must be "
-                f"{REVIEW_MODE_MIGRATION_NOT_OBSERVED!r} when set"
+                "Setup result review_mode_migration must be one of "
+                f"{', '.join(repr(item) for item in SETUP_MIGRATION_OUTCOMES)} "
+                "when set"
             )
 
 
@@ -2405,15 +2427,30 @@ class SetupPullRequestService:
                         installation_token=installation_token,
                         variables=SETUP_VARIABLES,
                     )
-                    # Protocol-required: a transport that can manage variables
-                    # must also migrate the retired value, otherwise the
-                    # generated caller keeps feeding the workflow guard a
-                    # retired mode and every review fails.
-                    review_mode_migration = (
-                        self.transport.migrate_retired_review_mode_variable(
-                            repository=repository,
-                            installation_token=installation_token,
+                    # Protocol-required since the merge-focused cutover: a
+                    # transport that can manage variables must also migrate the
+                    # retired value, otherwise the generated caller keeps
+                    # feeding the workflow guard a retired mode and every
+                    # review fails. The check is explicit because a transport
+                    # that predates the method would otherwise abort the whole
+                    # setup delivery with a bare AttributeError instead of an
+                    # actionable protocol-change error. See
+                    # docs/public-contracts.md for the transport contract.
+                    migrate_mode = getattr(
+                        self.transport,
+                        "migrate_retired_review_mode_variable",
+                        None,
+                    )
+                    if not callable(migrate_mode):
+                        raise GitHubSetupError(
+                            "The setup transport must implement "
+                            "migrate_retired_review_mode_variable() to migrate a "
+                            f"retired {RETIRED_REVIEW_MODE_VARIABLE} value; see "
+                            "docs/public-contracts.md for the transport contract"
                         )
+                    review_mode_migration = migrate_mode(
+                        repository=repository,
+                        installation_token=installation_token,
                     )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
