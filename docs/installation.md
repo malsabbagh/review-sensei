@@ -16,10 +16,10 @@ npx --yes @reviewsensei/cli@0.6.6 prepare-diff \
 
 The launcher and all optional platform packages use one exact version from
 `pyproject.toml` and the signed `vX.Y.Z` tag. Supported targets are macOS
-arm64/x64, glibc Linux arm64/x64, and Windows x64. Linux musl and unsupported
-architectures fail before any executable is spawned. Provider flags and
-configuration variables are the same as the Python CLI, including explicit
-local versus Ollama Cloud mode.
+arm64/x64, Linux arm64/x64 with glibc 2.36 or newer, and Windows x64. Linux
+musl and unsupported architectures fail before any executable is spawned.
+Provider flags and configuration variables are the same as the Python CLI,
+including explicit local versus Ollama Cloud mode.
 
 If npm reports that the optional package is missing or has a version mismatch,
 reinstall the exact launcher version; do not run a downloader or fall back to
@@ -199,7 +199,7 @@ OpenRouter CLI flags and environment (used with `--provider openrouter` or
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Default model for unprofiled OpenRouter CLI runs |
-| `OPENROUTER_UPSTREAM_PROVIDER` | `deepseek` | Upstream slug for unprofiled OpenRouter routing policy |
+| `OPENROUTER_UPSTREAM_PROVIDER` | `morph` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
 

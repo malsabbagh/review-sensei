@@ -23,7 +23,7 @@ DEFAULT_CLOUD_BASE_URL = "https://ollama.com/api"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
-DEFAULT_OPENROUTER_UPSTREAM = "deepseek"
+DEFAULT_OPENROUTER_UPSTREAM = "morph"
 LOCAL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 

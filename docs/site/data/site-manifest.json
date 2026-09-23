@@ -183,7 +183,7 @@
         "docs/adr/0045-openrouter-trusted-configuration.md"
       ],
       "limitations": [
-        "Hosted OpenRouter accepts only the published allowlist in provider_config.HOSTED_OPENROUTER_DEFAULTS; the default_model matches DEFAULT_OPENROUTER_MODEL (deepseek/deepseek-v4.1-flash).",
+        "Hosted OpenRouter accepts only the published allowlist in provider_config.HOSTED_OPENROUTER_DEFAULTS; the default model deepseek/deepseek-v4.1-flash is pinned to Morph with no fallback, data collection denied, and ZDR required.",
         "CLI profiles openrouter-sonnet and openrouter-gpt remain unqualified and require --allow-unqualified-profile for live review; tests/test_cli.py covers the opt-in and fail-closed paths.",
         "The npx launcher forwards argv to the Python CLI; reaching OpenRouter still requires explicit --provider openrouter (or --profile) plus OPENROUTER_API_KEY.",
         "Hosted workflows reject allow_unqualified_profile=true; use the CLI for unqualified profile runs."

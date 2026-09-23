@@ -68,7 +68,7 @@ and emergency revocation.
 - Named profiles (`openrouter-sonnet`, `openrouter-gpt`) embed an immutable
   `OpenRouterRoutingPolicy` (upstream provider slug, no fallbacks, deny data
   collection, ZDR). Unprofiled `--provider openrouter` uses
-  `OPENROUTER_UPSTREAM_PROVIDER` (default `deepseek`) for the routing policy.
+  `OPENROUTER_UPSTREAM_PROVIDER` (default `morph`) for the routing policy.
 - `doctor` and `plan` report execution location (local CLI process) versus
   inference location (remote for OpenRouter) and credential presence only.
 - `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` means Ollama Cloud only.
