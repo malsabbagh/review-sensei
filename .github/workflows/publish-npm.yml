@@ -31,7 +31,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-npm-${{ inputs.version }}
+  # Matches release.yml's tag job group (publish-npm-vX.Y.Z).
+  group: publish-npm-v${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -344,55 +345,13 @@ jobs:
             echo "verify-request did not produce a dispatch source SHA" >&2
             exit 1
           fi
-          run_json="$(gh run view "$RESUME_BUNDLE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json databaseId,conclusion,workflowName,event,headBranch,headSha,headRepository,displayTitle)"
-          bundle_source_sha="$(python3 - "$run_json" <<'PY'
-          import json
-          import os
-          import sys
-
-          def fail(message: str) -> None:
-              print(message, file=sys.stderr)
-              sys.exit(1)
-
-          run = json.loads(sys.argv[1])
-          expected_repo = os.environ["GITHUB_REPOSITORY"]
-          expected_branch = os.environ["DEFAULT_BRANCH"]
-          version = os.environ["VERSION"]
-          run_id = str(run["databaseId"])
-          if run_id != os.environ["RESUME_BUNDLE_RUN_ID"]:
-              fail("resume_bundle_run_id does not match attested workflow run")
-          if run.get("workflowName") != "Publish npm packages":
-              fail("resume_bundle_run_id must reference a publish-npm workflow run")
-          if run.get("conclusion") not in {"failure", "cancelled"}:
-              fail(
-                  "resume_bundle_run_id must reference a completed failed or cancelled run"
-              )
-          if run.get("event") != "workflow_dispatch":
-              fail("resume_bundle_run_id must reference a manual publish-npm dispatch")
-          if run.get("headBranch") != expected_branch:
-              fail("resume_bundle_run_id must reference a default-branch dispatch")
-          head_repo = run.get("headRepository") or {}
-          owner = (head_repo.get("owner") or {}).get("login")
-          name = head_repo.get("name")
-          if f"{owner}/{name}" != expected_repo:
-              fail("resume_bundle_run_id must reference this repository")
-          display_title = run.get("displayTitle") or ""
-          if display_title != f"publish-npm {version}":
-              fail(
-                  "resume_bundle_run_id must reference a publish-npm run for the same version"
-              )
-          head_sha = run.get("headSha")
-          if not isinstance(head_sha, str) or not head_sha:
-              fail("resume_bundle_run_id is missing attested head SHA")
-          # Resume requires the failed run and this dispatch to target the same
-          # default-branch commit; see docs/releasing.md.
-          if head_sha != os.environ["DISPATCH_SOURCE_SHA"]:
-              fail(
-                  "resume_bundle_run_id must reference a run from the dispatch source commit"
-              )
-          print(head_sha)
-          PY
-          )"
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_BUNDLE_RUN_ID" --jq '{id,conclusion,path,event,head_branch,head_sha,repository:.repository.full_name,display_title}')"
+          bundle_source_sha="$(python3 resume-source/scripts/validate_npm_resume_run.py \
+            --run-id "$RESUME_BUNDLE_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --version "$VERSION" \
+            --dispatch-source-sha "$DISPATCH_SOURCE_SHA" <<< "$run_json")"
           git -C resume-source fetch origin "$bundle_source_sha"
           git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
           git -C resume-source checkout --detach "$bundle_source_sha"

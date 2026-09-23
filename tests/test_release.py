@@ -28,6 +28,7 @@ def load_script(name: str):
 
 VERSION_CHECK = load_script("check_release_version.py")
 ARTIFACT_CHECK = load_script("validate_release.py")
+RESUME_RUN_CHECK = load_script("validate_npm_resume_run.py")
 
 
 class ReleaseMetadataTests(unittest.TestCase):
@@ -318,6 +319,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_tag_release_publishes_npm(self):
         self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
+        self.assertIn("group: publish-npm-${{ github.ref_name }}", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
         for job in ("native-build", "assemble-npm", "publish-npm"):
             match = re.search(
                 rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  \w|\Z)",
@@ -436,7 +439,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("environment:\n      name: npm", self.workflow)
         self.assertIn("id-token: write", self.workflow)
-        self.assertIn("group: publish-npm-${{ inputs.version }}", self.workflow)
+        self.assertIn("group: publish-npm-v${{ inputs.version }}", self.workflow)
         self.assertIn("bootstrap:", self.workflow)
         self.assertIn("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", self.workflow)
         self.assertIn(
@@ -494,12 +497,13 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         resume_section = self.workflow.split(
             "Download npm release bundle from prior workflow run", maxsplit=1
         )[1].split("Verify downloaded npm tarball checksums", maxsplit=1)[0]
-        self.assertIn("displayTitle", resume_section)
         self.assertIn(
-            'display_title != f"publish-npm {version}"',
+            'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_BUNDLE_RUN_ID"',
             resume_section,
         )
-        self.assertNotIn('display_title.startswith("publish-npm ")', resume_section)
+        self.assertNotIn("gh run view", resume_section)
+        self.assertIn("validate_npm_resume_run.py", resume_section)
+        self.assertIn("display_title", resume_section)
         self.assertIn("resume_staging", resume_section)
         self.assertIn("sha256sum --check SHA256SUMS", resume_section)
         self.assertLess(
@@ -515,14 +519,7 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             "verify-request did not produce a dispatch source SHA", resume_section
         )
         self.assertIn("DISPATCH_SOURCE_SHA", resume_section)
-        self.assertIn(
-            "resume_bundle_run_id must reference a completed failed or cancelled run",
-            resume_section,
-        )
-        self.assertIn(
-            "resume_bundle_run_id must reference a run from the dispatch source commit",
-            resume_section,
-        )
+        self.assertIn("--dispatch-source-sha", resume_section)
         self.assertIn("checkout --detach", resume_section)
         self.assertIn("test -f release/npm/integrity.jsonl", resume_section)
         self.assertIn('--version "$VERSION"', resume_section)
@@ -586,6 +583,55 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('--source-digest "$bundle_source_sha"', verify_section)
         self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
         self.assertIn("id: resume-bundle", self.workflow)
+
+
+class NpmResumeRunTests(unittest.TestCase):
+    def setUp(self):
+        self.sha = "a" * 40
+        self.run = {
+            "id": 123,
+            "repository": "malsabbagh/review-sensei",
+            "path": ".github/workflows/publish-npm.yml",
+            "conclusion": "failure",
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "display_title": "publish-npm 0.6.5",
+            "head_sha": self.sha,
+        }
+
+    def validate(self, run):
+        return RESUME_RUN_CHECK.validate_resume_run(
+            run,
+            run_id="123",
+            repository="malsabbagh/review-sensei",
+            default_branch="main",
+            version="0.6.5",
+            dispatch_source_sha=self.sha,
+        )
+
+    def test_rest_run_from_matching_manual_dispatch_is_accepted(self):
+        self.assertEqual(self.validate(self.run), self.sha)
+
+    def test_tag_release_and_other_repositories_are_rejected(self):
+        for field, value in (
+            ("path", ".github/workflows/release.yml"),
+            ("event", "push"),
+            ("repository", "other/review-sensei"),
+        ):
+            with self.subTest(field=field):
+                run = {**self.run, field: value}
+                with self.assertRaises(RESUME_RUN_CHECK.ResumeRunError):
+                    self.validate(run)
+
+    def test_different_version_or_source_commit_is_rejected(self):
+        for field, value in (
+            ("display_title", "publish-npm 0.6.4"),
+            ("head_sha", "b" * 40),
+        ):
+            with self.subTest(field=field):
+                run = {**self.run, field: value}
+                with self.assertRaises(RESUME_RUN_CHECK.ResumeRunError):
+                    self.validate(run)
 
 
 class ReleaseDocumentationTests(unittest.TestCase):
