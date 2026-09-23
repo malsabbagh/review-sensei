@@ -36,7 +36,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         with (ROOT / "pyproject.toml").open("rb") as handle:
             document = tomllib.load(handle)
         project = document["project"]
-        self.assertEqual(project["version"], "0.6.5")
+        self.assertEqual(project["version"], "0.6.6")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["license"], "MIT")
         self.assertEqual(project["license-files"], ["LICENSE"])
@@ -78,7 +78,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_matching_tag_and_dated_heading_pass(self):
-        self.assertEqual(VERSION_CHECK.validate_release_tag("v0.6.5", ROOT), "0.6.5")
+        self.assertEqual(VERSION_CHECK.validate_release_tag("v0.6.6", ROOT), "0.6.6")
 
     def test_tag_requires_v_prefix_and_exact_metadata(self):
         with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
@@ -101,11 +101,11 @@ class ReleaseVersionTests(unittest.TestCase):
             root = Path(temporary)
             shutil.copy(ROOT / "pyproject.toml", root / "pyproject.toml")
             (root / "CHANGELOG.md").write_text(
-                "## 0.6.5 - 2026-09-22\n", encoding="utf-8"
+                "## 0.6.6 - 2026-09-23\n", encoding="utf-8"
             )
             shutil.copytree(ROOT / "packages/npm", root / "packages/npm")
             self.assertEqual(
-                VERSION_CHECK.validate_release_tag("v0.6.5", root), "0.6.5"
+                VERSION_CHECK.validate_release_tag("v0.6.6", root), "0.6.6"
             )
             launcher = root / "packages/npm/cli/package.json"
             value = json.loads(launcher.read_text(encoding="utf-8"))
@@ -595,7 +595,7 @@ class NpmResumeRunTests(unittest.TestCase):
             "conclusion": "failure",
             "event": "workflow_dispatch",
             "head_branch": "main",
-            "display_title": "publish-npm 0.6.5",
+            "display_title": "publish-npm 0.6.6",
             "head_sha": self.sha,
         }
 
@@ -605,7 +605,7 @@ class NpmResumeRunTests(unittest.TestCase):
             run_id="123",
             repository="malsabbagh/review-sensei",
             default_branch="main",
-            version="0.6.5",
+            version="0.6.6",
             dispatch_source_sha=self.sha,
         )
 

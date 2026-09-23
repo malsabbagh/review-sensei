@@ -49,7 +49,7 @@ export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
 export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash";
-export const REVIEWSENSEI_VERSION = "0.6.5";
+export const REVIEWSENSEI_VERSION = "0.6.6";
 /** Package version embedded in byte-exact setup-v3 recognition templates. */
 export const HISTORICAL_V3_SETUP_PACKAGE_VERSION = "0.1.0";
 /** Package version embedded in byte-exact setup-v4 recognition templates. */

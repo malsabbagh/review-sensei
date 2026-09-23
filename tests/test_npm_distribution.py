@@ -41,7 +41,7 @@ class ManifestTests(unittest.TestCase):
             launcher.read_text(encoding="utf-8").startswith("#!/usr/bin/env node\n")
         )
         self.assertEqual(manifest["name"], "@reviewsensei/cli")
-        self.assertEqual(manifest["version"], "0.6.5")
+        self.assertEqual(manifest["version"], "0.6.6")
         self.assertEqual(manifest["license"], "MIT")
         self.assertEqual(manifest["repository"], VALIDATOR.NPM_PUBLIC_REPOSITORY)
         self.assertEqual(manifest["engines"], {"node": ">=22"})
@@ -109,8 +109,8 @@ class AssemblyAndSetTests(unittest.TestCase):
 
     def test_assembly_is_deterministic_and_validates_as_six_packages(self):
         ASSEMBLER.assemble_packages(ROOT, self.stage, self.bundles)
-        report = VALIDATOR.validate_package_set(self.stage, "0.6.5")
-        self.assertEqual(report["version"], "0.6.5")
+        report = VALIDATOR.validate_package_set(self.stage, "0.6.6")
+        self.assertEqual(report["version"], "0.6.6")
         self.assertEqual(len(report["packages"]), 6)
         first = (self.stage / "checksums.json").read_bytes()
         ASSEMBLER.assemble_packages(ROOT, self.stage, self.bundles)
@@ -126,7 +126,7 @@ class AssemblyAndSetTests(unittest.TestCase):
         self.assertFalse((self.stage / "cli/test").exists())
         (self.stage / "unexpected.txt").write_text("stale\n", encoding="utf-8")
         with self.assertRaises(VALIDATOR.NpmPackageValidationError):
-            VALIDATOR.validate_package_set(self.stage, "0.6.5")
+            VALIDATOR.validate_package_set(self.stage, "0.6.6")
         (self.stage / "unexpected.txt").unlink()
         alias = self.stage / "unexpected-link"
         try:
@@ -134,7 +134,7 @@ class AssemblyAndSetTests(unittest.TestCase):
         except OSError as exc:
             self.skipTest(f"directory symlinks unavailable: {exc}")
         with self.assertRaises(VALIDATOR.NpmPackageValidationError):
-            VALIDATOR.validate_package_set(self.stage, "0.6.5")
+            VALIDATOR.validate_package_set(self.stage, "0.6.6")
 
     def test_directory_validation_allows_windows_missing_posix_modes(self):
         ASSEMBLER.assemble_packages(ROOT, self.stage, self.bundles)
@@ -149,9 +149,9 @@ class AssemblyAndSetTests(unittest.TestCase):
                 payload.chmod(0o644)
 
         with patch.object(VALIDATOR.os, "name", "nt"):
-            report = VALIDATOR.validate_package_set(self.stage, "0.6.5")
+            report = VALIDATOR.validate_package_set(self.stage, "0.6.6")
 
-        self.assertEqual(report["version"], "0.6.5")
+        self.assertEqual(report["version"], "0.6.6")
 
     def test_assembly_rejects_missing_target_and_outside_staging(self):
         missing = dict(self.bundles)
@@ -180,22 +180,22 @@ class AssemblyAndSetTests(unittest.TestCase):
             manifest["scripts"] = {"prepack": "echo unsafe"}
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ASSEMBLER.NpmAssemblyError):
-                ASSEMBLER.validate_source_manifests(root, "0.6.5")
+                ASSEMBLER.validate_source_manifests(root, "0.6.6")
             manifest.pop("scripts")
             manifest["files"] = ["**"]
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ASSEMBLER.NpmAssemblyError):
-                ASSEMBLER.validate_source_manifests(root, "0.6.5")
+                ASSEMBLER.validate_source_manifests(root, "0.6.6")
             manifest["files"] = ["bin", "README.md", "LICENSE"]
             manifest["bin"] = {"review-sensei": "bin/review-sensei"}
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ASSEMBLER.NpmAssemblyError):
-                ASSEMBLER.validate_source_manifests(root, "0.6.5")
+                ASSEMBLER.validate_source_manifests(root, "0.6.6")
             manifest.pop("bin")
             manifest["repository"] = {"url": "https://example.invalid/repo"}
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ASSEMBLER.NpmAssemblyError):
-                ASSEMBLER.validate_source_manifests(root, "0.6.5")
+                ASSEMBLER.validate_source_manifests(root, "0.6.6")
 
 
 def _tar_member(
