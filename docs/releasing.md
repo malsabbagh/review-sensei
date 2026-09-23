@@ -1,17 +1,35 @@
 # Releasing ReviewSensei
 
 This runbook covers the first public package release and subsequent patch or
-minor releases. The tag-triggered workflow builds Python artifacts once from a
-version tag, validates them, then fans that bundle out to PyPI and a GitHub
-release. npm uses the separate public-repository lane below. Package
-publication is a maintainer operation; ordinary pull requests must not push
+minor releases. The tag-triggered workflow builds Python and npm artifacts
+from a version tag, validates and attests them, then publishes to PyPI, npm,
+and a GitHub release. The manual npm workflow is available for independent
+npm releases and recovery. Package publication is a maintainer operation;
+ordinary pull requests must not push
 tags or invoke a release workflow.
 
-## npm release lane (issue #103)
+## npm release paths (issue #103)
+
+The `Release` workflow's `publish-npm` job is the normal npm path for a
+`vX.Y.Z` tag. It publishes the attested platform tarballs before the launcher
+from the same tagged source. Its `npm` environment must allow a **tag** rule
+matching `v*.*.*`; a `main` **branch** rule does not admit a tag, even when
+that tag points to a commit on `main`. Keep the maintainer review gate. Register
+`.github/workflows/release.yml` as an npm Trusted Publisher with `npm publish`
+permission for all six packages, in addition to the manual workflow identity
+below. The environment and npm trust settings are external repository/registry
+configuration; merging this runbook does not change them.
+
+If the tag's npm job fails while the build and assembly jobs succeeded, re-run
+only that job (`gh run rerun --job <npm-job-id> --repo malsabbagh/review-sensei`).
+GitHub retains the original tag ref and commit for a job re-run, and the job
+downloads the original run's validated npm bundle. Do not move or recreate the
+tag to recover a publication failure. If any package reached npm, the preflight
+must find the exact attested integrity before publishing missing packages.
 
 The public `malsabbagh/review-sensei` repository owns the npm package source
 and the manual [`.github/workflows/publish-npm.yml`](../.github/workflows/publish-npm.yml)
-release lane. Dispatch it only from public `main`; it pins the dispatch SHA,
+release path. Dispatch it only from public `main`; it pins the dispatch SHA,
 checks the requested version against the package metadata and changelog, then
 builds each native target on a matching runner. It assembles the launcher plus
 five platform directories under ignored staging and runs non-dry-run `npm pack`
@@ -44,8 +62,10 @@ workflows after this metadata recording landed). Older bundles without that file
 are not eligible for resume. The resumed run must be a failed or cancelled
 manual `publish-npm` dispatch from the default branch of this repository, and
 its attested source commit and bundle metadata version must match the requested
-version. The run title must be exactly `publish-npm X.Y.Z`. Attestation
-verification binds each tarball and `bundle-metadata.json` to that run's source
+version. A failed tag-triggered `Release` run is not eligible for manual resume;
+re-run its failed npm job instead. The manual run title must be exactly
+`publish-npm X.Y.Z`. Attestation verification binds each tarball and
+`bundle-metadata.json` to that run's source
 commit ref and digest via `--source-ref` and `--source-digest`; the metadata
 file is listed in `SHA256SUMS` and attested with the tarballs.
 `bundle-metadata.json` also provides a secondary check. The workflow's `verify-bundle` helper checks bundle structure and
@@ -61,12 +81,10 @@ with a fresh rebuild for the same version. Non-resume publishes still accept
 legacy bundles that lack `bundle-metadata.json`; resume requires metadata and
 attestation. Packages already verified on the
 registry are skipped and only missing packages are published.
-It also
-installs the launcher in a clean Linux prefix, verifies that
+It also installs the launcher in a clean Linux prefix, verifies that
 `node_modules/.bin/review-sensei` resolves to the launcher rather than a
-platform package, and runs its help command. The npm lane is deliberately
-separate from PyPI and GitHub Release creation: do not use the tag-triggered
-`release.yml` workflow for an npm-only release.
+platform package, and runs its help command. Use this manual path for an
+npm-only release; a version-tag release also publishes PyPI and GitHub assets.
 
 The first version of a new npm package cannot use npm Trusted Publishing until
 the package already exists. For that one bootstrap run, create a short-lived
@@ -89,9 +107,23 @@ npm trust github @reviewsensei/cli-win32-x64 --repo malsabbagh/review-sensei --f
 ```
 
 Account 2FA and package write access are required to create these trust records.
-Protect the `npm` environment with a maintainer reviewer and a `main` branch
-policy before adding the bootstrap secret. A failed or partial npm release is
-never repaired by moving a tag or overwriting bytes: retry the same version only
+Also register the tag-triggered workflow for each package before relying on
+tag publication:
+
+```bash
+npm trust github @reviewsensei/cli --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+npm trust github @reviewsensei/cli-darwin-arm64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+npm trust github @reviewsensei/cli-darwin-x64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+npm trust github @reviewsensei/cli-linux-arm64-gnu --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+npm trust github @reviewsensei/cli-linux-x64-gnu --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+npm trust github @reviewsensei/cli-win32-x64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
+```
+
+Protect the `npm` environment with a maintainer reviewer, a `main` branch
+rule for manual dispatches, and a `v*.*.*` tag rule for version-tag releases.
+Protect who can create or change release tags; the environment reviewer is the
+final publication gate. A failed or partial npm release is never repaired by
+moving a tag or overwriting bytes: retry the same version only
 when every existing registry entry matches the attested bundle exactly; otherwise
 preserve the evidence, deprecate/remove the affected recommendation when
 appropriate, and publish a higher patch version after the source and provenance
@@ -143,9 +175,9 @@ can affect the package identity.
 
    The tag must match the package version and changelog. The workflow rejects a
    missing `v` prefix, a metadata mismatch, or a missing dated heading.
-5. Monitor the `Release` workflow. The build job must pass before either the
-   PyPI or GitHub release job can run. The PyPI environment approval, if
-   configured, is the final human publication gate.
+5. Monitor the `Release` workflow. The Python and npm build jobs must pass
+   before their respective publish jobs can run. The `pypi` and `npm`
+   environments each require their configured publication approval.
 
 ## Public reusable-workflow tag channel
 

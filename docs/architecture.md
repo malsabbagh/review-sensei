@@ -491,15 +491,17 @@ scoped per job and third-party actions are pinned to full commit SHAs. Active
 workflow jobs use GitHub-hosted runners, including the full cross-platform
 compatibility matrix.
 
-The public repository separately owns `.github/workflows/publish-npm.yml` for
-the standalone launcher and native platform packages. Its manual release is
-pinned to the public default-branch SHA, builds the five platform executables
-on native runners, validates and attests the exact tarballs, and publishes
-platform packages before the launcher through the protected `npm` environment.
+The public repository publishes the standalone launcher and native platform
+packages from a version tag in `.github/workflows/release.yml` or from the
+manual `.github/workflows/publish-npm.yml` path. The manual path is pinned to
+the public default-branch SHA. Both paths build the five platform executables
+on native runners, validate and attest the exact tarballs, and publish platform
+packages before the launcher through the protected `npm` environment. Their
+publish jobs share a version-specific concurrency group.
 Package manifests name the same public repository so npm provenance remains
 auditable. A temporary environment-scoped token can bootstrap an entirely new
 package set; after the first release, npm Trusted Publishing binds each package
-to this exact workflow, repository, and environment, eliminating the token.
+to each authorized workflow, repository, and environment, eliminating the token.
 
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
