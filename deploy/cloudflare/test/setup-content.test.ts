@@ -322,7 +322,7 @@ describe("setup-v4 public boundary", () => {
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
       "learning_proposals",
     );
-    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("version: 0.6.6");
+    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("version: 0.6.7");
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).toContain(
       "version: 0.1.1",
     );
