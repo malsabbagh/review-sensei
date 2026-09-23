@@ -678,9 +678,12 @@ per-head approval marker/idempotency boundary are shared, so approval adds no
 credential or persistence boundary.
 
 Issue #136 adds a versioned review-convergence policy (ADR 0046) that doctor
-and plan can display. Until later slices wire it into publication, GitHub
-review events continue to use the explicit finding `blocking` bit described
-above. `REVIEWSENSEI_AUTO_APPROVE=false` remains the comment-only opt-out.
+and plan can display. Issue #146 F7 (ADR 0055) makes `merge-focused` the
+runtime default and retires live `legacy` selection, so the policy is now bound
+into publication: operator modes run the blocker-admission evaluator before
+GitHub review events and comment rendering, and only historical `legacy`
+records keep the explicit finding `blocking` bit described above.
+`REVIEWSENSEI_AUTO_APPROVE=false` remains the comment-only opt-out.
 
 F1 of issue #146 adds an identity-bound `ReviewTransaction` handoff for
 operator-ledger runs. Analysis reserves once, checkpoints the validated result

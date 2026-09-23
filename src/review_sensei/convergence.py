@@ -186,10 +186,11 @@ def normalize_review_mode(value: object) -> str:
     return mode
 
 
-def migrate_review_mode(value: object) -> str:
+def migrate_stored_review_mode(value: object) -> str:
     """Return the idempotent supported replacement for one stored mode.
 
-    This reader is deliberately separate from runtime resolution: old
+    This reader is deliberately separate from runtime resolution (and named
+    for the stored value it rewrites, not for runtime mode selection): old
     ``legacy`` values can be migrated to the supported replacement, but an
     explicit old setting must never silently execute the retired engine.
     """
@@ -1439,7 +1440,7 @@ __all__ = [
     "evaluate_blocker_admission",
     "evaluate_round_admission",
     "normalize_review_mode",
-    "migrate_review_mode",
+    "migrate_stored_review_mode",
     "observe_shadow_admission",
     "policy_from_mapping",
     "publication_enforcement_for_mode",

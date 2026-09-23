@@ -24,7 +24,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from ...convergence import LEGACY_REVIEW_MODE, REVIEW_MODE_ENV, migrate_review_mode
+from ...convergence import (
+    LEGACY_REVIEW_MODE,
+    REVIEW_MODE_ENV,
+    migrate_stored_review_mode,
+)
 from .errors import (
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -74,11 +78,15 @@ SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
 # The retired review mode survives in existing installations as a repository
 # variable that setup never overwrites, which would make the reusable-workflow
 # guard fail every review. Only this variable and only the retired value
-# (``LEGACY_REVIEW_MODE``, replaced per ``migrate_review_mode`` in
+# (``LEGACY_REVIEW_MODE``, replaced per ``migrate_stored_review_mode`` in
 # ``review_sensei.convergence``) are migrated in place; every other
 # operator-set value is left as-is. The name is the same knob the CLI reads
 # from the environment, so it is an alias rather than a second literal.
 RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV
+# The variables API has no conditional write, so a migration that cannot be
+# read back is reported as not observed rather than assumed: the value is
+# surfaced in the structured setup result and in a warning.
+REVIEW_MODE_MIGRATION_NOT_OBSERVED = "not_observed"
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # The public tag is the only setup-v5 update channel. The Worker validates the
@@ -1654,8 +1662,12 @@ class GitHubSetupTransport(Protocol):
         *,
         repository: str,
         installation_token: str,
-    ) -> None:
-        """Replace a retired review-mode variable value in place."""
+    ) -> str | None:
+        """Replace a retired review-mode variable value in place.
+
+        Returns ``"not_observed"`` when the write could not be read back, so
+        the caller can report it in the structured setup result.
+        """
 
     def list_pull_requests(
         self,
@@ -1995,18 +2007,20 @@ class GitHubSetupClient:
         *,
         repository: str,
         installation_token: str,
-    ) -> None:
+    ) -> str | None:
         """Replace a retired review-mode variable value in place.
 
         A missing variable is left to :meth:`ensure_repository_variables`. The
         exact retired value is the only stored value rewritten; empty, unknown,
         or any other operator-set value stays untouched. The replacement is
-        resolved by ``review_sensei.convergence.migrate_review_mode`` so the
-        migration rule lives with the mode table. The written value is read
-        back and a mismatch emits a ``review_mode_migration_not_observed``
-        warning: the variables API has no conditional write, so a successful
+        resolved by ``review_sensei.convergence.migrate_stored_review_mode`` so
+        the migration rule lives with the mode table. The written value is read
+        back: the variables API has no conditional write, so a successful
         status says nothing about what was stored, and setup must not report a
-        migration it cannot observe.
+        migration it cannot observe. A mismatch emits a
+        ``review_mode_migration_not_observed`` warning and returns
+        ``"not_observed"`` so the structured setup result carries the outcome
+        too, where an operator can see it.
         """
 
         variable_path = (
@@ -2019,20 +2033,20 @@ class GitHubSetupClient:
             installation_token=installation_token,
         )
         if status == 404:
-            return
+            return None
         if status < 200 or status >= 300:
             self._raise_for_status(status)
         if not raw:
-            return
+            return None
         try:
             data = json.loads(bytes(raw).decode("utf-8", errors="strict"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise GitHubSetupError("GitHub setup response was invalid JSON") from exc
         if not isinstance(data, dict) or not isinstance(data.get("value"), str):
-            return
+            return None
         if data["value"] != LEGACY_REVIEW_MODE:
-            return
-        replacement = migrate_review_mode(data["value"])
+            return None
+        replacement = migrate_stored_review_mode(data["value"])
         status, _ = self._open(
             "PATCH",
             variable_path,
@@ -2067,6 +2081,8 @@ class GitHubSetupClient:
                 "variable to merge-focused before the next review",
                 stacklevel=2,
             )
+            return REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        return None
 
     def list_pull_requests(
         self,
@@ -2214,6 +2230,7 @@ class SetupPullRequestResult:
     repository: str
     status: str
     pull_request_number: int | None = None
+    review_mode_migration: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.repository, str) or not _is_repository_slug(
@@ -2222,6 +2239,13 @@ class SetupPullRequestResult:
             raise GitHubSetupError("Setup result repository must be an owner/repo slug")
         if not self.status:
             raise GitHubSetupError("Setup result status must be non-empty")
+        # Only the single diagnosed outcome is representable: an unobserved
+        # migration must reach the operator, but no other state is meaningful.
+        if self.review_mode_migration not in (None, REVIEW_MODE_MIGRATION_NOT_OBSERVED):
+            raise GitHubSetupError(
+                "Setup result review_mode_migration must be "
+                f"{REVIEW_MODE_MIGRATION_NOT_OBSERVED!r} when set"
+            )
 
 
 class SetupPullRequestService:
@@ -2372,6 +2396,7 @@ class SetupPullRequestService:
                 ensure_variables = getattr(
                     self.transport, "ensure_repository_variables", None
                 )
+                review_mode_migration: str | None = None
                 if callable(ensure_variables) and self._has_permission(
                     permissions, "variables"
                 ):
@@ -2384,9 +2409,11 @@ class SetupPullRequestService:
                     # must also migrate the retired value, otherwise the
                     # generated caller keeps feeding the workflow guard a
                     # retired mode and every review fails.
-                    self.transport.migrate_retired_review_mode_variable(
-                        repository=repository,
-                        installation_token=installation_token,
+                    review_mode_migration = (
+                        self.transport.migrate_retired_review_mode_variable(
+                            repository=repository,
+                            installation_token=installation_token,
+                        )
                     )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
@@ -2401,6 +2428,7 @@ class SetupPullRequestService:
                             repository=repository,
                             status="skipped_pull_request_exists",
                             pull_request_number=existing_after_branch,
+                            review_mode_migration=review_mode_migration,
                         )
                     )
                     continue
@@ -2422,6 +2450,7 @@ class SetupPullRequestService:
                         repository=repository,
                         status="created",
                         pull_request_number=number,
+                        review_mode_migration=review_mode_migration,
                     )
                 )
         return results

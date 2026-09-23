@@ -237,6 +237,10 @@ function mutationRequests(fake: FakeGitHub) {
   return fake.requests.filter(({ method }) => method !== "GET");
 }
 
+function variableRequests(fake: FakeGitHub) {
+  return fake.requests.filter(({ path }) => path.includes("/actions/variables"));
+}
+
 function historicalFixture(name: string): string {
   return readFileSync(
     new URL(`../../../tests/fixtures/setup-legacy/${name}`, import.meta.url),
@@ -467,17 +471,23 @@ describe("setup repository reconciliation", () => {
     expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe("merge-focused");
   });
 
-  it("warns when the review mode migration is not observed on read-back", async () => {
+  it("surfaces a not-observed review mode migration in the log and the result", async () => {
     // A 204 only says the PATCH was accepted, and the variables API has no
     // conditional write, so the migration verifies what the API reports and
-    // warns instead of silently trusting the status.
+    // reports the mismatch in the delivery result as well as the log: a
+    // warning alone does not reach the operator.
     const fake = new FakeGitHub();
     fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
     fake.variablePatchIgnored = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(await serviceWith(fake).process(delivery())).toEqual([
-        { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+        {
+          repository: "acme/widgets",
+          status: "created",
+          pull_request_number: 42,
+          review_mode_migration: "not_observed",
+        },
       ]);
       expect(warn).toHaveBeenCalledWith(
         "review_mode_migration_not_observed",
@@ -500,6 +510,40 @@ describe("setup repository reconciliation", () => {
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
     expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+    // Only the stored value costs a write, so an operator-owned value costs
+    // the two reads (variable reconciliation and the migration check) and no
+    // read-back: the migration is not a PATCH-plus-verify on every delivery.
+    const reviewModeReads = fake.requests.filter(
+      ({ method, path }) =>
+        method === "GET" &&
+        path.endsWith(
+          `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`,
+        ),
+    );
+    expect(reviewModeReads).toHaveLength(2);
+  });
+
+  it("touches no variables for current or customized setups", async () => {
+    // The migration runs only for deliveries the classifier sends down the
+    // setup path. A current or operator-customized (unknown) installation is
+    // skipped before any variables request, so no-op deliveries cost no
+    // variable traffic and customized installs are never rewritten.
+    const current = new FakeGitHub();
+    current.files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const customized = new FakeGitHub();
+    customized.files[SETUP_FILE_PATHS[0]] = "name: Customer ReviewSensei review\n";
+
+    for (const [setupState, fake, status] of [
+      ["current", current, "skipped_current"],
+      ["unknown", customized, "skipped_unknown_setup"],
+    ] as const) {
+      expect(await serviceWith(fake).process(delivery()), setupState).toEqual([
+        { repository: "acme/widgets", status },
+      ]);
+      expect(variableRequests(fake), setupState).toEqual([]);
+    }
   });
 
   it("leaves prototype-named review mode values untouched", async () => {

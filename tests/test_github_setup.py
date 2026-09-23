@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from review_sensei.convergence import (
     LEGACY_REVIEW_MODE,
     REVIEW_MODE_ENV,
-    migrate_review_mode,
+    migrate_stored_review_mode,
 )
 from review_sensei.hosting.github import (
     GitHubSetupClient,
@@ -19,6 +19,7 @@ from review_sensei.hosting.github import (
     GitHubSetupTransientError,
     SetupFile,
     SetupPlanBuilder,
+    SetupPullRequestResult,
     SetupPullRequestService,
     VerifiedDelivery,
 )
@@ -27,6 +28,8 @@ from review_sensei.hosting.github.setup import (
     CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
     RETIRED_REVIEW_MODE_VARIABLE,
+    REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+    SETUP_FILE_PATHS,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
     _broker_accepted_public_workflow_tags,
@@ -73,6 +76,7 @@ class FakeTransport:
         default_branch="main",
         branch_managed=True,
         ref_collision=False,
+        review_mode_migration=None,
     ):
         self.requests = []
         self._branch_exists = branch_exists if branch_exists is not None else False
@@ -82,6 +86,7 @@ class FakeTransport:
         self.branch_managed = branch_managed
         self.ref_collision = ref_collision
         self.collision_observed = False
+        self.review_mode_migration = review_mode_migration
 
     def get_default_branch(self, *, repository, installation_token):
         self.requests.append(("get_default_branch", repository, installation_token))
@@ -163,6 +168,7 @@ class FakeTransport:
         self.requests.append(
             ("migrate_retired_review_mode_variable", repository, installation_token)
         )
+        return self.review_mode_migration
 
     def list_pull_requests(self, *, repository, installation_token, head_branch):
         self.requests.append(
@@ -669,6 +675,83 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             transport.requests,
         )
 
+    def test_setup_result_carries_an_unobserved_review_mode_migration(self):
+        # The warning alone can be missed in Worker logs; the structured field
+        # travels with the delivery result so the operator sees it wherever the
+        # result is reported.
+        transport = FakeTransport(
+            review_mode_migration=REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+    def test_setup_result_carries_the_migration_on_the_existing_pr_skip(self):
+        # The setup PR can already exist when the migration runs, so the
+        # outcome is reported on that skip result too instead of being dropped.
+        transport = FakeTransport(
+            existing_prs=[{"number": 11}],
+            review_mode_migration=REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_pull_request_exists")
+        self.assertEqual(results[0].pull_request_number, 11)
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+    def test_setup_result_rejects_an_unknown_migration_outcome(self):
+        with self.assertRaises(GitHubSetupError):
+            SetupPullRequestResult(
+                repository="owner/repo",
+                status="created",
+                review_mode_migration="failed",
+            )
+
+    def test_current_or_customized_setups_never_touch_review_mode_variables(self):
+        # Both skip states return before any variable work, so a repository
+        # that is already current (or intentionally customized) keeps its
+        # operator-owned REVIEWSENSEI_REVIEW_MODE value untouched.
+        plan = SetupPlanBuilder().build("owner/repo")
+        current = FileTransport(files={file.path: file.content for file in plan.files})
+        customized = FileTransport(
+            files={SETUP_FILE_PATHS[0]: "name: Customer ReviewSensei review\n"}
+        )
+
+        for transport, expected in (
+            (current, "skipped_current"),
+            (customized, "skipped_unknown_setup"),
+        ):
+            with self.subTest(status=expected):
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+                self.assertEqual(results[0].status, expected)
+                self.assertIsNone(results[0].review_mode_migration)
+                self.assertFalse(
+                    any(
+                        request[0]
+                        in {
+                            "ensure_repository_variables",
+                            "migrate_retired_review_mode_variable",
+                        }
+                        for request in transport.requests
+                    )
+                )
+
     def test_setup_requires_the_retired_mode_migration_from_managing_transports(self):
         # The migration is part of the transport protocol, so a transport that
         # manages variables but cannot perform it must fail setup loudly:
@@ -710,7 +793,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertIsNotNone(migrations, "RETIRED_REVIEW_MODE_MIGRATIONS is missing")
         self.assertEqual(
             {LEGACY_REVIEW_MODE: migrations.group(1)},
-            {LEGACY_REVIEW_MODE: migrate_review_mode(LEGACY_REVIEW_MODE)},
+            {LEGACY_REVIEW_MODE: migrate_stored_review_mode(LEGACY_REVIEW_MODE)},
         )
 
     def test_retired_mode_variable_is_the_convergence_environment_constant(self):
@@ -1712,11 +1795,12 @@ class GitHubSetupClientTests(unittest.TestCase):
         client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            client.migrate_retired_review_mode_variable(
+            observed = client.migrate_retired_review_mode_variable(
                 repository="owner/repo",
                 installation_token="ghs_opaque",
             )
 
+        self.assertIsNone(observed)
         self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
         self.assertEqual(
             calls[0][1],
@@ -1730,7 +1814,7 @@ class GitHubSetupClientTests(unittest.TestCase):
         # The read-back targets the same variable path as the initial GET.
         self.assertEqual(calls[2][1], calls[0][1])
 
-    def test_client_warns_when_the_review_mode_migration_is_not_observed(self):
+    def test_client_reports_when_the_review_mode_migration_is_not_observed(self):
         # The variables API has no conditional write, so the PATCH can succeed
         # while another actor restores or rewrites the value. A migration that
         # cannot be observed must be surfaced, not reported as done.
@@ -1745,11 +1829,12 @@ class GitHubSetupClientTests(unittest.TestCase):
 
         client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
         with self.assertWarns(UserWarning) as raised:
-            client.migrate_retired_review_mode_variable(
+            observed = client.migrate_retired_review_mode_variable(
                 repository="owner/repo",
                 installation_token="ghs_opaque",
             )
 
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_NOT_OBSERVED)
         self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
         message = str(raised.warning)
         self.assertIn("review_mode_migration_not_observed", message)
@@ -1757,7 +1842,7 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertIn("'legacy'", message)
         self.assertIn("'merge-focused'", message)
 
-    def test_client_warns_when_the_review_mode_read_back_fails(self):
+    def test_client_reports_when_the_review_mode_read_back_fails(self):
         # A read-back that cannot report a value is not evidence of success.
         client, calls = self.make_client(
             [
@@ -1768,11 +1853,12 @@ class GitHubSetupClientTests(unittest.TestCase):
         )
 
         with self.assertWarns(UserWarning) as raised:
-            client.migrate_retired_review_mode_variable(
+            observed = client.migrate_retired_review_mode_variable(
                 repository="owner/repo",
                 installation_token="ghs_opaque",
             )
 
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_NOT_OBSERVED)
         self.assertEqual(len(calls), 3)
         self.assertIn("review_mode_migration_not_observed", str(raised.warning))
         self.assertIn("None", str(raised.warning))
@@ -1800,11 +1886,12 @@ class GitHubSetupClientTests(unittest.TestCase):
                     )
                 )
 
-                client.migrate_retired_review_mode_variable(
+                observed = client.migrate_retired_review_mode_variable(
                     repository="owner/repo",
                     installation_token="ghs_opaque",
                 )
 
+                self.assertIsNone(observed)
                 self.assertEqual([call[0] for call in calls], ["GET"])
 
     def test_client_ignores_a_missing_review_mode_variable(self):

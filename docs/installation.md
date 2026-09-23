@@ -251,7 +251,10 @@ The generated setup contains 15 repository variables, including 7 boolean
 controls, and 3 generated files. Boolean controls default to `false` except
 `REVIEWSENSEI_AUTO_APPROVE=true`, which remains gated by review and write
 settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
-boolean control. Merge-focused requires a trusted session ledger for admission
+boolean control. The reusable workflow's `review_mode` input is optional and
+defaults to `merge-focused`, and the generated caller maps an unset or empty
+repository variable to that default, so an absent or blank value resolves like
+the CLI rather than failing the workflow guard. Merge-focused requires a trusted session ledger for admission
 and round enforcement: every hosted review runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes

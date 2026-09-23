@@ -1071,38 +1071,56 @@ class ShadowObservationTests(unittest.TestCase):
         self.assertEqual(invalid["review_convergence"]["mode"], "merge-focused")
 
     def test_shadow_does_not_skip_legacy_publication(self):
-        ledger = InMemorySessionLedger()
-        record = SessionRecord.create(
-            IDENTITY,
-            now=FIXED_NOW,
-            completed_initial_reviews=1,
-            completed_verification_rounds=2,
-        )
-        ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
-        reviewer = RecordingReviewer()
-        application = GitHubApplication(
-            broker=RecordingBroker(),
-            http=None,
-            reviewer=reviewer,
-            learner=object(),
-            replier=object(),
-            session_ledger=ledger,
-        )
-        with patch.dict("os.environ", {REVIEW_SHADOW_ENV: "merge-focused"}):
-            result = application.publish_review(
-                options=GitHubWriteOptions(auto_review=True, github_writes=True),
-                oidc_token="oidc",
-                repository=IDENTITY.repository,
-                repository_id=99,
-                pull_request=IDENTITY.pull_request,
-                head_sha=HEAD,
-                base_branch="main",
-                base_sha="b" * 40,
-                result=ReviewResult(summary="ok", comments=(), provider="fixture"),
-                diff="diff",
-                app_slug="reviewsensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+        # The injected reviewer is the publication boundary here, so
+        # `ReviewPublisher.publish` and its `allow_retired_legacy_policy` gate
+        # are never reached and the flag has nothing to satisfy: the legacy
+        # policy only exercises the application's own admission path. What the
+        # test pins is the application-level contract that a shadow
+        # observation cannot withhold the review event, and it does so
+        # differentially against the same call with no shadow configured.
+        def run(shadow: str | None) -> tuple[object, RecordingReviewer]:
+            ledger = InMemorySessionLedger()
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=2,
             )
+            ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
+            reviewer = RecordingReviewer()
+            application = GitHubApplication(
+                broker=RecordingBroker(),
+                http=None,
+                reviewer=reviewer,
+                learner=object(),
+                replier=object(),
+                session_ledger=ledger,
+            )
+            environ = {} if shadow is None else {REVIEW_SHADOW_ENV: shadow}
+            with patch.dict("os.environ", environ):
+                if shadow is None:
+                    os.environ.pop(REVIEW_SHADOW_ENV, None)
+                result = application.publish_review(
+                    options=GitHubWriteOptions(auto_review=True, github_writes=True),
+                    oidc_token="oidc",
+                    repository=IDENTITY.repository,
+                    repository_id=99,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD,
+                    base_branch="main",
+                    base_sha="b" * 40,
+                    result=ReviewResult(summary="ok", comments=(), provider="fixture"),
+                    diff="diff",
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                )
+            return result, reviewer
+
+        control, control_reviewer = run(None)
+        self.assertEqual(control.status, "published")
+        self.assertEqual(len(control_reviewer.calls), 1)
+        self.assertIsNone(control.shadow)
+        result, reviewer = run("merge-focused")
         self.assertEqual(result.status, "published")
         self.assertEqual(len(reviewer.calls), 1)
         self.assertIsNotNone(result.shadow)

@@ -114,6 +114,10 @@ export interface SetupResult {
   repository: string;
   status: string;
   pull_request_number?: number;
+  // A legacy-value migration whose read-back did not observe the write is
+  // reported here as well as in the log: the delivery result is what reaches
+  // the operator, and the variables API has no conditional write.
+  review_mode_migration?: "not_observed";
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -773,7 +777,14 @@ export class GitHubSetupService {
       }
     }
     await this.ensureRepositoryVariables(repository, installationToken);
-    await this.migrateRetiredReviewModeVariable(repository, installationToken);
+    const reviewModeMigration = await this.migrateRetiredReviewModeVariable(
+      repository,
+      installationToken,
+    );
+    const migrationReport =
+      reviewModeMigration === "not_observed"
+        ? { review_mode_migration: "not_observed" as const }
+        : {};
     const existingAfterBranch = await this.existingPullRequest(
       repository,
       installationToken,
@@ -784,6 +795,7 @@ export class GitHubSetupService {
         repository,
         status: "skipped_pull_request_exists",
         pull_request_number: existingAfterBranch,
+        ...migrationReport,
       };
     }
     const response = await this.request(
@@ -810,6 +822,7 @@ export class GitHubSetupService {
           repository,
           status: "skipped_pull_request_exists",
           pull_request_number: existingAfterCreate,
+          ...migrationReport,
         };
       }
     }
@@ -821,7 +834,12 @@ export class GitHubSetupService {
     if (number === null) {
       throw new GitHubSetupError("GitHub setup response did not include a pull request number");
     }
-    return { repository, status: "created", pull_request_number: number };
+    return {
+      repository,
+      status: "created",
+      pull_request_number: number,
+      ...migrationReport,
+    };
   }
 
   private async inspectRepositorySetup(
@@ -883,27 +901,27 @@ export class GitHubSetupService {
   private async migrateRetiredReviewModeVariable(
     repository: string,
     token: string,
-  ): Promise<void> {
+  ): Promise<"not_observed" | null> {
     const variablePath =
       `/repos/${repositoryPath(repository)}/actions/variables/` +
       encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE);
     const existing = await this.request("GET", variablePath, token);
     if (existing.status === 404) {
       // A missing variable is left to ensureRepositoryVariables.
-      return;
+      return null;
     }
     const data = jsonObject(
       requireSuccessful(existing),
       "GitHub setup response was invalid",
     );
     if (typeof data.value !== "string") {
-      return;
+      return null;
     }
     // Own-property check: a bare index into the migration record resolves
     // inherited members for "__proto__"/"constructor"/"toString" instead of
     // returning undefined, which would PATCH a non-string value.
     if (!Object.hasOwn(RETIRED_REVIEW_MODE_MIGRATIONS, data.value)) {
-      return;
+      return null;
     }
     const replacement = RETIRED_REVIEW_MODE_MIGRATIONS[data.value];
     const updated = await this.request("PATCH", variablePath, token, {
@@ -926,7 +944,9 @@ export class GitHubSetupService {
         observed: typeof observed === "string" ? observed : null,
         status: readback.status,
       });
+      return "not_observed";
     }
+    return null;
   }
 
   private async defaultBranch(

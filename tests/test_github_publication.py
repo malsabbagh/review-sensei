@@ -1,10 +1,14 @@
 import hashlib
+import importlib
+import inspect
 import json
+import pkgutil
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import review_sensei
 from review_sensei.convergence import (
     REVIEW_MODE_ENV,
     ReviewConvergencePolicy,
@@ -2327,6 +2331,40 @@ deleted file mode 100644
                     "allow_retired_legacy_policy",
                     path.read_text(encoding="utf-8"),
                 )
+        # The textual check above cannot see an internal re-export that
+        # accepts the flag dynamically, so pin the signature side too: any
+        # route that could let production code opt in needs the parameter in a
+        # signature, and only the publisher's own keyword-only parameter may
+        # declare it.
+        declaring_signatures = set()
+        for module_info in pkgutil.walk_packages(
+            review_sensei.__path__, prefix="review_sensei."
+        ):
+            module = importlib.import_module(module_info.name)
+            members = []
+            for member in vars(module).values():
+                if getattr(member, "__module__", None) != module_info.name:
+                    continue
+                if inspect.isclass(member):
+                    members.extend(vars(member).values())
+                else:
+                    members.append(member)
+            for member in members:
+                if not callable(member):
+                    continue
+                try:
+                    signature = inspect.signature(member)
+                except (TypeError, ValueError):  # pragma: no cover - builtins
+                    continue
+                parameter = signature.parameters.get("allow_retired_legacy_policy")
+                if parameter is None:
+                    continue
+                declaring_signatures.add(f"{member.__module__}.{member.__qualname__}")
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(
+            declaring_signatures,
+            {"review_sensei.hosting.github.publication.ReviewPublisher.publish"},
+        )
 
     def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):
         head = "b" * 40

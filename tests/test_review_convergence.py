@@ -22,7 +22,7 @@ from review_sensei.convergence import (
     REQUIRED_CONTRACT_KINDS,
     REVIEW_MODE_ENV,
     comment_targets_pr_change,
-    migrate_review_mode,
+    migrate_stored_review_mode,
     policy_from_mapping,
     resolve_review_mode,
 )
@@ -63,8 +63,8 @@ class ReviewModeResolutionTests(unittest.TestCase):
             self.assertEqual(resolve_review_mode("  "), "merge-focused")
         with self.assertRaisesRegex(ReviewInputError, "retired"):
             resolve_review_mode("legacy")
-        self.assertEqual(migrate_review_mode("legacy"), "merge-focused")
-        self.assertEqual(migrate_review_mode("merge-focused"), "merge-focused")
+        self.assertEqual(migrate_stored_review_mode("legacy"), "merge-focused")
+        self.assertEqual(migrate_stored_review_mode("merge-focused"), "merge-focused")
 
     def test_cli_overrides_environment(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "strict"}):

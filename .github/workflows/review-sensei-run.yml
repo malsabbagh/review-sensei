@@ -205,6 +205,14 @@ jobs:
           set -euo pipefail
           PROVIDER_MODE="$(printf '%s' "$PROVIDER_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           MODEL="$(printf '%s' "$MODEL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          REVIEW_MODE="$(printf '%s' "$REVIEW_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "$REVIEW_MODE" ]; then
+            # The input is optional with a `merge-focused` default and the CLI
+            # resolves an empty mode to the same default, so an absent or empty
+            # value is normalized instead of rejected: a caller that pins the
+            # tag without passing the input must not fail a run the CLI accepts.
+            REVIEW_MODE=merge-focused
+          fi
           case "$PROVIDER_MODE" in
             ""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;
             *)
