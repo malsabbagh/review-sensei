@@ -7,6 +7,8 @@ import {
 } from "./github-api";
 import {
   DEFAULT_PUBLIC_WORKFLOW_TAG,
+  RETIRED_REVIEW_MODE_MIGRATIONS,
+  RETIRED_REVIEW_MODE_VARIABLE,
   SETUP_FILE_PATHS,
   SETUP_PULL_REQUEST_BODY,
   SETUP_PULL_REQUEST_TITLE,
@@ -17,6 +19,9 @@ import {
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
+  historicalV4UninstallWorkflow,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   previousProviderParityWorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
@@ -33,7 +38,7 @@ import {
 export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const MAX_SETUP_FILE_BYTES = 128 * 1024;
-const SETUP_BRANCH_PREFIX = "review-sensei/setup-v4";
+const SETUP_BRANCH_PREFIX = "review-sensei/setup-v5";
 const SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files";
 const SETUP_APP_LOGIN = "reviewsensei[bot]";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -109,6 +114,13 @@ export interface SetupResult {
   repository: string;
   status: string;
   pull_request_number?: number;
+  // The retired-value migration outcome is reported here as well as in the
+  // log: the delivery result is what reaches the operator. "observed" means
+  // the replacement was read back; "not_observed" means the write could not
+  // be observed (the variables API has no conditional write), which is also
+  // logged as a warning. The field is absent when no retired value was
+  // present.
+  review_mode_migration?: "observed" | "not_observed";
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -274,7 +286,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
     try {
       return (
-        content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
+        content === mergeFocusedV4WorkflowTemplate(publicWorkflowTag) ||
         content === releasedRunnerSwitchV4WorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowTemplate(publicWorkflowTag) ||
         content === providerParityWorkflowBeforeDraftSkip(publicWorkflowTag) ||
@@ -287,15 +299,31 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
     }
   }
   if (path === SETUP_FILE_PATHS[1]) {
-    return content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[1].content;
+    return content === historicalV4UninstallWorkflow();
   }
   if (path === SETUP_FILE_PATHS[2]) {
     return (
-      content === buildTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content ||
+      content === mergeFocusedV4ConfigFile() ||
       content === buildHistoricalTaggedV4SetupFiles(DEFAULT_PUBLIC_WORKFLOW_TAG)[2].content
     );
   }
   return false;
+}
+
+function looksLikeManagedV5Workflow(content: string): boolean {
+  const tagMatches = [...content.matchAll(PUBLIC_WORKFLOW_TAG_REFERENCE)];
+  if (tagMatches.length !== 1) {
+    return false;
+  }
+  const publicWorkflowTag = tagMatches[0]?.[1];
+  if (!publicWorkflowTag) {
+    return false;
+  }
+  try {
+    return content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content;
+  } catch {
+    return false;
+  }
 }
 
 async function classifySetupFiles(
@@ -323,11 +351,21 @@ async function classifySetupFiles(
       if (marker === SETUP_VERSION) {
         if (looksLikeCurrentSetup(path, content, publicWorkflowTag)) {
           hasCurrent = true;
+        } else if (
+          path === SETUP_FILE_PATHS[0] &&
+          looksLikeManagedV5Workflow(content)
+        ) {
+          hasManaged = true;
         } else if (looksLikeManagedV4Setup(path, content)) {
           hasManaged = true;
         } else {
           return "unknown";
         }
+      } else if (marker === 4) {
+        if (!looksLikeManagedV4Setup(path, content)) {
+          return "unknown";
+        }
+        hasManaged = true;
       } else if (marker === 3) {
         if (!looksLikeManagedV3Setup(path, content)) {
           return "unknown";
@@ -742,6 +780,14 @@ export class GitHubSetupService {
       }
     }
     await this.ensureRepositoryVariables(repository, installationToken);
+    const reviewModeMigration = await this.migrateRetiredReviewModeVariable(
+      repository,
+      installationToken,
+    );
+    const migrationReport =
+      reviewModeMigration === null
+        ? {}
+        : { review_mode_migration: reviewModeMigration };
     const existingAfterBranch = await this.existingPullRequest(
       repository,
       installationToken,
@@ -752,6 +798,7 @@ export class GitHubSetupService {
         repository,
         status: "skipped_pull_request_exists",
         pull_request_number: existingAfterBranch,
+        ...migrationReport,
       };
     }
     const response = await this.request(
@@ -778,6 +825,7 @@ export class GitHubSetupService {
           repository,
           status: "skipped_pull_request_exists",
           pull_request_number: existingAfterCreate,
+          ...migrationReport,
         };
       }
     }
@@ -789,7 +837,12 @@ export class GitHubSetupService {
     if (number === null) {
       throw new GitHubSetupError("GitHub setup response did not include a pull request number");
     }
-    return { repository, status: "created", pull_request_number: number };
+    return {
+      repository,
+      status: "created",
+      pull_request_number: number,
+      ...migrationReport,
+    };
   }
 
   private async inspectRepositorySetup(
@@ -846,6 +899,60 @@ export class GitHubSetupService {
       }
       requireSuccessful(created);
     }
+  }
+
+  private async migrateRetiredReviewModeVariable(
+    repository: string,
+    token: string,
+  ): Promise<"observed" | "not_observed" | null> {
+    const variablePath =
+      `/repos/${repositoryPath(repository)}/actions/variables/` +
+      encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE);
+    const existing = await this.request("GET", variablePath, token);
+    if (existing.status === 404) {
+      // A missing variable is left to ensureRepositoryVariables.
+      return null;
+    }
+    const data = jsonObject(
+      requireSuccessful(existing),
+      "GitHub setup response was invalid",
+    );
+    if (typeof data.value !== "string") {
+      return null;
+    }
+    // Own-property check: a bare index into the migration record resolves
+    // inherited members for "__proto__"/"constructor"/"toString" instead of
+    // returning undefined, which would PATCH a non-string value.
+    if (!Object.hasOwn(RETIRED_REVIEW_MODE_MIGRATIONS, data.value)) {
+      return null;
+    }
+    const replacement = RETIRED_REVIEW_MODE_MIGRATIONS[data.value];
+    const updated = await this.request("PATCH", variablePath, token, {
+      name: RETIRED_REVIEW_MODE_VARIABLE,
+      value: replacement,
+    });
+    requireSuccessful(updated);
+    // The variables API has no conditional write, so the GET/PATCH pair can
+    // race an operator change and a 204 says nothing about what was stored.
+    // Read back and surface a mismatch instead of trusting the status.
+    const readback = await this.request("GET", variablePath, token);
+    const observed =
+      readback.status === 200 && isObject(readback.data)
+        ? readback.data.value
+        : undefined;
+    if (observed !== replacement) {
+      console.warn("review_mode_migration_not_observed", {
+        repository,
+        expected: replacement,
+        observed: typeof observed === "string" ? observed : null,
+        status: readback.status,
+      });
+      return "not_observed";
+    }
+    // The replacement was read back, so the migration is reported as done in
+    // the structured setup result rather than only implied by the absence of a
+    // warning.
+    return "observed";
   }
 
   private async defaultBranch(

@@ -135,7 +135,7 @@ class RelatedPathTests(unittest.TestCase):
 class PreviewScopeTests(unittest.TestCase):
     def test_legacy_stays_unscoped(self) -> None:
         scope = preview_verification_scope(
-            policy=ReviewConvergencePolicy(),
+            policy=ReviewConvergencePolicy(mode="legacy"),
             completed_initial_reviews=1,
             changed_paths=("src/app.py",),
         )

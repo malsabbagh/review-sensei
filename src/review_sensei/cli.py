@@ -788,8 +788,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-mode",
         help=(
-            "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Operator modes enforce C5 round "
+            "Review-convergence mode: merge-focused (default), advisory, or "
+            "strict. Legacy settings must be migrated before execution. "
+            "Operator modes enforce C5 round "
             "admission before inference when a session ledger is present."
         ),
     )
@@ -957,9 +958,9 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-mode",
         help=(
-            "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Operator modes apply trusted blocker "
-            "admission at publication; legacy keeps ADR 0032 events."
+            "Review-convergence mode: merge-focused (default), advisory, or "
+            "strict. Legacy settings must be migrated before execution. "
+            "Operator modes apply trusted blocker admission at publication."
         ),
     )
     parser.add_argument(
@@ -1007,9 +1008,9 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-mode",
         help=(
-            "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Operator modes apply trusted blocker "
-            "admission at publication; legacy keeps ADR 0032 events."
+            "Review-convergence mode: merge-focused (default), advisory, or "
+            "strict. Legacy settings must be migrated before execution. "
+            "Operator modes apply trusted blocker admission at publication."
         ),
     )
     parser.add_argument("--base-sha")
@@ -1344,10 +1345,10 @@ def _github_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "--review-mode",
         help=(
-            "Review-convergence mode: legacy (default), advisory, "
-            "merge-focused, or strict. Operator modes apply trusted blocker "
-            "admission before GitHub review events. Recovery artifacts cannot "
-            "be republished under operator modes."
+            "Review-convergence mode: merge-focused (default), advisory, or "
+            "strict. Legacy settings must be migrated before execution. "
+            "Operator modes apply trusted blocker admission before GitHub review "
+            "events. Recovery artifacts cannot be republished under operator modes."
         ),
     )
     review.add_argument(
@@ -2151,7 +2152,7 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
         prog="review-sensei evaluate-convergence",
         description=(
             "Replay a frozen synthetic review sequence against a convergence "
-            "policy. Observation-only; does not publish or change the legacy default. "
+            "policy. Observation-only; does not publish or change the runtime default. "
             "With --observed, exit 0 only when cutover_status is passed. A completed "
             "not_ready report is still written and the process exits 1. Invalid "
             "input, including a legacy review mode, exits 1 without a report."
@@ -2160,7 +2161,7 @@ def _evaluate_convergence_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-mode",
         default="merge-focused",
-        help="Policy to replay (default merge-focused). Publication default stays legacy.",
+        help="Policy to replay (default merge-focused). Publication default is merge-focused.",
     )
     parser.add_argument(
         "--json",

@@ -139,9 +139,9 @@ Optional App-identity publication is documented in
 authentication adapter for GitHub App JWTs and installation access tokens; it
 is not a hosted review service, webhook receiver, or durable delivery store.
 
-### GitHub App setup-v4 integration
+### GitHub App setup-v5 integration
 
-The optional setup-v4 integration adds a reviewable, generated caller by using
+The optional setup-v5 integration adds a reviewable, generated caller by using
 the operator-managed `v5` git tag as the only update channel:
 `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5`.
 The Worker validates the tag before writing the caller, and the Cloudflare
@@ -179,8 +179,8 @@ authentication to obtain a repository-scoped installation token for the setup
 branch, pull request, and default variables.
 
 Installation, reinstall, permission-acceptance, and repository-added events
-reconcile absent or older generated clients through at most one setup-v4 PR.
-Current tag-following setup-v4 is a no-op; managed v3 and older generated clients are migrated
+reconcile absent or older generated clients through at most one setup-v5 PR.
+Current tag-following setup-v5 is a no-op; managed v3/v4 and older generated clients are migrated
 through a setup PR, while custom, malformed, and future setup files are no-write
 cases. See [`docs/installation.md`](docs/installation.md),
 [`docs/github-app-registration.md`](docs/github-app-registration.md), and the
@@ -533,15 +533,17 @@ network egress path for Ollama deployments.
 
 ## GitHub integration
 
-The GitHub App opens a setup-v4 PR containing a thin caller that follows the
+The GitHub App opens a setup-v5 PR containing a thin caller that follows the
 operator-managed `v5` public git tag. The reusable workflow prefers the
 requested exact package from PyPI and falls back to its executing workflow
 commit only when that package/version is unavailable. Unrelated PyPI
-installation failures remain fatal. All nine
-`REVIEWSENSEI_*` repository variables are created with safe defaults: automatic
-review, GitHub writes, learning PRs, mention replies, and artifact upload are
-off, while automatic approval is `true` when those review and write gates are
-enabled. The App never creates the customer-owned `OLLAMA_API_KEY` secret.
+installation failures remain fatal. Setup provisions 15 repository variables,
+including 7 boolean controls, and manages 3 generated files. Automatic review,
+GitHub writes, learning proposals, learning PRs, mention replies, and artifact
+upload default to `false`; automatic approval defaults to `true` but is effective
+only when review and write gates are enabled. `REVIEWSENSEI_REVIEW_MODE` is a
+policy selector, not a boolean control, and defaults to `merge-focused`.
+The App never creates the customer-owned `OLLAMA_API_KEY` secret.
 
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
@@ -587,10 +589,10 @@ mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
 findings also tell readers to reply with @sensei followed by their question.
 `review.json` is uploaded only when
-`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v4 does not create a separate
+`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v5 does not create a separate
 version artifact. See [installation and migration](docs/installation.md) and
 the reviewable
-[`setup-v4 example`](examples/github-actions/review-sensei-review.yml).
+[`setup-v5 example`](examples/github-actions/review-sensei-review.yml).
 
 ## Concurrency policy
 

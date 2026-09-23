@@ -2,16 +2,24 @@ import base64
 import hashlib
 import io
 import json
+import re
 import unittest
+import warnings
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
+from review_sensei.convergence import (
+    LEGACY_REVIEW_MODE,
+    REVIEW_MODE_ENV,
+    supported_mode_for_stored_value,
+)
 from review_sensei.hosting.github import (
     GitHubSetupClient,
     GitHubSetupError,
     GitHubSetupTransientError,
     SetupFile,
     SetupPlanBuilder,
+    SetupPullRequestResult,
     SetupPullRequestService,
     VerifiedDelivery,
 )
@@ -19,19 +27,36 @@ from review_sensei.hosting.github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
+    RETIRED_REVIEW_MODE_VARIABLE,
+    REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+    REVIEW_MODE_MIGRATION_OBSERVED,
+    SETUP_FILE_PATHS,
     SETUP_VARIABLES,
     WORKFLOW_PATH,
     _broker_accepted_public_workflow_tags,
     _historical_provider_parity_workflow,
+    _historical_v4_uninstall_workflow,
+    _merge_focused_v4_workflow,
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
     _public_workflow_tag_from_job_ref,
     _released_runner_switch_v4_workflow,
     _tagged_workflow,
+    _v4_with_review_mode_config_file,
 )
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
+
+# Byte-exact managed-v4 recognition contract shared with the Cloudflare Worker:
+# deploy/cloudflare/test/setup-content.test.ts asserts these same digests. The
+# bytes represent artifacts that already exist in installations, so an edit to
+# the current templates that changes them must be a deliberate decision.
+MANAGED_V4_RECOGNITION_SHA256 = {
+    "caller": "ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742",
+    "uninstall": "e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec",
+    "config": "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0",
+}
 
 
 class FakeHTTPResponse(io.BytesIO):
@@ -52,6 +77,7 @@ class FakeTransport:
         default_branch="main",
         branch_managed=True,
         ref_collision=False,
+        review_mode_migration=None,
     ):
         self.requests = []
         self._branch_exists = branch_exists if branch_exists is not None else False
@@ -61,6 +87,7 @@ class FakeTransport:
         self.branch_managed = branch_managed
         self.ref_collision = ref_collision
         self.collision_observed = False
+        self.review_mode_migration = review_mode_migration
 
     def get_default_branch(self, *, repository, installation_token):
         self.requests.append(("get_default_branch", repository, installation_token))
@@ -137,6 +164,12 @@ class FakeTransport:
                 variables,
             )
         )
+
+    def migrate_retired_review_mode_variable(self, *, repository, installation_token):
+        self.requests.append(
+            ("migrate_retired_review_mode_variable", repository, installation_token)
+        )
+        return self.review_mode_migration
 
     def list_pull_requests(self, *, repository, installation_token, head_branch):
         self.requests.append(
@@ -258,7 +291,7 @@ class SetupPlanTests(unittest.TestCase):
         workflow = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-review.yml"
         ]
-        self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             workflow,
@@ -279,7 +312,13 @@ class SetupPlanTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
         self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", workflow)
         self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
+        self.assertIn(("REVIEWSENSEI_REVIEW_MODE", "merge-focused"), SETUP_VARIABLES)
+        self.assertIn(
+            "review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}",
+            workflow,
+        )
         config = dict((f.path, f.content) for f in plan.files)[CONFIG_PATH]
+        self.assertIn("review_mode: merge-focused", config)
         self.assertIn("model: ''", config)
         self.assertIn("id-token: write", workflow)
         self.assertIn("pull-requests: write", workflow)
@@ -342,7 +381,7 @@ class SetupPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             dynamic.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
 
     def test_build_plan_uses_the_supplied_tag(self):
@@ -363,7 +402,7 @@ class SetupPlanTests(unittest.TestCase):
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", workflow)
         self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", workflow)
         self.assertNotIn("default: main", workflow)
-        self.assertIn("# ReviewSensei setup version: 4", workflow)
+        self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertEqual(
             workflow,
             (
@@ -373,10 +412,10 @@ class SetupPlanTests(unittest.TestCase):
             .read_text(encoding="utf-8")
             .replace("@v5", "@stable"),
         )
-        self.assertIn("setup_version: 4", files[".github/review-sensei/config.yml"])
+        self.assertIn("setup_version: 5", files[".github/review-sensei/config.yml"])
         self.assertEqual(
             plan.branch_name,
-            "review-sensei/setup-v4-bbbbbbbbbbbb-stable",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-stable",
         )
 
     def test_generated_caller_forwards_command_context_for_the_command_operation(self):
@@ -624,6 +663,169 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             any(r[0] == "ensure_repository_variables" for r in transport.requests)
         )
 
+    def test_setup_migrates_the_retired_review_mode_variable(self):
+        transport = FakeTransport()
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertIn(
+            ("migrate_retired_review_mode_variable", "owner/repo", "ghs_opaque"),
+            transport.requests,
+        )
+
+    def test_setup_result_carries_an_unobserved_review_mode_migration(self):
+        # The warning alone can be missed in Worker logs; the structured field
+        # travels with the delivery result so the operator sees it wherever the
+        # result is reported.
+        transport = FakeTransport(
+            review_mode_migration=REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+    def test_setup_result_carries_a_confirmed_review_mode_migration(self):
+        # A confirmed migration is reported in the structured field too, so a
+        # delivery result is self-verifying: the operator can see that the
+        # retired value was rewritten rather than assuming the migration ran.
+        transport = FakeTransport(review_mode_migration=REVIEW_MODE_MIGRATION_OBSERVED)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_OBSERVED
+        )
+
+    def test_setup_result_carries_the_migration_on_the_existing_pr_skip(self):
+        # The setup PR can already exist when the migration runs, so the
+        # outcome is reported on that skip result too instead of being dropped.
+        transport = FakeTransport(
+            existing_prs=[{"number": 11}],
+            review_mode_migration=REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_pull_request_exists")
+        self.assertEqual(results[0].pull_request_number, 11)
+        self.assertEqual(
+            results[0].review_mode_migration, REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        )
+
+    def test_setup_result_rejects_an_unknown_migration_outcome(self):
+        with self.assertRaises(GitHubSetupError):
+            SetupPullRequestResult(
+                repository="owner/repo",
+                status="created",
+                review_mode_migration="failed",
+            )
+
+    def test_current_or_customized_setups_never_touch_review_mode_variables(self):
+        # Both skip states return before any variable work, so a repository
+        # that is already current (or intentionally customized) keeps its
+        # operator-owned REVIEWSENSEI_REVIEW_MODE value untouched.
+        plan = SetupPlanBuilder().build("owner/repo")
+        current = FileTransport(files={file.path: file.content for file in plan.files})
+        customized = FileTransport(
+            files={SETUP_FILE_PATHS[0]: "name: Customer ReviewSensei review\n"}
+        )
+
+        for transport, expected in (
+            (current, "skipped_current"),
+            (customized, "skipped_unknown_setup"),
+        ):
+            with self.subTest(status=expected):
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+                self.assertEqual(results[0].status, expected)
+                self.assertIsNone(results[0].review_mode_migration)
+                self.assertFalse(
+                    any(
+                        request[0]
+                        in {
+                            "ensure_repository_variables",
+                            "migrate_retired_review_mode_variable",
+                        }
+                        for request in transport.requests
+                    )
+                )
+
+    def test_setup_requires_the_retired_mode_migration_from_managing_transports(self):
+        # The migration is part of the transport protocol, so a transport that
+        # manages variables but cannot perform it must fail setup loudly:
+        # tolerating its absence would leave `legacy` in place while the
+        # generated caller keeps feeding the workflow guard a retired mode.
+        # An older transport without the method raises an attribute error from
+        # a direct call; the service turns that absence into an actionable
+        # protocol-change error naming the required method instead.
+        class _NoMigrationTransport(FakeTransport):
+            @property
+            def migrate_retired_review_mode_variable(self):
+                raise AttributeError
+
+        transport = _NoMigrationTransport()
+        with self.assertRaises(GitHubSetupError) as raised:
+            SetupPullRequestService(transport).ensure_setup_pull_requests(
+                delivery(),
+                installation_token="ghs_opaque",
+            )
+        self.assertIn("migrate_retired_review_mode_variable", str(raised.exception))
+        self.assertIn("docs/public-contracts.md", str(raised.exception))
+
+    def test_worker_retired_mode_migration_matches_the_python_migration_rule(self):
+        # The Worker keeps its own TypeScript copy of the retired-mode
+        # migration map while the Python setup adapter derives its replacement
+        # from `convergence`; nothing couples the copies, so this guard reads
+        # the Worker literal and fails on drift, including a second retired
+        # mode added on only one side.
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "deploy/cloudflare/src/setup-content.ts").read_text(
+            encoding="utf-8"
+        )
+        variable = re.search(r'RETIRED_REVIEW_MODE_VARIABLE\s*=\s*"([^"]+)"', source)
+        self.assertIsNotNone(variable, "RETIRED_REVIEW_MODE_VARIABLE is missing")
+        self.assertEqual(variable.group(1), RETIRED_REVIEW_MODE_VARIABLE)
+        migrations = re.search(
+            r"RETIRED_REVIEW_MODE_MIGRATIONS[^=]*=\s*\{\s*"
+            r'legacy:\s*"([^"]+)",?\s*\}',
+            source,
+        )
+        self.assertIsNotNone(migrations, "RETIRED_REVIEW_MODE_MIGRATIONS is missing")
+        self.assertEqual(
+            {LEGACY_REVIEW_MODE: migrations.group(1)},
+            {LEGACY_REVIEW_MODE: supported_mode_for_stored_value(LEGACY_REVIEW_MODE)},
+        )
+
+    def test_retired_mode_variable_is_the_convergence_environment_constant(self):
+        # The repository variable and the CLI environment variable are the same
+        # operator knob, so setup aliases the `convergence` constant instead of
+        # declaring a second literal that could drift.
+        self.assertEqual(RETIRED_REVIEW_MODE_VARIABLE, REVIEW_MODE_ENV)
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/review_sensei/hosting/github/setup.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV", source)
+
     def test_legacy_setup_reuses_existing_content_addressed_branch(self):
         transport = FileTransport(
             branch_exists=True,
@@ -691,10 +893,10 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
 
-    def test_stale_v4_setup_following_another_tag_is_migrated(self):
+    def test_stale_v5_setup_following_another_tag_is_migrated(self):
         plan = SetupPlanBuilder(public_workflow_tag="old-v4").build("owner/repo")
         files = {file.path: file.content for file in plan.files}
         transport = FileTransport(
@@ -712,8 +914,239 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             branch_request[5],
-            "review-sensei/setup-v4-bbbbbbbbbbbb-v5",
+            "review-sensei/setup-v5-bbbbbbbbbbbb-v5",
         )
+
+    def test_managed_v4_recognition_bytes_are_frozen_across_implementations(self):
+        for name, content in (
+            ("caller", _merge_focused_v4_workflow("v5")),
+            ("uninstall", _historical_v4_uninstall_workflow()),
+            ("config", _v4_with_review_mode_config_file()),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hashlib.sha256(content.encode()).hexdigest(),
+                    MANAGED_V4_RECOGNITION_SHA256[name],
+                )
+
+    def test_frozen_digests_match_the_worker_sources_and_fixture_bytes(self):
+        # The frozen digests are declared in the Python module, the Worker
+        # sources, and this suite. Nothing keeps the copies in sync
+        # automatically, so this guard reads the Worker sources and the
+        # rendered fixture bytes and fails on any drift between the three.
+        root = Path(__file__).resolve().parents[1]
+        managed_source = (
+            root / "deploy/cloudflare/src/managed-v4-recognition-artifacts.ts"
+        ).read_text(encoding="utf-8")
+        released_source = (
+            root / "deploy/cloudflare/src/released-runner-switch-v4-caller.ts"
+        ).read_text(encoding="utf-8")
+
+        def declared(source: str, name: str) -> str:
+            match = re.search(rf'{name}_SHA256\s*=\s*"([0-9a-f]{{64}})"', source)
+            self.assertIsNotNone(match, f"{name}_SHA256 is missing from {source!r}")
+            return match.group(1)
+
+        worker_constants = {
+            "caller": declared(managed_source, "MERGE_FOCUSED_V4_CALLER"),
+            "uninstall": declared(managed_source, "HISTORICAL_V4_UNINSTALL"),
+            "config": declared(managed_source, "MERGE_FOCUSED_V4_CONFIG"),
+        }
+        self.assertEqual(set(worker_constants), set(MANAGED_V4_RECOGNITION_SHA256))
+        for name, content in (
+            ("caller", _merge_focused_v4_workflow("v5")),
+            ("uninstall", _historical_v4_uninstall_workflow()),
+            ("config", _v4_with_review_mode_config_file()),
+        ):
+            digest = hashlib.sha256(content.encode()).hexdigest()
+            with self.subTest(name=name):
+                self.assertEqual(digest, MANAGED_V4_RECOGNITION_SHA256[name])
+                self.assertEqual(digest, worker_constants[name])
+        released = _released_runner_switch_v4_workflow("v4")
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            declared(released_source, "RELEASED_RUNNER_SWITCH_V4"),
+        )
+        self.assertEqual(
+            hashlib.sha256(released.encode()).hexdigest(),
+            RELEASED_RUNNER_SWITCH_V4_SHA256,
+        )
+
+    def test_managed_v4_recognition_does_not_read_the_current_templates(self):
+        from unittest.mock import patch
+
+        from review_sensei.hosting.github import setup as setup_module
+
+        cases = (
+            ("caller", lambda: _merge_focused_v4_workflow("v5"), "_tagged_workflow"),
+            ("uninstall", _historical_v4_uninstall_workflow, "_uninstall_workflow"),
+            ("config", _v4_with_review_mode_config_file, "_current_config_file"),
+        )
+        for name, renderer, live_source in cases:
+            with self.subTest(name=name):
+                expected = renderer()
+                with patch.object(
+                    setup_module,
+                    live_source,
+                    side_effect=AssertionError("live setup template was consulted"),
+                ):
+                    self.assertEqual(renderer(), expected)
+
+    def test_frozen_caller_reference_is_derived_from_the_fixture(self):
+        # The frozen bytes carry the run-workflow reference exactly once; the
+        # retag target must come from those bytes, never a parallel constant.
+        # The Cloudflare twin asserts the same substitution contract
+        # (deploy/cloudflare/test/setup-content.test.ts).
+        reference = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml"
+        caller = _merge_focused_v4_workflow("v5")
+        self.assertEqual(caller.count(reference + "@v5"), 1)
+        self.assertEqual(_merge_focused_v4_workflow("v5"), caller)
+        self.assertEqual(
+            _merge_focused_v4_workflow("stable"),
+            caller.replace(reference + "@v5", reference + "@stable"),
+        )
+        released = _released_runner_switch_v4_workflow("v4")
+        self.assertEqual(released.count(reference + "@v4"), 1)
+        self.assertEqual(_released_runner_switch_v4_workflow("v4"), released)
+        self.assertEqual(
+            _released_runner_switch_v4_workflow("stable"),
+            released.replace(reference + "@v4", reference + "@stable"),
+        )
+
+    def test_frozen_caller_reference_guard_rejects_ambiguous_fixtures(self):
+        from unittest.mock import patch
+
+        from review_sensei.hosting.github import setup as setup_module
+
+        reference = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml"
+        caller = _merge_focused_v4_workflow("v5")
+        cases = (
+            caller.replace(reference + "@v5", "example.invalid/other.yml@v5"),
+            caller + reference + "@v5\n",
+        )
+        for content in cases:
+            with self.subTest(references=content.count(reference)):
+                with patch.object(
+                    setup_module,
+                    "_merge_focused_v4_caller_bytes",
+                    return_value=content,
+                ):
+                    with self.assertRaises(GitHubSetupError):
+                        _merge_focused_v4_workflow("stable")
+
+    def test_marker_reverted_current_workflow_is_not_recognized_as_managed_v4(self):
+        # A manually reverted marker must not turn live setup-v5 bytes into
+        # managed-v4 content: the marker==4 branch accepts only the frozen
+        # historical templates, and no live renderer's bytes are among them.
+        from review_sensei.hosting.github import setup as setup_module
+
+        tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
+        current = _tagged_workflow(tag)
+        self.assertEqual(current, setup_module._resolve_trigger_workflow(tag))
+        reverted = current.replace(
+            "# ReviewSensei setup version: 5",
+            "# ReviewSensei setup version: 4",
+            1,
+        )
+        self.assertNotEqual(reverted, current)
+        self.assertFalse(
+            setup_module._looks_like_managed_v4_setup(
+                WORKFLOW_PATH,
+                reverted,
+            )
+        )
+        self.assertNotIn(
+            current,
+            {
+                _merge_focused_v4_workflow(tag),
+                _released_runner_switch_v4_workflow(tag),
+                _provider_parity_workflow(tag),
+                _provider_parity_workflow_before_draft_skip(tag),
+                setup_module._historical_tagged_v4_workflow(tag),
+                setup_module._previous_provider_parity_workflow(tag),
+                _historical_provider_parity_workflow(tag),
+            },
+        )
+        self.assertFalse(
+            setup_module._looks_like_managed_v4_setup(
+                CONFIG_PATH,
+                setup_module._current_config_file().replace(
+                    "# ReviewSensei setup version: 5",
+                    "# ReviewSensei setup version: 4",
+                    1,
+                ),
+            )
+        )
+        # The uninstall is the one reverted-marker shape that matches, because
+        # the shipped v4 uninstall is byte-identical to the current bytes apart
+        # from the marker line: recognition there is exact, not a fail-open.
+        self.assertEqual(
+            setup_module._current_uninstall_workflow().replace(
+                "# ReviewSensei setup version: 5",
+                "# ReviewSensei setup version: 4",
+                1,
+            ),
+            _historical_v4_uninstall_workflow(),
+        )
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = reverted
+        self.assertEqual(setup_module._classify_setup_files(files), "unknown")
+
+    def test_immediate_pre_cutover_v4_setup_is_migrated(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = _merge_focused_v4_workflow("v5")
+        files[".github/workflows/review-sensei-uninstall.yml"] = (
+            _historical_v4_uninstall_workflow()
+        )
+        files[CONFIG_PATH] = _v4_with_review_mode_config_file()
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertIn(
+            ("migrate_retired_review_mode_variable", "owner/repo", "ghs_opaque"),
+            transport.requests,
+        )
+
+    def test_missing_v4_companions_are_repaired_by_the_migration(self):
+        # The pre-cutover classifier (origin/main) already allowed a missing
+        # companion file; the migration PR writes only the three generated
+        # paths, so a companion that is absent is added, never overwritten.
+        transport = FileTransport(
+            files={WORKFLOW_PATH: _merge_focused_v4_workflow("v5")}
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_foreign_v4_companion_content_blocks_the_migration(self):
+        # A v4-managed workflow must not lift a foreign file at one of the
+        # known paths into the migration: the classifier fails closed.
+        transport = FileTransport(
+            files={
+                WORKFLOW_PATH: _merge_focused_v4_workflow("v5"),
+                CONFIG_PATH: "provider: custom\n",
+            }
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "skipped_unknown_setup")
+        self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
 
     def test_released_provider_parity_v4_setup_with_reply_default_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")
@@ -834,7 +1267,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             hashlib.sha256(
                 files[".github/workflows/review-sensei-review.yml"].encode()
             ).hexdigest(),
-            "5c56bef7ff9dcd0602b085f7ab54bdce7e0447be6c03e085795c4d1a6d4be5c8",
+            "18cb5eee42fd6acf10764e37eb5aba99d60abe77cace83a8b2db6150b1e73af3",
         )
         self.assertEqual(
             hashlib.sha256(
@@ -884,6 +1317,45 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "skipped_unknown_setup")
         self.assertFalse(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_v5_recognition_ignores_a_second_run_workflow_reference(self):
+        # Recognition is byte-exact against the rendered single-reference
+        # caller, so a file that mentions the run-workflow reference again (a
+        # comment, a duplicated `uses:` line) is a customer edit: it stays
+        # `unknown`, writes nothing, and the scoped reference matcher must not
+        # turn a mention into a live tag.
+        plan = SetupPlanBuilder().build("owner/repo")
+        caller = next(file.content for file in plan.files if file.path == WORKFLOW_PATH)
+        reference = (
+            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5"
+        )
+        variants = {
+            # Positive control: the unmodified rendered caller is recognized.
+            "current": (caller, "skipped_current"),
+            "comment_mention": (
+                caller + f"# pinned via {reference}\n",
+                "skipped_unknown_setup",
+            ),
+            "duplicated_uses": (
+                caller + f"      uses: {reference}\n",
+                "skipped_unknown_setup",
+            ),
+        }
+        for name, (content, expected) in variants.items():
+            with self.subTest(variant=name):
+                files = {file.path: file.content for file in plan.files}
+                files[WORKFLOW_PATH] = content
+                transport = FileTransport(branch_exists=True, files=files)
+
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(),
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertEqual(results[0].status, expected)
+                self.assertFalse(
+                    any(r[0] == "create_pull_request" for r in transport.requests)
+                )
 
     def test_marker_only_v3_setup_is_treated_as_custom(self):
         transport = FileTransport(
@@ -1323,6 +1795,133 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "POST")
         self.assertIn("actions/variables", calls[1][1])
         self.assertEqual(calls[2][0], "GET")
+
+    def test_client_migrates_retired_review_mode_variable_in_place(self):
+        calls = []
+        state = {"value": "legacy"}
+
+        def opener(request, timeout):
+            body = json.loads(request.data.decode("utf-8")) if request.data else None
+            calls.append((request.method, request.full_url, body))
+            if request.method == "PATCH" and isinstance(body, dict):
+                state["value"] = body["value"]
+            return FakeHTTPResponse(
+                json.dumps(
+                    {"name": "REVIEWSENSEI_REVIEW_MODE", "value": state["value"]}
+                ).encode("utf-8")
+            )
+
+        client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            observed = client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
+
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_OBSERVED)
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
+        self.assertEqual(
+            calls[0][1],
+            "https://api.github.test/repos/owner/repo/actions/variables/"
+            "REVIEWSENSEI_REVIEW_MODE",
+        )
+        self.assertEqual(
+            calls[1][2],
+            {"name": "REVIEWSENSEI_REVIEW_MODE", "value": "merge-focused"},
+        )
+        # The read-back targets the same variable path as the initial GET.
+        self.assertEqual(calls[2][1], calls[0][1])
+
+    def test_client_reports_when_the_review_mode_migration_is_not_observed(self):
+        # The variables API has no conditional write, so the PATCH can succeed
+        # while another actor restores or rewrites the value. A migration that
+        # cannot be observed must be surfaced, not reported as done.
+        calls = []
+
+        def opener(request, timeout):
+            body = json.loads(request.data.decode("utf-8")) if request.data else None
+            calls.append((request.method, request.full_url, body))
+            return FakeHTTPResponse(
+                b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'
+            )
+
+        client = GitHubSetupClient(api_url="https://api.github.test", opener=opener)
+        with self.assertWarns(UserWarning) as raised:
+            observed = client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
+
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_NOT_OBSERVED)
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH", "GET"])
+        message = str(raised.warning)
+        self.assertIn("review_mode_migration_not_observed", message)
+        self.assertIn("owner/repo", message)
+        self.assertIn("'legacy'", message)
+        self.assertIn("'merge-focused'", message)
+
+    def test_client_reports_when_the_review_mode_read_back_fails(self):
+        # A read-back that cannot report a value is not evidence of success.
+        client, calls = self.make_client(
+            [
+                (200, b'{"name":"REVIEWSENSEI_REVIEW_MODE","value":"legacy"}'),
+                (204, b""),
+                (404, b""),
+            ]
+        )
+
+        with self.assertWarns(UserWarning) as raised:
+            observed = client.migrate_retired_review_mode_variable(
+                repository="owner/repo",
+                installation_token="ghs_opaque",
+            )
+
+        self.assertEqual(observed, REVIEW_MODE_MIGRATION_NOT_OBSERVED)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("review_mode_migration_not_observed", str(raised.warning))
+        self.assertIn("None", str(raised.warning))
+
+    def test_client_leaves_operator_review_mode_values_untouched(self):
+        # The prototype-named values cover the JS twin's own-property guard:
+        # the Python mapping is a dict, so a lookup can never resolve an
+        # inherited member for them either.
+        for value in (
+            "merge-focused",
+            "advisory",
+            "strict",
+            "",
+            "__proto__",
+            "constructor",
+            "toString",
+        ):
+            with self.subTest(value=value):
+                client, calls = self.make_client(
+                    (
+                        200,
+                        json.dumps(
+                            {"name": "REVIEWSENSEI_REVIEW_MODE", "value": value}
+                        ).encode("utf-8"),
+                    )
+                )
+
+                observed = client.migrate_retired_review_mode_variable(
+                    repository="owner/repo",
+                    installation_token="ghs_opaque",
+                )
+
+                self.assertIsNone(observed)
+                self.assertEqual([call[0] for call in calls], ["GET"])
+
+    def test_client_ignores_a_missing_review_mode_variable(self):
+        client, calls = self.make_client((404, b""))
+
+        client.migrate_retired_review_mode_variable(
+            repository="owner/repo",
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual([call[0] for call in calls], ["GET"])
 
     def test_client_maps_transient_and_sanitized_errors(self):
         error = HTTPError(

@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import threading
+import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -23,6 +24,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from ...convergence import (
+    LEGACY_REVIEW_MODE,
+    REVIEW_MODE_ENV,
+    supported_mode_for_stored_value,
+)
 from .errors import (
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -34,12 +40,12 @@ MAX_SETUP_FILE_BYTES = 128 * 1024
 DEFAULT_SETUP_BRANCH = "review-sensei/setup"
 DEFAULT_SETUP_TITLE = "ReviewSensei review setup"
 SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files"
-SETUP_BRANCH_PREFIX = "review-sensei/setup-v4"
+SETUP_BRANCH_PREFIX = "review-sensei/setup-v5"
 SETUP_APP_LOGIN = "reviewsensei[bot]"
 REQUIRED_SETUP_PERMISSIONS = frozenset(
     {"contents", "pull_requests", "variables", "workflows"}
 )
-SETUP_VERSION = 4
+SETUP_VERSION = 5
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
 CURRENT_PACKAGE_VERSION = "0.6.0"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
@@ -55,6 +61,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
     ("REVIEWSENSEI_VERSION", "0.6.0"),
+    ("REVIEWSENSEI_REVIEW_MODE", "merge-focused"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_AUTO_APPROVE", "true"),
     ("REVIEWSENSEI_LEARNING_PROPOSALS", "false"),
@@ -68,9 +75,28 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_CATEGORIES_DIR", ""),
 )
 SETUP_FILE_PATHS = (WORKFLOW_PATH, UNINSTALL_WORKFLOW_PATH, CONFIG_PATH)
+# The retired review mode survives in existing installations as a repository
+# variable that setup never overwrites, which would make the reusable-workflow
+# guard fail every review. Only this variable and only the retired value
+# (``LEGACY_REVIEW_MODE``, replaced per ``supported_mode_for_stored_value`` in
+# ``review_sensei.convergence``) are migrated in place; every other
+# operator-set value is left as-is. The name is the same knob the CLI reads
+# from the environment, so it is an alias rather than a second literal.
+RETIRED_REVIEW_MODE_VARIABLE = REVIEW_MODE_ENV
+# The variables API has no conditional write, so the migration reports the
+# stored value it read back rather than the write status: `observed` when the
+# replacement was read back, `not_observed` when it was not (the value is
+# surfaced in the structured setup result and in a warning), and no field at
+# all when there was no retired value to migrate.
+REVIEW_MODE_MIGRATION_OBSERVED = "observed"
+REVIEW_MODE_MIGRATION_NOT_OBSERVED = "not_observed"
+SETUP_MIGRATION_OUTCOMES = (
+    REVIEW_MODE_MIGRATION_OBSERVED,
+    REVIEW_MODE_MIGRATION_NOT_OBSERVED,
+)
 PUBLIC_WORKFLOW_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 PUBLIC_WORKFLOW_TAG_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# The public tag is the only setup-v4 update channel. The Worker validates the
+# The public tag is the only setup-v5 update channel. The Worker validates the
 # tag before creating the caller, and the broker resolves the same tag when it
 # authorizes a workflow run.
 DEFAULT_PUBLIC_WORKFLOW_TAG = "v5"
@@ -80,8 +106,17 @@ PUBLIC_WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
 RELEASED_RUNNER_SWITCH_V4_SHA256 = (
     "222c520f06ff3de44d57c5c4176ece68d0682e422c45df121c719438ec415f5e"
 )
-_RELEASED_RUNNER_SWITCH_V4_TAG_MARKER = (
-    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v4"
+# Frozen bytes of artifacts that already exist in installations. Recognition
+# must not be derived from the live templates: an edit to the current setup-v5
+# bytes must never change what these historical artifacts look like.
+MERGE_FOCUSED_V4_CALLER_SHA256 = (
+    "ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742"
+)
+MERGE_FOCUSED_V4_CONFIG_SHA256 = (
+    "2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0"
+)
+HISTORICAL_V4_UNINSTALL_SHA256 = (
+    "e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec"
 )
 # Retained for exact setup-v3 and SHA-pinned setup-v4 migration recognition.
 DEFAULT_PUBLIC_WORKFLOW_SHA = "f" * 40
@@ -174,12 +209,12 @@ def _looks_like_current_setup(
     *,
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> bool:
-    """Recognize only the exact current tag-following setup-v4 artifact."""
+    """Recognize only the exact current tag-following setup-v5 artifact."""
 
     expected = {
         WORKFLOW_PATH: _tagged_workflow(public_workflow_tag),
-        UNINSTALL_WORKFLOW_PATH: _v4_uninstall_workflow(),
-        CONFIG_PATH: _v4_config_file(),
+        UNINSTALL_WORKFLOW_PATH: _current_uninstall_workflow(),
+        CONFIG_PATH: _current_config_file(),
     }
     return expected.get(path) == content
 
@@ -239,7 +274,12 @@ def _looks_like_managed_v3_setup(path: str, content: str) -> bool:
 
 
 def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
-    """Recognize setup-v4 artifacts from either pinning contract."""
+    """Recognize setup-v4 artifacts from either pinning contract.
+
+    The workflow accepts the pre-cutover and released caller variants. The
+    uninstall has a single shipped shape (the historical bytes), while the
+    config has two (pre-cutover and historical).
+    """
 
     if path == WORKFLOW_PATH:
         sha_matches = [
@@ -260,7 +300,7 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
             return False
         try:
             return content in {
-                _tagged_workflow(tag_matches[0]),
+                _merge_focused_v4_workflow(tag_matches[0]),
                 _released_runner_switch_v4_workflow(tag_matches[0]),
                 _provider_parity_workflow(tag_matches[0]),
                 _provider_parity_workflow_before_draft_skip(tag_matches[0]),
@@ -271,13 +311,28 @@ def _looks_like_managed_v4_setup(path: str, content: str) -> bool:
         except GitHubSetupError:
             return False
     if path == UNINSTALL_WORKFLOW_PATH:
-        return content == _v4_uninstall_workflow()
+        return content == _historical_v4_uninstall_workflow()
     if path == CONFIG_PATH:
         return content in {
-            _v4_config_file(),
+            _v4_with_review_mode_config_file(),
             _historical_v4_config_file(),
         }
     return False
+
+
+def _looks_like_managed_v5_workflow(content: str) -> bool:
+    """Recognize an otherwise-current v5 caller following a stale valid tag."""
+
+    tag_matches = [
+        match.group("tag")
+        for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
+    ]
+    if len(tag_matches) != 1 or len(set(tag_matches)) != 1:
+        return False
+    try:
+        return content == _tagged_workflow(tag_matches[0])
+    except GitHubSetupError:
+        return False
 
 
 def _classify_setup_files(
@@ -315,10 +370,17 @@ def _classify_setup_files(
                     public_workflow_tag=public_workflow_tag,
                 ):
                     has_current = True
+                elif path == WORKFLOW_PATH and _looks_like_managed_v5_workflow(content):
+                    has_managed = True
                 elif _looks_like_managed_v4_setup(path, content):
                     has_managed = True
                 else:
                     return "unknown"
+                continue
+            if marker == 4:
+                if not _looks_like_managed_v4_setup(path, content):
+                    return "unknown"
+                has_managed = True
                 continue
             if marker == 3:
                 if not _looks_like_managed_v3_setup(path, content):
@@ -523,6 +585,7 @@ jobs:
       head_repository: ${{{{ github.event.pull_request.head.repo.full_name }}}}
       head_sha: ${{{{ github.event.pull_request.head.sha }}}}
       review_sensei_version: ${{{{ vars.REVIEWSENSEI_VERSION }}}}
+      review_mode: ${{{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}}}
       enable_review: ${{{{ vars.REVIEWSENSEI_AUTO_REVIEW }}}}
       enable_auto_approve: ${{{{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}}}
       enable_github_writes: ${{{{ vars.REVIEWSENSEI_GITHUB_WRITES }}}}
@@ -554,6 +617,7 @@ jobs:
     uses: {reusable}
     with:
       mode: manual
+      review_mode: ${{{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}}}
       operation: ${{{{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}}}
       repository: ${{{{ github.repository }}}}
       repository_id: ${{{{ github.repository_id }}}}
@@ -716,6 +780,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
@@ -771,15 +836,15 @@ def _released_runner_switch_v4_caller_bytes() -> str:
 
 
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
-    """Return the current setup-v4 caller with trusted trigger resolution."""
+    """Return the current setup-v5 caller with trusted trigger resolution."""
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
-    return r"""# ReviewSensei setup version: 4
+    return r"""# ReviewSensei setup version: 5
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
 # The installer and this example follow the operator-managed v5 git tag. Moving
-# that tag is the public setup-v4 release action. The reusable workflow installs
+# that tag is the public setup-v5 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
 #
@@ -1099,6 +1164,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
@@ -1136,21 +1202,61 @@ jobs:
 
 
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
-    """Return the current setup-v4 caller following the public git tag."""
+    """Return the current setup-v5 caller following the public git tag."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
+
+
+def _merge_focused_v4_caller_bytes() -> str:
+    """Return the frozen immediate pre-cutover v4 caller bytes."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("merge-focused-v4-caller.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != MERGE_FOCUSED_V4_CALLER_SHA256:
+        raise GitHubSetupError("merge-focused v4 caller fixture digest mismatch")
+    return content
+
+
+def _retag_frozen_caller(content: str, public_workflow_tag: str) -> str:
+    """Point a frozen caller's single run-workflow reference at the live tag.
+
+    The reference is located in the frozen bytes instead of a parallel
+    constant, so a fixture edit can never be silently mis-substituted; a
+    fixture whose reference is missing or duplicated fails here instead.
+    """
+
+    tag = _validate_public_workflow_tag(public_workflow_tag)
+    references = [
+        match.group(0)
+        for match in PUBLIC_WORKFLOW_TAG_REFERENCE_PATTERN.finditer(content)
+    ]
+    if len(references) != 1:
+        raise GitHubSetupError(
+            "frozen setup caller must reference the run workflow exactly once"
+        )
+    prefix, _, frozen_tag = references[0].rpartition("@")
+    if frozen_tag == tag:
+        return content
+    return content.replace(references[0], f"{prefix}@{tag}")
+
+
+def _merge_focused_v4_workflow(public_workflow_tag: str) -> str:
+    """Return the immediate pre-cutover caller for managed v4 recognition."""
+
+    return _retag_frozen_caller(_merge_focused_v4_caller_bytes(), public_workflow_tag)
 
 
 def _released_runner_switch_v4_workflow(public_workflow_tag: str) -> str:
     """Return the released setup-v4 caller retained for managed migration."""
 
-    tag = _validate_public_workflow_tag(public_workflow_tag)
-    caller = _released_runner_switch_v4_caller_bytes()
-    if tag == "v4":
-        return caller
-    return caller.replace(
-        _RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + tag,
+    return _retag_frozen_caller(
+        _released_runner_switch_v4_caller_bytes(), public_workflow_tag
     )
 
 
@@ -1217,15 +1323,23 @@ upload_artifacts: false
 """
 
 
-def _v4_config_file() -> str:
-    """Return the current setup-v4 configuration."""
+def _current_config_file() -> str:
+    """Return the current setup-v5 configuration."""
 
+    # Deliberately asymmetric with the Worker builder, which branches on the
+    # setup version inline while this side renders the live template and reads
+    # frozen fixtures only for v4 bytes. The current config's byte equivalence
+    # with the TS builder is pinned by
+    # test_current_config_matches_ts_builder_bytes and the v4 artifacts by
+    # MERGE_FOCUSED_V4_CONFIG_SHA256, so a future version bump must update both
+    # implementations rather than only the rendering here.
     return (
-        "# ReviewSensei setup version: 4\n"
-        "setup_version: 4\n"
+        "# ReviewSensei setup version: 5\n"
+        "setup_version: 5\n"
         "provider: ollama\n"
         "provider_mode: local\n"
         "model: ''\n"
+        "review_mode: merge-focused\n"
         "base_url: http://127.0.0.1:11434/api\n"
         "cloud_base_url: https://ollama.com/api\n"
         f"local_model: {DEFAULT_LOCAL_MODEL}\n"
@@ -1240,6 +1354,22 @@ def _v4_config_file() -> str:
         "stages_dir: ''\n"
         "categories_dir: ''\n"
     )
+
+
+def _v4_with_review_mode_config_file() -> str:
+    """Return the frozen pre-cutover v4 configuration with an explicit mode."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("merge-focused-v4-config.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != MERGE_FOCUSED_V4_CONFIG_SHA256:
+        raise GitHubSetupError("merge-focused v4 config fixture digest mismatch")
+    return content
 
 
 def _historical_v4_config_file() -> str:
@@ -1319,24 +1449,47 @@ jobs:
 """
 
 
-def _v4_uninstall_workflow() -> str:
+def _current_uninstall_workflow() -> str:
+    """Return the current setup-v5 uninstall workflow."""
+
     return _uninstall_workflow().replace(
-        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 4", 1
+        "# ReviewSensei setup version: 3", "# ReviewSensei setup version: 5", 1
     )
+
+
+def _historical_v4_uninstall_workflow() -> str:
+    """Return the released setup-v4 uninstall workflow bytes."""
+
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("historical-v4-uninstall.yml")
+        .read_text(encoding="utf-8")
+    )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != HISTORICAL_V4_UNINSTALL_SHA256:
+        raise GitHubSetupError("historical v4 uninstall fixture digest mismatch")
+    return content
 
 
 def _setup_pull_request_body() -> str:
     return (
         "This pull request adds or updates the ReviewSensei review workflow "
-        "(setup version 4), which follows the operator-managed public v4 git "
+        "(setup version 5), which follows the operator-managed public v5 git "
         "tag, with opt-in provider defaults and a "
         "manual uninstall-cleanup workflow. The installation bootstrap also "
-        "creates the visible repository variables REVIEWSENSEI_PROVIDER_MODE (local), "
+        "creates the visible repository variables "
+        "REVIEWSENSEI_REVIEW_MODE (merge-focused), "
+        "REVIEWSENSEI_PROVIDER_MODE (local), "
         "REVIEWSENSEI_MODEL (empty; provider-specific defaults apply), "
         "REVIEWSENSEI_LOCAL_MODEL (qwen3.5:4b), and "
         "REVIEWSENSEI_CLOUD_MODEL (deepseek-v4.1-flash:cloud), an exact package "
         "version, and false-by-default opt-ins without overwriting existing "
-        "values. Change the opt-in variables explicitly to enable publication. "
+        "values. A stored REVIEWSENSEI_REVIEW_MODE value of legacy is replaced "
+        "with merge-focused, because the retired legacy mode now fails the "
+        "workflow guard. Change the opt-in variables explicitly to enable "
+        "publication. "
         "The selected provider mode applies to automatic/manual reviews and "
         "authorized mention conversations: local-ollama uses the labelled "
         "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, and "
@@ -1410,8 +1563,8 @@ class SetupPlanBuilder:
             config = _config_file()
         else:
             workflow = _tagged_workflow(self.public_workflow_tag)
-            uninstall = _v4_uninstall_workflow()
-            config = _v4_config_file()
+            uninstall = _current_uninstall_workflow()
+            config = _current_config_file()
         files = (
             SetupFile(path=WORKFLOW_PATH, content=workflow),
             SetupFile(path=UNINSTALL_WORKFLOW_PATH, content=uninstall),
@@ -1517,6 +1670,23 @@ class GitHubSetupTransport(Protocol):
         variables: Sequence[tuple[str, str]],
     ) -> None:
         """Create missing plain-text Actions variables without overwriting values."""
+
+    def migrate_retired_review_mode_variable(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+    ) -> str | None:
+        """Replace a retired review-mode variable value in place.
+
+        Required alongside :meth:`ensure_repository_variables`: this method
+        was added by the merge-focused cutover, so a transport that predates
+        it fails setup with an explicit error rather than the attribute error
+        a bare call would raise. Returns ``"observed"`` when the replacement
+        was read back and ``"not_observed"`` when the write could not be read
+        back, so the caller can report the outcome in the structured setup
+        result; ``None`` means there was no retired value to migrate.
+        """
 
     def list_pull_requests(
         self,
@@ -1851,6 +2021,89 @@ class GitHubSetupClient:
             if status < 200 or status >= 300:
                 self._raise_for_status(status)
 
+    def migrate_retired_review_mode_variable(
+        self,
+        *,
+        repository: str,
+        installation_token: str,
+    ) -> str | None:
+        """Replace a retired review-mode variable value in place.
+
+        A missing variable is left to :meth:`ensure_repository_variables`. The
+        exact retired value is the only stored value rewritten; empty, unknown,
+        or any other operator-set value stays untouched. The replacement is
+        resolved by ``review_sensei.convergence.supported_mode_for_stored_value``
+        so the migration rule lives with the mode table. The written value is
+        read back: the variables API has no conditional write, so a successful
+        status says nothing about what was stored, and setup must not report a
+        migration it cannot observe. A read-back mismatch emits a
+        ``review_mode_migration_not_observed`` warning and returns
+        ``"not_observed"``; a confirmed replacement returns ``"observed"``. Both
+        outcomes reach the structured setup result, where an operator can see
+        that the migration ran or did not.
+        """
+
+        variable_path = (
+            f"/repos/{repository}/actions/variables/"
+            f"{quote(RETIRED_REVIEW_MODE_VARIABLE, safe='')}"
+        )
+        status, raw = self._open(
+            "GET",
+            variable_path,
+            installation_token=installation_token,
+        )
+        if status == 404:
+            return None
+        if status < 200 or status >= 300:
+            self._raise_for_status(status)
+        if not raw:
+            return None
+        try:
+            data = json.loads(bytes(raw).decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GitHubSetupError("GitHub setup response was invalid JSON") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("value"), str):
+            return None
+        if data["value"] != LEGACY_REVIEW_MODE:
+            return None
+        replacement = supported_mode_for_stored_value(data["value"])
+        status, _ = self._open(
+            "PATCH",
+            variable_path,
+            installation_token=installation_token,
+            body={"name": RETIRED_REVIEW_MODE_VARIABLE, "value": replacement},
+        )
+        if status < 200 or status >= 300:
+            self._raise_for_status(status)
+        # No conditional write exists for Actions variables, so the GET/PATCH
+        # pair can race an operator change. Read back and surface the mismatch
+        # rather than reporting a migration that was not stored.
+        observed_status, observed_raw = self._open(
+            "GET",
+            variable_path,
+            installation_token=installation_token,
+        )
+        observed: object = None
+        if observed_status == 200 and observed_raw:
+            try:
+                observed_data = json.loads(
+                    bytes(observed_raw).decode("utf-8", errors="strict")
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                observed_data = None
+            if isinstance(observed_data, dict):
+                observed = observed_data.get("value")
+        if observed != replacement:
+            warnings.warn(
+                "review_mode_migration_not_observed: "
+                f"{RETIRED_REVIEW_MODE_VARIABLE} for {repository} reads back as "
+                f"{observed!r}, expected {replacement!r}; re-run setup or set the "
+                "variable to merge-focused before the next review",
+                stacklevel=2,
+            )
+            return REVIEW_MODE_MIGRATION_NOT_OBSERVED
+        return REVIEW_MODE_MIGRATION_OBSERVED
+
     def list_pull_requests(
         self,
         *,
@@ -1997,6 +2250,7 @@ class SetupPullRequestResult:
     repository: str
     status: str
     pull_request_number: int | None = None
+    review_mode_migration: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.repository, str) or not _is_repository_slug(
@@ -2005,6 +2259,15 @@ class SetupPullRequestResult:
             raise GitHubSetupError("Setup result repository must be an owner/repo slug")
         if not self.status:
             raise GitHubSetupError("Setup result status must be non-empty")
+        # Only the diagnosed migration outcomes are representable, for both
+        # directions: a confirmed migration is as reportable as one that could
+        # not be read back, and no other state is meaningful.
+        if self.review_mode_migration not in (None, *SETUP_MIGRATION_OUTCOMES):
+            raise GitHubSetupError(
+                "Setup result review_mode_migration must be one of "
+                f"{', '.join(repr(item) for item in SETUP_MIGRATION_OUTCOMES)} "
+                "when set"
+            )
 
 
 class SetupPullRequestService:
@@ -2155,6 +2418,7 @@ class SetupPullRequestService:
                 ensure_variables = getattr(
                     self.transport, "ensure_repository_variables", None
                 )
+                review_mode_migration: str | None = None
                 if callable(ensure_variables) and self._has_permission(
                     permissions, "variables"
                 ):
@@ -2162,6 +2426,31 @@ class SetupPullRequestService:
                         repository=repository,
                         installation_token=installation_token,
                         variables=SETUP_VARIABLES,
+                    )
+                    # Protocol-required since the merge-focused cutover: a
+                    # transport that can manage variables must also migrate the
+                    # retired value, otherwise the generated caller keeps
+                    # feeding the workflow guard a retired mode and every
+                    # review fails. The check is explicit because a transport
+                    # that predates the method would otherwise abort the whole
+                    # setup delivery with a bare AttributeError instead of an
+                    # actionable protocol-change error. See
+                    # docs/public-contracts.md for the transport contract.
+                    migrate_mode = getattr(
+                        self.transport,
+                        "migrate_retired_review_mode_variable",
+                        None,
+                    )
+                    if not callable(migrate_mode):
+                        raise GitHubSetupError(
+                            "The setup transport must implement "
+                            "migrate_retired_review_mode_variable() to migrate a "
+                            f"retired {RETIRED_REVIEW_MODE_VARIABLE} value; see "
+                            "docs/public-contracts.md for the transport contract"
+                        )
+                    review_mode_migration = migrate_mode(
+                        repository=repository,
+                        installation_token=installation_token,
                     )
                 existing_after_branch = self._existing_pr_number(
                     self.transport.list_pull_requests(
@@ -2176,6 +2465,7 @@ class SetupPullRequestService:
                             repository=repository,
                             status="skipped_pull_request_exists",
                             pull_request_number=existing_after_branch,
+                            review_mode_migration=review_mode_migration,
                         )
                     )
                     continue
@@ -2197,6 +2487,7 @@ class SetupPullRequestService:
                         repository=repository,
                         status="created",
                         pull_request_number=number,
+                        review_mode_migration=review_mode_migration,
                     )
                 )
         return results

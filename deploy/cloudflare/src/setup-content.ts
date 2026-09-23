@@ -1,5 +1,5 @@
 /**
- * Generated customer setup-v4 files.
+ * Generated customer setup-v5 files.
  *
  * The Worker receives the public reusable-workflow git tag as the update
  * channel and validates that it resolves before generating these files. The
@@ -8,9 +8,11 @@
  */
 
 import {
-  RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-  releasedRunnerSwitchV4CallerBytes,
-} from "./released-runner-switch-v4-caller";
+  historicalV4UninstallBytes,
+  mergeFocusedV4CallerBytes,
+  mergeFocusedV4ConfigBytes,
+} from "./managed-v4-recognition-artifacts";
+import { releasedRunnerSwitchV4CallerBytes } from "./released-runner-switch-v4-caller";
 
 const GITHUB_EXPRESSION = "@@";
 const PUBLIC_SHA_PATTERN = /^[a-f0-9]{40}$/;
@@ -33,7 +35,7 @@ const LEGACY_V3_UNINSTALL_BODY =
   "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. " +
   "ReviewSensei learnings and repository secrets are left untouched.";
 
-export const SETUP_VERSION = 4;
+export const SETUP_VERSION = 5;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v5";
 export const PUBLIC_REPOSITORY = "malsabbagh/review-sensei";
@@ -75,6 +77,7 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
   { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
   { name: "REVIEWSENSEI_VERSION", value: REVIEWSENSEI_VERSION },
+  { name: "REVIEWSENSEI_REVIEW_MODE", value: "merge-focused" },
   { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
   { name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" },
   { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
@@ -85,6 +88,15 @@ export const SETUP_VARIABLES: readonly SetupVariable[] = [
   { name: "REVIEWSENSEI_STAGES_DIR", value: "" },
   { name: "REVIEWSENSEI_CATEGORIES_DIR", value: "" },
 ];
+
+// The retired review mode survives in existing installations as a repository
+// variable that setup never overwrites, which would make the reusable-workflow
+// guard fail every review. Only this variable and only these exact values are
+// migrated in place; every other operator-set value is left as-is.
+export const RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE";
+export const RETIRED_REVIEW_MODE_MIGRATIONS: Readonly<Record<string, string>> = {
+  legacy: "merge-focused",
+};
 
 export function validatePublicWorkflowSha(value: string): string {
   if (
@@ -391,6 +403,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: @@{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ github.event_name == 'pull_request' && 'review' || inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || (github.event_name == 'issue_comment' && (contains(github.event.comment.body, 're-scan') || contains(github.event.comment.body, 're scan') || contains(github.event.comment.body, 'rescan')) && 'review') || 'reply' }}
@@ -427,12 +440,12 @@ jobs:
 
 function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  return String.raw`# ReviewSensei setup version: 4
+  return String.raw`# ReviewSensei setup version: 5
 name: ReviewSensei review
 run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
 # The installer and this example follow the operator-managed v5 git tag. Moving
-# that tag is the public setup-v4 release action. The reusable workflow installs
+# that tag is the public setup-v5 release action. The reusable workflow installs
 # the requested package from PyPI first and falls back to its executing commit
 # only when the package version is not yet published.
 #
@@ -752,6 +765,7 @@ jobs:
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      review_mode: @@{{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
       provider_mode: @@{{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
       model: @@{{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: @@{{ needs.resolve-trigger.outputs.operation }}
@@ -790,6 +804,39 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+const FROZEN_RUN_WORKFLOW_TAG_REFERENCE =
+  /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([A-Za-z0-9][A-Za-z0-9._-]{0,127})/g;
+
+/**
+ * Point a frozen caller's single run-workflow reference at the live tag.
+ *
+ * The reference is located in the frozen bytes instead of a parallel
+ * constant, so a fixture edit can never be silently mis-substituted; a
+ * fixture whose reference is missing or duplicated fails here instead.
+ */
+function retagFrozenCaller(content: string, publicWorkflowTag: string): string {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  const references = [...content.matchAll(FROZEN_RUN_WORKFLOW_TAG_REFERENCE)].map(
+    (match) => match[0],
+  );
+  const reference = references.length === 1 ? references[0] : undefined;
+  if (reference === undefined) {
+    throw new Error(
+      "frozen setup caller must reference the run workflow exactly once",
+    );
+  }
+  const separator = reference.lastIndexOf("@");
+  if (reference.slice(separator + 1) === tag) {
+    return content;
+  }
+  return content.replace(reference, `${reference.slice(0, separator)}@${tag}`);
+}
+
+/** Immediate pre-cutover caller retained only for managed v4 recognition. */
+export function mergeFocusedV4WorkflowTemplate(publicWorkflowTag: string): string {
+  return retagFrozenCaller(mergeFocusedV4CallerBytes(), publicWorkflowTag);
+}
+
 function pinnedV4WorkflowTemplate(publicWorkflowSha: string): string {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return workflowTemplate(sha).replace(
@@ -805,15 +852,7 @@ const PROVIDER_PARITY_DRAFT_SKIP =
 export function releasedRunnerSwitchV4WorkflowTemplate(
   publicWorkflowTag: string,
 ): string {
-  const tag = validatePublicWorkflowTag(publicWorkflowTag);
-  const caller = releasedRunnerSwitchV4CallerBytes();
-  if (tag === "v4") {
-    return caller;
-  }
-  return caller.replaceAll(
-    RELEASED_RUNNER_SWITCH_V4_TAG_MARKER,
-    `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
-  );
+  return retagFrozenCaller(releasedRunnerSwitchV4CallerBytes(), publicWorkflowTag);
 }
 
 export function providerParityWorkflowBeforeDraftSkip(
@@ -947,6 +986,7 @@ function configFile(
     "provider: ollama\n" +
     "provider_mode: local\n" +
     "model: ''\n" +
+    (version === SETUP_VERSION ? "review_mode: merge-focused\n" : "") +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
@@ -964,6 +1004,16 @@ function configFile(
   );
 }
 
+/** Released setup-v4 uninstall bytes retained for exact managed migration recognition. */
+export function historicalV4UninstallWorkflow(): string {
+  return historicalV4UninstallBytes();
+}
+
+/** Immediate pre-cutover config retained only for managed v4 recognition. */
+export function mergeFocusedV4ConfigFile(): string {
+  return mergeFocusedV4ConfigBytes();
+}
+
 /** Exact setup-v4 output from the historical SHA-pinning contract. */
 export function buildPinnedV4SetupFiles(
   publicWorkflowSha: string,
@@ -973,15 +1023,12 @@ export function buildPinnedV4SetupFiles(
     { path: SETUP_FILE_PATHS[0], content: pinnedV4WorkflowTemplate(sha) },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],
       content: configFile(
-        SETUP_VERSION,
+        4,
         false,
         false,
         HISTORICAL_V4_SETUP_PACKAGE_VERSION,
@@ -990,7 +1037,7 @@ export function buildPinnedV4SetupFiles(
   ];
 }
 
-/** Current setup-v4 output: the public git tag is the only workflow ref. */
+/** Current setup-v5 output: the public git tag is the only workflow ref. */
 export function buildTaggedV4SetupFiles(
   publicWorkflowTag: string,
 ): readonly SetupFile[] {
@@ -1001,7 +1048,7 @@ export function buildTaggedV4SetupFiles(
       path: SETUP_FILE_PATHS[1],
       content: uninstallWorkflowTemplate().replace(
         "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
+        `# ReviewSensei setup version: ${SETUP_VERSION}`,
       ),
     },
     {
@@ -1020,15 +1067,12 @@ export function buildHistoricalTaggedV4SetupFiles(
     { path: SETUP_FILE_PATHS[0], content: taggedWorkflowTemplate(tag) },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],
       content: configFile(
-        SETUP_VERSION,
+        4,
         false,
         false,
         HISTORICAL_V4_SETUP_PACKAGE_VERSION,
@@ -1049,15 +1093,12 @@ export function buildHistoricalProviderParityV4SetupFiles(
     },
     {
       path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        "# ReviewSensei setup version: 4",
-      ),
+      content: historicalV4UninstallWorkflow(),
     },
     {
       path: SETUP_FILE_PATHS[2],
       content: configFile(
-        SETUP_VERSION,
+        4,
         false,
         false,
         HISTORICAL_V4_SETUP_PACKAGE_VERSION,
@@ -1103,7 +1144,7 @@ export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles();
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
-  "This pull request adds or updates the ReviewSensei setup-v4 caller, which " +
+  "This pull request adds or updates the ReviewSensei setup-v5 caller, which " +
   "follows the operator-managed public v5 git tag. " +
   "Cloud operations use GitHub-hosted compute and local operations use the labelled " +
   "self-hosted runner; both support reviews and authorized conversations. All write and artifact " +

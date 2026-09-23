@@ -134,7 +134,7 @@ environment used to run ReviewSensei. The CLI reads:
 | `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
 | `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
 | `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
-| `REVIEWSENSEI_REVIEW_MODE` | `legacy` | Review-convergence mode (`legacy`, `advisory`, `merge-focused`, `strict`). `legacy` keeps ADR 0032 publication; operator modes apply trusted blocker admission before GitHub review events. |
+| `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; setup replaces a stored `legacy` value with `merge-focused` in place. |
 | `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
 | `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
 | `OLLAMA_API_KEY` | empty | Optional bearer credential |
@@ -219,7 +219,7 @@ or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.
 
 ## GitHub workflow example
 
-The setup-v4 caller example in
+The setup-v5 caller example in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
 uses the operator-managed `v5` git tag directly. The Worker validates that tag
 during installation/reconciliation, and the broker resolves the same tag when
@@ -247,18 +247,44 @@ The App creates repository variables for provider mode/model selection, package
 version, independent analysis/publication controls, learning proposals and
 learning PRs, mention replies, artifact upload, and optional trusted stage and
 category directories (`REVIEWSENSEI_STAGES_DIR`, `REVIEWSENSEI_CATEGORIES_DIR`).
-Feature switches default to `false`; empty stage/category paths preserve the
-packaged defaults. Manual dispatch may override those directories; both the
+The generated setup contains 15 repository variables, including 7 boolean
+controls, and 3 generated files. Boolean controls default to `false` except
+`REVIEWSENSEI_AUTO_APPROVE=true`, which remains gated by review and write
+settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
+boolean control. The reusable workflow's `review_mode` input is optional and
+defaults to `merge-focused`, and the generated caller maps an unset or empty
+repository variable to that default, so an absent or blank value resolves like
+the CLI rather than failing the workflow guard. Only review operations fail
+closed on a retired stored value: reply and command runs warn and continue on
+`merge-focused`, matching the CLI reply path, which never resolves a review
+policy. Merge-focused requires a trusted session ledger for admission
+and round enforcement: every hosted review runs through the reusable workflow,
+which invokes `review-sensei github review` with the broker-attested
+`--github-session-ledger`. A default setup-v5 installation therefore completes
+reviews without any additional ledger provisioning. The ledger requirement is
+operator-visible only on the local CLI path: `review-sensei github review`
+without `--session-ledger` or `--github-session-ledger` reports `doctor`
+`status=action` (exit 2) and `plan` lists `session-ledger-required`, and an
+unadmitted round is skipped with zero provider calls rather than silently
+downgraded. See [`docs/diagnostics.md`](diagnostics.md) and
+[ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md). Empty stage/category paths preserve the packaged defaults. Manual dispatch may override those directories; both the
 variable and the input are repository-relative paths loaded from the trusted
 base checkout after authoritative PR preflight. Pull-request head edits to
 custom stage or category JSON cannot change the instructions used for that
 review. A stage whose lenses are all inactive for the diff makes zero provider
 calls; a category-less independent-output stage still runs once.
-The generated setup exposes nine independent operational controls so analysis,
-publication, approval, learning, replies, and artifact retention can be enabled
-separately.
-The five setup files and generated workflow references remain byte-addressed
-and are migrated only when their managed content matches exactly.
+The 7 boolean controls are `REVIEWSENSEI_AUTO_REVIEW`,
+`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
+`REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
+`REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`.
+The 3 generated files are `.github/workflows/review-sensei-review.yml`,
+`.github/workflows/review-sensei-uninstall.yml`, and
+`.github/review-sensei/config.yml`. They remain byte-addressed and are migrated
+only when their managed content matches exactly. Editing generated provider,
+model, or other configuration fields makes the installation custom (`unknown`)
+and prevents automatic overwrites, in both historical and current setup
+versions. Configure the generated caller through repository Actions variables;
+reconcile custom files manually rather than weakening managed-file recognition.
 The App does not create a placeholder secret or overwrite an existing variable.
 
 To enable automatic same-repository analysis, set
@@ -333,13 +359,17 @@ remove the generated files manually. Deploy the updated Worker, then accept a
 pending App permission update or remove and re-add the repository to generate a
 fresh setup delivery. The bootstrap identifies older generated files, including
 a byte-exact managed v3 workflow (including its older SHA pin), and opens a
-migration PR that updates only those files to setup-v4. It also migrates a
-managed v4 caller that follows an older tag. It skips custom or future versions
-for manual review and preserves learnings, existing variables, and secrets.
+migration PR that updates only those files to setup-v5. It also migrates a
+managed v4/v5 caller that follows an older tag, and replaces a
+`REVIEWSENSEI_REVIEW_MODE` value of exactly `legacy` with `merge-focused` in
+place so the generated caller and its workflow guard keep working, and reports
+`review_mode_migration: observed` or `not_observed` in the setup result. It skips
+custom or future versions for manual review and preserves learnings, every
+other existing variable value, and secrets.
 
-## Setup-v4 and tag-based reusable workflow
+## Setup-v5 and tag-based reusable workflow
 
-The current generated setup is version 4. The caller follows the public
+The current generated setup is version 5. The caller follows the public
 `malsabbagh/review-sensei` reusable workflow at the operator-managed `v5` git
 tag and passes only bounded event inputs. It requests `contents: read`,
 `pull-requests: read`, `issues: read`, and `id-token: write`; generated write
@@ -372,9 +402,13 @@ Setup reconciliation is PR-only and changes only the three generated paths.
 `installation.new_permissions_accepted`, and
 `installation_repositories.added` inspect absent, legacy, and v2 clients.
 They reuse an existing open setup PR and produce at most one deterministic
-`review-sensei/setup-v4-<base12>-<tag>` PR for the exact base and update
-channel. Current tag-following setup-v4 is a no-op. A byte-exact
-managed v3 workflow or a managed v4 workflow following another valid tag is
+`review-sensei/setup-v5-<base12>-<tag>` PR for the exact base and update
+channel. Open setup PRs from an earlier setup version are not recognized,
+because lookup matches the current v5 branch name; a delivery after a version
+change therefore opens the v5 migration PR alongside an unresolved
+`review-sensei/setup-v4-...` PR, and operators should close the superseded
+one. Current tag-following setup-v5 is a no-op. A byte-exact
+managed v3/v4 workflow or a managed v5 workflow following another valid tag is
 stale and is migrated; custom,
 malformed, and future versions are skipped without writes. A deployment alone
 does not replay old events.
@@ -383,7 +417,7 @@ Released pre-marker and setup-v2 clients are recognized from exact historical
 generated bytes. Present setup-v3 files must exactly match generated files; a
 review workflow that exactly matches its own older valid public workflow SHA is
 recognized as managed stale content, while retained markers do not make edited
-content migratable. The current setup-v4 workflow contains exactly one valid
+content migratable. The current setup-v5 workflow contains exactly one valid
 tagged reusable-workflow reference; the byte-exact previously released two-job
 v4 caller remains recognizable only for managed migration. Setup branches are
 create-only and bind the base

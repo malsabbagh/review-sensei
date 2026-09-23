@@ -11,6 +11,10 @@ on:
       mode:
         required: true
         type: string
+      review_mode:
+        required: false
+        default: merge-focused
+        type: string
       provider_mode:
         required: false
         default: ''
@@ -171,6 +175,7 @@ jobs:
         env:
           PROVIDER_MODE: ${{ inputs.provider_mode }}
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           MODEL: ${{ inputs.model }}
           PROVIDER_PROFILE: ${{ inputs.provider_profile }}
           ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
@@ -200,6 +205,14 @@ jobs:
           set -euo pipefail
           PROVIDER_MODE="$(printf '%s' "$PROVIDER_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           MODEL="$(printf '%s' "$MODEL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          REVIEW_MODE="$(printf '%s' "$REVIEW_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "$REVIEW_MODE" ]; then
+            # The input is optional with a `merge-focused` default and the CLI
+            # resolves an empty mode to the same default, so an absent or empty
+            # value is normalized instead of rejected: a caller that pins the
+            # tag without passing the input must not fail a run the CLI accepts.
+            REVIEW_MODE=merge-focused
+          fi
           case "$PROVIDER_MODE" in
             ""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;
             *)
@@ -256,6 +269,22 @@ jobs:
           case "$MODE" in
             automatic|manual) ;;
             *) echo '::error::workflow mode must be automatic or manual' >&2; exit 1 ;;
+          esac
+          case "$REVIEW_MODE" in
+            advisory|merge-focused|strict) ;;
+            legacy)
+              if [ "$OPERATION" = review ]; then
+                echo '::error::legacy review mode is retired; migrate configuration to merge-focused (set the REVIEWSENSEI_REVIEW_MODE repository variable to merge-focused, or merge the pending setup-v5 pull request from the ReviewSensei App, then re-run)' >&2
+                exit 1
+              fi
+              # Reply and command operations never resolve a review policy (the
+              # CLI reply path is exempt from the retired-mode guard), so a
+              # retired stored value must not fail them: warn and continue on
+              # the supported default.
+              echo "::warning::legacy review mode is retired and ignored for $OPERATION operations; set the REVIEWSENSEI_REVIEW_MODE repository variable to merge-focused or merge the pending setup-v5 pull request from the ReviewSensei App" >&2
+              REVIEW_MODE=merge-focused
+              ;;
+            *) echo '::error::review mode must be advisory, merge-focused, or strict' >&2; exit 1 ;;
           esac
           if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
             echo '::error::repository input is invalid' >&2
@@ -638,6 +667,7 @@ jobs:
       - name: Validate trusted workflow inputs
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           OPERATION: ${{ inputs.operation }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud-ollama' }}
           REPOSITORY: ${{ inputs.repository }}
@@ -754,6 +784,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -812,6 +843,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -894,6 +926,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -912,7 +945,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish cloud mention reply
         id: reply
@@ -1179,6 +1212,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
@@ -1242,6 +1276,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -1321,6 +1356,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -1339,7 +1375,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish OpenRouter mention reply
         id: reply
@@ -1592,6 +1628,7 @@ jobs:
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           MODE: ${{ inputs.mode }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1655,6 +1692,7 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
           if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
@@ -1737,6 +1775,7 @@ jobs:
           ENABLE_REVIEW: ${{ inputs.enable_review }}
           LEARNING_PRS: ${{ inputs.enable_learning_prs }}
           AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
         run: |
           publish_args=()
           if [[ "$ENABLE_REVIEW" == "true" ]]; then
@@ -1755,7 +1794,7 @@ jobs:
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
+            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
 
       - name: Generate and publish trusted local mention reply
         id: reply

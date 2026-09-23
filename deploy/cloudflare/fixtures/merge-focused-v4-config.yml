@@ -1,7 +1,7 @@
-# ReviewSensei setup version: 5
-setup_version: 5
+# ReviewSensei setup version: 4
+setup_version: 4
 provider: ollama
-provider_mode: cloud
+provider_mode: local
 model: ''
 review_mode: merge-focused
 base_url: http://127.0.0.1:11434/api
@@ -9,8 +9,11 @@ cloud_base_url: https://ollama.com/api
 local_model: qwen3.5:4b
 cloud_model: deepseek-v4.1-flash:cloud
 version: 0.6.0
-auto_review: true
-github_writes: true
+auto_review: false
+learning_proposals: false
+github_writes: false
 learning_prs: false
-mention_replies: true
+mention_replies: false
 upload_artifacts: false
+stages_dir: ''
+categories_dir: ''

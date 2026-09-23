@@ -10,13 +10,27 @@ directories, and symlinked assets are reported as `action` rather than
 silently treated as available. Doctor also records that symbol-aware source
 context is an opt-in trusted-base policy that stays disabled by default.
 It reports the review-convergence policy resolved from `--review-mode` or
-`REVIEWSENSEI_REVIEW_MODE` (`legacy` by default). `legacy` is display-only and
-does not change publication. Operator modes report `enforcement=publication`
+`REVIEWSENSEI_REVIEW_MODE` (`merge-focused` by default). Explicit historical
+`legacy` configuration reports an actionable migration error before execution.
+Supported modes report `enforcement=publication`
 because the blocker-admission evaluator now sits in front of GitHub review
 events. It never calls a model, mints a broker token, or writes to GitHub.
 When `REVIEWSENSEI_REVIEW_SHADOW` is set to an operator mode, doctor reports
 an observation-only `review-shadow` check; publication stays on the resolved
 review mode. `legacy` is not a valid shadow target.
+
+The default `merge-focused` policy requires trusted session state for round
+admission. With no configured session ledger, `doctor` reports `status=action`
+and exits 2, even when its package/provider checks pass. `plan` includes
+`session-ledger-required` in `skip_reasons`. Its `status=ready` only says the
+diff was analyzed; it is not admission to execute a review. Supplying valid,
+identity-bound session state is an execution prerequisite, not a reason to
+fall back to legacy. A default setup-v5 install never hits this case on the
+hosted path: its generated workflow passes `--github-session-ledger`, so a
+`status=action` result for a missing ledger means you are running the bare
+local CLI without that flag, not that a hosted install is broken. These
+diagnostic commands do not initialize or mutate a ledger, reset counters,
+invoke a model, or write to GitHub.
 
 Offline runs do not open sockets. Passing `--network` enables read-only probes
 that distinguish:

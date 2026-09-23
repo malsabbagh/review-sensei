@@ -86,7 +86,12 @@ class PublishableReviewTests(unittest.TestCase):
         )
 
     def test_legacy_mode_publishes_existing_comments_and_is_identified(self) -> None:
-        prepared = prepare_publishable_review(self.result)
+        # The implicit low-level default is merge-focused; legacy stays
+        # honored only when explicitly requested for existing installations.
+        prepared = prepare_publishable_review(
+            self.result,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+        )
         self.assertEqual(prepared.evidence_policy, "legacy")
         self.assertEqual(prepared.result.comments, self.result.comments)
         self.assertEqual(prepared.result.evidence_policy, "legacy")
@@ -653,6 +658,7 @@ class PublishableReviewTests(unittest.TestCase):
             prepare_publishable_review(
                 self.result,
                 evidence_policy="legacy",
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
                 blocker_candidates=(admitting_blocker_facts(),),
             )
 

@@ -95,8 +95,8 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_setup_content_is_tagged_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
-        self.assertIn("SETUP_VERSION = 4", source)
-        self.assertIn("ReviewSensei setup version: 4", source)
+        self.assertIn("SETUP_VERSION = 5", source)
+        self.assertIn("ReviewSensei setup version: 5", source)
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
         self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
@@ -141,20 +141,21 @@ class CloudflarePackageTests(unittest.TestCase):
             'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
         )
 
-    def test_v4_config_matches_ts_builder_bytes(self):
+    def test_current_config_matches_ts_builder_bytes(self):
         from review_sensei.hosting.github.setup import (
             CURRENT_PACKAGE_VERSION,
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
-            _v4_config_file,
+            _current_config_file,
         )
 
         expected_ts = (
-            "# ReviewSensei setup version: 4\n"
-            "setup_version: 4\n"
+            "# ReviewSensei setup version: 5\n"
+            "setup_version: 5\n"
             "provider: ollama\n"
             "provider_mode: local\n"
             "model: ''\n"
+            "review_mode: merge-focused\n"
             "base_url: http://127.0.0.1:11434/api\n"
             "cloud_base_url: https://ollama.com/api\n"
             f"local_model: {DEFAULT_LOCAL_MODEL}\n"
@@ -169,14 +170,14 @@ class CloudflarePackageTests(unittest.TestCase):
             "stages_dir: ''\n"
             "categories_dir: ''\n"
         )
-        self.assertEqual(_v4_config_file(), expected_ts)
+        self.assertEqual(_current_config_file(), expected_ts)
 
-    def test_v4_config_core_fields_match_ts_builder(self):
+    def test_current_config_core_fields_match_ts_builder(self):
         from review_sensei.hosting.github.setup import (
             CURRENT_PACKAGE_VERSION,
             DEFAULT_CLOUD_MODEL,
             DEFAULT_LOCAL_MODEL,
-            _v4_config_file,
+            _current_config_file,
         )
 
         def parse_fields(content: str) -> dict[str, str]:
@@ -188,17 +189,18 @@ class CloudflarePackageTests(unittest.TestCase):
                 fields[key.strip()] = value.strip()
             return fields
 
-        py_fields = parse_fields(_v4_config_file())
+        py_fields = parse_fields(_current_config_file())
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
             encoding="utf-8"
         )
         self.assertEqual(
             py_fields,
             {
-                "setup_version": "4",
+                "setup_version": "5",
                 "provider": "ollama",
                 "provider_mode": "local",
                 "model": "''",
+                "review_mode": "merge-focused",
                 "base_url": "http://127.0.0.1:11434/api",
                 "cloud_base_url": "https://ollama.com/api",
                 "local_model": DEFAULT_LOCAL_MODEL,
@@ -216,6 +218,7 @@ class CloudflarePackageTests(unittest.TestCase):
         )
         self.assertIn("provider_mode: local", ts_source)
         self.assertIn("model: ''", ts_source)
+        self.assertIn("review_mode: merge-focused", ts_source)
         self.assertIn("local_model: ${DEFAULT_LOCAL_MODEL}", ts_source)
         self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
         self.assertIn("learning_proposals: false", ts_source)
@@ -325,18 +328,33 @@ class CloudflarePackageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(py_workflow, example)
 
-    def test_user_guidance_describes_setup_v4_publication_contract(self):
+    def test_user_guidance_describes_setup_v5_publication_contract(self):
+        from review_sensei.hosting.github.setup import (
+            SETUP_FILE_PATHS,
+            SETUP_VARIABLES,
+        )
+
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
+        controls = {
+            name for name, value in SETUP_VARIABLES if value in {"true", "false"}
+        }
         for content in (readme, installation):
-            self.assertIn("setup-v4", content)
-            self.assertIn("nine", content)
-            self.assertIn("five", content)
+            normalized = " ".join(content.split())
+            self.assertIn("setup-v5", content)
+            self.assertIn(f"{len(SETUP_VARIABLES)} repository variables", normalized)
+            self.assertIn(f"{len(controls)} boolean controls", normalized)
+            self.assertIn(f"{len(SETUP_FILE_PATHS)} generated files", normalized)
             self.assertIn("automatic", content)
             self.assertIn("summary", content)
             self.assertIn("inline", content)
             self.assertIn("REVIEWSENSEI_UPLOAD_ARTIFACTS", content)
             self.assertNotIn("review-sensei-version.txt", content)
+        for name in controls:
+            self.assertIn(f"`{name}`", installation)
+        for path in SETUP_FILE_PATHS:
+            self.assertIn(f"`{path}`", installation)
+        self.assertNotIn("REVIEWSENSEI_REVIEW_MODE", controls)
 
     def test_worker_does_not_dispatch_reviews_or_invent_sha_concurrency_keys(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text(encoding="utf-8")

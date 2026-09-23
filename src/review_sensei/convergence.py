@@ -9,7 +9,9 @@ C2 sits ``evaluate_blocker_admission`` between candidate findings and
 publication.  ``legacy`` keeps ADR 0032/0035 events.  Operator modes apply
 the evaluator before GitHub review events and comment rendering.
 ``REVIEWSENSEI_AUTO_APPROVE`` default-on semantics are unchanged; advisory
-mode additionally withholds automatic GitHub review events.
+mode additionally withholds automatic GitHub review events.  The supported
+runtime default is ``merge-focused``; ``legacy`` remains readable only for
+historical records and explicit migration diagnostics.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping, Sequence, cast
 
 from .context import ReviewContextCacheKey, finding_lifecycle_for_comment
-from .errors import ReviewInputError
+from .errors import ReviewInputError, ReviewModeRetiredError
 from .models import COMMENT_SIDES, ReviewComment, ReviewResult
 from .schemas import validate_public_document
 
@@ -31,7 +33,8 @@ if TYPE_CHECKING:
 PUBLIC_SCHEMA_VERSION = "1.0"
 REVIEW_MODE_ENV = "REVIEWSENSEI_REVIEW_MODE"
 REVIEW_SHADOW_ENV = "REVIEWSENSEI_REVIEW_SHADOW"
-DEFAULT_REVIEW_MODE = "legacy"
+DEFAULT_REVIEW_MODE = "merge-focused"
+LEGACY_REVIEW_MODE = "legacy"
 REVIEW_MODES = frozenset({"legacy", "advisory", "merge-focused", "strict"})
 OPERATOR_REVIEW_MODES = frozenset({"advisory", "merge-focused", "strict"})
 ENFORCEMENT_MODES = frozenset({"display-only", "publication"})
@@ -183,12 +186,29 @@ def normalize_review_mode(value: object) -> str:
     return mode
 
 
-def resolve_review_mode(explicit: str | None = None) -> str:
-    """Resolve CLI, environment, then the compatible ``legacy`` default."""
+def supported_mode_for_stored_value(value: object) -> str:
+    """Map one historical stored mode value to the supported mode.
 
-    if explicit is not None:
-        return normalize_review_mode(explicit)
-    return normalize_review_mode(os.getenv(REVIEW_MODE_ENV))
+    Deliberately separate from :func:`resolve_review_mode`, which raises for a
+    retired value: setup migration rewrites an old ``legacy`` value to the
+    supported replacement, while runtime resolution must never silently
+    execute the retired engine.
+    """
+
+    mode = normalize_review_mode(value)
+    return DEFAULT_REVIEW_MODE if mode == LEGACY_REVIEW_MODE else mode
+
+
+def resolve_review_mode(explicit: str | None = None) -> str:
+    """Resolve a supported runtime policy without a legacy fallback."""
+
+    raw = explicit if explicit is not None else os.getenv(REVIEW_MODE_ENV)
+    mode = normalize_review_mode(raw)
+    if mode == LEGACY_REVIEW_MODE:
+        raise ReviewModeRetiredError(
+            "legacy review mode is retired; migrate configuration to merge-focused"
+        )
+    return mode
 
 
 def resolve_shadow_review_mode(explicit: str | None = None) -> str | None:
@@ -1402,6 +1422,7 @@ __all__ = [
     "DEFAULT_REVIEW_MODE",
     "EVIDENCE_REASONS",
     "HANDOFF_REASONS",
+    "LEGACY_REVIEW_MODE",
     "OPERATOR_REVIEW_MODES",
     "PREFERENCE_CATEGORIES",
     "PUBLIC_SCHEMA_VERSION",
@@ -1425,4 +1446,5 @@ __all__ = [
     "resolve_review_convergence_policy",
     "resolve_review_mode",
     "resolve_shadow_review_mode",
+    "supported_mode_for_stored_value",
 ]

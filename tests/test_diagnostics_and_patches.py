@@ -40,7 +40,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_doctor_is_bounded_and_reports_unknown_network(self):
         report = run_doctor()
         self.assertEqual(report["schema_version"], "v1")
-        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["status"], "action")
         self.assertTrue(
             any(
                 check["name"] == "network" and check["status"] == "unknown"
@@ -130,7 +130,7 @@ class DiagnosticsTests(unittest.TestCase):
                 categories_dir=categories_dir,
                 context_root=context_dir,
             )
-            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["status"], "action")
             self.assertTrue(
                 all(
                     check["status"] == "pass"
@@ -427,7 +427,7 @@ class DiagnosticProbeTests(unittest.TestCase):
             provider_mode="local",
             base_url="http://127.0.0.1:11434/api",
         )
-        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["status"], "action")
         names = {check["name"] for check in report["checks"]}
         self.assertIn("endpoint", names)
         self.assertIn("model", names)
@@ -444,7 +444,7 @@ class DiagnosticProbeTests(unittest.TestCase):
         self.assertEqual(report["identity"]["base_sha"], "a" * 40)
         self.assertEqual(report["identity"]["head_sha"], "b" * 40)
         self.assertEqual(report["operations"]["provider_calls"], 0)
-        self.assertEqual(report["skip_reasons"], [])
+        self.assertEqual(report["skip_reasons"], ["session-ledger-required"])
         with self.assertRaises(ReviewInputError):
             build_plan(base_sha="not-a-sha")
 

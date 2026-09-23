@@ -18,6 +18,14 @@ class ChunkPreflightError(ReviewInputError):
     """Raised when a chunked sub-run diff fails bounded planning preflight."""
 
 
+class ReviewModeRetiredError(ReviewInputError):
+    """Raised when configuration still selects the retired `legacy` engine.
+
+    Callers that must distinguish retirement from ordinary invalid input can
+    catch this subclass; the message always names the migration target.
+    """
+
+
 class ReviewFormatError(ReviewSenseiError, ValueError):
     """Raised when a provider response cannot be safely used as a review."""
 

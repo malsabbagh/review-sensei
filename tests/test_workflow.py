@@ -1,3 +1,5 @@
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -41,7 +43,130 @@ def _init_repository(root: Path, name: str) -> Path:
     return repository
 
 
+def _reusable_workflow() -> str:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "review-sensei-run.yml"
+    ).read_text(encoding="utf-8")
+
+
 class WorkflowValidationTests(unittest.TestCase):
+    def test_reusable_workflow_defaults_and_rejects_retired_legacy_mode(self):
+        workflow = _reusable_workflow()
+        self.assertIn(
+            "review_mode:\n        required: false\n        default: merge-focused",
+            workflow,
+        )
+        self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", workflow)
+        # The positive form above would still pass if a second, later default
+        # re-enabled the retired mode, so pin the retired value out entirely.
+        self.assertNotIn("default: legacy", workflow)
+        self.assertIn(
+            "legacy review mode is retired; migrate configuration to merge-focused",
+            workflow,
+        )
+        self.assertIn("merge the pending setup-v5 pull request", workflow)
+        legacy_line = next(
+            line
+            for line in workflow.splitlines()
+            if "legacy review mode is retired; migrate configuration" in line
+        )
+        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy_line)
+
+    def test_reusable_workflow_review_mode_case_rejects_legacy_at_runtime(self):
+        # Git Bash is present on the Windows compatibility runners, so the
+        # guard is executed there too; only a host without any POSIX bash is
+        # skipped, with the reason reported.
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("no POSIX bash is available to execute the workflow guard")
+        workflow = _reusable_workflow()
+        # Execute the guard the workflow itself runs instead of trusting that
+        # the literal is still wired the way the assertions above describe.
+        # The marker must occur exactly once and inside the named step, so a
+        # second copy elsewhere can never be sliced instead of the real guard.
+        marker = 'case "$REVIEW_MODE" in'
+        self.assertEqual(workflow.count(marker), 1)
+        step_start = workflow.index("      - name: Reject unsupported provider mode")
+        step_end = workflow.find("\n      - name:", step_start + 1)
+        self.assertNotEqual(step_end, -1)
+        guard_step = workflow[step_start:step_end]
+        self.assertIn(marker, guard_step)
+        # Execute the guard's own normalization together with the review-mode
+        # case, both verbatim, so the executed value is the one the case reads
+        # rather than the raw input. The intervening provider-mode cases are
+        # unrelated to this behavior and are not part of the slice.
+        normalize = 'REVIEW_MODE="$(printf'
+        self.assertIn(normalize, guard_step)
+        normalize_start = step_start + guard_step.index(normalize)
+        normalize_end = workflow.index('case "$PROVIDER_MODE" in', normalize_start)
+        case_start = step_start + guard_step.index(marker)
+        case_end = workflow.index("esac", case_start) + len("esac")
+        guard = (
+            workflow[normalize_start:normalize_end]
+            + "\n"
+            + workflow[case_start:case_end]
+        )
+
+        def run(mode: str, operation: str = "review") -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [bash, "-c", guard],
+                env={**os.environ, "REVIEW_MODE": mode, "OPERATION": operation},
+                capture_output=True,
+                text=True,
+            )
+
+        for mode in ("advisory", "merge-focused", "strict"):
+            with self.subTest(mode=mode):
+                completed = run(mode)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+        legacy = run("legacy")
+        self.assertEqual(legacy.returncode, 1)
+        self.assertIn("legacy review mode is retired", legacy.stderr)
+        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy.stderr)
+        # The guard normalizes exactly like the CLI resolves the mode, so a
+        # padded or upper-cased retired value takes the migration arm instead
+        # of the generic rejection.
+        for mode in (" LEGACY ", "Legacy"):
+            with self.subTest(mode=mode):
+                normalized_legacy = run(mode)
+                self.assertEqual(normalized_legacy.returncode, 1)
+                self.assertIn("legacy review mode is retired", normalized_legacy.stderr)
+        # Reply and command operations never resolve a review policy, so a
+        # retired stored value warns and continues instead of failing the run;
+        # only a review fails closed, matching the CLI reply exemption.
+        for operation in ("reply", "command"):
+            with self.subTest(operation=operation):
+                retired_non_review = run("legacy", operation=operation)
+                self.assertEqual(
+                    retired_non_review.returncode, 0, retired_non_review.stderr
+                )
+                self.assertIn("::warning::", retired_non_review.stderr)
+                self.assertNotIn("::error::", retired_non_review.stderr)
+                self.assertIn(
+                    f"retired and ignored for {operation} operations",
+                    retired_non_review.stderr,
+                )
+        for mode in (" MERGE-FOCUSED ", "Merge-Focused"):
+            with self.subTest(mode=mode):
+                normalized_supported = run(mode)
+                self.assertEqual(
+                    normalized_supported.returncode, 0, normalized_supported.stderr
+                )
+        bogus = run("bogus")
+        self.assertEqual(bogus.returncode, 1)
+        self.assertIn(
+            "review mode must be advisory, merge-focused, or strict", bogus.stderr
+        )
+        # The input is optional with a `merge-focused` default, so an absent or
+        # empty value resolves to the default here as it does in the CLI;
+        # callers that pin the tag without passing the input must not fail.
+        empty = run("")
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertNotIn("::error::", empty.stderr)
+
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(
             repository="owner/repo",

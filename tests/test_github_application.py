@@ -428,6 +428,9 @@ class GitHubApplicationTests(unittest.TestCase):
             ),
             diff="diff",
             app_slug="review-sensei[bot]",
+            # Pin the low-level compatibility path now that the omitted
+            # runtime policy resolves to merge-focused.
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
         )
         self.assertEqual(outcome.status, "published")
         forwarded = self.reviewer.calls[-1]["authorized_dispositions"]
@@ -1087,7 +1090,7 @@ class GitHubApplicationTests(unittest.TestCase):
             session_ledger=ledger,
         )
         legacy_kwargs = dict(publish_kwargs)
-        legacy_kwargs.pop("convergence_policy")
+        legacy_kwargs["convergence_policy"] = ReviewConvergencePolicy(mode="legacy")
         legacy_outcome = legacy_application.publish_review(**legacy_kwargs)
         self.assertEqual(legacy_outcome.status, "published")
         self.assertEqual(len(legacy_reviewer.calls), 1)

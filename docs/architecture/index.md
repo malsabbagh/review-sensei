@@ -27,7 +27,7 @@ result before a future publisher can consume it.
 | GitHub App auth and approval boundary | JWT and installation-token authentication, exact-head review publication, and idempotent approval finalization | Maintainers | `src/review_sensei/hosting/github/` | Unresolved blocking ReviewSensei roots request changes and withhold approval; GraphQL classification sweep is bounded and fail-closed |
 | GitHub App setup bootstrap | Webhook signature verification, delivery deduplication, visible provider-default variables, and idempotent setup pull request creation | Maintainers | `src/review_sensei/hosting/github/` | Fails closed on invalid webhooks; generated files and PR bodies contain no secrets |
 | GitHub learning publisher | Stable source-PR draft identity, content-addressed learning files, and fail-closed reconciliation | Maintainers | `src/review_sensei/hosting/github/learning_pr.py` | Hash-bound marker/commit provenance, latest-base rereads, non-force refreshes, merged generations |
-| Cloudflare deployment package | Worker ingress, SQLite delivery/broker claims, Web Crypto GitHub App auth, capability broker, and setup-v4 PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap and issuance-only token boundary; no hosted review execution or provider data |
+| Cloudflare deployment package | Worker ingress, SQLite delivery/broker claims, Web Crypto GitHub App auth, capability broker, and setup-v5 PR client | Deployment operators | `deploy/cloudflare/` | Optional installation bootstrap and issuance-only token boundary; no hosted review execution or provider data |
 
 ## Dependency Direction
 
@@ -102,8 +102,9 @@ transport calls; future GitHub publishers consume only validated
 | [`0048`](../adr/0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification | #136 C4; IncrementalReviewPlan + late classification |
 | [`0049`](../adr/0049-automation-admission-and-handoff.md) | Proposed | Automation admission and handoff | #136 C5; cap never mints approval |
 | [`0050`](../adr/0050-maintainer-disposition-and-handoff-status.md) | Proposed | Maintainer disposition and handoff status | #136 C6; `action_required` for handoff |
-| [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` |
+| [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` at that slice, superseded by 0055 |
 | [`0052`](../adr/0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 F1; one reservation, one checkpoint, retryable publication phases |
+| [`0055`](../adr/0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7; migration and release-readback remain explicit operator gates |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

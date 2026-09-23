@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from ...baseline import ReviewBaseline
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
+    LEGACY_REVIEW_MODE,
     BlockerCandidate,
     ReviewConvergencePolicy,
 )
@@ -1220,6 +1221,7 @@ class ReviewPublisher:
         snapshot_sha256: str | None = None,
         evidence_policy: str = "legacy",
         convergence_policy: ReviewConvergencePolicy | None = None,
+        allow_retired_legacy_policy: bool = False,
         blocker_candidates: Sequence[BlockerCandidate] | None = None,
         input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
         baseline: ReviewBaseline | None = None,
@@ -1249,13 +1251,28 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        # Omitted policies use the same deterministic default as preparation;
+        # runtime configuration is resolved by the application, not from
+        # ambient environment variables at this publication boundary. The
+        # historical legacy policy is retired (ADR 0055): a low-level embedder
+        # or replay that still needs it must ask for it explicitly, so a
+        # future caller cannot re-enable legacy by passing the policy alone.
         if convergence_policy is None:
-            # Omitted policy stays on compatible legacy. Operator modes must
-            # be supplied by the application layer so recovery and embedders
-            # cannot pick up REVIEWSENSEI_REVIEW_MODE from the ambient env.
             convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")
+        if not isinstance(allow_retired_legacy_policy, bool):
+            raise GitHubPublicationError(
+                "review legacy policy opt-in must be a boolean"
+            )
+        if (
+            convergence_policy.mode == LEGACY_REVIEW_MODE
+            and not allow_retired_legacy_policy
+        ):
+            raise GitHubPublicationError(
+                "the legacy review mode is retired and cannot be published "
+                "without allow_retired_legacy_policy=True"
+            )
         # Operator modes may only withhold GitHub review events. The
         # conjunction cannot promote auto_approve=False to REQUEST_CHANGES
         # or APPROVE, including when REVIEWSENSEI_REVIEW_MODE is merge-focused.
@@ -1441,20 +1458,22 @@ class ReviewPublisher:
                     else:
                         advisory_folded.append(entry[0])
                 prepared_comments = kept_inline
-            # GitHub rejects batch review comments with subject_type=file on
-            # REQUEST_CHANGES reviews (HTTP 422). Retain them in the summary
-            # instead; COMMENT reviews may still publish file-level threads.
-            if auto_approve and has_blocking_findings(result):
-                file_level: list[ReviewComment] = []
-                inline_prepared: list[tuple[ReviewComment, str, str, str]] = []
-                for entry in prepared_comments:
-                    if entry[3] == "file":
-                        file_level.append(entry[0])
-                    else:
-                        inline_prepared.append(entry)
-                if file_level:
-                    unanchored.extend(file_level)
-                prepared_comments = inline_prepared
+            # The batch create-review input type defines no file subject type:
+            # a live probe on a COMMENT review rejects a file-level entry with
+            # HTTP 422 ("Field is not defined on DraftPullRequestReviewComment",
+            # "0.position Expected value to not be null"), and an isolating
+            # probe with identical coordinates rejects only the entry carrying
+            # subject_type ("Field is not defined on
+            # DraftPullRequestReviewThread") while the same entry without it
+            # returns HTTP 200 COMMENTED, so a finding anchored to the file
+            # itself is always retained in the summary rather than published as
+            # an inline thread.
+            file_level = [entry[0] for entry in prepared_comments if entry[3] == "file"]
+            if file_level:
+                unanchored.extend(file_level)
+                prepared_comments = [
+                    entry for entry in prepared_comments if entry[3] != "file"
+                ]
             if unanchored:
                 summary = (
                     f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
@@ -1509,9 +1528,7 @@ class ReviewPublisher:
                 "path": comment.path,
                 "body": comment_body,
             }
-            if anchor == "file":
-                comment_payload["subject_type"] = "file"
-            elif anchor == "left":
+            if anchor == "left":
                 comment_payload["line"] = comment.line
                 comment_payload["side"] = "LEFT"
             else:

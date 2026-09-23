@@ -9,11 +9,16 @@ import {
   parseVerifiedDelivery,
 } from "../src/github-app";
 import {
+  RETIRED_REVIEW_MODE_VARIABLE,
   SETUP_FILE_PATHS,
+  SETUP_VARIABLES,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
+  buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
   providerParityWorkflowTemplate,
   releasedRunnerSwitchV4WorkflowTemplate,
@@ -22,7 +27,7 @@ import {
 const SHA = "a".repeat(40);
 const TAG = "v5";
 const BASE_SHA = "b".repeat(40);
-const SETUP_BRANCH = `review-sensei/setup-v4-${BASE_SHA.slice(0, 12)}-${TAG}`;
+const SETUP_BRANCH = `review-sensei/setup-v5-${BASE_SHA.slice(0, 12)}-${TAG}`;
 const ALL_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
@@ -95,6 +100,8 @@ class FakeGitHub {
   refCollision = false;
   collisionObserved = false;
   missingVariables = false;
+  variablePatchIgnored = false;
+  variableValues: Record<string, string | null> = {};
   existingPullRequest: number | null = null;
 
   async request(method: string, path: string, _token: string, requestBody?: Record<string, unknown>) {
@@ -102,7 +109,7 @@ class FakeGitHub {
     if (method === "GET" && /^\/repos\/acme\/(widgets|one|two)$/.test(path)) {
       return { status: 200, data: { default_branch: "main" } };
     }
-    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v4-")) {
+    if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v5-")) {
       const exists = this.branchExists || this.collisionObserved;
       return {
         status: exists ? 200 : 404,
@@ -148,7 +155,7 @@ class FakeGitHub {
     if (method === "GET" && path.includes("/contents/")) {
       const encoded = path.split("/contents/")[1].split("?", 1)[0];
       const filePath = encoded.split("/").map(decodeURIComponent).join("/");
-      const content = path.includes("?ref=review-sensei%2Fsetup-v4-")
+      const content = path.includes("?ref=review-sensei%2Fsetup-v5-")
         ? this.branchFiles[filePath]
         : this.files[filePath];
       return content === null || content === undefined
@@ -164,12 +171,40 @@ class FakeGitHub {
           };
     }
     if (method === "GET" && path.includes("/actions/variables/")) {
-      return this.missingVariables
-        ? { status: 404, data: null }
-        : { status: 200, data: { value: "operator-owned" } };
+      if (this.missingVariables) {
+        return { status: 404, data: null };
+      }
+      const name = decodeURIComponent(path.split("/actions/variables/")[1].split("?", 1)[0]);
+      const value = this.variableValues[name];
+      if (value === null) {
+        return { status: 404, data: null };
+      }
+      return { status: 200, data: { value: value ?? "operator-owned" } };
     }
     if (method === "POST" && path.endsWith("/actions/variables")) {
+      // GitHub persists the created variable, so a later read returns the
+      // created value instead of a second 404.
+      if (
+        requestBody &&
+        typeof requestBody.name === "string" &&
+        typeof requestBody.value === "string"
+      ) {
+        this.variableValues[requestBody.name] = requestBody.value;
+      }
       return { status: 201, data: null };
+    }
+    if (method === "PATCH" && path.includes("/actions/variables/")) {
+      // GitHub applies the update and answers 204 with no body; the flag
+      // simulates a write the API acknowledged but did not persist.
+      if (
+        !this.variablePatchIgnored &&
+        requestBody &&
+        typeof requestBody.name === "string" &&
+        typeof requestBody.value === "string"
+      ) {
+        this.variableValues[requestBody.name] = requestBody.value;
+      }
+      return { status: 204, data: null };
     }
     if (method === "GET" && path.includes("/git/ref/heads/main")) {
       return { status: 200, data: { object: { sha: BASE_SHA } } };
@@ -200,6 +235,10 @@ function serviceWith(fake: FakeGitHub): GitHubSetupService {
 
 function mutationRequests(fake: FakeGitHub) {
   return fake.requests.filter(({ method }) => method !== "GET");
+}
+
+function variableRequests(fake: FakeGitHub) {
+  return fake.requests.filter(({ path }) => path.includes("/actions/variables"));
 }
 
 function historicalFixture(name: string): string {
@@ -417,6 +456,150 @@ describe("setup repository reconciliation", () => {
       .toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
+  it("migrates a retired legacy review mode variable in place", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      {
+        repository: "acme/widgets",
+        status: "created",
+        pull_request_number: 42,
+        // A confirmed migration is reported in the structured result too, so
+        // the delivery result is self-verifying instead of only silent on the
+        // happy path.
+        review_mode_migration: "observed",
+      },
+    ]);
+    const variablePath = `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`;
+    const patch = fake.requests.find(({ method, path }) =>
+      method === "PATCH" && path.endsWith(variablePath),
+    );
+    expect(patch?.body).toEqual({ name: RETIRED_REVIEW_MODE_VARIABLE, value: "merge-focused" });
+    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe("merge-focused");
+  });
+
+  it("surfaces a not-observed review mode migration in the log and the result", async () => {
+    // A 204 only says the PATCH was accepted, and the variables API has no
+    // conditional write, so the migration verifies what the API reports and
+    // reports the mismatch in the delivery result as well as the log: a
+    // warning alone does not reach the operator.
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
+    fake.variablePatchIgnored = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        {
+          repository: "acme/widgets",
+          status: "created",
+          pull_request_number: 42,
+          review_mode_migration: "not_observed",
+        },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        "review_mode_migration_not_observed",
+        expect.objectContaining({
+          repository: "acme/widgets",
+          expected: "merge-focused",
+          observed: "legacy",
+        }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves operator review mode variable values untouched", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "advisory";
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+    // Only the stored value costs a write, so an operator-owned value costs
+    // the two reads (variable reconciliation and the migration check) and no
+    // read-back: the migration is not a PATCH-plus-verify on every delivery.
+    const reviewModeReads = fake.requests.filter(
+      ({ method, path }) =>
+        method === "GET" &&
+        path.endsWith(
+          `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`,
+        ),
+    );
+    expect(reviewModeReads).toHaveLength(2);
+  });
+
+  it("touches no variables for current or customized setups", async () => {
+    // The migration runs only for deliveries the classifier sends down the
+    // setup path. A current or operator-customized (unknown) installation is
+    // skipped before any variables request, so no-op deliveries cost no
+    // variable traffic and customized installs are never rewritten.
+    const current = new FakeGitHub();
+    current.files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const customized = new FakeGitHub();
+    customized.files[SETUP_FILE_PATHS[0]] = "name: Customer ReviewSensei review\n";
+
+    for (const [setupState, fake, status] of [
+      ["current", current, "skipped_current"],
+      ["unknown", customized, "skipped_unknown_setup"],
+    ] as const) {
+      expect(await serviceWith(fake).process(delivery()), setupState).toEqual([
+        { repository: "acme/widgets", status },
+      ]);
+      expect(variableRequests(fake), setupState).toEqual([]);
+    }
+  });
+
+  it("leaves prototype-named review mode values untouched", async () => {
+    for (const value of ["__proto__", "constructor", "toString"]) {
+      const fake = new FakeGitHub();
+      // The entry is defined directly because a plain assignment through the
+      // fake's record is not guaranteed to create an own property for every
+      // value name the API could return.
+      Object.defineProperty(fake.variableValues, RETIRED_REVIEW_MODE_VARIABLE, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+      ]);
+      expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+    }
+  });
+
+  it("leaves a freshly created default review mode variable untouched", async () => {
+    const fake = new FakeGitHub();
+    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = null;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    // A fresh install creates the variable with the generated default, so
+    // the migration pass reads that value and issues no PATCH at all.
+    const created = SETUP_VARIABLES.find(
+      ({ name }) => name === RETIRED_REVIEW_MODE_VARIABLE,
+    );
+    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe(created?.value);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+  });
+
+  it("ignores a review mode variable still absent after migration read", async () => {
+    const fake = new FakeGitHub();
+    fake.missingVariables = true;
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+  });
+
   it("does not overwrite a customer-owned deterministic branch", async () => {
     const fake = new FakeGitHub();
     fake.branchExists = true;
@@ -536,6 +719,56 @@ describe("setup repository reconciliation", () => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(
       buildTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
+    );
+    fake.files[SETUP_FILE_PATHS[0]] = mergeFocusedV4WorkflowTemplate("old-v4");
+    fake.files[SETUP_FILE_PATHS[1]] = fake.files[SETUP_FILE_PATHS[1]]!.replace(
+      "ReviewSensei setup version: 5",
+      "ReviewSensei setup version: 4",
+    );
+    fake.files[SETUP_FILE_PATHS[2]] = mergeFocusedV4ConfigFile();
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+    expect(
+      fake.requests.find(
+        ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+      )?.body,
+    ).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+  });
+
+  it("migrates a released historical v4 file set with the shipped uninstall bytes", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildHistoricalTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
+    );
+
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
+    ]);
+  });
+
+  it("does not migrate an edited managed v5 uninstall or config file", async () => {
+    for (const index of [1, 2]) {
+      const fake = new FakeGitHub();
+      const files = Object.fromEntries(
+        buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+      );
+      const path = SETUP_FILE_PATHS[index]!;
+      files[path] = `${files[path]!}\n# customer note\n`;
+      fake.files = files;
+
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "skipped_unknown_setup" },
+      ]);
+      expect(mutationRequests(fake)).toEqual([]);
+    }
+  });
+
+  it("migrates a managed v5 setup following an older public tag", async () => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(
+      buildSetupFiles("old-v4").map(({ path, content }) => [path, content]),
     );
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
@@ -693,6 +926,37 @@ describe("setup repository reconciliation", () => {
       { repository: "acme/widgets", status: "skipped_current" },
     ]);
     expect(mutationRequests(fake)).toEqual([]);
+  });
+
+  it("recognizes only the exact caller bytes, not a re-mentioned run-workflow reference", async () => {
+    // Recognition is byte-exact against the rendered single-reference caller,
+    // so a comment or duplicated `uses:` line mentioning the same reference
+    // stays `unknown`: a mention must never be read as a live tag and
+    // rewritten.
+    const files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const current = files[SETUP_FILE_PATHS[0]]!;
+    const reference = `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${TAG}`;
+
+    const currentFake = new FakeGitHub();
+    currentFake.files = files;
+    expect(await serviceWith(currentFake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: "skipped_current" },
+    ]);
+    expect(mutationRequests(currentFake)).toEqual([]);
+
+    for (const content of [
+      `${current}# pinned via ${reference}\n`,
+      `${current}      uses: ${reference}\n`,
+    ]) {
+      const fake = new FakeGitHub();
+      fake.files = { ...files, [SETUP_FILE_PATHS[0]]: content };
+      expect(await serviceWith(fake).process(delivery())).toEqual([
+        { repository: "acme/widgets", status: "skipped_unknown_setup" },
+      ]);
+      expect(mutationRequests(fake)).toEqual([]);
+    }
   });
 
   it("does not overwrite custom, malformed, or future setup", async () => {

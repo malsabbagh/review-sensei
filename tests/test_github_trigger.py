@@ -601,9 +601,11 @@ class InlineCallerResolverTests(unittest.TestCase):
     def test_inline_command_prefilter_copies_are_enumerated(self):
         """A new prefilter copy must be a deliberate act.
 
-        The grammar lives in four byte-locked artifacts plus the two tests
+        The grammar lives in six byte-locked artifacts plus the two tests
         that read them; a copy added anywhere else should fail here with the
-        new path named instead of passing as an unguarded drift site.
+        new path named instead of passing as an unguarded drift site. The two
+        fixture copies are the frozen managed-v4 caller bytes, additionally
+        pinned by the MERGE_FOCUSED_V4_CALLER_SHA256 digest in both languages.
         """
 
         marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
@@ -627,9 +629,11 @@ class InlineCallerResolverTests(unittest.TestCase):
             found,
             {
                 ".github/workflows/review-sensei-review.yml",
+                "deploy/cloudflare/fixtures/merge-focused-v4-caller.yml",
                 "deploy/cloudflare/src/setup-content.ts",
                 "deploy/cloudflare/test/setup-content.test.ts",
                 "examples/github-actions/review-sensei-review.yml",
+                "src/review_sensei/hosting/github/fixtures/merge-focused-v4-caller.yml",
                 "src/review_sensei/hosting/github/setup.py",
                 "tests/test_github_trigger.py",
             },

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { mergeFocusedV4CallerBytes } from "../src/managed-v4-recognition-artifacts";
 import {
   RELEASED_RUNNER_SWITCH_V4_SHA256,
   releasedRunnerSwitchV4CallerBytes,
@@ -15,6 +16,9 @@ import {
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  historicalV4UninstallWorkflow,
+  mergeFocusedV4ConfigFile,
+  mergeFocusedV4WorkflowTemplate,
   publicWorkflowTagFromJobRef,
   releasedRunnerSwitchV4WorkflowTemplate,
   validatePublicWorkflowTag,
@@ -115,7 +119,7 @@ describe("setup-v4 public boundary", () => {
   it("generates fork-safe callers at the supplied public workflow tag", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
-    expect(SETUP_VERSION).toBe(4);
+    expect(SETUP_VERSION).toBe(5);
     expect(SETUP_VARIABLES).toContainEqual(
       expect.objectContaining({ name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" }),
     );
@@ -246,12 +250,58 @@ describe("setup-v4 public boundary", () => {
     expect(releasedRunnerSwitchV4CallerBytes()).toBe(canonical);
   });
 
+  it("keeps the managed v4 recognition bytes frozen across implementations", () => {
+    // The Python setup recognizer asserts these same digests
+    // (tests/test_github_setup.py::MANAGED_V4_RECOGNITION_SHA256), pinning the
+    // byte-exact contract for artifacts that already exist in installations.
+    expect(
+      createHash("sha256").update(mergeFocusedV4WorkflowTemplate("v5")).digest("hex"),
+    ).toBe("ce69d43119e2573853545edf90e595cda93fc0f4a018ede87aa5b604f6ab7742");
+    expect(
+      createHash("sha256").update(historicalV4UninstallWorkflow()).digest("hex"),
+    ).toBe("e349ede8fa3eca6a303a04d688679b1abc41d13c31ba0d10651c376e9c77a6ec");
+    expect(
+      createHash("sha256").update(mergeFocusedV4ConfigFile()).digest("hex"),
+    ).toBe("2a81144f0c22d295b8be49474979f9fa073271b3c763da302ba4f0fcf68cefb0");
+  });
+
+  it("reads the managed v4 recognition bytes from the frozen fixtures", () => {
+    // The Python setup recognizer loads these same frozen bytes from its
+    // packaged fixtures (src/review_sensei/hosting/github/fixtures). The v4
+    // recognizer must not derive them from the live setup-v5 templates: an
+    // edit to those templates must never change what an existing installation
+    // looks like.
+    const fixture = (name: string) =>
+      readFileSync(
+        new URL(
+          `../../../src/review_sensei/hosting/github/fixtures/${name}`,
+          import.meta.url,
+        ),
+        "utf8",
+      );
+    const caller = fixture("merge-focused-v4-caller.yml");
+    expect(mergeFocusedV4CallerBytes()).toBe(caller);
+    expect(mergeFocusedV4WorkflowTemplate("v5")).toBe(caller);
+    expect(mergeFocusedV4WorkflowTemplate("stable")).toBe(
+      caller.replaceAll(
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+        "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@stable",
+      ),
+    );
+    expect(mergeFocusedV4ConfigFile()).toBe(
+      fixture("merge-focused-v4-config.yml"),
+    );
+    expect(historicalV4UninstallWorkflow()).toBe(
+      fixture("historical-v4-uninstall.yml"),
+    );
+  });
+
   it("generates one provider-neutral reusable job with the supplied tag", () => {
     const tag = "stable";
     const workflow = buildTaggedV4SetupFiles(tag)[0].content;
     const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
     expect(workflow.match(workflowPattern)).toHaveLength(1);
-    expect(workflow).toContain("# ReviewSensei setup version: 4");
+    expect(workflow).toContain("# ReviewSensei setup version: 5");
     expect(workflow).toContain("pull-requests: write");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("github.event.pull_request.draft != true");

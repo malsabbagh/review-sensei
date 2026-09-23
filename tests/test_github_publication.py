@@ -1,9 +1,14 @@
 import hashlib
+import importlib
+import inspect
 import json
+import pkgutil
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
+import review_sensei
 from review_sensei.convergence import (
     REVIEW_MODE_ENV,
     ReviewConvergencePolicy,
@@ -190,6 +195,8 @@ class ReviewPublisherTests(unittest.TestCase):
             "result": result(),
             "diff": DIFF,
             "app_slug": "reviewsensei[bot]",
+            "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
+            "allow_retired_legacy_policy": True,
         }
         arguments.update(overrides)
         http, calls = make_http(responses)
@@ -214,7 +221,12 @@ class ReviewPublisherTests(unittest.TestCase):
         http, calls = make_http([])
         publisher = ReviewPublisher(http=http)
         head = "b" * 40
-        prepared = publisher.prepare(result=result(), diff=DIFF, head_sha=head)
+        prepared = publisher.prepare(
+            result=result(),
+            diff=DIFF,
+            head_sha=head,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+        )
 
         with self.assertRaisesRegex(GitHubPublicationError, "publication context"):
             publisher.publish(
@@ -229,6 +241,8 @@ class ReviewPublisherTests(unittest.TestCase):
                 diff=DIFF.replace("+change", "+different-change"),
                 app_slug="reviewsensei[bot]",
                 prepared_review=prepared,
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                allow_retired_legacy_policy=True,
             )
         self.assertEqual(calls, [])
 
@@ -253,6 +267,8 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             prepared_review=prepared,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(published.status, "published")
         self.assertEqual(valid_calls[4][0], "POST")
@@ -277,8 +293,38 @@ class ReviewPublisherTests(unittest.TestCase):
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
                 prepared_review=prepared,
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                allow_retired_legacy_policy=True,
             )
         self.assertEqual(calls, [])
+
+    def test_retired_legacy_policy_requires_an_explicit_opt_in(self):
+        http, calls = make_http([])
+        publisher = ReviewPublisher(http=http)
+
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "allow_retired_legacy_policy=True"
+        ):
+            publisher.publish(
+                token="token",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                head_sha="b" * 40,
+                base_branch="main",
+                base_sha="a" * 40,
+                result=result(),
+                diff=DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            )
+        self.assertEqual(calls, [])
+
+    def test_retired_legacy_policy_opt_in_must_be_a_boolean(self):
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "legacy policy opt-in must be a boolean"
+        ):
+            self.publish([], allow_retired_legacy_policy="yes")
 
     def test_finalizer_approves_with_only_non_blocking_and_human_threads_open(self):
         head = "b" * 40
@@ -737,6 +783,8 @@ class ReviewPublisherTests(unittest.TestCase):
             result=result(),
             diff=DIFF,
             app_slug="review-sensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.review_id, 5)
@@ -1055,6 +1103,8 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=result(),
                 diff=DIFF,
                 app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                allow_retired_legacy_policy=True,
             )
         self.assertFalse(
             any(
@@ -1186,6 +1236,8 @@ class ReviewPublisherTests(unittest.TestCase):
                         result=result(),
                         diff=DIFF,
                         app_slug="reviewsensei[bot]",
+                        convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                        allow_retired_legacy_policy=True,
                     )
                 self.assertFalse(
                     any(
@@ -1215,6 +1267,8 @@ class ReviewPublisherTests(unittest.TestCase):
             result=classified_result(),
             diff=DIFF,
             app_slug="review-sensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -1255,6 +1309,8 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
 
         self.assertEqual(outcome.status, "published")
@@ -1981,6 +2037,8 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -2008,6 +2066,8 @@ class ReviewPublisherTests(unittest.TestCase):
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(blocking_outcome.status, "published")
         blocking_body = __import__("json").loads(blocking_calls[3][2].decode("utf-8"))
@@ -2054,6 +2114,8 @@ deleted file mode 100644
             diff=deletion,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
@@ -2098,6 +2160,8 @@ deleted file mode 100644
             diff=DIFF,
             app_slug="reviewsensei[bot]",
             auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
@@ -2107,7 +2171,7 @@ deleted file mode 100644
         self.assertIn("`src/app.py`", body["body"])
         self.assertIn("tighter contract", body["body"])
 
-    def test_file_level_comment_is_published_with_subject_type_file(self):
+    def test_file_level_comment_is_retained_in_summary_without_subject_type(self):
         result = ReviewResult(
             summary="File-wide finding.",
             comments=(
@@ -2125,7 +2189,6 @@ deleted file mode 100644
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
-            graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
         http, calls = make_http(responses)
@@ -2141,13 +2204,167 @@ deleted file mode 100644
             diff=DIFF,
             app_slug="review-sensei[bot]",
             auto_approve=False,
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertEqual(body["comments"][0]["path"], "src/app.py")
-        self.assertEqual(body["comments"][0]["subject_type"], "file")
-        self.assertNotIn("line", body["comments"][0])
-        self.assertNotIn("side", body["comments"][0])
+        body = __import__("json").loads(calls[3][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        # GitHub's batch create-review input type defines no file subject type
+        # and rejects a subject_type=file comment with HTTP 422, so a
+        # file-level finding is folded into the summary instead.
+        self.assertEqual(body["comments"], [])
+        self.assertNotIn("subject_type", calls[3][2].decode("utf-8"))
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("`src/app.py`", body["body"])
+        self.assertIn("tighter contract", body["body"])
+
+    def test_no_review_event_emits_a_subject_type_entry(self):
+        # Public contract: no review event may emit `subject_type`, because
+        # GitHub's batch create-review request type defines no file subject type
+        # and requires a position for every inline comment. A file-level finding
+        # therefore rides in the summary of the review that carries findings,
+        # which for an approval is the findings review, not the approval marker.
+        file_comment = ReviewComment(
+            path="src/app.py",
+            line=None,
+            side="FILE",
+            body="This file needs a tighter contract.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        blocking_comment = replace(file_comment, blocking=True)
+        head = "b" * 40
+        file_result = ReviewResult(
+            summary="File-wide finding.",
+            comments=(file_comment,),
+            provider="ollama",
+        )
+        approve = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ],
+            result=file_result,
+            auto_approve=True,
+        )
+        comment = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ],
+            result=file_result,
+            auto_approve=False,
+        )
+        request_changes = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+            ],
+            result=ReviewResult(
+                summary="File-wide finding.",
+                comments=(blocking_comment,),
+                provider="ollama",
+            ),
+            auto_approve=True,
+        )
+
+        cases = (
+            ("APPROVE", approve, 1, 0),
+            ("COMMENT", comment, 0, 0),
+            ("REQUEST_CHANGES", request_changes, 0, 0),
+        )
+        for event, (outcome, calls), event_index, finding_index in cases:
+            with self.subTest(event=event):
+                self.assertEqual(outcome.status, "published")
+                reviews = [
+                    body.decode("utf-8")
+                    for method, url, body in calls
+                    if method == "POST" and url.endswith("/reviews")
+                ]
+                self.assertTrue(reviews)
+                for payload in reviews:
+                    self.assertNotIn("subject_type", payload)
+                    parsed = json.loads(payload)
+                    if "comments" in parsed:
+                        self.assertEqual(parsed["comments"], [])
+                self.assertEqual(json.loads(reviews[event_index])["event"], event)
+                self.assertIn("tighter contract", reviews[finding_index])
+
+    def test_publication_sources_never_build_a_subject_type_key(self):
+        # Structural counterpart to the per-event payload contract: no review
+        # event may emit `subject_type`, so the key must not exist in the
+        # sources that build review payloads.
+        root = Path(__file__).resolve().parents[1]
+        for path in sorted((root / "src/review_sensei").rglob("*.py")):
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn('"subject_type"', source)
+                self.assertNotIn("'subject_type'", source)
+
+    def test_no_hosted_entry_point_can_opt_into_the_retired_policy(self):
+        # `allow_retired_legacy_policy` is an internal escape hatch for this
+        # package's tests and historical-fixture replay. No hosted entry point
+        # (CLI or GitHubApplication) may reach it, so the identifier must stay
+        # confined to the publication module that declares it.
+        root = Path(__file__).resolve().parents[1]
+        declaring = root / "src/review_sensei/hosting/github/publication.py"
+        self.assertTrue(declaring.is_file())
+        for path in sorted((root / "src/review_sensei").rglob("*.py")):
+            if path == declaring:
+                continue
+            with self.subTest(path=path.name):
+                self.assertNotIn(
+                    "allow_retired_legacy_policy",
+                    path.read_text(encoding="utf-8"),
+                )
+        # The textual check above cannot see an internal re-export that
+        # accepts the flag dynamically, so pin the signature side too: any
+        # route that could let production code opt in needs the parameter in a
+        # signature, and only the publisher's own keyword-only parameter may
+        # declare it.
+        declaring_signatures = set()
+        for module_info in pkgutil.walk_packages(
+            review_sensei.__path__, prefix="review_sensei."
+        ):
+            module = importlib.import_module(module_info.name)
+            members = []
+            for member in vars(module).values():
+                if getattr(member, "__module__", None) != module_info.name:
+                    continue
+                if inspect.isclass(member):
+                    members.extend(vars(member).values())
+                else:
+                    members.append(member)
+            for member in members:
+                if not callable(member):
+                    continue
+                try:
+                    signature = inspect.signature(member)
+                except (TypeError, ValueError):  # pragma: no cover - builtins
+                    continue
+                parameter = signature.parameters.get("allow_retired_legacy_policy")
+                if parameter is None:
+                    continue
+                declaring_signatures.add(f"{member.__module__}.{member.__qualname__}")
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(
+            declaring_signatures,
+            {"review_sensei.hosting.github.publication.ReviewPublisher.publish"},
+        )
 
     def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):
         head = "b" * 40
@@ -2742,6 +2959,8 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             "result": result(),
             "diff": DIFF,
             "app_slug": "reviewsensei[bot]",
+            "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
+            "allow_retired_legacy_policy": True,
         }
         arguments.update(overrides)
         http, calls = make_http(responses)
@@ -2769,7 +2988,8 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
     def test_legacy_still_emits_request_changes_for_model_blocker(self):
         outcome, calls = self.publish(
             self._responses(),
-            convergence_policy=ReviewConvergencePolicy(),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
         body = json.loads(calls[-1][2].decode("utf-8"))
@@ -2846,6 +3066,49 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])
         self.assertIn("Proposed: Non-blocking", body["comments"][0]["body"])
+
+    def test_merge_focused_folds_admitted_file_level_blocker_without_auto_approve(
+        self,
+    ):
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", enforcement="publication"
+        )
+        comment = ReviewComment(
+            path="src/app.py",
+            line=None,
+            side="FILE",
+            body="This file needs a tighter contract.",
+            blocking=False,
+            severity="high",
+            defect_kind="authz-failure",
+            fix_effort="small",
+        )
+        facts = derive_blocker_candidate(
+            comment,
+            on_changed_path=True,
+            evidence_locations_validated=True,
+            has_failure_condition=True,
+            has_actionable_remedy=True,
+            has_specific_violation=True,
+        )
+        # An admitted blocker stays inline in operator mode even without
+        # auto_approve, but a file-level target is not publishable inline.
+        outcome, calls = self.publish(
+            self._comment_only_responses(),
+            result=ReviewResult(
+                summary="Summary.", comments=(comment,), provider="ollama"
+            ),
+            convergence_policy=policy,
+            blocker_candidates=(facts,),
+            auto_approve=False,
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertNotIn("subject_type", calls[-1][2].decode("utf-8"))
+        body = json.loads(calls[-1][2].decode("utf-8"))
+        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["comments"], [])
+        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("tighter contract", body["body"])
 
     def test_confirmed_merge_focused_does_not_invent_failure_conditions(self):
         snapshot = {"src/app.py": "keep\nchange\n"}
@@ -3127,7 +3390,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
                     auto_approve=False,
                 )
 
-    def test_omitted_policy_stays_legacy_when_env_is_merge_focused(self):
+    def test_explicit_legacy_policy_is_not_replaced_from_environment(self):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
             outcome, calls = self.publish(self._responses())
         self.assertEqual(outcome.status, "published")

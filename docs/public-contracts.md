@@ -411,7 +411,12 @@ enumeration use ``partial``. Both values block auto-approval via
 legacy right-side contract. `LEFT` is a deleted old-file line. `FILE` is a
 path-level concern and omits `line`. The GitHub publisher validates those
 locations against the exact snapshot and retains unrepresentable findings in
-the review body instead of dropping them.
+the review body instead of dropping them. File-level (`FILE`) findings are
+always folded into the review summary body for every review event: GitHub's
+batch create-review request type defines no file subject type and requires a
+`position`, so a file-level entry is rejected with HTTP 422 regardless of the
+review event. Inline threads are reserved for findings that carry a valid
+snapshot line.
 
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
@@ -536,7 +541,7 @@ The command is `review-sensei`. Supported flags are:
 | `--symbol-context-max-depth` | none | Maximum relationship depth (default 1) |
 | `--no-learning-proposals` | none | Do not request durable learning proposals |
 | `--orchestrate-large-changes` | none | Opt in to bounded chunk orchestration under the total-work budget |
-| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `legacy` (default), `advisory`, `merge-focused`, or `strict`. Operator modes apply C2 admission at publication |
+| `--review-mode` | `REVIEWSENSEI_REVIEW_MODE` | Review-convergence mode for doctor/plan/github: `merge-focused` (default), `advisory`, or `strict`. Explicit historical `legacy` configuration must migrate to `merge-focused` before inference or writes; resolution raises `ReviewModeRetiredError` (a `ReviewInputError` subclass) at flag/env resolution time, before `run_doctor`, `build_plan`, or inference work begins. |
 | `--session-ledger` | `REVIEWSENSEI_SESSION_LEDGER` | Local directory for the C3 durable session ledger (doctor/plan display; `github review` write-through). The GitHub review flag does not affect `reply` or other GitHub subcommands. Requires repository and pull-request identity |
  | none | `REVIEWSENSEI_REVIEW_SHADOW` | Observation-only operator mode (`advisory`, `merge-focused`, or `strict`). Never changes GitHub publication; `legacy` is rejected |
 | `--categories-dir` | `REVIEWSENSEI_CATEGORIES_DIR` | Review category directory |
@@ -643,7 +648,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --json
 review. Without `--diff`, the plan is incomplete rather than ready. Optional
 `--base-sha` and `--head-sha` record snapshot identity when supplied.
 Doctor and plan also report the resolved review-convergence policy
-(`legacy` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
+(`merge-focused` by default via `REVIEWSENSEI_REVIEW_MODE` / `--review-mode`).
 When `--session-ledger` or `REVIEWSENSEI_SESSION_LEDGER` is set with a
 repository and pull-request identity, they also report the C3 session
 counters or an explicit missing/expired/tampered status. Doctor and plan
@@ -739,6 +744,7 @@ Expected failures expose `error_category` on the exception class:
 | Class | Category |
 | --- | --- |
 | `ReviewInputError` | `input` |
+| `ReviewModeRetiredError` (subclass of `ReviewInputError`) | `input` |
 | `ReviewFormatError` | `format` |
 | `LearningLoadError` | `learning` |
 | `ContextLoadError` | `context` |
@@ -835,6 +841,24 @@ writing, and never includes private keys, installation tokens, raw webhook
 bodies, authorization headers, or GitHub API bodies in generated files or PR
 bodies.
 
+`SetupPullRequestService` talks to GitHub through a transport that implements
+the documented setup protocol. A transport that implements
+`ensure_repository_variables` must also implement
+`migrate_retired_review_mode_variable`, added by the merge-focused cutover:
+the method rewrites only an exact retired `REVIEWSENSEI_REVIEW_MODE` value to
+its supported replacement and reads the stored value back, because the Actions
+variables API has no conditional write and a write status is not evidence of
+what was stored. A transport that predates the method fails setup with an
+explicit `github_setup` error naming the required method instead of an
+attribute error, so the added method is a detectable, required protocol change
+when upgrading.
+
+The structured setup result carries `review_mode_migration` when a retired
+value was present: `"observed"` when the rewrite read back as the replacement
+and `"not_observed"` when it did not (which also emits a
+`review_mode_migration_not_observed` warning). The field is absent when there
+was no retired value to migrate.
+
 Setup and webhook errors expose the stable categories listed above. Webhook
 signature failures use `github_webhook_signature`; malformed or duplicate
 deliveries use `github_webhook`; setup validation failures use `github_setup`;
@@ -874,6 +898,21 @@ transport ceiling of 65,536 bytes before any POST is attempted.
 The marker, App slug, exact head commit, and repository identity form the
 idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
 fail closed.
+
+The publication boundary resolves an omitted convergence policy to the
+`merge-focused` default and binds the same policy digest as preparation; a
+prepared result bound to a different policy is rejected rather than silently
+republished. One deliberate exception exists, and it is internal to this
+package's own tests and to historical-fixture replay: an explicitly supplied
+`ReviewConvergencePolicy(mode="legacy")` is honored only when the caller also
+passes `allow_retired_legacy_policy=True`; without that opt-in the publication
+fails closed with `GitHubPublicationError`, so passing the retired policy
+object alone can never re-enable `legacy` (ADR 0055). The flag is not part of
+any supported hosting contract and no hosted path may pass it: the CLI,
+generated configuration, and the hosted workflow all resolve `legacy` to the
+actionable migration error before preparation or writes, and
+`tests/test_github_publication.py` asserts the identifier appears nowhere
+outside `review_sensei/hosting/github/publication.py`.
 
 Learning proposal files remain content-addressed by their full canonical
 SHA-256 digest at
@@ -941,7 +980,7 @@ reply returns `resolve: true` for a blocking root and the resolution mutation
 succeeds, the same provider job invokes the deterministic exact-head approval
 finalizer. It does not call the provider again.
 
-All setup-v4 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
+All setup-v5 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
 Automatic approval defaults to `true` and can be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
 enabled, blocking findings publish as `REQUEST_CHANGES` and non-blocking
