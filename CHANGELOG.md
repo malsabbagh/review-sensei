@@ -29,6 +29,17 @@
   concludes registry absence after the short 404 budget (#159), and an
   already-complete published version is reported as a no-op success (#160).
 
+- Hosted review lane fixes found by running the promoted channel against a
+  real pull request (#171): the durable convergence-history component bound
+  is derived from the reserved writer shape it must hold (4096 bytes, with
+  the session record bound at twice it) instead of the 2048 bytes that
+  refused every realistic checkpoint (ADR 0053), a finding whose inline
+  target does not validate stays published at file level without making the
+  round partial — checkpointing, publication, and approval gate on coverage
+  of the reviewed paths — and a transactional analysis that cannot checkpoint
+  now fails closed with a non-zero exit instead of reporting success without
+  the context artifacts its caller publishes from.
+
 - Maintenance: the Action pin gate fails on per-workflow version skew
   (#166); pinned `ruff` (#163), `coverage` (#162), and CodeQL action
   (#165) versions refreshed.
