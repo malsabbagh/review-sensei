@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.6.5 - 2026-09-22
+
+- Package cutoff pairing the movable public workflow channel `v5` with the
+  merge-focused default: PyPI `review-sensei==0.6.5` and npm
+  `@reviewsensei/cli@0.6.5` with matching platform packages, published
+  through GitHub OIDC Trusted Publishing. Installed callers must move
+  `REVIEWSENSEI_VERSION` to `0.6.5`.
+
+- Merge-focused is now the runtime default and live `legacy` selection is
+  retired (ADR 0055, issue #146 F7): new runtime configuration, CLI
+  invocation, generated setup files (setup format v5), and managed callers
+  default to `merge-focused`; explicit `legacy` use fails with a migration
+  error; setup migrates an existing `REVIEWSENSEI_REVIEW_MODE=legacy`
+  repository variable in place; recognized managed v4 installations receive
+  a reviewable setup PR; and file-level findings are always folded into the
+  review summary instead of being published as inline threads.
+
+- Hosted maintainer-command caller wiring (issue #146 F5, #153) and the
+  observed-convergence evidence harness (issue #146 F6, #154, ADR 0054) are
+  included: generated callers forward the command context and route
+  `@sensei` commands to the `command` operation, and the observed harness
+  reports cutover readiness from recorded round evidence.
+
+- npm publication lane fixes: bundle scripts invoked directly by workflow
+  steps resolve the checkout root (#158; the 0.6.0 tag run packed its
+  tarballs but failed before writing bundle metadata), a fresh preflight
+  concludes registry absence after the short 404 budget (#159), and an
+  already-complete published version is reported as a no-op success (#160).
+
+- Hosted review lane fixes found by running the promoted channel against a
+  real pull request (#171): the durable convergence-history component bound
+  is derived from the reserved writer shape it must hold (4096 bytes, with
+  the session record bound at twice it) instead of the 2048 bytes that
+  refused every realistic checkpoint (ADR 0053), a finding whose inline
+  target does not validate stays published at file level without making the
+  round partial — checkpointing, publication, and approval gate on coverage
+  of the reviewed paths — and a transactional analysis that cannot checkpoint
+  now fails closed with a non-zero exit instead of reporting success without
+  the context artifacts its caller publishes from.
+
+- Maintenance: the Action pin gate fails on per-workflow version skew
+  (#166); pinned `ruff` (#163), `coverage` (#162), and CodeQL action
+  (#165) versions refreshed.
+
 ## 0.6.0 - 2026-09-21
 
 - Package cutoff pairing the movable public workflow channel `v5` with the

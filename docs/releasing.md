@@ -164,7 +164,7 @@ Keep these names distinct:
   format.
 - **`v5`** is the movable public workflow channel. Generated callers use
   `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.
-- **`0.6.0` / `v0.6.0`** is the immutable Python and npm package cutoff.
+- **`0.6.5` / `v0.6.5`** is the immutable Python and npm package cutoff.
   `release.yml` publishes PyPI from `v*.*.*` tags. Do not create a package tag
   named `v5.0.0`; that would collide with the `v*.*.*` release trigger and
   confuse the workflow channel with a library version.

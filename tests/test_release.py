@@ -35,7 +35,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         with (ROOT / "pyproject.toml").open("rb") as handle:
             document = tomllib.load(handle)
         project = document["project"]
-        self.assertEqual(project["version"], "0.6.0")
+        self.assertEqual(project["version"], "0.6.5")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["license"], "MIT")
         self.assertEqual(project["license-files"], ["LICENSE"])
@@ -77,7 +77,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_matching_tag_and_dated_heading_pass(self):
-        self.assertEqual(VERSION_CHECK.validate_release_tag("v0.6.0", ROOT), "0.6.0")
+        self.assertEqual(VERSION_CHECK.validate_release_tag("v0.6.5", ROOT), "0.6.5")
 
     def test_tag_requires_v_prefix_and_exact_metadata(self):
         with self.assertRaises(VERSION_CHECK.ReleaseVersionError):
@@ -100,11 +100,11 @@ class ReleaseVersionTests(unittest.TestCase):
             root = Path(temporary)
             shutil.copy(ROOT / "pyproject.toml", root / "pyproject.toml")
             (root / "CHANGELOG.md").write_text(
-                "## 0.6.0 - 2026-09-21\n", encoding="utf-8"
+                "## 0.6.5 - 2026-09-22\n", encoding="utf-8"
             )
             shutil.copytree(ROOT / "packages/npm", root / "packages/npm")
             self.assertEqual(
-                VERSION_CHECK.validate_release_tag("v0.6.0", root), "0.6.0"
+                VERSION_CHECK.validate_release_tag("v0.6.5", root), "0.6.5"
             )
             launcher = root / "packages/npm/cli/package.json"
             value = json.loads(launcher.read_text(encoding="utf-8"))
