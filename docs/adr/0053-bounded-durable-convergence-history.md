@@ -15,8 +15,8 @@ responses would make the session comment an unbounded and unsafe source store.
 ## Decision
 
 Add an optional, integrity-covered `convergence_history` envelope to the
-existing session record. It is canonical UTF-8 JSON, has a 2048-byte component
-limit, and is also constrained by the record's existing 4096-byte limit.
+existing session record. It is canonical UTF-8 JSON, has a 4096-byte component
+limit, and is also constrained by the record's 8192-byte limit.
 
 The envelope contains only closed metadata:
 
@@ -41,10 +41,27 @@ holding one is rejected under the legacy or operator-paused digest shape, so an
 in-place upgrade can never keep a digest computed without it. The F3 slice
 translates this persisted envelope into the runtime baseline used by the review
 service and reserves enough space for three trusted blocker-set identities.
-The baseline snapshot therefore retains two, rather than three, findings:
-keeping all three would exceed the fixed 2048-byte component bound when F3
-records the minimum repeat/oscillation evidence. F2 deliberately does not
-change the live inference path.
+The baseline snapshot therefore retains two, rather than three, findings: the
+narrower projection leaves the reserved headroom for the repeat/oscillation
+evidence and for the reviewed-path metadata that the next round classifies
+against. F2 deliberately does not change the live inference path.
+
+The bounds are derived from the reserved shape rather than chosen for
+appearance. With repository-realistic identity content (a populated cache key,
+finding paths and symbols, and identity-bearing progress markers) that shape
+encodes to 2294 bytes with no path evidence and 3202 bytes for a twenty-four
+path checkpoint, so the F2 2048-byte bound refused every realistic completion
+without paths ever being the deciding member. The committed regression fixture
+`test_repository_realistic_checkpoint_fits_the_component_bound` holds that
+projection, so the derivation is reproducible rather than a claim about
+fixtures that no longer exist. The envelope bound is therefore 4096 bytes, and
+the record bound stays twice it: the largest non-envelope members (a
+publication transaction, four maximal dispositions, and four maximal
+continuation grants) measured 5704 bytes, which leaves a realistic record
+bound by the envelope while a pathological combination of both is still
+refused. Widening a bound never admits review source, prompts, diffs, or
+provider output; the envelope remains closed metadata, and both capacities are
+still checked before writes and by untrusted-document loading.
 
 The convergence key is the canonical admitted blocker identity set, not the
 provenance of equivalent evidence. Fresh candidate evidence still has to pass
@@ -109,6 +126,9 @@ publication.
 
 Run session-ledger and schema regressions covering round-trip persistence,
 digest tampering, bounded shape rejection, and local/GitHub comment framing.
+The bound tests use repository-realistic identity content and a realistic
+reviewed-path count, because a minimal fixture cannot detect a component bound
+that the reserved F3 writer shape already exceeds.
 
 ## Links
 

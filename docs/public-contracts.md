@@ -356,7 +356,12 @@ publisher can obtain the same trusted context through another operator
 boundary. `--admission-context-output` writes the admission context described
 above and, like the configuration artifact, opts into the transaction; both
 artifacts are written before the round is checkpointed, so a failed write
-cannot leave a durable round that publication cannot reconstruct.
+cannot leave a durable round that publication cannot reconstruct. A round that
+cannot be checkpointed (a review that is not `complete`) writes neither
+artifact and fails with a non-zero exit, because a caller that publishes from
+those artifacts cannot be told the round succeeded while they are missing.
+`--transaction` without an artifact-output flag still returns the unusable
+result together with its structured outcome.
 
 An analysis that runs inside a GitHub-hosted job can resolve its session
 ledger from the broker instead of the runner filesystem. `--github-session-ledger`
@@ -441,7 +446,10 @@ enumeration use ``partial``. Both values block auto-approval via
 legacy right-side contract. `LEFT` is a deleted old-file line. `FILE` is a
 path-level concern and omits `line`. The GitHub publisher validates those
 locations against the exact snapshot and retains unrepresentable findings in
-the review body instead of dropping them. File-level (`FILE`) findings are
+the review body instead of dropping them. That retention is a placement
+downgrade only: the concern stays in the result and the reviewed paths keep
+their coverage, so it never changes `review_status` or the coverage outcome.
+File-level (`FILE`) findings are
 always folded into the review summary body for every review event: GitHub's
 batch create-review request type defines no file subject type and requires a
 `position`, so a file-level entry is rejected with HTTP 422 regardless of the

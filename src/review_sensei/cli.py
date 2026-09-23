@@ -3031,11 +3031,24 @@ def main(argv: list[str] | None = None) -> int:
                 # Partial coverage is a valid run outcome, but it is not a
                 # publishable transaction. Release the analysis reservation
                 # through the bounded failed-attempt path and preserve the
-                # partial result for the caller instead of turning it into a
-                # generic checkpoint error.
+                # partial result for a caller that only wanted a review instead
+                # of turning it into a generic checkpoint error.
                 cleanup_analysis_reservation(charge_failed_attempt=True)
                 prepared_round = None
                 prepared_transaction = None
+                if (
+                    args.configuration_context_output is not None
+                    or args.admission_context_output is not None
+                ):
+                    # A caller that asks for the identity-bound publication
+                    # artifacts publishes from them, so it cannot be told the
+                    # round succeeded while they are missing. Fail closed
+                    # instead, which is what a partial path must do.
+                    raise ReviewInputError(
+                        "identity-bound analysis produced a "
+                        f"{result.review_status} review that cannot be "
+                        "checkpointed or published"
+                    )
             elif result.evidence_policy != "legacy":
                 # The analysis CLI currently produces only the compatible
                 # single-pass evidence contract. Confirmed evidence requires

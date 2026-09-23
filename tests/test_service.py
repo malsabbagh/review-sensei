@@ -160,7 +160,9 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.review_status, "summary-only")
 
-    def test_invalid_inline_location_marks_result_partial(self):
+    def test_invalid_inline_location_retains_the_finding_without_making_it_partial(
+        self,
+    ):
         stage = Stage(
             name="Comments",
             prompt_template="Review: {diff}",
@@ -174,7 +176,10 @@ class ReviewServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.comments[0].side, "FILE")
         self.assertIsNone(result.comments[0].line)
-        self.assertEqual(result.review_status, "partial")
+        # The concern is carried whether or not it can be anchored inline, so
+        # the pass stays complete for the reviewed paths. Checkpointing,
+        # publication, and approval gate on that status.
+        self.assertEqual(result.review_status, "complete")
 
     def test_renders_only_active_categories_and_their_structured_context(self):
         architecture = ReviewCategory(

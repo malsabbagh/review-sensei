@@ -39,6 +39,7 @@ from review_sensei.hosting.github.session_ledger import (
 from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
+    MAX_CONVERGENCE_HISTORY_BYTES,
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_TTL,
@@ -403,7 +404,7 @@ class SessionRecordTests(unittest.TestCase):
         encoded = json.dumps(history, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        self.assertLessEqual(len(encoded), 2048)
+        self.assertLessEqual(len(encoded), MAX_CONVERGENCE_HISTORY_BYTES)
         record = SessionRecord.create(
             IDENTITY, now=FIXED_NOW, convergence_history=history
         )
@@ -411,6 +412,119 @@ class SessionRecordTests(unittest.TestCase):
         self.assertEqual(
             convergence_progress_blocker_sets(record.convergence_history),
             (first, second, third),
+        )
+
+    def test_repository_realistic_checkpoint_fits_the_component_bound(self):
+        # A minimal fixture cannot detect a component bound that the reserved
+        # F3 writer shape already exceeds: identities in the recorded shape are
+        # real digests and paths, not one-character placeholders. This fixture
+        # mirrors a real hosted checkpoint (two findings with paths and symbols,
+        # three identity-bearing markers, and the twenty-four reviewed paths of
+        # a multi-file pull request) so a bound that no real completion can
+        # satisfy fails here instead of on the next hosted run.
+        reviewed = (
+            "src/review_sensei/baseline.py",
+            "src/review_sensei/cli.py",
+            "src/review_sensei/context.py",
+            "src/review_sensei/convergence.py",
+            "src/review_sensei/conversation.py",
+            "src/review_sensei/coverage.py",
+            "src/review_sensei/disposition.py",
+            "src/review_sensei/hosting/github/application.py",
+            "src/review_sensei/hosting/github/approval.py",
+            "src/review_sensei/hosting/github/broker_client.py",
+            "src/review_sensei/hosting/github/session_ledger.py",
+            "src/review_sensei/schemas/session-record.schema.json",
+            "src/review_sensei/service.py",
+            "src/review_sensei/session.py",
+            "src/review_sensei/workflow_inputs.py",
+            ".github/workflows/review-sensei-review.yml",
+            ".github/workflows/review-sensei-run.yml",
+            "docs/adr/0053-bounded-durable-convergence-history.md",
+            "docs/architecture.md",
+            "tests/test_review_transaction.py",
+            "tests/test_session_ledger.py",
+            "tests/test_workflow.py",
+            "scripts/check_release_version.py",
+            "packages/npm/cli/package.json",
+        )
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=169,
+                base_sha="1a9e4eb" + "0" * 33,
+                head_sha="ee67051" + "0" * 33,
+                engine="anthropic",
+                model="claude-sonnet-4-6",
+                profile="merge-focused",
+                stage_digest="a1" * 32,
+                context_digest="b2" * 32,
+                learning_digest="c3" * 32,
+            ),
+            policy_digest="d4" * 32,
+            complete=True,
+            coverage_complete=True,
+            findings=(
+                BaselineFinding(
+                    fingerprint="e5" * 32,
+                    resolution_criterion="f6" * 32,
+                    concern="a7" * 32,
+                    path="src/review_sensei/session.py",
+                    symbol="SessionRecord.from_dict",
+                    defect_kind="bug",
+                    generation=3,
+                    blocking=True,
+                ),
+                BaselineFinding(
+                    fingerprint="b8" * 32,
+                    resolution_criterion="c9" * 32,
+                    concern="da" * 32,
+                    path="src/review_sensei/hosting/github/session_ledger.py",
+                    symbol="GitHubIssueCommentSessionLedger.load",
+                    defect_kind="bug",
+                    generation=3,
+                    blocking=False,
+                ),
+            ),
+            reviewed_paths=reviewed,
+        )
+        blocker_sets = (
+            blocker_set_digest(("ab" * 32,)),
+            blocker_set_digest(("cd" * 32, "ef" * 32)),
+            blocker_set_digest(("ab" * 32,)),
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline),
+            "progress": [
+                {
+                    "event": "completed",
+                    "generation": generation,
+                    "blocker_set_sha256": digest,
+                    "blocker_count": count,
+                    "transaction_id": f"{generation:02x}" * 32,
+                }
+                for generation, (digest, count) in enumerate(blocker_sets, start=1)
+            ],
+            "provenance": {"ledger_digest": "12" * 32},
+        }
+        encoded = json.dumps(history, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        self.assertLessEqual(len(encoded), MAX_CONVERGENCE_HISTORY_BYTES)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        validate_public_document(record.to_dict(), "session-record")
+        restored = SessionRecord.from_dict(record.to_dict())
+        self.assertEqual(restored.convergence_history, history)
+        restored_baseline = restored.convergence_history["baseline"]
+        assert isinstance(restored_baseline, dict)
+        self.assertEqual(restored_baseline["reviewed_paths"], list(reviewed))
+        self.assertEqual(len(restored_baseline["findings"]), 2)
+        self.assertEqual(
+            convergence_progress_blocker_sets(restored.convergence_history),
+            blocker_sets,
         )
 
     def test_legacy_progress_cannot_supply_blocker_identity(self):
