@@ -837,8 +837,7 @@ def _parser() -> argparse.ArgumentParser:
         "--app-slug",
         default="reviewsensei[bot]",
         help=(
-            "App login whose issue comments are trusted as the hosted session "
-            "marker"
+            "App login whose issue comments are trusted as the hosted session marker"
         ),
     )
     parser.add_argument(
