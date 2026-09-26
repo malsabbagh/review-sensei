@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- When a pull request has used its automatic review budget, post a comment
-  with the maintainer continue and rescan commands and let the review job
-  succeed instead of failing.
+- When a pull request has used its automatic review budget, the reusable
+  workflow reads the session ledger before starting the review CLI, posts the
+  continue and rescan instructions, and completes the check successfully.
+  The package does not post that notice or decide the check.
 
 ## 0.6.7 - 2026-09-23
 

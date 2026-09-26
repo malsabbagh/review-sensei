@@ -789,7 +789,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
-            self.assertEqual(job.count(pull_request_env), 4)
+            self.assertEqual(job.count(pull_request_env), 5)
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
@@ -999,7 +999,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count(
                 "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
             ),
-            3,
+            6,
         )
         self.assertEqual(
             text.count(
@@ -1665,6 +1665,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         )
         handoff_guard = (
             " && steps.provider-review.outputs.outcome_status != 'action_required'"
+            " && steps.budget-admission.outputs.spent != 'true'"
         )
         publish_if = (
             admission_if
@@ -1721,6 +1722,73 @@ class ReusablePublishGuardTests(unittest.TestCase):
         cloud_confirm = _step_block(_job_section(text, "cloud"), confirm_name)
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
         self.assertEqual(cloud_confirm, local_confirm)
+
+    def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
+        text = _reusable_workflow_text()
+        chunks = re.findall(
+            r"          def automatic_budget_spent\(record, head_sha\):.*?\n              return True\n",
+            text,
+            flags=re.S,
+        )
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(len(set(chunks)), 1)
+        from datetime import datetime, timezone
+
+        namespace: dict[str, object] = {
+            "datetime": datetime,
+            "timezone": timezone,
+        }
+        exec(textwrap.dedent(chunks[0]), namespace)
+        spent = namespace["automatic_budget_spent"]
+        assert callable(spent)
+        head = "a" * 40
+        record = {
+            "completed_initial_reviews": 1,
+            "completed_verification_rounds": 2,
+            "failed_attempts": 0,
+        }
+        self.assertTrue(spent(record, head))
+        self.assertFalse(spent({**record, "completed_verification_rounds": 1}, head))
+        self.assertFalse(spent({**record, "operator_paused": True}, head))
+        self.assertFalse(spent({**record, "failed_attempts": 6}, head))
+        self.assertFalse(spent(None, head))
+        future = "2099-01-01T00:00:00+00:00"
+        granted = {
+            **record,
+            "continuation_grants": [
+                {
+                    "consumed_reservation_id": None,
+                    "head_sha": head,
+                    "expires_at": future,
+                }
+            ],
+        }
+        self.assertFalse(spent(granted, head))
+        consumed = {
+            **record,
+            "continuation_grants": [
+                {
+                    "consumed_reservation_id": "reservation",
+                    "head_sha": head,
+                    "expires_at": future,
+                }
+            ],
+        }
+        self.assertTrue(spent(consumed, head))
+        for job_id, review_name in (
+            ("cloud", "Run cloud-provider review"),
+            ("openrouter", "Run OpenRouter-provider review"),
+            ("local", "Prepare and run trusted local review"),
+        ):
+            with self.subTest(job=job_id):
+                names = _named_steps(_job_section(text, job_id))
+                review_index = names.index(review_name)
+                self.assertEqual(
+                    names[review_index - 1],
+                    "Decide whether the automatic review budget is already spent",
+                )
+                review = _step_block(_job_section(text, job_id), review_name)
+                self.assertIn("steps.budget-admission.outputs.spent != 'true'", review)
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
