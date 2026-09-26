@@ -125,12 +125,15 @@ class RelatedPathTests(unittest.TestCase):
         self.assertEqual(related, ("src/helper.py", "src/app.py"))
         self.assertNotIn("docs/b.md", related)
 
-    def test_related_path_overflow_fails_closed(self) -> None:
+    def test_related_path_overflow_truncates_at_the_bound(self) -> None:
         changed = tuple(
             f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 2)
         )
-        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
-            related_paths_for_change(changed)
+        related = related_paths_for_change(changed)
+        expected = tuple(
+            f"src/file-{index}.py" for index in range(1, MAX_RELATED_PATHS + 1)
+        )
+        self.assertEqual(related, expected)
 
 
 class PreviewScopeTests(unittest.TestCase):
@@ -1328,7 +1331,9 @@ class BaselineAdmissionTests(unittest.TestCase):
             )
         self.assertEqual(planner.call_args.kwargs["related_paths"], ())
 
-    def test_baseline_admission_related_overflow_fails_closed(self) -> None:
+    def test_baseline_admission_related_overflow_truncates_derived_context(
+        self,
+    ) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         baseline = baseline_from_review(
             _result(_comment()), cache_key=_key(), policy=policy
@@ -1336,15 +1341,32 @@ class BaselineAdmissionTests(unittest.TestCase):
         changed = tuple(
             f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
         )
-        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
-            admit_review_result(
-                _result(_comment()),
-                policy,
-                baseline=baseline,
-                current_key=_key(head_sha=SHA_C),
-                changed_paths=changed,
-                related_paths=None,  # type: ignore[arg-type]
-            )
+        result = admit_review_result(
+            _result(_comment()),
+            policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed,
+            related_paths=None,  # type: ignore[arg-type]
+        )
+        self.assertFalse(result.comments[0].effective_blocking)
+
+    def test_derived_related_overflow_truncates_in_the_verify_scope(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        changed = tuple(
+            f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed,
+        )
+        self.assertEqual(scope.status, "verify")
+        self.assertEqual(len(scope.related_paths), MAX_RELATED_PATHS)
 
     def test_explicit_candidates_precede_baseline_planning(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
