@@ -32,6 +32,11 @@ from review_sensei.session import (
     should_skip_automation,
 )
 
+try:
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
+except ModuleNotFoundError:
+    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
 +++ b/src/app.py
@@ -504,7 +509,7 @@ class DiagnosticAutomationTests(unittest.TestCase):
             self.assertIn("verification=20", check["detail"])
 
 
-class CliInferenceSkipTests(unittest.TestCase):
+class CliInferenceSkipTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_handoff_operator_mode_makes_zero_provider_calls(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

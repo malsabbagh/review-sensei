@@ -444,12 +444,28 @@ describe("setup repository reconciliation", () => {
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
-    // The retired path is neither read nor part of the managed set: only the
-    // three managed paths are inspected, and the existing canonical branch is
-    // adopted because its compare shows managed files only.
-    expect(fake.requests.some(({ path }) => path.includes("review-sensei%2Fconfig.yml"))).toBe(false);
-    expect(fake.requests.find(({ method, path }) => method === "POST" && path.endsWith("/pulls"))?.body)
-      .toMatchObject({ head: SETUP_BRANCH, base: "main" });
+    // The retired path is read exactly once, for the one-time import check,
+    // and never written: released v2 bytes carry no operator intent beyond
+    // the packaged defaults, so nothing is imported, and the existing
+    // canonical branch is adopted because its compare shows managed files
+    // only.
+    expect(
+      fake.requests.filter(
+        ({ method, path }) =>
+          method === "GET" && path.includes("/contents/.github/review-sensei/config.yml"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fake.requests.some(
+        ({ method, path }) =>
+          method !== "GET" && path.includes("/contents/.github/review-sensei/config.yml"),
+      ),
+    ).toBe(false);
+    const pullRequest = fake.requests.find(
+      ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+    );
+    expect(pullRequest?.body).toMatchObject({ head: SETUP_BRANCH, base: "main" });
+    expect(String(pullRequest?.body?.body)).not.toContain("carried these settings");
   });
 
   it("does not overwrite a customer-owned deterministic branch", async () => {
@@ -483,11 +499,12 @@ describe("setup repository reconciliation", () => {
     ]);
   });
 
-  it("leaves a customized legacy setup-v2 config untouched", async () => {
-    // The retired configuration path is not part of the managed set: the
-    // Worker neither reads it nor writes it, so an operator's customized v2
-    // file never blocks setup and is never replaced. Retiring it is the
-    // generated uninstall workflow's job.
+  it("imports a customized retired configuration without writing it", async () => {
+    // The retired configuration path is read once, when a setup pull request
+    // is created, and translated into the generated root configuration, so an
+    // operator's endpoint choice survives the cutover. The retired file
+    // itself is never written or deleted here: that is the operator's merge
+    // decision, and the generated uninstall workflow is the removal path.
     const fake = new FakeGitHub();
     fake.files[LEGACY_CONFIG_PATH] = [
       "# ReviewSensei setup version: 2",
@@ -499,15 +516,28 @@ describe("setup repository reconciliation", () => {
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
-    const reads = fake.requests.filter(({ method, path }) =>
-      method === "GET" && path.includes("/contents/"),
+    const reads = fake.requests.filter(
+      ({ method, path }) =>
+        method === "GET" && path.includes("/contents/.github/review-sensei/config.yml"),
     );
+    expect(reads).toHaveLength(1);
     expect(
-      reads.every(({ path }) => !path.includes("review-sensei%2Fconfig.yml")),
-    ).toBe(true);
+      fake.requests.some(
+        ({ method, path }) =>
+          method !== "GET" && path.includes("/contents/.github/review-sensei/config.yml"),
+      ),
+    ).toBe(false);
     const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
-    expect((tree?.body?.tree as Array<{ path: string }>).map(({ path }) => path)).toEqual(
-      SETUP_FILE_PATHS,
+    const entries = tree?.body?.tree as Array<{ path: string; content: string }>;
+    expect(entries.map(({ path }) => path)).toEqual(SETUP_FILE_PATHS);
+    const config = entries.find(({ path }) => path === CONFIG_PATH)?.content ?? "";
+    expect(config).toContain("# One-time import of the retired");
+    expect(config).toContain("base_url: https://customer.example/api");
+    const pullRequest = fake.requests.find(
+      ({ method, path }) => method === "POST" && path.endsWith("/pulls"),
+    );
+    expect(String(pullRequest?.body?.body)).toContain(
+      "carried these settings into .reviewsensei.yml: inference.backend, advanced.endpoint.base_url",
     );
   });
 

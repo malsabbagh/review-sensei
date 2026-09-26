@@ -24,6 +24,11 @@ from review_sensei.cli import (
 )
 from review_sensei.errors import ReviewInputError
 
+try:
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
+except ModuleNotFoundError:
+    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
 +++ b/src/app.py
@@ -70,7 +75,7 @@ class FakeRegistry:
         return self.provider
 
 
-class CliTests(unittest.TestCase):
+class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_github_review_cli_wires_review_and_learning_publication(self):
         from review_sensei.hosting import github as github_module
 
@@ -2344,7 +2349,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("x" * 20, stderr.getvalue())
 
 
-class DoctorPlanCliTests(unittest.TestCase):
+class DoctorPlanCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_doctor_parser_accepts_configuration_flags(self):
         args = _doctor_parser().parse_args(
             [
@@ -2706,7 +2711,7 @@ class DoctorPlanCliTests(unittest.TestCase):
         )
 
 
-class PromotionCliTests(unittest.TestCase):
+class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def _make_report(self, **kwargs):
         path = Path(__file__).resolve().parent / "test_promotion_release.py"
         spec = importlib.util.spec_from_file_location("promotion_release_helpers", path)
@@ -3144,7 +3149,7 @@ class PromotionCliTests(unittest.TestCase):
         self.assertIn("unrecognized arguments", stderr.getvalue())
 
 
-class HostedPublicationCliTests(unittest.TestCase):
+class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     """The hosted publication boundary reads the analysis artifacts."""
 
     class FakeApplication:
@@ -3411,7 +3416,7 @@ class HostedPublicationCliTests(unittest.TestCase):
         self.assertNotIn("::error", stderr.getvalue())
 
 
-class HostedSessionLedgerFlagTests(unittest.TestCase):
+class HostedSessionLedgerFlagTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     """Analysis-side hosted flags cannot be mixed with local invocation."""
 
     def _run(self, extra: list[str]) -> tuple[int, str]:

@@ -271,7 +271,7 @@ record digest. Operator modes apply
 events. C3 persists PR-wide counters without refusing publication. C4 plans
 verification from a complete compatible baseline and classifies later
 findings before C2 admission. C7 replays frozen sequences and may shadow an
-operator policy without changing GitHub events. `REVIEWSENSEI_AUTO_APPROVE` default-on semantics are unchanged.
+operator policy without changing GitHub events; the `github.reviews` approval policy is unchanged.
 When an operator-ledger analysis uses the F1 handoff, `ReviewResult.to_dict()`
 may include a `transaction` envelope validated by
 `review-transaction.schema.json`. Its canonical result digest excludes that
@@ -786,7 +786,8 @@ Operator modes also report C4 verification scope:
 `verification` over existing concerns plus changed and related paths, and
 late blockers need `new-regression` or `substantiated-missed-defect`.
 Operator modes apply `evaluate_blocker_admission` before GitHub review events
-and do not change `REVIEWSENSEI_AUTO_APPROVE`. `REVIEWSENSEI_REVIEW_SHADOW`
+and do not change the `github.reviews` approval policy.
+`REVIEWSENSEI_REVIEW_SHADOW`
 displays an observation-only operator policy in doctor/plan without changing
 publication. See [ADR 0046](adr/0046-evidence-based-blocker-admission-and-review-loop-convergence.md)
 and [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
@@ -1125,9 +1126,12 @@ reply returns `resolve: true` for a blocking root and the resolution mutation
 succeeds, the same provider job invokes the deterministic exact-head approval
 finalizer. It does not call the provider again.
 
-All setup-v5 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
-Automatic approval defaults to `true` and can be disabled with
-`REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
+Setup-v5 resolves every policy from `.reviewsensei.yml`; the packaged defaults
+are `github.reviews: auto-approve`, `github.automatic_reviews: true`, and
+`github.writes: false` (see the defaults table in `docs/installation.md`).
+Automatic approval can be disabled with `github.reviews: blocking` (publish and
+enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
+gate). When automatic review and GitHub writes are
 enabled, ReviewSensei publishes one exact-head `COMMENT` review and one stable
 `ReviewSensei` check run that is the single enforcement authority for that head
 (ADR 0057): `success` for a complete review with no required fixes, `failure`

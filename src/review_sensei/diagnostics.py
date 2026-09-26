@@ -827,9 +827,10 @@ def run_doctor(
                 f"{gate_identity['name']!r} produced by App "
                 f"{gate_identity['producer']!r}; "
                 f"{REVIEW_CHECK_NAME!r} must be marked required by a repository "
-                "administrator (ReviewSensei cannot read or change branch "
-                "protection), the App needs Checks: write, and GitHub never "
-                "runs required checks on App-authored pull requests"
+                "administrator (ReviewSensei requests no Administration "
+                "permission and never changes branch protection), the App needs "
+                "Checks: write, and GitHub never runs required checks on "
+                "App-authored pull requests"
             ),
         )
     )

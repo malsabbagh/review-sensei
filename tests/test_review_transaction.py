@@ -1022,9 +1022,11 @@ diff --git a/src/helper.py b/src/helper.py
                 record.convergence_history["baseline"]
             )
             self.assertEqual(initial_baseline.cache_key.head_sha, HEAD_SHA)
+            # The persisted projection orders path evidence by value, so the
+            # stored document does not depend on traversal or provider order.
             self.assertEqual(
                 initial_baseline.related_paths,
-                ("src/helper.py", "src/app.py"),
+                ("src/app.py", "src/helper.py"),
             )
             self.assertEqual(
                 record.transaction.result_sha256,

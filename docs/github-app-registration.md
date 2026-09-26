@@ -141,8 +141,13 @@ Generated setup pull requests contain only:
 - `.github/workflows/review-sensei-review.yml` with an immutable Action pin;
 - `.github/workflows/review-sensei-uninstall.yml` with an immutable Action pin;
 - `.reviewsensei.yml` with local-first provider defaults;
-- a short pull request body naming the generated files and the optional
-  provider credentials.
+- a short pull request body naming the generated files, the optional provider
+  credentials, and the default approval policy
+  (`github.reviews: auto-approve`). If a retired
+  `.github/review-sensei/config.yml` exists and is not a released generated
+  shape, the body also lists the settings that one-time import carried into
+  `.reviewsensei.yml`; released bytes at that path carry no operator intent and
+  are replaced rather than imported.
 
 The bootstrap creates no repository variables at all. The only two product
 overrides are the optional `REVIEWSENSEI_PROVIDER` (canonical
@@ -182,17 +187,24 @@ accept the App's permission update (`new_permissions_accepted`) or remove and
 re-add the repository to emit a fresh setup event. Merge the migration PR after
 review; an uninstall/reinstall cycle is not required.
 
-## Issue-64 setup-v4 lifecycle
+## Issue-64 setup-v5 lifecycle
 
-Setup-v4 adds the public reusable workflow boundary. The operator-managed `v5`
+Setup-v5 adds the public reusable workflow boundary and makes
+`.reviewsensei.yml` the only configuration source. The operator-managed `v5`
 git tag is the update channel: the Worker validates it before setup and the
 generated caller follows the tag. The caller requests
 `contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
-and defaults every write/artifact switch to `false`.
+and reads no repository variables. Package defaults keep `github.writes: false`
+and `github.artifacts: none`, so nothing publishes and no artifact uploads
+until the operator enables them; `github.automatic_reviews` and
+`github.mentions` default to `true`, and `github.reviews` defaults to
+`auto-approve`.
 Cloud review and conversation operations use GitHub-hosted compute; local review
 and conversation operations use the operator's labelled self-hosted runner.
-Both provider modes support automatic/manual review, learning proposals,
-artifacts, and authorized `@sensei` replies. Automatic fork review remains
+Either compute path supports automatic/manual review (`github.automatic_reviews`),
+learning proposals and learning PRs (`github.learning`), artifacts
+(`github.artifacts`), and authorized `@sensei` replies (`github.mentions`, with
+`github.writes: true`). Automatic fork review remains
 disabled.
 
 The App may pass the customer-owned `OLLAMA_API_KEY` secret by name only. It
@@ -201,9 +213,9 @@ setup PR. Add the secret manually when enabling cloud mode.
 
 | Delivery | Reconciliation | Write rule |
 | --- | --- | --- |
-| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3/v4 -> one setup-v4 PR; current tag-following setup-v4 -> no-op |
+| `installation.created` | Inspect every selected repository, including reinstall | Absent/legacy/v2/stale managed v3/v4 -> one setup-v5 PR; current tag-following setup-v5 -> no-op |
 | `installation.new_permissions_accepted` | Repeat the same selected-repository inspection | Reuse one open setup PR; custom/malformed/future -> zero writes |
-| `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v4 PR per repository |
+| `installation_repositories.added` | Inspect only added repositories | At most one deterministic setup-v5 PR per repository |
 | removed/deleted/suspended/unsupported | Do not reconcile setup | No setup write |
 
 The Worker validates the configured tag and resolves it through GitHub before

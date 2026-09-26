@@ -1337,6 +1337,432 @@ export function currentConfigFile(): string {
   );
 }
 
+/**
+ * Bounded translation of the retired flat setup configuration.
+ *
+ * The retired file was never read by a runtime. This one-time import keeps the
+ * explicit choices an operator made in it; values it cannot translate are
+ * reported as comments in the rendered file and never guessed at. The
+ * algorithm mirrors the Python implementation in review_sensei.configuration
+ * and renders identical bytes for the same input: the shared cases in
+ * tests/fixtures/legacy-setup-import.json are asserted by both suites.
+ */
+export const LEGACY_SETUP_IMPORT_MAX_LINES = 256;
+export const LEGACY_SETUP_IMPORT_MAX_LINE_BYTES = 1024;
+export const LEGACY_SETUP_IMPORT_MAX_BYTES = 65536;
+export const LEGACY_SETUP_IMPORT_NOTE_LIMIT = 8;
+
+export interface LegacySetupImport {
+  readonly content: string;
+  readonly carried: readonly string[];
+  readonly notes: readonly string[];
+}
+
+const LEGACY_SETUP_BACKEND_ALIASES: Readonly<Record<string, string>> = {
+  ollama: "local-ollama",
+  local: "local-ollama",
+  "local-ollama": "local-ollama",
+  local_ollama: "local-ollama",
+  cloud: "cloud-ollama",
+  "cloud-ollama": "cloud-ollama",
+  cloud_ollama: "cloud-ollama",
+  "ollama-cloud": "cloud-ollama",
+  openrouter: "openrouter",
+  openai: "openai-compatible",
+};
+
+const LEGACY_SETUP_BASE_URLS: Readonly<Record<string, string>> = {
+  "local-ollama": "http://127.0.0.1:11434/api",
+  "cloud-ollama": "https://ollama.com/api",
+};
+
+const LEGACY_SETUP_BEHAVIOR_KEYS: readonly string[] = [
+  "auto_review",
+  "github_writes",
+  "auto_approve",
+  "mention_replies",
+  "learning_proposals",
+  "learning_prs",
+  "upload_artifacts",
+];
+
+const LEGACY_SETUP_IMPORTED_KEYS = new Set<string>([
+  "provider",
+  "provider_mode",
+  "model",
+  "local_model",
+  "cloud_model",
+  "base_url",
+  "cloud_base_url",
+  "schema",
+  ...LEGACY_SETUP_BEHAVIOR_KEYS,
+]);
+
+// The retired flat keys an import can name when it reports a replacement.
+// tests/test_legacy_setup_import.py guards these strings against the Python
+// RETIRED_FIELDS table.
+export const LEGACY_SETUP_RETIRED_FIELDS: Readonly<Record<string, string>> = {
+  setup_version: "release/installer identity; the configuration version is 'schema'",
+  provider: "inference.backend",
+  provider_mode: "inference.backend (use 'local-ollama' or 'cloud-ollama')",
+  model: "inference.model",
+  base_url: "advanced.endpoint.base_url",
+  cloud_base_url: "advanced.endpoint.base_url",
+  local_model: "inference.model",
+  cloud_model: "inference.model",
+  version: "release/installer identity; the configuration version is 'schema'",
+  auto_review: "github.automatic_reviews",
+  auto_approve: "github.reviews",
+  github_writes: "github.writes",
+  learning_prs: "github.learning: pull-requests",
+  learning_proposals: "github.learning: proposals",
+  mention_replies: "github.mentions",
+  upload_artifacts: "github.artifacts: diagnostics",
+  stages_dir: ".reviewsensei/stages/",
+  categories_dir: ".reviewsensei/categories/",
+  review_mode:
+    "one evidence-focused pipeline is the only engine; integration policy is github.reviews",
+  provider_profile:
+    "select inference.backend and set the advanced.endpoint fields",
+  reviewsensei_version: "release/installer identity; remove it",
+};
+
+// Python's str.splitlines() and str.strip() use character sets that differ
+// from String.prototype.split/trim, so the byte-parity contract needs them
+// spelled out here.
+const PYTHON_WHITESPACE =
+  "\\t\\n\\v\\f\\r \\x85\\x1c-\\x1f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const PYTHON_STRIP_PATTERN = new RegExp(
+  `^[${PYTHON_WHITESPACE}]+|[${PYTHON_WHITESPACE}]+$`,
+  "g",
+);
+const PYTHON_LINE_PATTERN = /[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/;
+const LEGACY_SETUP_KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
+const LEGACY_SETUP_BARE_VALUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
+const LEGACY_SETUP_ECHO_LENGTH = 64;
+
+function pythonStrip(value: string): string {
+  return value.replace(PYTHON_STRIP_PATTERN, "");
+}
+
+function pythonSplitLines(value: string): string[] {
+  if (value === "") {
+    return [];
+  }
+  const normalized = value.replace(/\r\n/g, "\n");
+  const lines = normalized.split(PYTHON_LINE_PATTERN);
+  const last = normalized.at(-1) ?? "";
+  if (PYTHON_LINE_PATTERN.test(last)) {
+    lines.pop();
+  }
+  return lines;
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return true;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function legacySetupEcho(value: string): string {
+  const text = pythonStrip(value);
+  if (text.length <= LEGACY_SETUP_ECHO_LENGTH) {
+    return text;
+  }
+  return `${text.slice(0, LEGACY_SETUP_ECHO_LENGTH)}...`;
+}
+
+function legacySetupScalar(raw: string): string {
+  if (
+    raw.length >= 2 &&
+    raw[0] === raw[raw.length - 1] &&
+    (raw[0] === "'" || raw[0] === '"')
+  ) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
+function legacySetupQuoted(value: string): string {
+  if (LEGACY_SETUP_BARE_VALUE_PATTERN.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function renderValue(value: boolean): string {
+  return value ? "true" : "false";
+}
+
+function legacySetupValues(content: string): {
+  values: Map<string, string>;
+  notes: string[];
+} {
+  if (hasLoneSurrogate(content)) {
+    return { values: new Map(), notes: ["the retired file is not valid UTF-8"] };
+  }
+  if (utf8Length(content) > LEGACY_SETUP_IMPORT_MAX_BYTES) {
+    return {
+      values: new Map(),
+      notes: ["the retired file is larger than the import bound"],
+    };
+  }
+  const lines = pythonSplitLines(content);
+  if (lines.length > LEGACY_SETUP_IMPORT_MAX_LINES) {
+    return {
+      values: new Map(),
+      notes: ["the retired file is longer than the import bound"],
+    };
+  }
+  const values = new Map<string, string>();
+  const notes: string[] = [];
+  for (const line of lines) {
+    const stripped = pythonStrip(line);
+    if (!stripped || stripped.startsWith("#")) {
+      continue;
+    }
+    if (utf8Length(line) > LEGACY_SETUP_IMPORT_MAX_LINE_BYTES) {
+      notes.push("a line longer than the import bound was not imported");
+      continue;
+    }
+    const separator = stripped.indexOf(":");
+    const key = separator === -1 ? "" : pythonStrip(stripped.slice(0, separator));
+    if (separator === -1 || !LEGACY_SETUP_KEY_PATTERN.test(key)) {
+      notes.push(`the line '${legacySetupEcho(stripped)}' was not imported`);
+      continue;
+    }
+    if (values.has(key)) {
+      notes.push(`'${key}' is repeated; the first value was kept`);
+      continue;
+    }
+    values.set(key, legacySetupScalar(pythonStrip(stripped.slice(separator + 1))));
+  }
+  return { values, notes };
+}
+
+export function importLegacySetupConfiguration(
+  content: string,
+): LegacySetupImport {
+  const parsed = legacySetupValues(content);
+  let values = parsed.values;
+  const notes = parsed.notes;
+  if (values.has("schema")) {
+    // A canonical document at the retired path is not a flat legacy file:
+    // translate nothing rather than misread nested keys as retired ones.
+    notes.push("the retired path holds a canonical configuration; it was not imported");
+    values = new Map();
+  }
+
+  const text = (key: string): string | null => {
+    const raw = values.get(key);
+    if (raw === undefined) {
+      return null;
+    }
+    const value = pythonStrip(raw);
+    return value || null;
+  };
+
+  const boolean = (key: string): boolean | null => {
+    const raw = text(key);
+    if (raw === null) {
+      return null;
+    }
+    const lowered = raw.toLowerCase();
+    if (lowered === "true" || lowered === "false") {
+      return lowered === "true";
+    }
+    notes.push(
+      `'${key}': '${legacySetupEcho(raw)}' is not a boolean and was not imported`,
+    );
+    return null;
+  };
+
+  const carried: string[] = [];
+
+  let backend: string | null = null;
+  for (const key of ["provider_mode", "provider"]) {
+    const raw = text(key);
+    if (raw === null) {
+      continue;
+    }
+    const mapped = LEGACY_SETUP_BACKEND_ALIASES[raw.toLowerCase()];
+    if (mapped === undefined) {
+      notes.push(`'${key}': '${legacySetupEcho(raw)}' is not a backend; it was not imported`);
+      continue;
+    }
+    if (backend === null) {
+      backend = mapped;
+      carried.push("inference.backend");
+    }
+  }
+  const resolvedBackend = backend ?? "local-ollama";
+
+  let model = text("model");
+  let selectedModelKey: string | null = model === null ? null : "model";
+  if (model === null && resolvedBackend in LEGACY_SETUP_BASE_URLS) {
+    const fallbackKey =
+      resolvedBackend === "cloud-ollama" ? "cloud_model" : "local_model";
+    model = text(fallbackKey);
+    if (model !== null) {
+      selectedModelKey = fallbackKey;
+    }
+  }
+  if (model !== null) {
+    carried.push("inference.model");
+  }
+  for (const key of ["local_model", "cloud_model"]) {
+    if (key !== selectedModelKey && values.has(key)) {
+      notes.push(`'${key}' is not imported; the selected backend uses inference.model`);
+    }
+  }
+
+  let endpoint: string | null = null;
+  const selectedEndpointKey =
+    { "local-ollama": "base_url", "cloud-ollama": "cloud_base_url" }[
+      resolvedBackend
+    ] ?? null;
+  const endpointKeys: ReadonlyArray<readonly [string, string]> = [
+    ["base_url", "local-ollama"],
+    ["cloud_base_url", "cloud-ollama"],
+  ];
+  for (const [key, endpointBackend] of endpointKeys) {
+    const rawEndpoint = text(key);
+    if (rawEndpoint === null) {
+      continue;
+    }
+    const defaultEndpoint = LEGACY_SETUP_BASE_URLS[endpointBackend];
+    if (key === selectedEndpointKey) {
+      if (rawEndpoint !== defaultEndpoint) {
+        endpoint = rawEndpoint;
+        carried.push("advanced.endpoint.base_url");
+      }
+      continue;
+    }
+    if (rawEndpoint !== defaultEndpoint) {
+      notes.push(
+        `'${key}' is not imported for this backend; set advanced.endpoint.base_url explicitly`,
+      );
+    }
+  }
+
+  const presentBehavior = LEGACY_SETUP_BEHAVIOR_KEYS.filter((key) =>
+    values.has(key),
+  );
+
+  const automaticReviews = boolean("auto_review");
+  if (automaticReviews !== null) {
+    carried.push("github.automatic_reviews");
+  }
+  const writes = boolean("github_writes");
+  if (writes !== null) {
+    carried.push("github.writes");
+  }
+  const autoApprove = boolean("auto_approve");
+  if (autoApprove !== null) {
+    carried.push("github.reviews");
+  }
+  const mentions = boolean("mention_replies");
+  if (mentions !== null) {
+    carried.push("github.mentions");
+  }
+  const proposals = boolean("learning_proposals");
+  const learningPrs = boolean("learning_prs");
+  if (values.has("learning_proposals") || values.has("learning_prs")) {
+    carried.push("github.learning");
+  }
+  const artifactsFlag = boolean("upload_artifacts");
+  if (artifactsFlag !== null) {
+    carried.push("github.artifacts");
+  }
+
+  for (const key of values.keys()) {
+    if (LEGACY_SETUP_IMPORTED_KEYS.has(key)) {
+      continue;
+    }
+    const replacement = LEGACY_SETUP_RETIRED_FIELDS[key];
+    if (replacement !== undefined) {
+      notes.push(`'${key}' was retired; ${replacement}`);
+    } else {
+      notes.push(`'${key}' is not a retired setup setting and was not imported`);
+    }
+  }
+
+  const boundedNotes = notes.slice(0, LEGACY_SETUP_IMPORT_NOTE_LIMIT);
+  if (notes.length > LEGACY_SETUP_IMPORT_NOTE_LIMIT) {
+    boundedNotes.push(
+      `${notes.length - LEGACY_SETUP_IMPORT_NOTE_LIMIT} more import notes were omitted`,
+    );
+  }
+
+  let lines: string[];
+  let body: string[];
+  if (carried.length === 0) {
+    lines = [
+      `# ReviewSensei setup version: ${SETUP_VERSION}`,
+      "# The retired .github/review-sensei/config.yml is no longer read, and",
+      "# this import did not translate anything from it. Review the retired",
+      "# file, then delete it after merging.",
+    ];
+    body = ["schema: 1", "", "inference:", "  backend: local-ollama"];
+  } else {
+    lines = [
+      `# ReviewSensei setup version: ${SETUP_VERSION}`,
+      "# One-time import of the retired .github/review-sensei/config.yml,",
+      "# which nothing reads any more. The settings below are this file's",
+      "# policies now; review this diff, then delete the retired file",
+      "# after merging.",
+    ];
+    body = ["schema: 1", "", "inference:", `  backend: ${resolvedBackend}`];
+    if (model !== null) {
+      body.push(`  model: ${legacySetupQuoted(model)}`);
+    }
+    if (presentBehavior.length > 0) {
+      body.push(
+        "",
+        "github:",
+        `  automatic_reviews: ${renderValue(automaticReviews ?? true)}`,
+        `  writes: ${renderValue(writes ?? false)}`,
+        `  reviews: ${autoApprove === false ? "advisory" : "auto-approve"}`,
+        `  mentions: ${renderValue(mentions ?? true)}`,
+        `  learning: ${
+          learningPrs ? "pull-requests" : proposals ? "proposals" : "disabled"
+        }`,
+        `  artifacts: ${artifactsFlag ? "diagnostics" : "none"}`,
+      );
+    }
+    if (endpoint !== null) {
+      body.push(
+        "",
+        "advanced:",
+        "  endpoint:",
+        `    base_url: ${legacySetupQuoted(endpoint)}`,
+        "    allow_custom_endpoint: true",
+      );
+    }
+  }
+  lines.push(...boundedNotes.map((note) => `# NOTE: ${note}`));
+  lines.push(...body);
+  return {
+    content: `${lines.join("\n")}\n`,
+    carried,
+    notes,
+  };
+}
+
 /** Released setup-v4 uninstall bytes retained for exact managed migration recognition. */
 export function historicalV4UninstallWorkflow(): string {
   return historicalV4UninstallBytes();
@@ -1455,36 +1881,66 @@ export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles();
 
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
-export const SETUP_PULL_REQUEST_BODY =
-  "This pull request adds or updates the ReviewSensei review workflow " +
-  "(setup version 5): a thin caller that follows the operator-managed " +
-  "public v5 git tag, the canonical .reviewsensei.yml configuration, and " +
-  "a manual uninstall-cleanup workflow. " +
-  "Configuration lives in .reviewsensei.yml at the repository root of the " +
-  "default branch. The generated file states the setup-time backend " +
-  "choice and nothing else; every other setting has a package default and " +
-  "the file belongs to you from here on. Setup creates no repository " +
-  "variables and never rewrites the file. " +
-  "The only two optional Actions overrides are REVIEWSENSEI_PROVIDER " +
-  "(inference.backend) and REVIEWSENSEI_MODEL (inference.model); set them " +
-  "under Settings → Secrets and variables → Actions → Variables only to " +
-  "override the file, and the reusable workflow reads them once. " +
-  "The selected backend applies to automatic/manual reviews and " +
-  "authorized mention conversations: local-ollama uses the labelled " +
-  "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, " +
-  "openrouter uses GitHub-hosted OpenRouter, and openai-compatible uses " +
-  "the endpoint and model named in the configuration. Cloud credentials " +
-  "are read by name only: OLLAMA_API_KEY, OPENROUTER_API_KEY, or " +
-  "OPENAI_API_KEY. The App never creates or reads secret values. " +
-  "Upgrading from an earlier setup: the old workflow's repository " +
-  "variables (including REVIEWSENSEI_REVIEW_MODE, " +
-  "REVIEWSENSEI_PROVIDER_MODE, REVIEWSENSEI_GITHUB_WRITES, " +
-  "REVIEWSENSEI_MENTION_REPLIES, and the model variables) and the retired " +
-  ".github/review-sensei/config.yml are no longer read by anything. Move " +
-  "any settings you changed into .reviewsensei.yml, then delete the old " +
-  "variables and file; this is a one-time cleanup, and leaving them in " +
-  "place is harmless but silently ignored. " +
-  "The uninstall workflow creates a reviewable PR that removes these " +
-  "generated files, including .reviewsensei.yml and the retired config " +
-  "location; it does not delete learnings or secrets. No private keys, " +
-  "installation tokens, or webhook bodies are included in these files.";
+/**
+ * Setup pull request body, byte-identical to the Python builder in
+ * review_sensei.hosting.github.setup for the same imported settings.
+ */
+export function setupPullRequestBody(
+  importedSettings: readonly string[] = [],
+): string {
+  const generatedSummary =
+    importedSettings.length > 0
+      ? "The generated file states the setup-time backend choice plus the " +
+        "settings imported from your retired configuration"
+      : "The generated file states the setup-time backend choice and " +
+        "nothing else";
+  let body =
+    "This pull request adds or updates the ReviewSensei review workflow " +
+    "(setup version 5): a thin caller that follows the operator-managed " +
+    "public v5 git tag, the canonical .reviewsensei.yml configuration, and " +
+    "a manual uninstall-cleanup workflow. " +
+    "Configuration lives in .reviewsensei.yml at the repository root of the " +
+    "default branch. " +
+    generatedSummary +
+    "; every other setting has a package default and the file belongs to " +
+    "you from here on. Setup creates no repository variables and never " +
+    "rewrites the file. " +
+    "Approval policy: the package default is github.reviews: auto-approve, " +
+    "so ReviewSensei approves an eligible exact head as part of its normal " +
+    "pipeline. Set github.reviews: blocking to publish and enforce without " +
+    "ever approving, or github.reviews: advisory for findings with no " +
+    "ReviewSensei merge gate. " +
+    "The only two optional Actions overrides are REVIEWSENSEI_PROVIDER " +
+    "(inference.backend) and REVIEWSENSEI_MODEL (inference.model); set them " +
+    "under Settings → Secrets and variables → Actions → Variables only to " +
+    "override the file, and the reusable workflow reads them once. ";
+  if (importedSettings.length > 0) {
+    body +=
+      "This setup read the retired .github/review-sensei/config.yml once " +
+      "and carried these settings into .reviewsensei.yml: " +
+      importedSettings.join(", ") +
+      ". Review the generated file before merging; it is not " +
+      "regenerated afterwards, and nothing reads the retired file once " +
+      "this pull request is merged. ";
+  }
+  body +=
+    "The selected backend applies to automatic/manual reviews and " +
+    "authorized mention conversations: local-ollama uses the labelled " +
+    "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, " +
+    "openrouter uses GitHub-hosted OpenRouter, and openai-compatible uses " +
+    "the endpoint and model named in the configuration. Cloud credentials " +
+    "are read by name only: OLLAMA_API_KEY, OPENROUTER_API_KEY, or " +
+    "OPENAI_API_KEY. The App never creates or reads secret values. " +
+    "Upgrading from an earlier setup: the old workflow's repository " +
+    "variables and the retired .github/review-sensei/config.yml are no " +
+    "longer read by the review runtime. If you want them removed, do it as " +
+    "a separate, explicitly authorized cleanup: delete only the " +
+    "ReviewSensei-managed variables the old workflow read, and leave " +
+    "credentials and unrelated repository settings untouched. Leaving them " +
+    "in place is harmless but silently ignored. " +
+    "The uninstall workflow creates a reviewable PR that removes these " +
+    "generated files, including .reviewsensei.yml and the retired config " +
+    "location; it does not delete learnings or secrets. No private keys, " +
+    "installation tokens, or webhook bodies are included in these files.";
+  return body;
+}

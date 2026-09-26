@@ -41,6 +41,11 @@ from review_sensei.schemas import validate_public_document
 from review_sensei.stages import Stage
 from review_sensei.workflow import ReviewExecutionPlan
 
+try:
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
+except ModuleNotFoundError:
+    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
 +++ b/src/app.py
@@ -140,7 +145,7 @@ class RecordingBroker:
         return f"capability-{capability}"
 
 
-class RunOutcomeWiringTests(unittest.TestCase):
+class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_successful_run_emits_reviewed_outcome(self):
         provider = FakeProvider('{"summary":"Looks good.","comments":[]}')
         run = ReviewService(provider).run(ReviewRequest(diff=DIFF))

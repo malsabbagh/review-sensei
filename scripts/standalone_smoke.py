@@ -352,51 +352,56 @@ def run_smoke(
             standalone_env={"PATH": ""},
         ),
     ]
-    if diff is not None and fixture_response is not None:
-        diff = diff.resolve()
-        fixture_response = fixture_response.resolve()
-        if not diff.is_file() or not fixture_response.is_file():
-            raise SmokeError("fixture diff and response must be regular files")
-        results.append(
-            compare_case(
-                "fixture-review",
-                [
-                    "--provider",
-                    "fixture",
-                    "--fixture-response",
-                    str(fixture_response),
-                    "--diff",
-                    str(diff),
-                ],
+    # The clean-host cases must not inherit the checkout's own configuration.
+    scratch = Path(tempfile.mkdtemp(prefix=".review-sensei-smoke-cwd-", dir=repository))
+    try:
+        if diff is not None and fixture_response is not None:
+            diff = diff.resolve()
+            fixture_response = fixture_response.resolve()
+            if not diff.is_file() or not fixture_response.is_file():
+                raise SmokeError("fixture diff and response must be regular files")
+            results.append(
+                compare_case(
+                    "fixture-review",
+                    [
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(fixture_response),
+                        "--diff",
+                        str(diff),
+                    ],
+                    executable=executable,
+                    python_executable=python_executable,
+                    repository=scratch,
+                )
+            )
+            results.append(
+                compare_case(
+                    "validation-failure",
+                    [
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(fixture_response),
+                        "--diff",
+                        str(scratch / "missing-review-sensei-diff.patch"),
+                    ],
+                    executable=executable,
+                    python_executable=python_executable,
+                    repository=scratch,
+                    expected_returncode=2,
+                )
+            )
+        results.extend(
+            _local_review_cases(
                 executable=executable,
                 python_executable=python_executable,
-                repository=repository,
+                repository=scratch,
             )
         )
-        results.append(
-            compare_case(
-                "validation-failure",
-                [
-                    "--provider",
-                    "fixture",
-                    "--fixture-response",
-                    str(fixture_response),
-                    "--diff",
-                    str(repository / "missing-review-sensei-diff.patch"),
-                ],
-                executable=executable,
-                python_executable=python_executable,
-                repository=repository,
-                expected_returncode=2,
-            )
-        )
-    results.extend(
-        _local_review_cases(
-            executable=executable,
-            python_executable=python_executable,
-            repository=repository,
-        )
-    )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     if base_ref is not None and head_ref is not None:
         # Use a fresh repository-local name so the smoke oracle cannot
         # overwrite or delete a caller's pre-existing output file.

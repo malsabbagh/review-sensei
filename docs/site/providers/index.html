@@ -135,9 +135,9 @@ h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:
     <li><strong>Destination</strong><span>http://127.0.0.1:11434/api (local)</span></li>
     <li><strong>Model</strong><span>qwen3.5:4b</span></li>
     <li><strong>Credential</strong><span>none</span></li>
-    <li><strong>Workflow</strong><span>local · reusable workflow yes</span></li>
+    <li><strong>Workflow</strong><span>inference.backend: local-ollama · reusable workflow yes</span></li>
   </ul>
-  <p>Default installed workflow path via REVIEWSENSEI_PROVIDER_MODE=local and local model variables.</p>
+  <p>Default installed workflow path: inference.backend: local-ollama in .reviewsensei.yml, with the packaged local model unless inference.model names another one.</p>
   <ul class="meta-list">
     <li><strong>CLI</strong><span>yes</span></li>
     <li><strong>evaluate</strong><span>yes</span></li>
@@ -155,9 +155,9 @@ h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:
     <li><strong>Destination</strong><span>https://ollama.com/api (remote)</span></li>
     <li><strong>Model</strong><span>deepseek-v4.1-flash:cloud</span></li>
     <li><strong>Credential</strong><span>OLLAMA_API_KEY</span></li>
-    <li><strong>Workflow</strong><span>cloud · reusable workflow yes</span></li>
+    <li><strong>Workflow</strong><span>inference.backend: cloud-ollama · reusable workflow yes</span></li>
   </ul>
-  <p>Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=cloud and repository OLLAMA_API_KEY secret.</p>
+  <p>Installed workflows opt in with inference.backend: cloud-ollama in .reviewsensei.yml and the repository OLLAMA_API_KEY secret.</p>
   <ul class="meta-list">
     <li><strong>CLI</strong><span>yes</span></li>
     <li><strong>evaluate</strong><span>yes</span></li>
@@ -195,9 +195,9 @@ h2{font-size:clamp(28px,3vw,40px);line-height:1.08;letter-spacing:-.04em;margin:
     <li><strong>Destination</strong><span>https://openrouter.ai/api/v1 (remote)</span></li>
     <li><strong>Model</strong><span>deepseek/deepseek-v4.1-flash</span></li>
     <li><strong>Credential</strong><span>OPENROUTER_API_KEY</span></li>
-    <li><strong>Workflow</strong><span>openrouter · reusable workflow yes</span></li>
+    <li><strong>Workflow</strong><span>inference.backend: openrouter · reusable workflow yes</span></li>
   </ul>
-  <p>Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=openrouter and repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only.</p>
+  <p>Installed workflows opt in with inference.backend: openrouter in .reviewsensei.yml and the repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only.</p>
   <ul class="meta-list">
     <li><strong>CLI</strong><span>yes</span></li>
     <li><strong>evaluate</strong><span>yes</span></li>

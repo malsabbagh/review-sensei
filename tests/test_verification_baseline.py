@@ -266,6 +266,84 @@ class BaselinePlanTests(unittest.TestCase):
         self.assertEqual(scope.status, "incomplete-baseline")
         self.assertEqual(scope.coverage_mode, "fallback-full")
 
+    def test_narrowed_path_projection_requires_a_fallback_full_pass(self) -> None:
+        # A persisted projection that dropped path evidence marks coverage
+        # incomplete (ADR 0053). Reading it as a compatible incremental
+        # baseline would classify a dropped path against history the record no
+        # longer carries, so it degrades to a fallback-full pass instead.
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = replace(
+            baseline_from_review(_result(_comment()), cache_key=_key(), policy=policy),
+            coverage_complete=False,
+        )
+        self.assertTrue(baseline.complete)
+        self.assertEqual(
+            evaluate_baseline_compatibility(
+                baseline, current_key=_key(head_sha=SHA_C), policy=policy
+            ),
+            "coverage-incomplete",
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+        )
+        self.assertEqual(scope.status, "incomplete-baseline")
+        self.assertEqual(scope.invalidation_reason, "coverage-incomplete")
+        self.assertEqual(scope.coverage_mode, "fallback-full")
+        self.assertIsNone(scope.incremental)
+        self.assertFalse(scope.late_admission_required)
+
+    def test_narrowed_projection_never_reads_a_dropped_path_as_unreviewed(
+        self,
+    ) -> None:
+        # The one direction ADR 0053 forbids is reading missing path evidence
+        # as success. Without the coverage mark the same record is compatible
+        # and an out-of-scope finding on the dropped path classifies as
+        # pre-existing; with the mark the round falls back and that finding
+        # stays human-adjudicated instead.
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=policy,
+            reviewed_paths=("src/app.py", "src/context.py"),
+        )
+        self.assertIn("src/context.py", baseline.reviewed_paths)
+        dropped = replace(baseline, reviewed_paths=())
+        comment = _comment(path="src/context.py", symbol="load")
+        changed_paths = ("src/helper.py",)
+        trusted_scope = plan_verification_scope(
+            policy=policy,
+            baseline=dropped,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed_paths,
+        )
+        self.assertEqual(trusted_scope.status, "verify")
+        unmarked = classify_later_finding(
+            comment,
+            baseline=dropped,
+            scope=trusted_scope,
+            changed_paths=changed_paths,
+        )
+        self.assertEqual(unmarked.attribution, "pre-existing")
+        narrowed = replace(dropped, coverage_complete=False)
+        narrowed_scope = plan_verification_scope(
+            policy=policy,
+            baseline=narrowed,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed_paths,
+        )
+        classification = classify_later_finding(
+            comment,
+            baseline=narrowed,
+            scope=narrowed_scope,
+            changed_paths=changed_paths,
+        )
+        self.assertEqual(classification.classification, "needs-human")
+        self.assertNotEqual(classification.attribution, "pre-existing")
+
     def test_baseline_required_scope_reports_changed_paths(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         scope = plan_verification_scope(

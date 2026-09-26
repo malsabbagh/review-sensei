@@ -21,7 +21,7 @@ consumer_image=debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da
 docker run --rm --platform "$platform" \
   --user "$(id -u):$(id -g)" \
   --volume "$root:/workspace" --workdir /workspace \
-  --env "TARGET=$target" --env HOME=/tmp --env PYTHONPATH=src \
+  --env "TARGET=$target" --env HOME=/tmp --env PYTHONPATH=/workspace/src \
   "$build_image" bash -euo pipefail -c '
     test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.36"
     python -m venv /tmp/review-sensei-release-venv
@@ -46,30 +46,35 @@ docker run --rm --platform "$platform" --network none \
   --env "TARGET=$target" --env HOME=/tmp \
   "$consumer_image" sh -eu -c '
     test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.36"
-    executable="dist/standalone/$TARGET/review-sensei/review-sensei"
+    executable=/workspace/dist/standalone/$TARGET/review-sensei/review-sensei
+    # The checkout carries its own .reviewsensei.yml policy, which must not
+    # leak into the clean-consumer contract: run each review from an empty
+    # directory with no configuration above it.
+    scratch=$(mktemp -d /var/tmp/review-sensei-consumer-XXXXXX)
+    cd "$scratch"
     "$executable" --version
     "$executable" plan \
-      --diff evaluation/v1/diffs/off-by-one.patch \
+      --diff /workspace/evaluation/v1/diffs/off-by-one.patch \
       --provider ollama --json >/dev/null
     # The local review contract must hold with no host identity, no Python,
     # and no network: one required fix exits 1, and the same completed run
     # under the operational contract exits 0.
     set +e
     "$executable" --provider fixture \
-      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
-      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --fixture-response /workspace/tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff /workspace/tests/fixtures/standalone-smoke/blocking-review.patch \
       --no-learning-proposals --format markdown >/tmp/review.md
     review_status=$?
     "$executable" --provider fixture \
-      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
-      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --fixture-response /workspace/tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff /workspace/tests/fixtures/standalone-smoke/blocking-review.patch \
       --no-learning-proposals --exit-semantics operational >/dev/null
     operational_status=$?
     # One explicit persistent-local session must also start with no ledger or
     # artifact path supplied, storing its state under the platform default.
     "$executable" --provider fixture \
-      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
-      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --fixture-response /workspace/tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff /workspace/tests/fixtures/standalone-smoke/blocking-review.patch \
       --no-learning-proposals --local-session >/dev/null
     session_status=$?
     set -e

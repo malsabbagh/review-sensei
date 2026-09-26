@@ -174,7 +174,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
       Pick a route, understand the control matrix, and know what writes are enabled before you merge.
     </p>
     <p class="note">
-      <strong>App installation alone does not run reviews.</strong> The GitHub App opens a setup pull request with workflows and repository variables. You still choose a provider, runner, and which write switches to enable.
+      <strong>App installation alone does not run reviews.</strong> The GitHub App opens a setup pull request with the caller workflow, the uninstall workflow, and <code>.reviewsensei.yml</code>. You still choose a provider, runner, and which publication policies to enable.
     </p>
   </div>
 </section>
@@ -184,14 +184,14 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
     <div class="section-head">
       <div class="kicker">Operational controls</div>
       <h2>Control matrix</h2>
-      <p>Setup-v4 exposes nine independent switches. All default to <code>false</code> except automatic approval (<code>REVIEWSENSEI_AUTO_APPROVE</code>, default <code>true</code> when publication is enabled).</p>
+      <p>Setup-v5 writes no repository variables. Every policy lives in <code>.reviewsensei.yml</code> on the default branch, and publication stays off until you enable it.</p>
     </div>
     <div class="card matrix-wrap">
       <table class="matrix" aria-label="ReviewSensei operational control matrix">
         <thead>
           <tr>
             <th scope="col">Capability</th>
-            <th scope="col">Repository variable</th>
+            <th scope="col">.reviewsensei.yml setting</th>
             <th scope="col">Default</th>
             <th scope="col">When enabled</th>
             <th scope="col">Observation-only example</th>
@@ -200,57 +200,50 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
         <tbody>
           <tr>
             <td><strong>Analysis</strong></td>
-            <td><code>REVIEWSENSEI_AUTO_REVIEW</code></td>
-            <td class="no">false</td>
+            <td><code>github.automatic_reviews</code></td>
+            <td class="opt">true</td>
             <td>Runs provider inference on eligible same-repository pull requests (skips drafts).</td>
-            <td>Leave <code>false</code> and dispatch <strong>ReviewSensei review</strong> manually, or use CLI <code>plan</code> / <code>doctor</code>.</td>
+            <td>Set <code>false</code> and dispatch <strong>ReviewSensei review</strong> manually, or use CLI <code>plan</code> / <code>doctor</code>.</td>
           </tr>
           <tr>
             <td><strong>Comment publication</strong></td>
-            <td><code>REVIEWSENSEI_GITHUB_WRITES</code></td>
+            <td><code>github.writes</code></td>
             <td class="no">false</td>
-            <td>Publishes validated inline comments and review summaries to GitHub.</td>
-            <td>Run analysis with writes disabled: provider calls occur; GitHub receives no review body.</td>
+            <td>Publishes validated inline comments, the review summary, and the <code>ReviewSensei</code> check run.</td>
+            <td>Run analysis with writes disabled: provider calls occur; GitHub receives no review body and no check run.</td>
           </tr>
           <tr>
-            <td><strong>Automatic approval / request changes</strong></td>
-            <td><code>REVIEWSENSEI_AUTO_APPROVE</code></td>
-            <td class="opt">true*</td>
-            <td>Blocking findings publish as <code>REQUEST_CHANGES</code>; eligible clean reviews may receive <code>APPROVE</code>. Set <code>false</code> for comment-only publication.</td>
-            <td>Disable with <code>REVIEWSENSEI_AUTO_APPROVE=false</code> while keeping publication on for comment-only reviews.</td>
+            <td><strong>Review policy / automatic approval</strong></td>
+            <td><code>github.reviews</code></td>
+            <td class="opt">auto-approve</td>
+            <td>Publishes one exact-head <code>COMMENT</code> review; eligible clean heads may receive <code>APPROVE</code>. <code>blocking</code> publishes and enforces through the <code>ReviewSensei</code> check run without approving and emits no persistent request changes review as a second gate; <code>advisory</code> imposes no ReviewSensei merge gate.</td>
+            <td>Set <code>blocking</code> for enforcement without automatic approval, or <code>advisory</code> for comment-only publication with a neutral check.</td>
           </tr>
           <tr>
-            <td><strong>Learning proposal generation</strong></td>
-            <td><code>REVIEWSENSEI_LEARNING_PROPOSALS</code></td>
-            <td class="no">false</td>
-            <td>Model-generated learning proposals are produced during review runs.</td>
+            <td><strong>Learning</strong></td>
+            <td><code>github.learning</code></td>
+            <td class="no">disabled</td>
+            <td><code>proposals</code> enables learning proposal generation during review runs; <code>pull-requests</code> additionally enables learning PR publication, opening or refreshing a draft learning pull request on the default branch.</td>
             <td>Leave disabled; learnings remain ordinary repository files you manage manually.</td>
           </tr>
           <tr>
-            <td><strong>Learning PR publication</strong></td>
-            <td><code>REVIEWSENSEI_LEARNING_PRS</code></td>
-            <td class="no">false</td>
-            <td>Opens or refreshes a draft learning pull request on the default branch.</td>
-            <td>Enable proposals without PR publication to inspect proposal files locally from workflow logs.</td>
-          </tr>
-          <tr>
             <td><strong>Conversations</strong></td>
-            <td><code>REVIEWSENSEI_MENTION_REPLIES</code></td>
-            <td class="no">false</td>
-            <td>Authorized <code>@sensei</code> mentions receive bounded thread replies (requires <code>REVIEWSENSEI_GITHUB_WRITES=true</code>). This switch controls only conversational replies: the maintainer commands <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> run whenever <code>REVIEWSENSEI_GITHUB_WRITES=true</code> and the comment body matches the caller workflow's <code>@sensei</code> routing gate. Those caller checks route the run; the mutation is re-authorized inside the reusable workflow against the broker-attested actor and the session ledger before any write.</td>
-            <td>Leave disabled to skip conversational replies; mention events are ignored for reply publication. This switch does not disable commands: the maintainer surface <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> stays available whenever <code>REVIEWSENSEI_GITHUB_WRITES=true</code> — <code>@sensei review status</code> is read-only but still routes through the command job against the broker-attested actor. See the <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">installation guide</a> for the full grammar.</td>
+            <td><code>github.mentions</code></td>
+            <td class="opt">true</td>
+            <td>Authorized <code>@sensei</code> mentions receive bounded thread replies (requires <code>github.writes: true</code>). This setting controls only conversational replies: the maintainer commands <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> run whenever <code>github.writes: true</code> and the comment body matches the caller workflow's <code>@sensei</code> routing gate. Those caller checks route the run; the mutation is re-authorized inside the reusable workflow against the broker-attested actor and the session ledger before any write.</td>
+            <td>Set <code>false</code> to skip conversational replies; mention events are ignored for reply publication. This setting does not disable commands: the maintainer surface <code>@sensei review status|pause|continue|reenroll</code>, <code>@sensei verify</code>, and <code>@sensei dismiss|defer|accept-risk</code> stays available whenever <code>github.writes: true</code> — <code>@sensei review status</code> is read-only but still routes through the command job against the broker-attested actor. See the <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md">installation guide</a> for the full grammar.</td>
           </tr>
           <tr>
             <td><strong>Artifact retention</strong></td>
-            <td><code>REVIEWSENSEI_UPLOAD_ARTIFACTS</code></td>
-            <td class="no">false</td>
-            <td>Uploads <code>review.json</code> as GitHub Actions artifacts.</td>
-            <td>Leave disabled; validated results stay inside the job unless you add your own upload step.</td>
+            <td><code>github.artifacts</code></td>
+            <td class="no">none</td>
+            <td><code>diagnostics</code> uploads <code>review.json</code> as a GitHub Actions artifact.</td>
+            <td>Leave <code>none</code>; validated results stay inside the job unless you add your own upload step.</td>
           </tr>
         </tbody>
       </table>
       <p class="note" style="margin-top:16px;margin-bottom:0">
-        *Automatic approval applies only when automatic review <em>and</em> GitHub writes are enabled and all eligibility gates pass.
+        Automatic approval applies only when automatic review <em>and</em> GitHub writes are enabled and all eligibility gates pass; the default policy is <code>github.reviews: auto-approve</code>.
       </p>
     </div>
   </div>
@@ -276,50 +269,68 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
         <p style="color:#a4a8a5">Install the ReviewSensei GitHub App on selected repositories. The App opens a setup pull request; review execution stays in your GitHub Actions environment.</p>
         <dl class="meta-grid">
           <div class="meta-item"><dt>Execution location</dt><dd>Your repository's GitHub Actions runners — <code>ubuntu-latest</code> (cloud) or labelled self-hosted runner (<code>self-hosted, linux, x64, ollama</code>) for local mode.</dd></div>
-          <div class="meta-item"><dt>Provider destination</dt><dd><code>http://127.0.0.1:11434/api</code> (local, default), <code>https://ollama.com/api</code> (cloud, explicit opt-in), or <code>https://openrouter.ai/api/v1</code> (<code>REVIEWSENSEI_PROVIDER_MODE=openrouter</code>).</dd></div>
-          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_MODEL</code>, <code>REVIEWSENSEI_LOCAL_MODEL</code>, <code>REVIEWSENSEI_CLOUD_MODEL</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
+          <div class="meta-item"><dt>Provider destination</dt><dd><code>http://127.0.0.1:11434/api</code> (local, default), <code>https://ollama.com/api</code> (cloud, explicit opt-in), or <code>https://openrouter.ai/api/v1</code> (<code>inference.backend: openrouter</code>).</dd></div>
+          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), and the optional <code>REVIEWSENSEI_PROVIDER</code> / <code>REVIEWSENSEI_MODEL</code> overrides — no other variable reaches a run.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>You pay for Actions minutes (or self-hosted hardware) and your Ollama, Ollama Cloud, or OpenRouter usage.</dd></div>
-          <div class="meta-item"><dt>Enabled writes (defaults)</dt><dd>Setup PR only until merged. Generated variables default all write switches to <code>false</code>.</dd></div>
-          <div class="meta-item"><dt>First-success output</dt><dd>One App-authored review with inline comments on an eligible PR after enabling <code>REVIEWSENSEI_AUTO_REVIEW=true</code> and <code>REVIEWSENSEI_GITHUB_WRITES=true</code>.</dd></div>
+          <div class="meta-item"><dt>Enabled writes (defaults)</dt><dd>The setup pull request writes <code>.reviewsensei.yml</code> with the setup-time backend choice and nothing else; <code>github.writes</code> stays <code>false</code>, so nothing publishes until you enable it.</dd></div>
+          <div class="meta-item"><dt>First-success output</dt><dd>One App-authored review with inline comments on an eligible PR after you set <code>github.writes: true</code> in <code>.reviewsensei.yml</code> (automatic reviews are on by default).</dd></div>
         </dl>
         <h4>Setup steps</h4>
         <ol class="steps">
           <li><strong>Install the App</strong> on selected repositories.</li>
-          <li><strong>Merge</strong> the generated setup pull request.</li>
-          <li><strong>Configure provider mode</strong> via repository variables. Cloud mode requires <code>OLLAMA_API_KEY</code>; OpenRouter mode requires <code>OPENROUTER_API_KEY</code>.</li>
+          <li><strong>Merge</strong> the generated setup pull request; if a retired configuration is present, review the one-time import it carried into <code>.reviewsensei.yml</code>, then delete the retired file.</li>
+          <li><strong>Choose the backend</strong> in <code>.reviewsensei.yml</code>. Cloud mode requires <code>OLLAMA_API_KEY</code>; OpenRouter requires <code>OPENROUTER_API_KEY</code>.</li>
           <li><strong>Enable controls deliberately</strong> — analysis first, then publication.</li>
         </ol>
         <div class="command-wrap">
           <pre class="command" id="cmd-app"># Install the ReviewSensei GitHub App
 https://github.com/apps/reviewsensei
 
-REVIEWSENSEI_AUTO_REVIEW=true
-REVIEWSENSEI_GITHUB_WRITES=true
-REVIEWSENSEI_VERSION=0.6.9</pre>
+# .reviewsensei.yml, merged with the setup pull request
+schema: 1
+inference:
+  backend: cloud-ollama        # or local-ollama (default), openrouter
+github:
+  automatic_reviews: true      # analyze eligible pull requests
+  writes: true                 # publish findings and the check run
+  reviews: auto-approve        # or blocking / advisory
+  mentions: true               # authorized @sensei conversation
+</pre>
           <button class="copy" type="button" data-copy="cmd-app" aria-label="Copy App-assisted setup commands">Copy</button>
         </div>
         <h4>Cleanup / disable / uninstall</h4>
-        <p style="color:#a4a8a5">Run the generated <strong>Remove ReviewSensei setup</strong> workflow. Uninstall the App from GitHub settings to stop new setup deliveries.</p>
+        <p style="color:#a4a8a5">Run the generated <strong>Remove ReviewSensei setup</strong> workflow. Uninstall the App from GitHub settings to stop new setup deliveries, and delete <code>.reviewsensei.yml</code> if you no longer want ReviewSensei policy in the repository.</p>
       </section>
 
       <section class="path-panel" id="panel-actions" role="tabpanel" aria-labelledby="tab-actions" hidden>
         <h3>Manual Actions setup</h3>
-        <p style="color:#a4a8a5">Copy the supported example workflow without installing the GitHub App. You own the workflow, runner labels, secrets, and every control switch.</p>
+        <p style="color:#a4a8a5">Copy the supported example workflow without installing the GitHub App. You own the workflow, runner labels, secrets, and every control in <code>.reviewsensei.yml</code>.</p>
         <dl class="meta-grid">
           <div class="meta-item"><dt>Execution location</dt><dd>GitHub Actions on your runner. Local mode requires self-hosted runner labelled <code>ollama</code>.</dd></div>
           <div class="meta-item"><dt>Provider destination</dt><dd>Local: <code>http://127.0.0.1:11434/api</code>. Cloud: <code>https://ollama.com/api</code>. OpenRouter: <code>https://openrouter.ai/api/v1</code>.</dd></div>
-          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code>, <code>OPENROUTER_API_KEY</code>, <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_MODEL</code>, <code>REVIEWSENSEI_VERSION</code>.</dd></div>
+          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), <code>OPENAI_API_KEY</code> (OpenAI-compatible), and the optional <code>REVIEWSENSEI_PROVIDER</code> / <code>REVIEWSENSEI_MODEL</code> overrides — the caller reads no repository variables.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>Actions minutes or self-hosted capacity plus provider inference.</dd></div>
-          <div class="meta-item"><dt>Enabled writes</dt><dd>Controlled by repository variables; defaults match setup-v4.</dd></div>
-          <div class="meta-item"><dt>First-success output</dt><dd>Validated <code>review.json</code> artifact (if upload enabled) and a review on the PR when publication is enabled.</dd></div>
+          <div class="meta-item"><dt>Enabled writes</dt><dd><code>github.writes</code> in <code>.reviewsensei.yml</code>; defaults to <code>false</code>, so nothing publishes until you enable it.</dd></div>
+          <div class="meta-item"><dt>First-success output</dt><dd>A review on the PR once <code>github.writes: true</code>, and a <code>review.json</code> artifact when <code>github.artifacts: diagnostics</code>.</dd></div>
         </dl>
         <div class="command-wrap">
-          <pre class="command" id="cmd-actions"># examples/github-actions/review-sensei-review.yml
-REVIEWSENSEI_PROVIDER_MODE=local
-REVIEWSENSEI_VERSION=0.6.9
-REVIEWSENSEI_AUTO_REVIEW=false
-REVIEWSENSEI_GITHUB_WRITES=false
-OLLAMA_API_KEY</pre>
+          <pre class="command" id="cmd-actions"># examples/github-actions/review-sensei-review.yml — pinned to the operator-managed v5 tag
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+jobs:
+  review:
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+# .reviewsensei.yml — the full control surface
+schema: 1
+github:
+  automatic_reviews: true
+  writes: true
+  reviews: auto-approve</pre>
           <button class="copy" type="button" data-copy="cmd-actions" aria-label="Copy Manual Actions configuration">Copy</button>
         </div>
         <div class="command-wrap">
@@ -340,7 +351,7 @@ review-sensei doctor --json</pre>
           <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), <code>OPENAI_API_KEY</code> (OpenAI-compatible), <code>REVIEWSENSEI_PROVIDER</code>, <code>REVIEWSENSEI_MODEL</code>.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>Your machine plus model inference. <code>doctor</code> and <code>plan</code> perform zero provider calls.</dd></div>
           <div class="meta-item"><dt>Enabled writes</dt><dd>None from CLI alone.</dd></div>
-          <div class="meta-item"><dt>First-success output</dt><dd><code>review-sensei doctor --json</code> reports <code>status: pass</code>; a full review writes readable text by default (<code>--format markdown</code> or <code>--format json</code> to change it) and exits 0, 1, or 2.</dd></div>
+          <div class="meta-item"><dt>First-success output</dt><dd><code>review-sensei doctor --json</code> reports every check with its status and exits <code>0</code> when the configured checks pass (<code>2</code> when one needs operator action — see <code>docs/diagnostics.md</code>); a full review writes readable text by default (<code>--format markdown</code> or <code>--format json</code> to change it) and exits 0, 1, or 2.</dd></div>
         </dl>
         <div class="command-wrap">
           <pre class="command" id="cmd-cli-pip">pip install review-sensei==0.6.9
@@ -373,7 +384,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
         <p class="note" style="margin-top:24px"><strong>JavaScript is disabled.</strong> Expand each path below.</p>
         <details class="path-accordion" open>
           <summary>App-assisted GitHub reviews</summary>
-          <div class="accordion-body"><p style="color:#a4a8a5">Install the App, merge setup PR, set <code>REVIEWSENSEI_VERSION=0.6.9</code>.</p></div>
+          <div class="accordion-body"><p style="color:#a4a8a5">Install the App, merge the setup PR, then review <code>.reviewsensei.yml</code> — writes stay <code>false</code> until you enable them.</p></div>
         </details>
         <details class="path-accordion">
           <summary>Manual Actions setup</summary>

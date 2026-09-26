@@ -2,6 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-26
+Last amended: 2026-09-26
 GitHub Issue: #181
 Pull Request: [#187](https://github.com/malsabbagh/review-sensei/pull/187)
 Owners/Reviewers: Maintainers
@@ -231,6 +232,20 @@ directions, so a rollback does not duplicate or revoke an approval by itself.
 - Hosted evidence after rollout: check identity readback, a required-check
   gating observation, an interrupted-run observation, and an App-authored
   pull-request observation.
+
+## Amendment 2026-09-26: branch-surface reads
+
+The Decision section said ReviewSensei "never reads or changes branch
+protection". [ADR 0056](0056-host-fact-placement-and-honest-approval-presentation.md),
+adopted in the same slice, has the publisher read the branch's
+conversation-resolution requirement - branch rules, then classic branch
+protection - before it opens optional inline threads, treating an unreadable or
+unexpected response as unknown, which fails closed. The accurate boundary,
+which `doctor` and the installation guide now state, is that the App requests
+no `Administration` permission and never *changes* branch protection; the
+conversation-resolution probe exists only for placement, and no enforcement or
+approval decision reads branch protection. No other decision in this record
+changes.
 
 ## Links
 

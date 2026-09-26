@@ -47,22 +47,34 @@ Repair actions:
 | `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
 | `compatibility` action | Supply a validated compatibility manifest path. |
 
-Optional `--network` probes are read-only GETs. Example local output:
+Optional `--network` probes are read-only GETs. Example output from a bare
+directory with only the packaged defaults — no repository, session ledger, or
+network probe — so the automated-review admission check reports `action` and
+doctor exits `2`:
 
 ```text
-status: pass
+status: action
 version: 0.6.9
 pass: package — 0.6.9
 pass: packaged-assets — default stages and categories available
 pass: provider-mode — local (offline check)
+pass: review-convergence — mode=merge-focused enforcement=publication compatibility=explicit-opt-in rounds=uncapped failed_attempts=6
+action: automation-admission — operator mode cannot report automated-review admission without a session ledger
+pass: verification-scope — status=baseline-required round=initial late_admission=False reason=missing-baseline
 pass: stages — packaged default stages selected
 pass: categories — packaged default categories selected
 pass: context — no supplemental context configured
-pass: endpoint — local runner endpoint reachable
-pass: model — configured model is installed
-unknown: repository-metadata — repository metadata not checked (repository not supplied)
-unknown: compatibility — compatibility evidence not supplied
+pass: symbol-context — opt-in trusted-base symbol context is disabled by default
+pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei requests no Administration permission and never changes branch protection), the App needs Checks: write, and GitHub never runs required checks on App-authored pull requests
+unknown: network — not checked (offline mode)
 ```
+
+`status: pass` (exit `0`) appears only when every configured check passes —
+including `automation-admission`, which reports `pass` when the session ledger
+for the configured repository and pull request admits the round. `review-gate`
+reports `pass` as guidance that the gate contract is understood, not as proof
+that branch protection is configured. See
+[`docs/diagnostics.md`](diagnostics.md) for the exit-code contract.
 
 Preview a review without provider or GitHub writes:
 
@@ -254,8 +266,9 @@ uses the operator-managed `v5` git tag directly. The Worker validates that tag
 during installation/reconciliation, and the broker resolves the same tag when
 authorizing a run (using the public Git ref advertisement before a bounded REST
 fallback on GitHub.com). That workflow
-tries to install the exact `REVIEWSENSEI_VERSION` from PyPI in a separate
-`RUNNER_TEMP` environment. When that exact distribution/version is unavailable,
+installs the exact release its workflow commit belongs to (the version its
+`pyproject.toml` declares) from PyPI in a separate `RUNNER_TEMP` environment;
+no repository variable selects it. When that exact distribution is unavailable,
 it installs from the public ReviewSensei repository at the executing workflow
 commit SHA;
 other PyPI failures remain fatal, including network and authentication errors.
@@ -281,13 +294,73 @@ optional Actions overrides the product consumes are `REVIEWSENSEI_PROVIDER`
 (`inference.backend`) and `REVIEWSENSEI_MODEL` (`inference.model`); the
 reusable workflow maps them once from the trusted policy commit, and no other
 variable, boolean, or path reaches a run. A repository that still carries a
-retired managed variable (`REVIEWSENSEI_AUTO_REVIEW`,
-`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_GITHUB_WRITES`,
-`REVIEWSENSEI_MENTION_REPLIES`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
-`REVIEWSENSEI_LEARNING_PRS`, `REVIEWSENSEI_UPLOAD_ARTIFACTS`,
-`REVIEWSENSEI_REVIEW_MODE`, `REVIEWSENSEI_VERSION`,
-`REVIEWSENSEI_STAGES_DIR`, or `REVIEWSENSEI_CATEGORIES_DIR`) sees it reported
-with its `.reviewsensei.yml` replacement on each run and otherwise ignored.
+retired managed variable sees it reported with its `.reviewsensei.yml`
+replacement on each run and otherwise ignored; the complete list and the
+separately authorized cleanup are in Retiring old repository variables below.
+
+### Retiring old repository variables
+
+The reviewed replacement keeps every behavioral decision in `.reviewsensei.yml`,
+and no run reads an obsolete managed variable as configuration: a retired
+variable has no dual-read precedence to outlive the transition. A hosted run
+reports each retired variable it still sees, once, with the replacement that
+carries its meaning now, and reads nothing else from it. Removal is a separate,
+authorized cleanup that the operator performs after reviewing the list below
+against the repository's own settings; no setup, App, or workflow run deletes a
+repository variable, and no credential or unrelated repository setting is
+touched.
+
+The complete list of managed repository variables this cleanup may delete, each
+with the replacement a run reports for it, is:
+
+| Retired variable | Reported replacement |
+| --- | --- |
+| `REVIEWSENSEI_PROVIDER_MODE` | select `inference.backend` ('local-ollama' or 'cloud-ollama') or set `REVIEWSENSEI_PROVIDER` |
+| `REVIEWSENSEI_PROVIDER_PROFILE` | select `inference.backend` and set the `advanced.endpoint` fields in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LOCAL_MODEL` | set `inference.model` in `.reviewsensei.yml` or `REVIEWSENSEI_MODEL` |
+| `REVIEWSENSEI_CLOUD_MODEL` | set `inference.model` in `.reviewsensei.yml` or `REVIEWSENSEI_MODEL` |
+| `REVIEWSENSEI_REVIEW_MODE` | one evidence-focused pipeline is the only engine; set `github.reviews` |
+| `REVIEWSENSEI_AUTO_REVIEW` | set `github.automatic_reviews` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_GITHUB_WRITES` | set `github.writes` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_AUTO_APPROVE` | set `github.reviews` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_MENTION_REPLIES` | set `github.mentions` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LEARNING_PROPOSALS` | set `github.learning` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LEARNING_PRS` | set `github.learning: pull-requests` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_UPLOAD_ARTIFACTS` | set `github.artifacts: diagnostics` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_STAGES_DIR` | place stage JSON files under `.reviewsensei/stages/` |
+| `REVIEWSENSEI_CATEGORIES_DIR` | place category JSON files under `.reviewsensei/categories/` |
+| `REVIEWSENSEI_VERSION` | release/installer identity; remove it |
+
+After that review, the cleanup is exactly these repository-variable deletions:
+
+```bash
+gh variable delete REVIEWSENSEI_PROVIDER_MODE
+gh variable delete REVIEWSENSEI_PROVIDER_PROFILE
+gh variable delete REVIEWSENSEI_LOCAL_MODEL
+gh variable delete REVIEWSENSEI_CLOUD_MODEL
+gh variable delete REVIEWSENSEI_REVIEW_MODE
+gh variable delete REVIEWSENSEI_AUTO_REVIEW
+gh variable delete REVIEWSENSEI_GITHUB_WRITES
+gh variable delete REVIEWSENSEI_AUTO_APPROVE
+gh variable delete REVIEWSENSEI_MENTION_REPLIES
+gh variable delete REVIEWSENSEI_LEARNING_PROPOSALS
+gh variable delete REVIEWSENSEI_LEARNING_PRS
+gh variable delete REVIEWSENSEI_UPLOAD_ARTIFACTS
+gh variable delete REVIEWSENSEI_STAGES_DIR
+gh variable delete REVIEWSENSEI_CATEGORIES_DIR
+gh variable delete REVIEWSENSEI_VERSION
+```
+
+Two variables are deliberately absent. `REVIEWSENSEI_PROVIDER`
+(`inference.backend`) and `REVIEWSENSEI_MODEL` (`inference.model`) are the only
+supported Actions overrides and remain supported, so they are not retired and
+must not be deleted. Credentials are secrets, not variables: nothing here
+deletes `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or an App
+private key, and no `gh secret delete` command belongs to this cleanup.
+Unscoped process settings such as `AUTO_REVIEW`, `AUTO_APPROVE`,
+`GITHUB_WRITES`, `MENTION_REPLIES`, `OLLAMA_MODEL`, and
+`OPENROUTER_UPSTREAM_PROVIDER` are reported by `review-sensei config` and are
+not repository variables, so they are not part of this cleanup either.
 
 Stage and category documents live in the conventional directories
 `.reviewsensei/stages/` and `.reviewsensei/categories/` beside the
@@ -359,8 +432,9 @@ or `github.reviews: advisory` (no ReviewSensei merge gate and no approval) in
 `.reviewsensei.yml` to select another policy instead. Enforcement is
 one stable `ReviewSensei` check run bound to the reviewed head and to the App
 that produced it; mark it required in branch protection (an administrator
-action - ReviewSensei never reads or changes branch protection, and `doctor`
-reports the check identity and producing App) for it to gate merges. The
+action - ReviewSensei requests no Administration permission and never changes
+branch protection, and `doctor` reports the check identity and producing App)
+for it to gate merges. The
 conclusion is `success` for a complete review with no required fixes, `failure`
 when required fixes remain, `action_required` for a partial, incomplete, or
 unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run that
@@ -406,6 +480,207 @@ migration PR that updates only those files to setup-v5. It also migrates a
 managed v4/v5 caller that follows an older tag. It skips custom or future
 versions for manual review, preserves learnings and repository secrets, and
 never creates, reads, or rewrites a repository variable.
+
+## Session state: upgrade, rollback, and in-flight runs
+
+Review state persists in three places, and every transition below respects all
+three: the session ledger record carried by the broker-attested comment (or the
+local session file), the repository learnings under
+`.github/review-sensei/learnings`, and the Worker's Durable Object namespaces
+(`DeliveryLedger`, `BrokerLedger`, and the enrollment witness). No upgrade or
+rollback deletes any of them - learnings, review evidence, and the Durable
+Object migration history are part of the compatibility contract - and the
+Worker procedure in
+[`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md) redeploys a
+known commit with the same Wrangler configuration and migration history instead
+of resetting a namespace. Multi-repository continuation and alarm recovery are
+preserved as deployed: each alarm reconciles one repository, and the recovery
+state lives in Durable Object storage that no engine transition rewrites.
+
+### Upgrading a running installation
+
+The current engine reads every record vintage of the durable ledger, including
+records that predate the convergence envelope, and the next checkpoint rewrites
+a loaded record in the current shape. A local operator-ledger file still in the
+bounded v0.1 legacy shape migrates on load; a GitHub-carried marker whose shape
+is not recognized fails closed rather than being reinterpreted. Missing history
+is never read as success; the transition rules are:
+
+- **A record without `convergence_history`** loads, and its next checkpoint
+  adds the integrity-covered envelope in place
+  (`test_legacy_record_gains_a_covered_history_in_place`).
+- **An F2 three-finding envelope** stays read-compatible; a later checkpoint
+  rewrites the two-finding/three-marker projection, and an integrity-valid
+  record is never truncated at load (`test_f2_three_finding_history_remains_read_compatible`).
+- **Completed counters at any value**, including past the retired 8/32
+  thresholds, are diagnostic history: no count gate refuses a round, a session
+  that was paused for exhaustion is admitted on the next eligible trigger, and
+  a manual pause keeps blocking until continued
+  (`test_old_exhausted_session_admits_a_changed_head_resume`,
+  `test_manual_pause_and_dispositions_survive_the_upgrade`). The session keeps
+  its identity: a later head starts the same logical review, not a fresh one.
+- **Retained continuation grants** are kept verbatim as inert evidence, bounded
+  and digest-protected; no command grants new allowances
+  (`test_retained_continuation_grants_round_trip_verbatim`).
+- **Findings, dispositions, and the baseline** are retained: the persisted
+  baseline feeds the next round's classification, dispositions remain
+  authoritative for approval eligibility, and the transaction record keeps its
+  phase and result digest while never storing the result body
+  (`test_checkpoint_persists_completed_baseline_for_a_fresh_ledger`).
+- **An expired, witness-only, or integrity-failed record** fails closed and
+  names `@sensei review reenroll`; established but lost state requires that
+  repair and is never reinitialized into an empty clean review
+  (`test_expired_established_history_never_reopens_an_initial_allowance`).
+
+### Rolling back
+
+A rollback rolls the engine version back; it never edits or deletes persisted
+state, and it never authorizes publishing from a record that failed the current
+integrity or shape checks. Compatibility holds in one direction only, and the
+engine keeps it:
+
+- A reader released before a writer change still reads what the current engine
+  writes: an F2 reader accepts the F3 projection, and a reader released before
+  the narrowed path projection treats a narrowed record as an incomplete
+  baseline and plans a fallback-full pass
+  (`test_narrowed_path_projection_requires_a_fallback_full_pass`).
+- A narrowed record never authorizes publishing from the narrowed scope under
+  any reader. When the envelope bound forces the writer to drop persisted path
+  evidence, it clears both completeness flags, so the stored baseline reports
+  itself incomplete instead of reading as a complete reviewed scope
+  (`test_narrowed_projection_never_reads_a_dropped_path_as_unreviewed`).
+- `publication_suppressed` is terminal for that transaction: a retry returns
+  the handoff with its transaction identity and performs no new inference, and
+  only a later head or an authenticated reenrollment creates the new
+  transaction (`test_publication_suppression_is_terminal_and_idempotent`).
+- Rolling the code back does not reset counters, grants, or identity, and it
+  does not reintroduce the retired count policy; that requires a forward
+  version change ([ADR 0056](adr/0056-remove-pr-wide-review-count-caps.md)).
+
+### In-flight runs
+
+A run executes the release identity it started with: the reusable workflow
+installs the version its own workflow commit declares and proves that identity
+against the compatibility manifest, so moving a channel tag does not
+retroactively change an in-flight or rerun job. A job whose broker or identity
+check cannot be satisfied fails closed - retrying the same stale event does not
+pass, and a fresh triggering event is the supported recovery. When a
+write-channel tag moves during a run, the default is fail-closed retry; bounded
+grace exists only as an explicit in-memory authorized record for that run.
+Because the ledger lives in the broker-attested comment, a job that dies
+mid-transaction leaves the transaction record behind: the next run resumes from
+the record instead of starting clean, a completed analysis continues from
+`publication_pending`, publication failures stay retryable, and a suppressed
+transaction hands off terminally as above. A Worker deploy during in-flight
+runs is safe by the same rule: the broker accepts both channel targets across a
+migration, and an existing run's accepted identity state is preserved.
+
+Package publication, public channel movement, App permission acceptance,
+Worker deployment, production settings changes, and paid live inference remain
+explicit operator operations. No upgrade, rollback, or cleanup step in this
+guide performs any of them.
+
+## Reconciling a prior gate state
+
+Releases before this change published blocking findings as a `REQUEST_CHANGES`
+review (ADR 0035, superseded by
+[ADR 0057](adr/0057-one-check-run-as-the-single-merge-authority.md)). GitHub
+keeps that change request as the pull request's review decision until the
+reviewer approves or the review is dismissed, and a later `COMMENT` review does
+not clear it. The request is not bound to the head it reviewed either: it
+outlives the execution that created it, can sit behind a newer head, and
+competes with the App's own approval. Current releases
+publish every review as `COMMENT` and enforce through the one head-bound
+`ReviewSensei` check, so an installation upgraded from an earlier release can
+carry two kinds of obsolete host state:
+
+- App-authored change requests left by the previous release on pull requests
+  that are still open; and
+- a required-check rule for a check name the installation no longer publishes.
+
+Both are reconciled by an authorized operator with the operator's own
+credentials. ReviewSensei does not reconcile, dismiss, or re-require anything
+for you.
+
+### The App requests no dismissal or administration permission
+
+The broker issues exactly the capabilities in the
+[capability table](github-app-auth.md#issue-64-worker-capability-broker), and
+none of them is a review-dismissal or branch-protection capability; the product
+never calls GitHub's review-dismissal endpoint. Nothing in this section requires
+granting the App dismissal, `Administration`, or branch-protection permission,
+and the App's installation token is never used for the dismissal below: an
+operator with repository write access performs it with the operator's own
+credentials. Maintaining branch protection is a separate repository
+administrator action that the App also does not request.
+
+### Clearing obsolete App-authored change requests
+
+Dismissal here is bounded to the App's own stale review. Never dismiss a human
+review, and never dismiss every change request on a pull request: the App login
+is the producer `doctor` reports (`reviewsensei[bot]` in this setup), and only a
+review authored by that login is part of this reconciliation.
+
+List the open pull requests whose review decision is still changes-requested:
+
+```bash
+gh pr list --state open --limit 200 --json number,reviewDecision --jq '.[] | select(.reviewDecision == "CHANGES_REQUESTED") | .number'
+```
+
+For each pull request, list its change-request reviews with their authors, and
+keep only the rows whose author is the App login:
+
+```bash
+gh api "repos/OWNER/REPO/pulls/NUMBER/reviews" --paginate --jq '.[] | select(.state == "CHANGES_REQUESTED") | "\(.id) \(.user.login)"'
+```
+
+Dismiss exactly that review, by its id:
+
+```bash
+gh api --method POST "repos/OWNER/REPO/pulls/NUMBER/reviews/REVIEW_ID/dismissals" -f message="Obsolete change request: the head-bound ReviewSensei check is the merge authority (ADR 0057)."
+```
+
+A dismissal clears the obsolete review decision only. The review, its inline
+threads, its findings, and its dispositions stay, no human review is touched,
+and the change request does not come back, because the current release never
+emits `REQUEST_CHANGES`: later reviews on that pull request are `COMMENT` and
+the `ReviewSensei` check carries enforcement. Human approval requirements are
+unaffected; branch protection still applies exactly as configured.
+
+### Reconciling required-check state
+
+YAML cannot make a check required and ReviewSensei never changes the
+requirement: an administrator marks the check in branch protection or a
+ruleset, and `doctor` reports the identity to require. Read back what is
+currently required before changing anything:
+
+```bash
+gh api "repos/OWNER/REPO/branches/BRANCH/protection" --jq '.required_status_checks.contexts[]'
+```
+
+```bash
+gh api "repos/OWNER/REPO/rules/branches/BRANCH" --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'
+```
+
+A `404` from either read means that surface carries no rule for the branch.
+
+Reconcile the rule when the installation no longer publishes a required check,
+because a required check that is never reported leaves every pull request
+waiting on it:
+
+- With `github.writes: false` nothing is published, so a required
+  `ReviewSensei` never appears; restore writes, or remove the requirement.
+- A rollback to a release that does not publish the check has the same effect;
+  keep the release that publishes it, or remove the requirement before rolling
+  back.
+- `github.reviews: advisory` still publishes the check, and the `neutral`
+  conclusion it writes satisfies a required check; advisory mode is the
+  explicit choice to keep the requirement while removing enforcement.
+
+Remove or re-add the requirement in the branch protection rule or ruleset that
+`doctor`'s identity points at. An installation that never marked
+`ReviewSensei` required has nothing to reconcile here: the check is
+informative, and no merge waits on it.
 
 ## Setup-v5 and tag-based reusable workflow
 

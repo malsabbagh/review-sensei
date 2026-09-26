@@ -108,6 +108,14 @@ MAX_HISTORY_FINDINGS = 2
 # readers accept the three-finding F2 envelope during rolling upgrades. A
 # later checkpoint rewrites the bounded projection using MAX_HISTORY_FINDINGS.
 MAX_HISTORY_READ_FINDINGS = 3
+# The persisted projection must fit the session envelope's 4096-byte bound
+# (ADR 0053) beside the framing a checkpoint also carries: the lifecycle state,
+# up to three blocker-bearing progress markers, and the provenance digest.
+# Measured with three maximal markers and a populated cache key that framing
+# costs 846 bytes, so 1024 is reserved and the projection may use 3072. A
+# parity test pins both constants against the session envelope bound.
+MAX_HISTORY_ENVELOPE_RESERVE_BYTES = 1024
+MAX_HISTORY_BASELINE_BYTES = 3072
 # The verification-scope and session-record schemas mirror these bounds; update
 # their parity tests whenever the shared metadata budget changes.
 
@@ -306,6 +314,44 @@ class ReviewBaseline:
             raise ReviewInputError("review baseline generation is invalid")
 
 
+def _history_encoding_size(value: object) -> int:
+    """Return the canonical envelope encoding size of one persisted member."""
+
+    return len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _history_path_projection(
+    baseline: ReviewBaseline, *, available: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the deterministic path evidence that fits the reserved budget.
+
+    Persisted path evidence is narrowed, never refused: a review with more
+    path evidence than the envelope reserves still checkpoints, exactly as the
+    finding projection already keeps an oversized finding set from wedging the
+    ledger. Paths are ordered by value so the projection is content-derived
+    rather than provider- or retry-ordered, and reviewed evidence is admitted
+    before related context because the next round classifies findings against
+    it.
+    """
+
+    reviewed: list[str] = []
+    related: list[str] = []
+    used = 0
+    for target, paths in (
+        (reviewed, sorted(baseline.reviewed_paths)),
+        (related, sorted(baseline.related_paths)),
+    ):
+        for path in paths:
+            # One byte over the encoded entry covers its array separator, so
+            # the projection cannot exceed the budget it was given.
+            cost = len(json.dumps(path).encode("utf-8")) + 1
+            if used + cost > available:
+                return tuple(reviewed), tuple(related)
+            used += cost
+            target.append(path)
+    return tuple(reviewed), tuple(related)
+
+
 def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     """Return the closed metadata needed to rebuild a completed baseline.
 
@@ -316,7 +362,10 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     enforces on the persisted envelope. Checking them before serialization
     keeps a checkpoint that Python accepts from becoming a record the schema
     rejects on the next read, which would strand the pull request in an
-    unreadable session state.
+    unreadable session state. The persisted projection is narrowed to fit the
+    envelope's reserved budget rather than refused, and a narrowed projection
+    reports itself incomplete so a later round falls back to a full pass
+    instead of reading dropped path evidence as a complete reviewed scope.
     """
 
     if not isinstance(baseline, ReviewBaseline):
@@ -333,7 +382,7 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
         :MAX_HISTORY_FINDINGS
     ]
-    return {
+    document: dict[str, object] = {
         "cache_key": baseline_cache_key_document(baseline.cache_key),
         "policy_digest": baseline.policy_digest,
         "complete": baseline.complete,
@@ -352,9 +401,30 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
             }
             for finding in findings
         ],
-        "reviewed_paths": list(baseline.reviewed_paths),
-        "related_paths": list(baseline.related_paths),
+        "reviewed_paths": [],
+        "related_paths": [],
     }
+    available = MAX_HISTORY_BASELINE_BYTES - _history_encoding_size(document)
+    if available < 0:
+        raise ReviewInputError("baseline identity exceeds the persisted envelope bound")
+    reviewed, related = _history_path_projection(baseline, available=available)
+    document["reviewed_paths"] = list(reviewed)
+    document["related_paths"] = list(related)
+    if len(reviewed) != len(baseline.reviewed_paths) or len(related) != len(
+        baseline.related_paths
+    ):
+        # A dropped path must never read as "not reviewed": a later finding on
+        # it would classify as pre-existing or new instead of a missed defect,
+        # which is the one direction ADR 0053 forbids. The stored baseline
+        # therefore reports itself incomplete, and the next round runs a
+        # fallback-full pass instead of an incremental round that would trust
+        # the narrowed scope. Both flags are cleared because a reader released
+        # before the projection was narrowed only degrades to a fallback-full
+        # pass when ``complete`` is false; a true value would let a rollback to
+        # that reader trust path evidence the record does not carry.
+        document["complete"] = False
+        document["coverage_complete"] = False
+    return document
 
 
 _BASELINE_CACHE_KEY_FIELDS = frozenset(
@@ -565,6 +635,14 @@ def evaluate_baseline_compatibility(
             if baseline.coverage_complete
             else "coverage-incomplete"
         )
+    if not baseline.coverage_complete:
+        # A persisted projection can carry a reviewed scope narrowed to fit the
+        # session envelope (ADR 0053). Narrowed evidence must never be read as
+        # the complete reviewed scope, even when a record claims the review
+        # completed, so the baseline degrades to a fallback-full pass instead
+        # of an incremental round that classifies a dropped path against
+        # history it does not carry.
+        return "coverage-incomplete"
     if policy.digest() != baseline.policy_digest:
         return "policy-change"
     previous = baseline.cache_key
