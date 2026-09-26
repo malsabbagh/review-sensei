@@ -1,33 +1,35 @@
 name: ReviewSensei reusable runner
 
-# This is the public reusable workflow. Setup-v4 callers use the
+# This is the public reusable workflow. Setup callers use the
 # operator-managed v5 git tag as their update channel. The OIDC broker resolves
 # that tag at capability-exchange time and requires the executing workflow SHA
 # to match it. PyPI remains the primary package channel; the source fallback
 # installs the executing workflow commit SHA directly.
+#
+# The workflow is deliberately thin. It owns events, runners, jobs,
+# concurrency, permissions, secret injection, and exact package installation.
+# Everything else is a package decision:
+#
+#  * A read-only bootstrap freezes the trusted policy commit (the repository
+#    default branch, never the pull-request head), installs the exact package
+#    release this workflow commit belongs to, and asks the package for one
+#    hosted plan.
+#  * Every provider job consumes only that plan: runner requirement, backend,
+#    model, endpoint, credential reference, and github policy. Backend
+#    defaults, classification, count arithmetic, markdown assembly, and
+#    approval eligibility are never restated here.
+#  * Only two optional Actions variables exist: REVIEWSENSEI_PROVIDER and
+#    REVIEWSENSEI_MODEL. They are mapped into the package resolver exactly
+#    once, in the bootstrap plan step, and nowhere else.
 on:
   workflow_call:
     inputs:
       mode:
+        # automatic: an eligible host event may start a review, subject to the
+        # plan's github.automatic_reviews. manual: an explicit dispatch, which
+        # stays independently available. Both are invocation data, not a
+        # second configuration hierarchy.
         required: true
-        type: string
-      review_mode:
-        required: false
-        default: merge-focused
-        type: string
-      provider_mode:
-        required: false
-        default: ''
-        type: string
-      model:
-        required: false
-        default: ''
-        type: string
-      provider_profile:
-        # Unused. Hosted selection is provider_mode + model only.
-        # Non-empty values fail closed.
-        required: false
-        default: ''
         type: string
       operation:
         required: false
@@ -89,59 +91,18 @@ on:
         required: false
         default: ''
         type: string
-      review_sensei_version:
-        required: true
-        type: string
-      pull_request_title:
-        required: false
-        default: ''
-        type: string
-      stages_dir:
-        required: false
-        default: ''
-        type: string
-      categories_dir:
-        required: false
-        default: ''
-        type: string
-      enable_review:
-        required: false
-        default: 'false'
-        type: string
-      enable_auto_approve:
-        required: false
-        default: 'true'
-        type: string
-      enable_learning_proposals:
-        required: false
-        default: 'false'
-        type: string
-      enable_github_writes:
-        required: false
-        default: 'false'
-        type: string
-      enable_learning_prs:
-        required: false
-        default: 'false'
-        type: string
-      enable_mention_replies:
-        required: false
-        default: 'false'
-        type: string
-      upload_artifacts:
-        required: false
-        default: 'false'
-        type: string
-      allow_unqualified_profile:
-        # Unused. OpenRouter hosted runs use --provider openrouter --model.
-        # Non-false values fail closed.
-        required: false
-        default: 'false'
-        type: string
     secrets:
+      # Only named required secrets are declared. There is no `secrets:
+      # inherit`, no credential in YAML, and no provider credential is ever
+      # sent to the Worker. The broker remains the only write-capability
+      # exchange. A credential's presence never authorizes writes or
+      # inference: github.writes decides writes, and the plan decides
+      # inference.
       OLLAMA_API_KEY:
         required: false
       OPENROUTER_API_KEY:
+        required: false
+      OPENAI_API_KEY:
         required: false
 
 concurrency:
@@ -158,27 +119,41 @@ concurrency:
   cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}
 
 jobs:
-  validate-provider-mode:
+  bootstrap:
     # opened/synchronize/reopened still fire for drafts. Skip those review runs
     # so they are not failed by later eligibility checks; ready_for_review and
     # non-pull_request operations continue.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    permissions: {}
+    # Read-only. The bootstrap reads the trusted policy commit, installs the
+    # exact released package, and reports the plan; it holds no write scope and
+    # never materializes a provider credential.
+    permissions:
+      contents: read
     outputs:
-      normalized_provider_mode: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_provider_mode }}
-      normalized_model: ${{ steps.reject-unsupported-provider-mode.outputs.normalized_model }}
-      active_provider: ${{ steps.reject-unsupported-provider-mode.outputs.active_provider }}
+      backend: ${{ steps.plan.outputs.backend }}
+      model: ${{ steps.plan.outputs.model }}
+      base_url: ${{ steps.plan.outputs.base_url }}
+      runner_kind: ${{ steps.plan.outputs.runner_kind }}
+      credential_env: ${{ steps.plan.outputs.credential_env }}
+      credential_required: ${{ steps.plan.outputs.credential_required }}
+      inference_location: ${{ steps.plan.outputs.inference_location }}
+      upstream_provider: ${{ steps.plan.outputs.upstream_provider }}
+      automatic_reviews: ${{ steps.plan.outputs.automatic_reviews }}
+      writes: ${{ steps.plan.outputs.writes }}
+      reviews: ${{ steps.plan.outputs.reviews }}
+      mentions: ${{ steps.plan.outputs.mentions }}
+      learning: ${{ steps.plan.outputs.learning }}
+      artifacts: ${{ steps.plan.outputs.artifacts }}
+      configuration_source: ${{ steps.plan.outputs.configuration_source }}
+      package_version: ${{ steps.release-identity.outputs.package_version }}
+      workflow_commit: ${{ steps.release-identity.outputs.workflow_commit }}
+      policy_commit: ${{ steps.policy.outputs.commit }}
     steps:
-      - name: Reject unsupported provider mode
-        id: reject-unsupported-provider-mode
+      - name: Reject unsupported invocation inputs
+        id: reject-unsupported-invocation
         env:
-          PROVIDER_MODE: ${{ inputs.provider_mode }}
           MODE: ${{ inputs.mode }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
-          MODEL: ${{ inputs.model }}
-          PROVIDER_PROFILE: ${{ inputs.provider_profile }}
-          ALLOW_UNQUALIFIED_PROFILE: ${{ inputs.allow_unqualified_profile }}
           OPERATION: ${{ inputs.operation }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -189,13 +164,6 @@ jobs:
           HEAD_REF: ${{ inputs.head_ref }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_REVIEW: ${{ inputs.enable_review }}
-          ENABLE_AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          ENABLE_LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          ENABLE_LEARNING_PRS: ${{ inputs.enable_learning_prs }}
-          ENABLE_MENTION_REPLIES: ${{ inputs.enable_mention_replies }}
-          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           COMMENT_BODY: ${{ inputs.comment_body }}
           COMMENT_ACTOR: ${{ inputs.comment_actor }}
@@ -203,65 +171,10 @@ jobs:
           COMMENT_ASSOCIATION: ${{ inputs.comment_association }}
         run: |
           set -euo pipefail
-          PROVIDER_MODE="$(printf '%s' "$PROVIDER_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          MODEL="$(printf '%s' "$MODEL" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          REVIEW_MODE="$(printf '%s' "$REVIEW_MODE" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          if [ -z "$REVIEW_MODE" ]; then
-            # The input is optional with a `merge-focused` default and the CLI
-            # resolves an empty mode to the same default, so an absent or empty
-            # value is normalized instead of rejected: a caller that pins the
-            # tag without passing the input must not fail a run the CLI accepts.
-            REVIEW_MODE=merge-focused
-          fi
-          case "$PROVIDER_MODE" in
-            ""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;
-            *)
-              echo '::error::ReviewSensei provider mode is unsupported; use local-ollama, cloud-ollama, or openrouter (local and cloud are aliases).' >&2
-              exit 1
-              ;;
-          esac
-          case "$PROVIDER_MODE" in
-            openrouter) active_provider=openrouter ;;
-            local|local-ollama) active_provider=local ;;
-            cloud|cloud-ollama) active_provider=cloud ;;
-            "")
-              if [[ "$MODE" == "manual" ]]; then
-                active_provider=local
-              else
-                active_provider=cloud
-              fi
-              ;;
-            *) active_provider=invalid ;;
-          esac
-          case "$PROVIDER_MODE" in
-            cloud) resolved_provider_mode=cloud-ollama ;;
-            local) resolved_provider_mode=local-ollama ;;
-            openrouter|cloud-ollama|local-ollama) resolved_provider_mode="$PROVIDER_MODE" ;;
-            "")
-              if [[ "$MODE" == "manual" ]]; then
-                resolved_provider_mode=local-ollama
-              else
-                resolved_provider_mode=cloud-ollama
-              fi
-              ;;
-            *) resolved_provider_mode=invalid ;;
-          esac
-          if [[ -n "$PROVIDER_PROFILE" ]]; then
-            echo '::error::provider_profile is unused; set provider_mode to openrouter and model via REVIEWSENSEI_MODEL.' >&2
-            exit 1
-          fi
-          case "$ALLOW_UNQUALIFIED_PROFILE" in
-            ""|false)
-              ;;
-            true)
-              echo '::error::allow_unqualified_profile is unused for hosted OpenRouter runs.' >&2
-              exit 1
-              ;;
-            *)
-              echo '::error::allow_unqualified_profile must be empty or false' >&2
-              exit 1
-              ;;
-          esac
+          # Invocation data only: the workflow validates what a caller passes
+          # and refuses to guess. Backend, model, endpoint, credential, and
+          # policy are resolved by the package from .reviewsensei.yml and the
+          # documented packaged defaults; none of them is an input here.
           case "$OPERATION" in
             review|reply|command) ;;
             *) echo '::error::operation must be review, reply, or command' >&2; exit 1 ;;
@@ -269,22 +182,6 @@ jobs:
           case "$MODE" in
             automatic|manual) ;;
             *) echo '::error::workflow mode must be automatic or manual' >&2; exit 1 ;;
-          esac
-          case "$REVIEW_MODE" in
-            advisory|merge-focused|strict) ;;
-            legacy)
-              if [ "$OPERATION" = review ]; then
-                echo '::error::legacy review mode is retired; migrate configuration to merge-focused (set the REVIEWSENSEI_REVIEW_MODE repository variable to merge-focused, or merge the pending setup-v5 pull request from the ReviewSensei App, then re-run)' >&2
-                exit 1
-              fi
-              # Reply and command operations never resolve a review policy (the
-              # CLI reply path is exempt from the retired-mode guard), so a
-              # retired stored value must not fail them: warn and continue on
-              # the supported default.
-              echo "::warning::legacy review mode is retired and ignored for $OPERATION operations; set the REVIEWSENSEI_REVIEW_MODE repository variable to merge-focused or merge the pending setup-v5 pull request from the ReviewSensei App" >&2
-              REVIEW_MODE=merge-focused
-              ;;
-            *) echo '::error::review mode must be advisory, merge-focused, or strict' >&2; exit 1 ;;
           esac
           if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
             echo '::error::repository input is invalid' >&2
@@ -306,82 +203,225 @@ jobs:
             echo '::error::head repository input is invalid' >&2
             exit 1
           fi
-          if [[ "$OPERATION" == review && "$ENABLE_REVIEW" == true ]]; then
-            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
-              echo '::error::pull request number is required for review operations' >&2
-              exit 1
-            fi
-            if [[ -z "$HEAD_REF" || "$HEAD_REF" == -* || "$HEAD_REF" == *--* || "$HEAD_REF" == *- || ! "$HEAD_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-              echo '::error::head ref input is invalid' >&2
-              exit 1
-            fi
-            if [[ ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-              echo '::error::head sha is required for review operations' >&2
-              exit 1
-            fi
-          elif [[ "$OPERATION" == reply && "$ENABLE_GITHUB_WRITES" == true && "$ENABLE_MENTION_REPLIES" == true && ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
-            echo '::error::pull request number is required for reply operations' >&2
-            exit 1
-          elif [[ "$OPERATION" == command ]]; then
-            # Command inputs are checked whether or not writes are enabled, so
-            # a caller cannot route command payloads through the workflow while
-            # the job that consumes them is skipped.
-            if [[ "$ENABLE_GITHUB_WRITES" != true ]]; then
-              echo '::error::command operations require enable_github_writes' >&2
-              exit 1
-            fi
-            # LC_ALL=C pins wc to byte counting instead of the runner locale.
-            comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | LC_ALL=C wc -c)"
-            if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
-              echo '::error::command operations require an explicit pull_request_number input' >&2
-              exit 1
-            fi
-            if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ || ! "$SOURCE_COMMENT_ID" =~ ^[1-9][0-9]*$ || -z "$COMMENT_BODY" || "$comment_body_bytes" -gt 4096 || -z "$COMMENT_ACTOR" || ${#COMMENT_ACTOR} -gt 256 ]]; then
-              echo '::error::command operations require a pull request, current head SHA, and source comment identity' >&2
-              exit 1
-            fi
-            if [[ "$COMMENT_ACTOR_TYPE" != "User" || ! "$COMMENT_ASSOCIATION" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
-              echo '::error::command operations require an authorized human maintainer' >&2
-              exit 1
-            fi
-          fi
-          for flag in ENABLE_REVIEW ENABLE_AUTO_APPROVE ENABLE_LEARNING_PROPOSALS ENABLE_GITHUB_WRITES ENABLE_LEARNING_PRS ENABLE_MENTION_REPLIES UPLOAD_ARTIFACTS; do
-            value="${!flag}"
-            case "$value" in
-              ''|true|false) ;;
-              *) echo "::error::${flag} must be true or false" >&2; exit 1 ;;
-            esac
-          done
-          if [[ -n "$MODEL" && "$MODEL" == -* ]]; then
-            echo '::error::model must not start with -' >&2
-            exit 1
-          fi
-          case "$PROVIDER_MODE" in
-            openrouter)
-              if [[ -n "$MODEL" && "$MODEL" == *:cloud* ]]; then
-                echo '::error::openrouter model must not use ollama cloud suffix' >&2
+          case "$OPERATION" in
+            review)
+              if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+                echo '::error::pull request number is required for review operations' >&2
+                exit 1
+              fi
+              if [[ -z "$HEAD_REF" || "$HEAD_REF" == -* || "$HEAD_REF" == *--* || "$HEAD_REF" == *- || ! "$HEAD_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                echo '::error::head ref input is invalid' >&2
+                exit 1
+              fi
+              if [[ ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+                echo '::error::head sha is required for review operations' >&2
                 exit 1
               fi
               ;;
-            ""|local|local-ollama|cloud|cloud-ollama)
-              if [[ -n "$MODEL" && "$MODEL" == */* ]]; then
-                echo '::error::ollama model must not use vendor/model openrouter slug' >&2
+            reply)
+              if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+                echo '::error::pull request number is required for reply operations' >&2
+                exit 1
+              fi
+              ;;
+            command)
+              # Command inputs are checked whether or not the selected policy
+              # authorizes writes, so a caller cannot route command payloads
+              # through the workflow while the job that consumes them is
+              # skipped.
+              # LC_ALL=C pins wc to byte counting instead of the runner locale.
+              comment_body_bytes="$(printf '%s' "$COMMENT_BODY" | LC_ALL=C wc -c)"
+              if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+                echo '::error::command operations require an explicit pull_request_number input' >&2
+                exit 1
+              fi
+              if [[ ! "$PULL_REQUEST" =~ ^[1-9][0-9]*$ || ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ || ! "$SOURCE_COMMENT_ID" =~ ^[1-9][0-9]*$ || -z "$COMMENT_BODY" || "$comment_body_bytes" -gt 4096 || -z "$COMMENT_ACTOR" || ${#COMMENT_ACTOR} -gt 256 ]]; then
+                echo '::error::command operations require a pull request, current head SHA, and source comment identity' >&2
+                exit 1
+              fi
+              if [[ "$COMMENT_ACTOR_TYPE" != "User" || ! "$COMMENT_ASSOCIATION" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
+                echo '::error::command operations require an authorized human maintainer' >&2
                 exit 1
               fi
               ;;
           esac
-          {
-            echo "normalized_provider_mode=$resolved_provider_mode"
-            echo "normalized_model=$MODEL"
-            echo "active_provider=$active_provider"
-          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the trusted policy commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The repository default branch is the integration channel: a
+          # reviewed merge is what changes host policy, so a pull request can
+          # never grant itself github.writes or select its own backend. The
+          # exact reviewed base/head is frozen separately by the provider jobs.
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve the trusted policy commit
+        id: policy
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        working-directory: trusted-policy
+        run: |
+          set -euo pipefail
+          policy_commit="$(git rev-parse HEAD)"
+          if [[ ! "$policy_commit" =~ ^[a-f0-9]{40}$ ]]; then
+            echo '::error::the trusted policy commit is invalid' >&2
+            exit 1
+          fi
+          echo "commit=$policy_commit" >> "$GITHUB_OUTPUT"
+          echo "Trusted policy commit $policy_commit resolved from $DEFAULT_BRANCH."
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Resolve the exact package release
+        id: release-identity
+        env:
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          # The installed artifact selects its engine version: the release
+          # identity is the workflow commit this run executes, resolved to the
+          # exact version that commit declares. Repository YAML cannot install
+          # or update the binary, and no `latest` fallback exists.
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+            exit 1
+          fi
+          source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
+          rm -rf "$source_dir"
+          git init --bare "$source_dir"
+          git --git-dir="$source_dir" fetch --depth=1 \
+            https://github.com/malsabbagh/review-sensei.git \
+            "$REVIEW_SENSEI_WORKFLOW_SHA"
+          object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+          if [[ "$object_type" == "tag" ]]; then
+            workflow_commit="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+          elif [[ "$object_type" == "commit" ]]; then
+            workflow_commit="$REVIEW_SENSEI_WORKFLOW_SHA"
+          else
+            echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
+            exit 1
+          fi
+          package_version="$(git --git-dir="$source_dir" show "$workflow_commit:pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei workflow commit does not declare an exact released version." >&2
+            exit 1
+          fi
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "workflow_commit=$workflow_commit" >> "$GITHUB_OUTPUT"
+          echo "ReviewSensei release identity: review-sensei==$package_version at $workflow_commit."
+
+      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
+        env:
+          REVIEW_SENSEI_VERSION: ${{ steps.release-identity.outputs.package_version }}
+          REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ steps.release-identity.outputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/review-sensei-venv"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          expected_version="${REVIEW_SENSEI_VERSION#v}"
+          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
+          if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei release identity is invalid." >&2
+            exit 1
+          fi
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei workflow commit is invalid." >&2
+            exit 1
+          fi
+          if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
+            "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee -a "$pypi_log"; then
+            install_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
+            "$python_bin" -m pip install --disable-pip-version-check \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+          else
+            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
+          if [[ "$installed_version" != "$expected_version" ]]; then
+            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
+            exit 1
+          fi
+          "$python_bin" -m pip check
+          echo "Installed ReviewSensei $installed_version from $install_source."
+
+      - name: Report retired repository variables
+        # Retired managed variables are reported here, once per run, with the
+        # YAML field that replaces each one. They are never read as
+        # configuration: an obsolete value cannot change behavior, it can only
+        # produce this annotation. Removal is a separate, authorized cleanup
+        # and no credential or unrelated repository setting is touched.
+        env:
+          REVIEWSENSEI_PROVIDER_MODE: ${{ vars.REVIEWSENSEI_PROVIDER_MODE }}
+          REVIEWSENSEI_PROVIDER_PROFILE: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE }}
+          REVIEWSENSEI_LOCAL_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
+          REVIEWSENSEI_CLOUD_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
+          REVIEWSENSEI_REVIEW_MODE: ${{ vars.REVIEWSENSEI_REVIEW_MODE }}
+          REVIEWSENSEI_AUTO_REVIEW: ${{ vars.REVIEWSENSEI_AUTO_REVIEW }}
+          REVIEWSENSEI_GITHUB_WRITES: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
+          REVIEWSENSEI_AUTO_APPROVE: ${{ vars.REVIEWSENSEI_AUTO_APPROVE }}
+          REVIEWSENSEI_MENTION_REPLIES: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}
+          REVIEWSENSEI_LEARNING_PROPOSALS: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS }}
+          REVIEWSENSEI_LEARNING_PRS: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
+          REVIEWSENSEI_UPLOAD_ARTIFACTS: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
+          REVIEWSENSEI_STAGES_DIR: ${{ vars.REVIEWSENSEI_STAGES_DIR }}
+          REVIEWSENSEI_CATEGORIES_DIR: ${{ vars.REVIEWSENSEI_CATEGORIES_DIR }}
+          REVIEWSENSEI_VERSION: ${{ vars.REVIEWSENSEI_VERSION }}
+        run: |
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
+          import os
+          import sys
+
+          from review_sensei.configuration import retired_environment_remedies
+
+          for name, remedy in retired_environment_remedies(os.environ):
+              print(
+                  f"::warning::{name} is retired and has no effect; {remedy}",
+                  file=sys.stderr,
+              )
+          PY
+
+      - name: Resolve the hosted plan
+        # The only two supported Actions overrides, mapped into one package
+        # resolver exactly once. The plan reads .reviewsensei.yml from the
+        # frozen trusted policy commit and falls back to the documented
+        # packaged backend defaults; nothing is inferred from a secret's
+        # presence.
+        id: plan
+        working-directory: trusted-policy
+        env:
+          REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}
+          REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" host-plan \
+            --github-output "$GITHUB_OUTPUT"
 
   authoritative-preflight:
-    needs: validate-provider-mode
+    needs: bootstrap
     # Validation is deliberately a dependency.  If the cheap input checks
-    # fail, do not make an unnecessary GitHub API request.  Reply operations
-    # still run this no-op job so the provider jobs can share one dependency.
-    if: needs.validate-provider-mode.result == 'success'
+    # fail, do not make an unnecessary GitHub API request.  Every provider path
+    # in this workflow publishes through the broker, so a policy that does not
+    # authorize writes performs no host operation at all: it is skipped here,
+    # before any API request and before inference, instead of silently
+    # switching to stateless enforcement.  Explicit local analysis remains
+    # available through the local CLI.
+    if: needs.bootstrap.outputs.writes == 'true'
     outputs:
       pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
       base_sha: ${{ steps.fetch-pr.outputs.base_sha }}
@@ -404,24 +444,15 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
           OPERATION: ${{ inputs.operation }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          ENABLE_REVIEW: ${{ inputs.enable_review }}
         run: |
           set -euo pipefail
           # Command mutations reuse the live head/branch checks below, so a
           # stale or fabricated head SHA fails here rather than only at the
           # broker. Reviews need the fetch for their base SHA and title.
-          if [[ "$OPERATION" != "command" && ("$OPERATION" != "review" || "$ENABLE_REVIEW" != "true") ]]; then
+          if [[ "$OPERATION" != "command" && "$OPERATION" != "review" ]]; then
             echo 'authoritative PR preflight not required for this operation'
             exit 0
           fi
-          for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do
-            if [[ -n "$config_path" && ( "$config_path" = /* || "$config_path" == *'..'* || ! "$config_path" =~ ^[A-Za-z0-9._/-]+$ ) ]]; then
-              echo '::error::trusted stage/category paths must be repository-relative' >&2
-              exit 1
-            fi
-          done
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::repository id must be a positive decimal integer' >&2; exit 1; }
@@ -508,11 +539,13 @@ jobs:
           PY
 
   command:
-    needs: [validate-provider-mode, authoritative-preflight]
+    needs: [bootstrap, authoritative-preflight]
     # authoritative-preflight re-reads the live PR and rejects a head SHA that
     # no longer matches, so the mutation only runs against the commit the
-    # maintainer addressed.
-    if: inputs.operation == 'command' && inputs.enable_github_writes == 'true' && needs.validate-provider-mode.result == 'success' && needs.authoritative-preflight.result == 'success'
+    # maintainer addressed. Maintainer status/pause/resume/verify/disposition
+    # commands have their own authorization and do not depend on
+    # conversational replies being enabled.
+    if: inputs.operation == 'command' && needs.bootstrap.outputs.writes == 'true'
     concurrency:
       group: reviewsensei-command-${{ github.run_id }}
       cancel-in-progress: false
@@ -532,44 +565,30 @@ jobs:
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
-          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei release identity is invalid." >&2
             exit 1
           fi
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei workflow commit is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
-            rm -rf "$source_dir"
-            git init --bare "$source_dir"
-            git --git-dir="$source_dir" fetch --depth=1 \
-              https://github.com/malsabbagh/review-sensei.git \
-              "$REVIEW_SENSEI_WORKFLOW_SHA"
-            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
-            if [[ "$object_type" == "tag" ]]; then
-              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
-            elif [[ "$object_type" != "commit" ]]; then
-              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
-              exit 1
-            fi
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
-            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1
@@ -642,14 +661,21 @@ jobs:
             --source-comment-id "$SOURCE_COMMENT_ID" --session-attestation "$attestation" \
             --github-session-ledger --oidc-token "$oidc_token" --allow-write
 
-  cloud:
-    needs: [validate-provider-mode, authoritative-preflight]
-    # Compatibility marker for consumers that inspect the historical single
-    # dependency spelling: needs: validate-provider-mode
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'cloud'
+  hosted:
+    needs: [bootstrap, authoritative-preflight]
+    # The plan decides the backend and its runner requirement; this job is the
+    # hosted half of that decision. Both the review and reply paths mutate
+    # through the broker, so github.writes is a precondition. github.reviews
+    # and github.learning travel to the package as explicit invocation flags
+    # below and are never re-derived here.
+    if: >-
+      needs.bootstrap.outputs.runner_kind == 'hosted' &&
+      needs.bootstrap.outputs.writes == 'true' &&
+      ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
+      (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
     concurrency:
-      # All provider modes share this review group, so a newer cloud review
-      # cancels an older local review (and vice versa) for the same PR. Reply
+      # The hosted and local jobs share this review group, so a newer review
+      # cancels an older one for the same PR regardless of where it runs. Reply
       # operations intentionally use the triggering run id and never cancel a
       # sibling reply. The preflight output is authoritative for manual
       # reviews; event PR metadata is only a host-provided fallback.
@@ -662,15 +688,25 @@ jobs:
       issues: read
       id-token: write
     steps:
-      - name: Check out trusted base only
+      - name: Check out the trusted policy commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The workspace is the frozen policy commit, so the package resolves
+          # its configuration, stages, and categories from trusted content and
+          # never from the pull-request head.
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Check out the trusted reviewed base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
+          path: trusted-base
           fetch-depth: 0
 
       - name: Resolve trusted base SHA
         id: trusted-base
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git -C trusted-base rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -680,25 +716,30 @@ jobs:
       - name: Validate trusted workflow inputs
         env:
           MODE: ${{ inputs.mode }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'cloud-ollama' }}
+          RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           python - <<'PY'
           import os
           import re
-          import sys
 
           ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
           repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-          version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+          backend_pattern = re.compile(
+              r"^(local-ollama|cloud-ollama|openrouter|openai-compatible)$"
+          )
+          credential_pattern = re.compile(r"^(|[A-Z][A-Z0-9_]*)$")
 
           def valid_ref(value: str) -> bool:
               return bool(
@@ -713,542 +754,22 @@ jobs:
               raise SystemExit("workflow mode is invalid")
           if os.environ.get("OPERATION") not in {"review", "reply"}:
               raise SystemExit("workflow operation is invalid")
-          if os.environ.get("PROVIDER_MODE") not in {"cloud", "cloud-ollama"}:
-              raise SystemExit("cloud job received an invalid provider mode")
-          if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
-              raise SystemExit("repository input is invalid")
-          for name in ("BASE_REF",):
-              value = os.environ.get(name, "")
-              if not valid_ref(value):
-                  raise SystemExit(f"{name} input is invalid")
-          head_ref = os.environ.get("HEAD_REF", "")
-          if os.environ.get("OPERATION") == "review" and not valid_ref(head_ref):
-              raise SystemExit("HEAD_REF input is invalid")
-          base_sha = os.environ.get("BASE_SHA", "")
-          if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
-              raise SystemExit("BASE_SHA input is invalid")
-          head_sha = os.environ.get("HEAD_SHA", "")
-          if os.environ.get("OPERATION") == "review" and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
-              raise SystemExit("HEAD_SHA input is invalid")
-          head_repository = os.environ.get("HEAD_REPOSITORY", "")
-          if head_repository and not repository_pattern.fullmatch(head_repository):
-              raise SystemExit("head repository input is invalid")
-          if not version_pattern.fullmatch(os.environ.get("REVIEW_SENSEI_VERSION", "")):
-              raise SystemExit("ReviewSensei version must be exact")
-          PY
-
-      - name: Install ReviewSensei package (PyPI first, GitHub fallback)
-        env:
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
-          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/review-sensei-venv"
-          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
-          expected_version="${REVIEW_SENSEI_VERSION#v}"
-          pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
-            exit 1
-          fi
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
-            exit 1
-          fi
-          if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
-            "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee -a "$pypi_log"; then
-            install_source="PyPI"
-          elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
-            grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
-            rm -rf "$source_dir"
-            git init --bare "$source_dir"
-            git --git-dir="$source_dir" fetch --depth=1 \
-              https://github.com/malsabbagh/review-sensei.git \
-              "$REVIEW_SENSEI_WORKFLOW_SHA"
-            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
-            if [[ "$object_type" == "tag" ]]; then
-              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
-            elif [[ "$object_type" != "commit" ]]; then
-              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
-              exit 1
-            fi
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
-            "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
-            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
-          else
-            echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
-            exit 1
-          fi
-          installed_version="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei"))')"
-          if [[ "$installed_version" != "$expected_version" ]]; then
-            echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
-            exit 1
-          fi
-          "$python_bin" -m pip check
-          echo "Installed ReviewSensei $installed_version from $install_source."
-
-      - name: Prepare bounded trusted-base diff
-        if: inputs.operation == 'review'
-        env:
-          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
-          HEAD_REF: ${{ inputs.head_sha }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-        run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then
-            args+=(--head-repository "$HEAD_REPOSITORY")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
-              exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
-            exit 1
-          fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
-
-      - name: Run cloud-provider review
-        id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
-        env:
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          MODE: ${{ inputs.mode }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
-          BACKEND_DEFAULT: deepseek-v4.1-flash:cloud
-          OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
-        run: |
-          if [[ -z "$OLLAMA_API_KEY" ]]; then
-            echo '::error::OLLAMA_API_KEY is required for cloud-ollama mode' >&2
-            exit 1
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          if resolved != os.environ["OLLAMA_MODEL"]:
-              print(
-                  "::error::resolved hosted model does not match workflow env",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-          PY
-          if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
-            echo '::error::authoritative pull-request title output is invalid' >&2
-            exit 1
-          fi
-          TITLE=""
-          if [[ -n "$TITLE_B64" ]] && ! TITLE="$(printf '%s' "$TITLE_B64" | base64 --decode)"; then
-            echo '::error::authoritative pull-request title output could not be decoded' >&2
-            exit 1
-          fi
-          review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
-          review_args+=(--review-mode "$REVIEW_MODE")
-          if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
-          if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
-          if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
-          if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
-          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
-          if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
-          if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
-            review_args+=(--recovery-artifact recovery-artifact.json)
-          fi
-          # Reserve the round, checkpoint the identity-bound transaction, and
-          # emit the trusted admission artifacts before inference results are
-          # published. The transaction lives in the broker-attested comment
-          # ledger rather than a runner-local file, so the publication step of
-          # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
-          review_args+=(--transaction --github-session-ledger \
-            --repository-id "$REPOSITORY_ID" \
-            --configuration-context-output configuration-context.json \
-            --admission-context-output admission-context.json)
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
-            --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" \
-            --output review.json --outcome outcome.json
-
-      # success() && !cancelled() skips a pointless API call after a failed
-      # provider step or cancelled run. Publish still has its own cancellation
-      # guard and requires status=current from this head check.
-      - name: Confirm live pull-request head is still current
-        id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          live_sha=""
-          for attempt in 1 2 3; do
-            err_file="$RUNNER_TEMP/rs-head-revalidate.$$"
-            if live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>"$err_file")"; then
-              rm -f "$err_file"
-              break
-            fi
-            err_text="$(tr -d '\000' <"$err_file" | tail -n 20)"
-            rm -f "$err_file"
-            if [[ "$err_text" =~ HTTP\ (401|403|404) ]]; then
-              echo '::error::live pull-request head revalidation was unauthorized or missing; refusing publish' >&2
-              exit 1
-            fi
-            if [[ "$attempt" -eq 3 ]]; then
-              echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
-              exit 1
-            fi
-            delay=$((1 << (attempt - 1)))
-            if [[ "$err_text" =~ HTTP\ 429 ]]; then
-              delay=$((delay * 2))
-            fi
-            if [[ "$delay" -gt 8 ]]; then
-              delay=8
-            fi
-            jitter_hundredths=$((RANDOM % 50))
-            sleep "${delay}.${jitter_hundredths}"
-          done
-          if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            echo '::error::live pull-request head identity is invalid; refusing publish' >&2
-            exit 1
-          fi
-          if [[ "$live_sha" != "$HEAD_SHA" ]]; then
-            echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
-            echo 'skipped_stale'
-            echo 'status=skipped_stale' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'publish admission current'
-          echo 'status=current' >> "$GITHUB_OUTPUT"
-
-      - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_REF: ${{ inputs.base_ref }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          ENABLE_REVIEW: ${{ inputs.enable_review }}
-          LEARNING_PRS: ${{ inputs.enable_learning_prs }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
-        run: |
-          publish_args=()
-          if [[ "$ENABLE_REVIEW" == "true" ]]; then
-            publish_args+=(--enable-review)
-          fi
-          if [[ "$LEARNING_PRS" == "true" ]]; then
-            publish_args+=(--enable-learning-prs)
-          fi
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            publish_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            publish_args+=(--no-auto-approve)
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
-            --result review.json --diff pr.patch --repository "$REPOSITORY" \
-            --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
-            --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --github-session-ledger \
-            --configuration-context configuration-context.json \
-            --admission-context admission-context.json \
-            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
-
-      - name: Generate and publish cloud mention reply
-        id: reply
-        if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
-        env:
-          MODE: ${{ inputs.mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
-          SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
-          SOURCE_KIND: ${{ inputs.source_kind }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
-          BACKEND_DEFAULT: deepseek-v4.1-flash:cloud
-          OLLAMA_BASE_URL: https://ollama.com/api
-          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud' }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-        run: |
-          if [[ -z "$OLLAMA_API_KEY" ]]; then
-            echo '::error::OLLAMA_API_KEY is required for cloud-ollama mode' >&2
-            exit 1
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          if resolved != os.environ["OLLAMA_MODEL"]:
-              print(
-                  "::error::resolved hosted model does not match workflow env",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-          PY
-          reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            auto_approve_args+=(--no-auto-approve)
-          fi
-          set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
-            --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
-            --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
-            --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
-            --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
-            --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
-          reply_exit=$?
-          set -e
-          reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
-          echo "$reply_status"
-          if [[ "$reply_exit" -ne 0 ]]; then
-            echo "::error::mention reply command failed (exit $reply_exit)" >&2
-            exit 1
-          fi
-          case "$reply_status" in
-            replied_and_resolved|already_replied_and_resolved)
-              echo "resolved=true" >> "$GITHUB_OUTPUT"
-              ;;
-            replied|already_replied|skipped_source_gone|skipped_no_mention|\
-              skipped_unauthorized|skipped_edited_source|skipped_pr_state|\
-              skipped_stale_head|skipped_fork)
-              echo "resolved=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::unexpected mention reply status: $reply_status" >&2
-              exit 1
-              ;;
-          esac
-
-      - name: Verify mention reply completed
-        if: >-
-          always() && inputs.operation == 'reply' &&
-          inputs.enable_github_writes == 'true' &&
-          inputs.enable_mention_replies == 'true' &&
-          steps.reply.outcome != 'success'
-        run: |
-          echo '::error::mention reply step did not complete successfully' >&2
-          exit 1
-
-      - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: review-sensei-review
-          path: |
-            review.json
-            outcome.json
-            recovery-artifact.json
-          if-no-files-found: error
-          retention-days: 7
-
-  openrouter:
-    needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'openrouter'
-    concurrency:
-      # OpenRouter shares the provider review group with cloud/local so a newer
-      # review for the same PR cancels any in-flight provider-mode review.
-      group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
-      cancel-in-progress: ${{ inputs.operation == 'review' }}
-    # Public reusable workflow: GitHub-hosted compute for cloud/OpenRouter matches
-    # the `cloud` job.
-    runs-on: ubuntu-latest
-    # Same permission set as cloud/local. GitHub writes go through the OIDC
-    # broker inside `review-sensei github review` / `github reply`; this job
-    # does not grant pull-requests:write or issues:write to GITHUB_TOKEN.
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-    steps:
-      - name: Check out trusted base only
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
-          fetch-depth: 0
-
-      - name: Resolve trusted base SHA
-        id: trusted-base
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.11'
-
-      - name: Validate trusted workflow inputs
-        env:
-          MODE: ${{ inputs.mode }}
-          OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          REPOSITORY: ${{ inputs.repository }}
-          BASE_REF: ${{ inputs.base_ref }}
-          HEAD_REF: ${{ inputs.head_ref }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-
-          ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
-          repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-          version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
-
-          def valid_ref(value: str) -> bool:
-              return bool(
-                  value
-                  and not value.startswith("-")
-                  and "--" not in value
-                  and not value.endswith("-")
-                  and ref_pattern.fullmatch(value)
-              )
-
-          if os.environ.get("MODE") not in {"automatic", "manual"}:
-              raise SystemExit("workflow mode is invalid")
-          if os.environ.get("OPERATION") not in {"review", "reply"}:
-              raise SystemExit("workflow operation is invalid")
-          if os.environ.get("PROVIDER_MODE") != "openrouter":
-              raise SystemExit("openrouter job received an invalid provider mode")
+          # Each provider job re-checks the plan output it was selected by, so
+          # a plan/job mismatch fails closed instead of running a backend on
+          # the wrong runner.
+          if os.environ.get("RUNNER_KIND") != "hosted":
+              raise SystemExit("hosted job received a non-hosted plan")
+          if not backend_pattern.fullmatch(os.environ.get("BACKEND", "")):
+              raise SystemExit("plan backend is invalid")
+          model = os.environ.get("MODEL", "")
+          if not model or model.startswith("-"):
+              raise SystemExit("plan model is invalid")
+          if not re.fullmatch(r"https?://[^\s]+", os.environ.get("BASE_URL", "")):
+              raise SystemExit("plan endpoint is invalid")
+          if not credential_pattern.fullmatch(os.environ.get("CREDENTIAL_ENV", "")):
+              raise SystemExit("plan credential reference is invalid")
+          if os.environ.get("CREDENTIAL_REQUIRED") not in {"true", "false"}:
+              raise SystemExit("plan credential requirement is invalid")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
               raise SystemExit("repository input is invalid")
           base_ref = os.environ.get("BASE_REF", "")
@@ -1266,27 +787,24 @@ jobs:
           head_repository = os.environ.get("HEAD_REPOSITORY", "")
           if head_repository and not repository_pattern.fullmatch(head_repository):
               raise SystemExit("head repository input is invalid")
-          if not version_pattern.fullmatch(os.environ.get("REVIEW_SENSEI_VERSION", "")):
-              raise SystemExit("ReviewSensei version must be exact")
           PY
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
-          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei release identity is invalid." >&2
             exit 1
           fi
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei workflow commit is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check --upgrade pip 2>&1 | tee "$pypi_log" && \
@@ -1294,23 +812,10 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
-            rm -rf "$source_dir"
-            git init --bare "$source_dir"
-            git --git-dir="$source_dir" fetch --depth=1 \
-              https://github.com/malsabbagh/review-sensei.git \
-              "$REVIEW_SENSEI_WORKFLOW_SHA"
-            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
-            if [[ "$object_type" == "tag" ]]; then
-              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
-            elif [[ "$object_type" != "commit" ]]; then
-              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
-              exit 1
-            fi
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
-            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1
@@ -1322,6 +827,49 @@ jobs:
           fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
+
+      - name: Scope the selected backend credential
+        id: credential
+        env:
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          # Exactly one credential reference is materialized, and only when the
+          # plan says the selected backend requires it. A backend that requires
+          # no credential never receives one implicitly, and a credential's
+          # presence never authorizes writes or inference.
+          case "$CREDENTIAL_ENV" in
+            "")
+              if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+                echo '::error::the selected backend requires a credential but the plan named none' >&2
+                exit 1
+              fi
+              echo "no credential is required for backend ${{ needs.bootstrap.outputs.backend }}"
+              exit 0
+              ;;
+            OLLAMA_API_KEY|OPENROUTER_API_KEY|OPENAI_API_KEY)
+              ;;
+            *)
+              echo "::error::credential reference $CREDENTIAL_ENV is not one of this workflow's declared secrets (OLLAMA_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY); declare it in .reviewsensei.yml advanced.endpoint.credential_env or run the analysis locally" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$CREDENTIAL_REQUIRED" != "true" ]]; then
+            echo "backend ${{ needs.bootstrap.outputs.backend }} does not require a credential; none is materialized"
+            exit 0
+          fi
+          credential_value="${!CREDENTIAL_ENV:-}"
+          if [[ -z "$credential_value" ]]; then
+            echo "::error::secret $CREDENTIAL_ENV is required for the selected backend and is not available to this workflow" >&2
+            exit 1
+          fi
+          echo "::add-mask::$credential_value"
+          printf '%s=%s\n' "$CREDENTIAL_ENV" "$credential_value" >> "$GITHUB_ENV"
+          echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
       - name: Prepare bounded trusted-base diff
         if: inputs.operation == 'review'
@@ -1335,148 +883,34 @@ jobs:
             args+=(--head-repository "$HEAD_REPOSITORY")
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
+            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" \
+            --head-ref "$HEAD_REF" \
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
-              exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
-            exit 1
-          fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
-
-      - name: Run OpenRouter-provider review
+      - name: Run hosted review
         id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
+        if: inputs.operation == 'review'
         env:
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          MODE: ${{ inputs.mode }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_DEFAULT: deepseek/deepseek-v4.1-flash
+          RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
+          LEARNING: ${{ needs.bootstrap.outputs.learning }}
+          ARTIFACTS: ${{ needs.bootstrap.outputs.artifacts }}
           REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
         run: |
-          if [[ -z "$OPENROUTER_API_KEY" ]]; then
-            echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
-            exit 1
-          fi
-          VALIDATED_MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", "openrouter"),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          print(resolved, end="")
-          PY
-          )"
-          unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
-            echo '::error::hosted OpenRouter resolution failed' >&2
-            exit 1
-          }
-          MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
-          OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
-          if [[ "$MODEL" != "$VALIDATED_MODEL" ]]; then
-            echo '::error::resolved hosted OpenRouter model does not match workflow env' >&2
-            exit 1
-          fi
-          export MODEL OPENROUTER_UPSTREAM_PROVIDER
+          # The runner the plan selected is verified before inference: a
+          # backend-aware plan that lands on the wrong runner fails here rather
+          # than reaching an unintended provider or endpoint.
+          [[ "$RUNNER_KIND" == "hosted" ]] || { echo '::error::hosted review requires the hosted runner plan' >&2; exit 1; }
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
             exit 1
@@ -1487,14 +921,11 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
-          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
-          if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
-          if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
-          if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
+          if [[ "$LEARNING" == "disabled" ]]; then review_args+=(--no-learning-proposals); fi
           if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
           if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
-          if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
+          if [[ "$ARTIFACTS" == "diagnostics" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
           # Reserve the round, checkpoint the identity-bound transaction, and
@@ -1502,19 +933,32 @@ jobs:
           # published. The transaction lives in the broker-attested comment
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
+          # rounds and baselines.
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # Backend, endpoint, and model are plan outputs. The workflow holds
+          # no provider default and no model chain.
+          review_args+=(--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL")
+          review_args+=(--format json --exit-semantics operational)
+          # The named credential travels only when the selected backend
+          # requires one. A backend that requires no credential receives none
+          # implicitly: a cloud key exported for another backend must not reach
+          # a local endpoint.
+          if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+            review_args+=(--api-key-env "$CREDENTIAL_ENV")
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --provider openrouter --model "$MODEL" \
             --output review.json --outcome outcome.json
 
+      # success() && !cancelled() skips a pointless API call after a failed
+      # provider step or cancelled run. Publish still has its own cancellation
+      # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: success() && !cancelled() && inputs.operation == 'review'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1566,7 +1010,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1574,22 +1018,17 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          ENABLE_REVIEW: ${{ inputs.enable_review }}
-          LEARNING_PRS: ${{ inputs.enable_learning_prs }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
+          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
+          LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
-          publish_args=()
-          if [[ "$ENABLE_REVIEW" == "true" ]]; then
-            publish_args+=(--enable-review)
-          fi
-          if [[ "$LEARNING_PRS" == "true" ]]; then
-            publish_args+=(--enable-learning-prs)
-          fi
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
+          publish_args=(--enable-review)
+          if [[ "$REVIEWS" == "auto-approve" ]]; then
             publish_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+          else
             publish_args+=(--no-auto-approve)
+          fi
+          if [[ "$LEARNING" == "pull-requests" ]]; then
+            publish_args+=(--enable-learning-prs)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
@@ -1598,16 +1037,17 @@ jobs:
             --outcome publication-outcome.json --github-session-ledger \
             --configuration-context configuration-context.json \
             --admission-context admission-context.json \
-            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
+            --allow-write "${publish_args[@]}"
 
-      - name: Generate and publish OpenRouter mention reply
+      - name: Generate and publish hosted mention reply
         id: reply
-        # Approval finalization is inside `github reply --enable-auto-approve`,
-        # matching cloud/local. There is no separate YAML finalizer step.
-        if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
+        if: inputs.operation == 'reply'
         env:
-          MODE: ${{ inputs.mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1616,65 +1056,27 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_DEFAULT: deepseek/deepseek-v4.1-flash
+          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
         run: |
-          if [[ -z "$OPENROUTER_API_KEY" ]]; then
-            echo '::error::OPENROUTER_API_KEY is required for OpenRouter mode' >&2
-            exit 1
-          fi
-          VALIDATED_MODEL="$("$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", "openrouter"),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          print(resolved, end="")
-          PY
-          )"
-          unset OPENROUTER_UPSTREAM_PROVIDER
-          OPENROUTER_RESOLVED="$("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" resolve-hosted-openrouter both)" || {
-            echo '::error::hosted OpenRouter resolution failed' >&2
-            exit 1
-          }
-          MODEL="${OPENROUTER_RESOLVED%%$'\t'*}"
-          OPENROUTER_UPSTREAM_PROVIDER="${OPENROUTER_RESOLVED#*$'\t'}"
-          if [[ "$MODEL" != "$VALIDATED_MODEL" ]]; then
-            echo '::error::resolved hosted OpenRouter model does not match workflow env' >&2
-            exit 1
-          fi
-          export MODEL OPENROUTER_UPSTREAM_PROVIDER
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
+          if [[ "$REVIEWS" == "auto-approve" ]]; then
             auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+          else
             auto_approve_args+=(--no-auto-approve)
+          fi
+          reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
+            --model "$MODEL" --repository "$REPOSITORY" \
+            --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
+            --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
+            --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
+            --allow-write --enable-reply "${auto_approve_args[@]}")
+          if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+            reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
-            --generate --provider openrouter --model "$MODEL" \
-            --repository "$REPOSITORY" --pull-request "$PULL_REQUEST" \
-            --source-comment-id "$SOURCE_COMMENT_ID" \
-            --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
-            --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+            "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
           reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
@@ -1701,18 +1103,16 @@ jobs:
       - name: Verify mention reply completed
         if: >-
           always() && inputs.operation == 'reply' &&
-          inputs.enable_github_writes == 'true' &&
-          inputs.enable_mention_replies == 'true' &&
           steps.reply.outcome != 'success'
         run: |
           echo '::error::mention reply step did not complete successfully' >&2
           exit 1
 
-      - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+      - name: Upload diagnostics artifact
+        if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: review-sensei-review
+          name: review-sensei-diagnostics
           path: |
             review.json
             outcome.json
@@ -1721,12 +1121,19 @@ jobs:
           retention-days: 7
 
   local:
-    needs: [validate-provider-mode, authoritative-preflight]
-    if: ((inputs.operation == 'review' && inputs.enable_review == 'true') || (inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true')) && needs.validate-provider-mode.outputs.active_provider == 'local'
+    needs: [bootstrap, authoritative-preflight]
+    # Backend-aware runner planning: the same plan that selected the backend
+    # selects this job when the backend declares a local runner.
+    if: >-
+      needs.bootstrap.outputs.runner_kind == 'local' &&
+      needs.bootstrap.outputs.writes == 'true' &&
+      ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
+      (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
     concurrency:
-      # Keep this key byte-for-byte equivalent to the cloud job. A newer
-      # review therefore cancels any older provider-mode review for the same
-      # PR, while each mention reply remains isolated to its triggering run.
+      # Keep this key byte-for-byte equivalent to the hosted job. A newer
+      # review therefore cancels any older review for the same PR regardless
+      # of where it runs, while each mention reply remains isolated to its
+      # triggering run.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
     runs-on: [self-hosted, linux, x64, ollama]
@@ -1736,15 +1143,22 @@ jobs:
       issues: read
       id-token: write
     steps:
-      - name: Check out trusted base only
+      - name: Check out the trusted policy commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Check out the trusted reviewed base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
+          path: trusted-base
           fetch-depth: 0
 
       - name: Resolve trusted base SHA
         id: trusted-base
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git -C trusted-base rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -1755,12 +1169,16 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode || 'local-ollama' }}
+          RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           REPOSITORY: ${{ inputs.repository }}
           BASE_REF: ${{ inputs.base_ref }}
           HEAD_REF: ${{ inputs.head_ref }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
@@ -1770,7 +1188,10 @@ jobs:
 
           ref_pattern = re.compile(r"^[A-Za-z0-9._/-]+$")
           repository_pattern = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-          version_pattern = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+          backend_pattern = re.compile(
+              r"^(local-ollama|cloud-ollama|openrouter|openai-compatible)$"
+          )
+          credential_pattern = re.compile(r"^(|[A-Z][A-Z0-9_]*)$")
 
           def valid_ref(value: str) -> bool:
               return bool(
@@ -1785,8 +1206,22 @@ jobs:
               raise SystemExit("workflow mode is invalid")
           if os.environ.get("OPERATION") not in {"review", "reply"}:
               raise SystemExit("workflow operation is invalid")
-          if os.environ.get("PROVIDER_MODE") not in {"local", "local-ollama"}:
-              raise SystemExit("local job received an invalid provider mode")
+          # Each provider job re-checks the plan output it was selected by, so
+          # a plan/job mismatch fails closed instead of running a backend on
+          # the wrong runner.
+          if os.environ.get("RUNNER_KIND") != "local":
+              raise SystemExit("local job received a non-local plan")
+          if not backend_pattern.fullmatch(os.environ.get("BACKEND", "")):
+              raise SystemExit("plan backend is invalid")
+          model = os.environ.get("MODEL", "")
+          if not model or model.startswith("-"):
+              raise SystemExit("plan model is invalid")
+          if not re.fullmatch(r"https?://[^\s]+", os.environ.get("BASE_URL", "")):
+              raise SystemExit("plan endpoint is invalid")
+          if not credential_pattern.fullmatch(os.environ.get("CREDENTIAL_ENV", "")):
+              raise SystemExit("plan credential reference is invalid")
+          if os.environ.get("CREDENTIAL_REQUIRED") not in {"true", "false"}:
+              raise SystemExit("plan credential requirement is invalid")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
               raise SystemExit("repository input is invalid")
           base_ref = os.environ.get("BASE_REF", "")
@@ -1804,50 +1239,34 @@ jobs:
           head_repository = os.environ.get("HEAD_REPOSITORY", "")
           if head_repository and not repository_pattern.fullmatch(head_repository):
               raise SystemExit("head repository input is invalid")
-          if not version_pattern.fullmatch(os.environ.get("REVIEW_SENSEI_VERSION", "")):
-              raise SystemExit("ReviewSensei version must be exact")
           PY
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
-          REVIEW_SENSEI_VERSION: ${{ inputs.review_sensei_version }}
-          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
-          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/review-sensei-venv"
           python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
           expected_version="${REVIEW_SENSEI_VERSION#v}"
           pypi_log="$RUNNER_TEMP/review-sensei-pypi-install.log"
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_REF" =~ ^malsabbagh/review-sensei/\.github/workflows/review-sensei-run\.yml@refs/tags/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow must run from a public git tag." >&2
+          if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei release identity is invalid." >&2
             exit 1
           fi
-          if [[ ! "$REVIEW_SENSEI_WORKFLOW_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo "::error::The ReviewSensei reusable workflow SHA is invalid." >&2
+          if [[ ! "$REVIEW_SENSEI_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::The ReviewSensei workflow commit is invalid." >&2
             exit 1
           fi
           if "$python_bin" -m pip install --disable-pip-version-check "review-sensei==$expected_version" 2>&1 | tee "$pypi_log"; then
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
-            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
-            rm -rf "$source_dir"
-            git init --bare "$source_dir"
-            git --git-dir="$source_dir" fetch --depth=1 \
-              https://github.com/malsabbagh/review-sensei.git \
-              "$REVIEW_SENSEI_WORKFLOW_SHA"
-            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
-            if [[ "$object_type" == "tag" ]]; then
-              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
-            elif [[ "$object_type" != "commit" ]]; then
-              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
-              exit 1
-            fi
-            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
+            echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check \
-              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
-            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_SHA"
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+            install_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei==$expected_version for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
             exit 1
@@ -1860,142 +1279,82 @@ jobs:
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
 
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
+      - name: Scope the selected backend credential
+        id: credential
         env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
+          # Exactly one credential reference is materialized, and only when the
+          # plan says the selected backend requires it. A backend that requires
+          # no credential never receives one implicitly, and a credential's
+          # presence never authorizes writes or inference.
+          case "$CREDENTIAL_ENV" in
+            "")
+              if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+                echo '::error::the selected backend requires a credential but the plan named none' >&2
+                exit 1
+              fi
+              echo "no credential is required for backend ${{ needs.bootstrap.outputs.backend }}"
+              exit 0
+              ;;
+            OLLAMA_API_KEY|OPENROUTER_API_KEY|OPENAI_API_KEY)
+              ;;
+            *)
+              echo "::error::credential reference $CREDENTIAL_ENV is not one of this workflow's declared secrets (OLLAMA_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY); declare it in .reviewsensei.yml advanced.endpoint.credential_env or run the analysis locally" >&2
               exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          if [[ "$CREDENTIAL_REQUIRED" != "true" ]]; then
+            echo "backend ${{ needs.bootstrap.outputs.backend }} does not require a credential; none is materialized"
             exit 0
           fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
+          credential_value="${!CREDENTIAL_ENV:-}"
+          if [[ -z "$credential_value" ]]; then
+            echo "::error::secret $CREDENTIAL_ENV is required for the selected backend and is not available to this workflow" >&2
             exit 1
           fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
+          echo "::add-mask::$credential_value"
+          printf '%s=%s\n' "$CREDENTIAL_ENV" "$credential_value" >> "$GITHUB_ENV"
+          echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
-      - name: Prepare and run trusted local review
+      - name: Run local review
         id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
+        if: inputs.operation == 'review'
         env:
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          MODE: ${{ inputs.mode }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
-          BACKEND_DEFAULT: qwen3.5:4b
+          RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
+          CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
+          CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
+          LEARNING: ${{ needs.bootstrap.outputs.learning }}
+          ARTIFACTS: ${{ needs.bootstrap.outputs.artifacts }}
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
-          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
           REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
-          STAGES_DIR: ${{ inputs.stages_dir }}
-          CATEGORIES_DIR: ${{ inputs.categories_dir }}
-          LEARNING_PROPOSALS: ${{ inputs.enable_learning_proposals }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
         run: |
+          [[ "$RUNNER_KIND" == "local" ]] || { echo '::error::local review requires the local runner plan' >&2; exit 1; }
+          # The local prerequisite is verified against the planned endpoint and
+          # model: an unreachable server or a missing model fails before
+          # inference instead of failing mid-review.
+          curl --fail --silent --show-error --max-time 10 "$BASE_URL/tags" >/dev/null
+          ollama show "$MODEL" >/dev/null
           args=()
           if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          if resolved != os.environ["OLLAMA_MODEL"]:
-              print(
-                  "::error::resolved hosted model does not match workflow env",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-          PY
-          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
-          ollama show "$OLLAMA_MODEL" >/dev/null
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
+            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" \
+            --head-ref "$HEAD_REF" \
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
@@ -2008,14 +1367,11 @@ jobs:
             exit 1
           fi
           review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
-          review_args+=(--review-mode "$REVIEW_MODE")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
-          if [[ -n "$STAGES_DIR" ]]; then review_args+=(--stages-dir "$STAGES_DIR"); fi
-          if [[ -n "$CATEGORIES_DIR" ]]; then review_args+=(--categories-dir "$CATEGORIES_DIR"); fi
-          if [[ "$LEARNING_PROPOSALS" != "true" ]]; then review_args+=(--no-learning-proposals); fi
+          if [[ "$LEARNING" == "disabled" ]]; then review_args+=(--no-learning-proposals); fi
           if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
           if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
-          if [[ "$UPLOAD_ARTIFACTS" == "true" ]]; then
+          if [[ "$ARTIFACTS" == "diagnostics" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
           fi
           # Reserve the round, checkpoint the identity-bound transaction, and
@@ -2023,14 +1379,18 @@ jobs:
           # published. The transaction lives in the broker-attested comment
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
+          # rounds and baselines.
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          review_args+=(--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL")
+          review_args+=(--format json --exit-semantics operational)
+          if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+            review_args+=(--api-key-env "$CREDENTIAL_ENV")
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" \
             --output review.json --outcome outcome.json
 
       # success() && !cancelled() skips a pointless API call after a failed
@@ -2038,7 +1398,7 @@ jobs:
       # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: success() && !cancelled() && inputs.operation == 'review'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -2089,8 +1449,8 @@ jobs:
           echo 'publish admission current'
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
-      - name: Publish or promote trusted local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
+      - name: Publish or promote validated local review and learnings
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -2098,22 +1458,17 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          ENABLE_REVIEW: ${{ inputs.enable_review }}
-          LEARNING_PRS: ${{ inputs.enable_learning_prs }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
-          REVIEW_MODE: ${{ inputs.review_mode }}
+          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
+          LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
-          publish_args=()
-          if [[ "$ENABLE_REVIEW" == "true" ]]; then
-            publish_args+=(--enable-review)
-          fi
-          if [[ "$LEARNING_PRS" == "true" ]]; then
-            publish_args+=(--enable-learning-prs)
-          fi
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
+          publish_args=(--enable-review)
+          if [[ "$REVIEWS" == "auto-approve" ]]; then
             publish_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+          else
             publish_args+=(--no-auto-approve)
+          fi
+          if [[ "$LEARNING" == "pull-requests" ]]; then
+            publish_args+=(--enable-learning-prs)
           fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
@@ -2122,18 +1477,15 @@ jobs:
             --outcome publication-outcome.json --github-session-ledger \
             --configuration-context configuration-context.json \
             --admission-context admission-context.json \
-            --review-mode "$REVIEW_MODE" --allow-write "${publish_args[@]}"
+            --allow-write "${publish_args[@]}"
 
-      - name: Generate and publish trusted local mention reply
+      - name: Generate and publish local mention reply
         id: reply
-        if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
+        if: inputs.operation == 'reply'
         env:
-          MODE: ${{ inputs.mode }}
-          PROVIDER_MODE: ${{ needs.validate-provider-mode.outputs.normalized_provider_mode }}
-          CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
-          HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
-          BACKEND_MODEL: ${{ vars.REVIEWSENSEI_LOCAL_MODEL }}
-          BACKEND_DEFAULT: qwen3.5:4b
+          BACKEND: ${{ needs.bootstrap.outputs.backend }}
+          BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          MODEL: ${{ needs.bootstrap.outputs.model }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -2142,52 +1494,31 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
+          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
         run: |
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import os
-          import sys
-
-          from review_sensei.errors import ReviewInputError
-          from review_sensei.provider_config import validate_resolved_hosted_job_model
-
-          try:
-              resolved = validate_resolved_hosted_job_model(
-                  provider_mode=os.environ.get("PROVIDER_MODE", ""),
-                  workflow_mode=os.environ.get("MODE", ""),
-                  caller_model=os.environ.get("CALLER_MODEL", ""),
-                  reviewsensei_model=os.environ.get("HOSTED_REVIEWSENSEI_MODEL", ""),
-                  backend_model=os.environ.get("BACKEND_MODEL", ""),
-                  backend_default=os.environ.get("BACKEND_DEFAULT", ""),
-              )
-          except ReviewInputError as exc:
-              print(f"::error::{exc}", file=sys.stderr)
-              raise SystemExit(1) from exc
-          if resolved != os.environ["OLLAMA_MODEL"]:
-              print(
-                  "::error::resolved hosted model does not match workflow env",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-          PY
-          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
-          ollama show "$OLLAMA_MODEL" >/dev/null
+          # The same local prerequisite check the review path uses, so a reply
+          # never reaches an unreachable server or a missing model.
+          curl --fail --silent --show-error --max-time 10 "$BASE_URL/tags" >/dev/null
+          ollama show "$MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
+          if [[ "$REVIEWS" == "auto-approve" ]]; then
             auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
+          else
             auto_approve_args+=(--no-auto-approve)
           fi
-          set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
-            --generate --provider ollama --base-url http://127.0.0.1:11434/api \
-            --model "$OLLAMA_MODEL" --repository "$REPOSITORY" \
+          reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
+            --model "$MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+            --allow-write --enable-reply "${auto_approve_args[@]}")
+          if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
+            reply_args+=(--api-key-env "$CREDENTIAL_ENV")
+          fi
+          set +e
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
+            "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
           reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
@@ -2214,18 +1545,16 @@ jobs:
       - name: Verify mention reply completed
         if: >-
           always() && inputs.operation == 'reply' &&
-          inputs.enable_github_writes == 'true' &&
-          inputs.enable_mention_replies == 'true' &&
           steps.reply.outcome != 'success'
         run: |
           echo '::error::mention reply step did not complete successfully' >&2
           exit 1
 
-      - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+      - name: Upload diagnostics artifact
+        if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: review-sensei-review
+          name: review-sensei-diagnostics
           path: |
             review.json
             outcome.json

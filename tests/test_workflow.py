@@ -1,7 +1,9 @@
 import os
-import shutil
+import re
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -53,119 +55,133 @@ def _reusable_workflow() -> str:
 
 
 class WorkflowValidationTests(unittest.TestCase):
-    def test_reusable_workflow_defaults_and_rejects_retired_legacy_mode(self):
-        workflow = _reusable_workflow()
-        self.assertIn(
-            "review_mode:\n        required: false\n        default: merge-focused",
-            workflow,
-        )
-        self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", workflow)
-        # The positive form above would still pass if a second, later default
-        # re-enabled the retired mode, so pin the retired value out entirely.
-        self.assertNotIn("default: legacy", workflow)
-        self.assertIn(
-            "legacy review mode is retired; migrate configuration to merge-focused",
-            workflow,
-        )
-        self.assertIn("merge the pending setup-v5 pull request", workflow)
-        legacy_line = next(
-            line
-            for line in workflow.splitlines()
-            if "legacy review mode is retired; migrate configuration" in line
-        )
-        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy_line)
-
-    def test_reusable_workflow_review_mode_case_rejects_legacy_at_runtime(self):
-        # Git Bash is present on the Windows compatibility runners, so the
-        # guard is executed there too; only a host without any POSIX bash is
-        # skipped, with the reason reported.
-        bash = shutil.which("bash")
-        if bash is None:
-            self.skipTest("no POSIX bash is available to execute the workflow guard")
-        workflow = _reusable_workflow()
-        # Execute the guard the workflow itself runs instead of trusting that
-        # the literal is still wired the way the assertions above describe.
-        # The marker must occur exactly once and inside the named step, so a
-        # second copy elsewhere can never be sliced instead of the real guard.
-        marker = 'case "$REVIEW_MODE" in'
-        self.assertEqual(workflow.count(marker), 1)
-        step_start = workflow.index("      - name: Reject unsupported provider mode")
-        step_end = workflow.find("\n      - name:", step_start + 1)
-        self.assertNotEqual(step_end, -1)
-        guard_step = workflow[step_start:step_end]
-        self.assertIn(marker, guard_step)
-        # Execute the guard's own normalization together with the review-mode
-        # case, both verbatim, so the executed value is the one the case reads
-        # rather than the raw input. The intervening provider-mode cases are
-        # unrelated to this behavior and are not part of the slice.
-        normalize = 'REVIEW_MODE="$(printf'
-        self.assertIn(normalize, guard_step)
-        normalize_start = step_start + guard_step.index(normalize)
-        normalize_end = workflow.index('case "$PROVIDER_MODE" in', normalize_start)
-        case_start = step_start + guard_step.index(marker)
-        case_end = workflow.index("esac", case_start) + len("esac")
-        guard = (
-            workflow[normalize_start:normalize_end]
-            + "\n"
-            + workflow[case_start:case_end]
+    def test_reusable_workflow_declares_only_invocation_inputs(self):
+        from review_sensei.configuration import (
+            RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS,
+            RETIRED_ENVIRONMENT_SETTINGS,
         )
 
-        def run(mode: str, operation: str = "review") -> subprocess.CompletedProcess:
-            return subprocess.run(
-                [bash, "-c", guard],
-                env={**os.environ, "REVIEW_MODE": mode, "OPERATION": operation},
-                capture_output=True,
-                text=True,
+        workflow = _reusable_workflow()
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\n    secrets:", 1)[0]
+        declared = re.findall(r"^      ([a-z_]+):$", inputs, re.M)
+        self.assertEqual(
+            declared,
+            [
+                "mode",
+                "operation",
+                "repository",
+                "repository_id",
+                "pull_request_number",
+                "base_ref",
+                "base_sha",
+                "head_ref",
+                "head_repository",
+                "head_sha",
+                "source_kind",
+                "source_comment_id",
+                "source_updated_at",
+                "root_comment_id",
+                "comment_body",
+                "comment_actor",
+                "comment_actor_type",
+                "comment_association",
+            ],
+        )
+        # An invocation carries identity and payload only. Backend, model,
+        # endpoint, credential, and policy are package decisions, so no input
+        # may name any of them.
+        for token in (
+            "provider",
+            "model",
+            "base_url",
+            "credential",
+            "review_mode",
+            "enable_",
+        ):
+            self.assertNotIn(token, inputs)
+        # The complete set of repository variables this workflow reads: the two
+        # supported overrides, plus the retired names the diagnostic report maps
+        # so it can warn about them. Nothing else is read from `vars`.
+        retired = (
+            set(RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS)
+            | set(RETIRED_ENVIRONMENT_SETTINGS)
+        )
+        managed = sorted(
+            name for name in retired if name.startswith("REVIEWSENSEI_")
+        ) + ["REVIEWSENSEI_MODEL", "REVIEWSENSEI_PROVIDER"]
+        mapped = re.findall(
+            r"^          ([A-Z][A-Z0-9_]*): \$\{\{ vars\.([A-Z][A-Z0-9_]*) \}\}$",
+            workflow,
+            re.M,
+        )
+        self.assertEqual(sorted(mapped), [(name, name) for name in sorted(managed)])
+        # A repository variable is always addressable only through its
+        # prefixed name, so the map above is the workflow's complete `vars`
+        # surface; the unprefixed historical names must not be read at all.
+        for name in sorted(retired - set(managed)):
+            self.assertIsNone(
+                re.search(rf"(?<![A-Z0-9_]){name}(?![A-Z0-9_])", workflow),
+                f"{name} must not appear in the workflow",
             )
 
-        for mode in ("advisory", "merge-focused", "strict"):
-            with self.subTest(mode=mode):
-                completed = run(mode)
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-        legacy = run("legacy")
-        self.assertEqual(legacy.returncode, 1)
-        self.assertIn("legacy review mode is retired", legacy.stderr)
-        self.assertIn("REVIEWSENSEI_REVIEW_MODE", legacy.stderr)
-        # The guard normalizes exactly like the CLI resolves the mode, so a
-        # padded or upper-cased retired value takes the migration arm instead
-        # of the generic rejection.
-        for mode in (" LEGACY ", "Legacy"):
-            with self.subTest(mode=mode):
-                normalized_legacy = run(mode)
-                self.assertEqual(normalized_legacy.returncode, 1)
-                self.assertIn("legacy review mode is retired", normalized_legacy.stderr)
-        # Reply and command operations never resolve a review policy, so a
-        # retired stored value warns and continues instead of failing the run;
-        # only a review fails closed, matching the CLI reply exemption.
-        for operation in ("reply", "command"):
-            with self.subTest(operation=operation):
-                retired_non_review = run("legacy", operation=operation)
-                self.assertEqual(
-                    retired_non_review.returncode, 0, retired_non_review.stderr
-                )
-                self.assertIn("::warning::", retired_non_review.stderr)
-                self.assertNotIn("::error::", retired_non_review.stderr)
-                self.assertIn(
-                    f"retired and ignored for {operation} operations",
-                    retired_non_review.stderr,
-                )
-        for mode in (" MERGE-FOCUSED ", "Merge-Focused"):
-            with self.subTest(mode=mode):
-                normalized_supported = run(mode)
-                self.assertEqual(
-                    normalized_supported.returncode, 0, normalized_supported.stderr
-                )
-        bogus = run("bogus")
-        self.assertEqual(bogus.returncode, 1)
-        self.assertIn(
-            "review mode must be advisory, merge-focused, or strict", bogus.stderr
+    def test_retired_variables_are_reported_and_change_no_behavior(self):
+        # The workflow's own retired-variable report is executed here, not just
+        # matched as text: a stored value that no longer maps to configuration
+        # must produce one warning naming its replacement, and must never reach
+        # a later step.
+        workflow = _reusable_workflow()
+        step_start = workflow.index("- name: Report retired repository variables")
+        step_end = workflow.find("\n      - name:", step_start + 1)
+        self.assertNotEqual(step_end, -1)
+        report = workflow[step_start:step_end]
+        self.assertNotIn("id:", report)
+        self.assertNotIn("GITHUB_ENV", report)
+        self.assertNotIn("GITHUB_OUTPUT", report)
+        block = report.split("python\" - <<'PY'\n", 1)[1]
+        block = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0])
+
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        environment = {
+            **os.environ,
+            "PYTHONPATH": source_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "REVIEWSENSEI_REVIEW_MODE": "legacy",
+            "REVIEWSENSEI_AUTO_APPROVE": "true",
+        }
+        reported = subprocess.run(
+            [sys.executable, "-c", block],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        # The input is optional with a `merge-focused` default, so an absent or
-        # empty value resolves to the default here as it does in the CLI;
-        # callers that pin the tag without passing the input must not fail.
-        empty = run("")
-        self.assertEqual(empty.returncode, 0, empty.stderr)
-        self.assertNotIn("::error::", empty.stderr)
+        self.assertEqual(reported.returncode, 0, reported.stderr)
+        self.assertIn(
+            "::warning::REVIEWSENSEI_REVIEW_MODE is retired and has no effect; "
+            "one evidence-focused pipeline is the only engine; set github.reviews",
+            reported.stderr,
+        )
+        self.assertIn(
+            "::warning::REVIEWSENSEI_AUTO_APPROVE is retired and has no effect; "
+            "set github.reviews in .reviewsensei.yml",
+            reported.stderr,
+        )
+        self.assertNotIn("::error::", reported.stderr)
+        self.assertEqual(reported.stdout, "")
+
+        quiet = subprocess.run(
+            [sys.executable, "-c", block],
+            env={
+                **environment,
+                "REVIEWSENSEI_REVIEW_MODE": "",
+                "REVIEWSENSEI_AUTO_APPROVE": " ",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertNotIn("::warning::", quiet.stderr)
+        self.assertNotIn("::error::", quiet.stderr)
 
     def test_authoritative_execution_plan_binds_identity_and_eligibility(self):
         plan = plan_review_execution(
