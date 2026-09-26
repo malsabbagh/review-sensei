@@ -177,24 +177,36 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | --- | --- |
 | `review_publish` | `pull_requests: write` |
 | `review_status` | `pull_requests: read` |
+| `check_publish` | `checks: write` |
 | `inline_reply` | `pull_requests: write` |
 | `issue_reply` | `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
-The `review_publish` capability covers `COMMENT`, `REQUEST_CHANGES`, and
-`APPROVE` events; no additional App permission or secret is required.
+The `review_publish` capability covers `COMMENT` and `APPROVE` events;
+ReviewSensei publishes its review as one exact-head `COMMENT` and never emits a
+persistent `REQUEST_CHANGES`. Enforcement is the `ReviewSensei` check run
+published through the separate `check_publish` capability, which is why
+`checks: write` is requested explicitly: it is not part of review-comment
+permission. If the broker withholds that capability or the App lacks the
+permission, the review is still published, approval is withheld, and the run
+reports `check_permission` rather than implying enforcement. Because a required
+check is matched to its producing App, an administrator who makes
+`ReviewSensei` required selects it by this App's slug; YAML alone cannot make a
+check required, and GitHub does not run required checks on App-authored pull
+requests, so those are reported as `app_authored` instead of gated.
+
 Automatic approval defaults to enabled and may be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. The shared finalizer runs after review
 publication and after an AI resolution of a blocking ReviewSensei root. It
-emits `APPROVE` only for an eligible exact head with no unresolved
-ReviewSensei root classified blocking. A later same-head execution still
-requests changes if blocking comments remain or appear after an approval, and
-it approves after an earlier change request only once those roots are resolved.
-Explicit non-blocking follow-ups and human threads can remain open; an
-unclassified ReviewSensei root, partial/incomplete/summary-only result, or
-incomplete sweep remains a comment or fails closed. Omitted finding
-classifications are blocking only for case-insensitive critical/high severity;
-missing, lower-severity, and legacy free-form values are non-blocking.
+emits `APPROVE` only for an eligible exact head with a complete, qualified
+review and no unresolved ReviewSensei root classified blocking, deciding from
+the persisted eligibility document rather than a caller boolean. Explicit
+non-blocking follow-ups and human threads can remain open; an unclassified
+ReviewSensei root, partial/incomplete/summary-only result, or incomplete sweep
+withholds approval or fails closed. Omitted finding classifications are
+blocking only for case-insensitive critical/high severity; missing,
+lower-severity, and legacy free-form values are non-blocking. ReviewSensei
+never calls a merge endpoint or enables auto-merge.
 
 The signed assertion must use issuer
 `https://token.actions.githubusercontent.com`, audience

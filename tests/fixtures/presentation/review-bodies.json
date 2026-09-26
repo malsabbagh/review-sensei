@@ -53,7 +53,7 @@
         }
       ],
       "expected_events": [
-        "REQUEST_CHANGES"
+        "COMMENT"
       ],
       "expected_inline": 1,
       "expected_required_ids": [
@@ -301,7 +301,7 @@
         }
       ],
       "expected_events": [
-        "REQUEST_CHANGES"
+        "COMMENT"
       ],
       "expected_inline": 0,
       "expected_required_ids": [
@@ -590,7 +590,7 @@
         }
       ],
       "expected_events": [
-        "REQUEST_CHANGES"
+        "COMMENT"
       ],
       "expected_inline": 1,
       "expected_required_ids": [

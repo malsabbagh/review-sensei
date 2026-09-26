@@ -1128,32 +1128,36 @@ finalizer. It does not call the provider again.
 All setup-v5 switches except `REVIEWSENSEI_AUTO_APPROVE` default to `false`.
 Automatic approval defaults to `true` and can be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
-enabled, blocking findings publish as `REQUEST_CHANGES` and non-blocking
-findings as `COMMENT`. The shared finalizer emits `APPROVE` only for an
-eligible exact head with no unresolved ReviewSensei root classified blocking.
-A later execution on the same head still requests changes after an earlier
-approval if blocking comments remain, and it approves after an earlier change
-request only once those roots are resolved. Non-blocking ReviewSensei
-follow-ups and human threads may remain open; blocking or unclassified
-ReviewSensei roots and `@sensei` replies remain ordinary comments except for
-the review event above. Partial, incomplete, or summary-only artifacts are
-always comments, even when approval is enabled. Automatic approval also
-requires an eligible artifact: a complete review status, no finding awaiting a
-human assessment, and coverage that is either absent (a legacy or third-party
-result, which keeps the compatible path) or fully reviewed. When the operator
-enabled automatic approval but the artifact is ineligible, the finalizer still
-maintains the gate it owns — an open blocking root re-asserts
-`REQUEST_CHANGES` — and otherwise reports `approval_withheld` instead of
-approving on the maintainer's behalf. Eligibility is evaluated once, on the
-admitted artifact that is actually published, so the published summary state
-and the approval operation never disagree; a pre-admission runtime flag on an
-input comment is not authoritative. Draft, closed, stale, fork, or
-App-authored pull requests are never approved. A malformed, unauthorized,
-incomplete, or over-limit thread response fails closed before the write. The
-approval marker deduplicates each exact-head approval while repeated comments
-and approvals remain no-ops. The finalizer runs after review publication and
-after an AI resolution of a blocking root. Manual thread resolution alone does
-not trigger a workflow run. The generated caller may contain only the name-only secret mapping
+enabled, ReviewSensei publishes one exact-head `COMMENT` review and one stable
+`ReviewSensei` check run that is the single enforcement authority for that head
+(ADR 0057): `success` for a complete review with no required fixes, `failure`
+when required fixes remain, `action_required` for a partial, incomplete, or
+unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run
+that ended without a conclusion. A new review first writes `in_progress`, so an
+earlier conclusion on the same head cannot stand for a review that has not
+finished, and no persistent `REQUEST_CHANGES` is emitted as a second gate. A
+repository administrator must mark the check required for it to gate merges;
+`review-sensei doctor` reports the expected check identity and producing App,
+and `Checks: write` is a scoped broker capability, so a missing permission
+publishes the review, withholds approval, and reports `check_permission`.
+
+The shared finalizer emits `APPROVE` only for an eligible exact head with a
+complete, qualified review and no unresolved ReviewSensei root classified
+blocking, deciding from the persisted eligibility document rather than a
+caller-supplied boolean. Non-blocking ReviewSensei follow-ups and human threads
+may remain open; blocking or unclassified ReviewSensei roots and `@sensei`
+replies remain ordinary comments. Partial, incomplete, or summary-only
+artifacts never approve. Draft, closed, stale, fork, or App-authored pull
+requests are never approved; GitHub does not run required checks on App-authored
+pull requests, so those withhold approval with `app_authored` instead of
+claiming enforcement. A malformed, unauthorized, incomplete, or over-limit
+thread response fails closed before the write, and the withheld decision
+carries a bounded diagnostic. The approval marker deduplicates each exact-head
+approval while repeated comments and approvals remain no-ops. The finalizer
+runs after review publication and after an AI resolution of a blocking root,
+and it never calls a merge endpoint or enables auto-merge. Manual thread
+resolution alone does not trigger a workflow run. The generated caller may
+contain only the name-only secret mapping
 `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`; no secret value is generated or
 handled by the App setup boundary.
 

@@ -43,7 +43,7 @@ Process: `docs/process/adr-process.md`
 | [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; a shared finalizer ignores open non-blocking and human threads, while unknown ReviewSensei roots fail closed. |
 | [0033](0033-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 | [0034](0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | not configured | Typed resolve decision with exact-head and ReviewSensei-root guards; a blocking resolution invokes the shared finalizer. |
-| [0035](0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | #86 | Blocking findings emit `REQUEST_CHANGES`; a later same-head approve wins only after those roots resolve. |
+| [0035](0035-request-changes-for-blocking-findings.md) | Superseded | Request changes for unresolved blocking findings | #86 | Superseded by ADR 0057; enforcement is the head-bound `ReviewSensei` check run and reviews stay `COMMENT`. |
 | [0036](0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | #41 | Advisory stale/conflict signals; feedback is not trusted review context |
 | [0037](0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40 | Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited workflow-channel promotion/rollback |
@@ -66,6 +66,7 @@ Process: `docs/process/adr-process.md`
 | [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
 | [0056](0056-remove-pr-wide-review-count-caps.md) | Proposed | Remove the PR-wide review count cap | #181 C | Rounds are uncapped; only live causes refuse; counters are diagnostic history |
 | [0056](0056-host-fact-placement-and-honest-approval-presentation.md) | Proposed | Host-fact placement and honest approval presentation | #181 D | Conversation resolution is host authority; approval only from an eligible admitted artifact |
+| [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
 ## Policy
 

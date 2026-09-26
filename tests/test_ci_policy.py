@@ -669,8 +669,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         # github.reviews and github.learning travel to the package as explicit
         # invocation flags instead of being re-derived from a variable.
         self.assertIn('if [[ "$REVIEWS" == "auto-approve" ]]; then', text)
-        self.assertIn("auto_approve_args+=(--enable-auto-approve)", text)
-        self.assertIn("auto_approve_args+=(--no-auto-approve)", text)
+        # Only the publish steps carry the approval boolean: reply finalization
+        # re-reads the persisted eligibility of the review published for this
+        # head instead of trusting a caller flag.
+        self.assertNotIn("auto_approve_args", text)
         self.assertIn("publish_args+=(--enable-auto-approve)", text)
         self.assertIn("publish_args+=(--no-auto-approve)", text)
         self.assertIn('if [[ "$LEARNING" == "disabled" ]]; then', text)
@@ -798,10 +800,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             )
             reply = _step_block(job, reply_name)
             self.assertIn("GITHUB_TOKEN: ${{ github.token }}", reply)
-            self.assertIn("REVIEWS: ${{ needs.bootstrap.outputs.reviews }}", reply)
-            self.assertIn("auto_approve_args=()", reply)
-            self.assertIn("auto_approve_args+=(--enable-auto-approve)", reply)
-            self.assertIn('"${auto_approve_args[@]}"', reply)
+            # Approval finalization inside `github reply` re-reads the
+            # persisted eligibility of the review published for this head, so
+            # the reply step never carries a caller-supplied approval boolean.
+            self.assertNotIn("AUTO_APPROVE", reply)
+            self.assertNotIn("auto_approve_args", reply)
+            self.assertNotIn("--enable-auto-approve", reply)
+            self.assertNotIn("--no-auto-approve", reply)
             self.assertIn("github reply \\", reply)
             self.assertIn("reply_exit=$?", reply)
             self.assertIn("grep -E '^(replied_and_resolved|", reply)

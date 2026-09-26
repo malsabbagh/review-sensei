@@ -354,17 +354,25 @@ valid inline comments and a validated summary.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically by default. Set
-`github.reviews: blocking` or `github.reviews: advisory` in
-`.reviewsensei.yml` to select a non-approving policy instead. Blocking
-findings are published as `REQUEST_CHANGES`, then a shared idempotent
-finalizer may emit `APPROVE` once no unresolved ReviewSensei root is classified
-blocking. A later execution on the same head can still request changes after
-an earlier approval, and can approve after an earlier change request only when
-those blocking roots are resolved. Non-blocking ReviewSensei follow-ups and
-human threads may remain open. An unclassified ReviewSensei root,
-partial/incomplete/summary-only result, incomplete/error thread response, or
-stale/fork/closed/App-authored target remains a comment or fails closed before
-writing. All `@sensei` replies remain ordinary comments.
+`github.reviews: blocking` (publish and enforce, never automatically approve)
+or `github.reviews: advisory` (no ReviewSensei merge gate and no approval) in
+`.reviewsensei.yml` to select another policy instead. Enforcement is
+one stable `ReviewSensei` check run bound to the reviewed head and to the App
+that produced it; mark it required in branch protection (an administrator
+action - ReviewSensei never reads or changes branch protection, and `doctor`
+reports the check identity and producing App) for it to gate merges. The
+conclusion is `success` for a complete review with no required fixes, `failure`
+when required fixes remain, `action_required` for a partial, incomplete, or
+unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run that
+ended without a conclusion; no persistent `REQUEST_CHANGES` is emitted as a
+second gate, and the App needs `Checks: write`. A shared idempotent finalizer may
+then emit `APPROVE` once no unresolved ReviewSensei root is classified blocking.
+Non-blocking ReviewSensei follow-ups and human threads may remain open. An
+unclassified ReviewSensei root, partial/incomplete/summary-only result,
+incomplete/error thread response, missing check permission, or
+stale/fork/closed/App-authored target withholds approval or fails closed before
+writing, with a bounded diagnostic. All `@sensei` replies remain ordinary
+comments.
 
 The approval marker deduplicates the `APPROVED` state per exact head. The
 finalizer runs immediately after review publication and after an AI reply

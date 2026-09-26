@@ -262,6 +262,10 @@ class _ObservedGitHub:
         self.head_sha = "0" * 40
         self.unresolved_blocking_thread = unresolved_blocking_thread
         self.reviews: list[dict[str, object]] = []
+        self.check_runs: dict[str, dict[str, object]] = {}
+        self.gate_writes: list[dict[str, object]] = []
+        self._check_run_heads: dict[int, str] = {}
+        self._next_check_run_id = 1
         self.calls: list[tuple[str, str, dict[str, object] | None]] = []
         self.http = GitHubHttp(
             api_url="https://observed.github.invalid", opener=self._open, timeout=1
@@ -277,6 +281,16 @@ class _ObservedGitHub:
             and isinstance(body, dict)
             and body.get("event") == "APPROVE"
         )
+
+    @property
+    def gate_conclusions(self) -> list[object]:
+        """Return every gate conclusion the harness published, in order."""
+
+        return [
+            write.get("conclusion")
+            for write in self.gate_writes
+            if write.get("conclusion") is not None
+        ]
 
     def _pr_payload(self) -> dict[str, object]:
         return {
@@ -310,6 +324,34 @@ class _ObservedGitHub:
             return _ObservedHTTPResponse(self._pr_payload())
         if request.method == "GET" and path.endswith("/pulls/136/reviews"):
             return _ObservedHTTPResponse(self.reviews)
+        if request.method == "GET" and path.endswith("/check-runs"):
+            head_sha = path.split("/commits/", 1)[-1].split("/", 1)[0]
+            published = self.check_runs.get(head_sha)
+            return _ObservedHTTPResponse(
+                {"check_runs": [] if published is None else [published]}
+            )
+        if request.method == "POST" and path.endswith("/check-runs"):
+            if body is None:
+                raise ReviewInputError("observed check publication body is missing")
+            head_sha = body.get("head_sha")
+            if not isinstance(head_sha, str):
+                raise ReviewInputError("observed check publication head is invalid")
+            run_id = self._next_check_run_id
+            self._next_check_run_id += 1
+            self._check_run_heads[run_id] = head_sha
+            self.gate_writes.append(dict(body))
+            self.check_runs[head_sha] = {"id": run_id, **body}
+            return _ObservedHTTPResponse({"id": run_id}, 201)
+        if request.method == "PATCH" and "/check-runs/" in path:
+            if body is None:
+                raise ReviewInputError("observed check update body is missing")
+            run_id = int(path.rsplit("/", 1)[-1])
+            head_sha = self._check_run_heads.get(run_id)
+            if head_sha is None:
+                return _ObservedHTTPResponse({"message": "not found"}, 404)
+            self.gate_writes.append(dict(body))
+            self.check_runs[head_sha].update(body)
+            return _ObservedHTTPResponse({"id": run_id})
         if request.method == "POST" and path == "/graphql":
             nodes: list[dict[str, object]] = []
             operation = body.get("operationName") if isinstance(body, dict) else None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -46,7 +48,21 @@ from ...presentation import (
 )
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, PublishableReview, prepare_publishable_review
-from .approval import has_blocking_findings, has_human_adjudication_findings
+from .approval import (
+    ReviewApprovalEligibility,
+    approval_eligibility_from_result,
+    approval_withheld_diagnostic,
+    evaluate_approval_facts,
+    has_blocking_findings,
+    has_human_adjudication_findings,
+)
+from .checks import (
+    REVIEW_POLICY_MODES,
+    CheckOutcome,
+    ReviewCheckPublisher,
+    check_outcome_for_result,
+    review_check_outcome_for_publication_failure,
+)
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -59,16 +75,12 @@ REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
 FINDING_MARKER_PREFIX_V2 = "<!-- reviewsensei:finding:v2"
 APPROVAL_MARKER_PREFIX = "<!-- reviewsensei:approval:v1"
-CHANGES_REQUESTED_MARKER_PREFIX = "<!-- reviewsensei:changes-requested:v1"
+APPROVAL_ELIGIBILITY_MARKER_PREFIX = "<!-- reviewsensei:eligibility:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
 PUBLISHED_REVIEW_STATES = frozenset({"COMMENTED", "APPROVED", "CHANGES_REQUESTED"})
-CHANGES_REQUESTED_BODY = "Blocking ReviewSensei findings remain unresolved."
-CHANGES_REQUESTED_INLINE_POINTER = "See the inline ReviewSensei comments on this head."
 DISCUSSION_INSTRUCTION = (
     "To discuss this finding, reply with @sensei followed by your question."
 )
-MAX_CHANGE_REQUEST_EXCERPTS = 8
-MAX_CHANGE_REQUEST_EXCERPT_CHARS = 200
 # GitHub's review body limit is independent of the provider-neutral summary
 # profile. The formatted summary is checked against ReviewLimits first, then
 # the complete body (including framing and the idempotency marker) is checked
@@ -108,7 +120,6 @@ _FINDING_MARKER_RE = re.compile(
     r"base=(?P<base_sha>[a-f0-9]{40}) result=(?P<result>[a-f0-9]{64}) "
     r"blocking=(?P<blocking>true|false) -->"
 )
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _FINDING_MARKER_V2_RE = re.compile(
     r"<!-- reviewsensei:finding:v2 repo=(?P<repository_id>[1-9][0-9]*) "
     r"pr=(?P<pull_request>[1-9][0-9]*) head=(?P<head_sha>[a-f0-9]{40}) "
@@ -277,7 +288,9 @@ def _with_discussion_instruction(text: str) -> str:
     return f"{text}\n\n{DISCUSSION_INSTRUCTION}"
 
 
-def _result_digest(result: ReviewResult) -> str:
+def review_result_digest(result: ReviewResult) -> str:
+    """Return the canonical digest that binds a decision to one review result."""
+
     canonical = json.dumps(
         result.to_dict(),
         ensure_ascii=False,
@@ -294,7 +307,7 @@ def review_marker(
     head_sha: str,
     result: ReviewResult,
 ) -> str:
-    digest = _result_digest(result)
+    digest = review_result_digest(result)
     return (
         f"{review_identity_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha)} "
         f"result={digest} coverage={result.coverage_mode} -->"
@@ -333,7 +346,7 @@ def finding_marker(
         )
     return (
         f"{FINDING_MARKER_PREFIX} repo={repository_id} pr={pull_request} "
-        f"head={head_sha} base={base_sha} result={_result_digest(result)} "
+        f"head={head_sha} base={base_sha} result={review_result_digest(result)} "
         f"blocking={'true' if blocking else 'false'} -->"
     )
 
@@ -398,72 +411,71 @@ def approval_marker(
     )
 
 
-def changes_requested_marker(
-    *, repository_id: int, pull_request: int, head_sha: str, base_sha: str
-) -> str:
-    """Return the idempotency marker for one exact-head change request."""
+_APPROVAL_ELIGIBILITY_RE = re.compile(
+    re.escape(APPROVAL_ELIGIBILITY_MARKER_PREFIX)
+    + r" (?P<payload>[A-Za-z0-9_-]+={0,2}) -->"
+)
 
-    return (
-        f"{CHANGES_REQUESTED_MARKER_PREFIX} repo={repository_id} "
-        f"pr={pull_request} head={head_sha} base={base_sha} -->"
+
+def approval_eligibility_marker(eligibility: ReviewApprovalEligibility) -> str:
+    """Encode one eligibility document as a hidden, bounded review-body marker.
+
+    The document is JSON, then base64url so it stays single-line and cannot
+    close the HTML comment early. It is persisted beside the published review
+    because the delayed finalization path (a reply-driven resolution) runs in a
+    different process from the review that produced the evidence.
+    """
+
+    if not isinstance(eligibility, ReviewApprovalEligibility):
+        raise GitHubPublicationError("approval eligibility is invalid")
+    canonical = json.dumps(
+        eligibility.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
-
-
-def _change_request_excerpt(body: object) -> str:
-    """Return one bounded, marker-stripped blocking-root excerpt."""
-
-    if not isinstance(body, str) or not body.strip():
-        return ""
-    text = _HTML_COMMENT_RE.sub("", body)
-    text = text.replace(DISCUSSION_INSTRUCTION, "")
-    text = " ".join(text.split())
-    if len(text) > MAX_CHANGE_REQUEST_EXCERPT_CHARS:
-        text = text[: MAX_CHANGE_REQUEST_EXCERPT_CHARS - 1].rstrip() + "…"
-    return text
-
-
-def changes_requested_review_body(*, excerpts: tuple[str, ...], marker: str) -> str:
-    """Return one bounded exact-head change-request review body."""
-
-    parts = [CHANGES_REQUESTED_BODY, ""]
-    if excerpts:
-        parts.extend(f"- {excerpt}" for excerpt in excerpts)
-    else:
-        parts.append(CHANGES_REQUESTED_INLINE_POINTER)
-    parts.extend(["", marker])
-    body = "\n".join(parts)
+    payload = base64.urlsafe_b64encode(canonical.encode("utf-8")).decode("ascii")
+    marker = f"{APPROVAL_ELIGIBILITY_MARKER_PREFIX} {payload} -->"
     try:
         validate_bounded_text(
-            body,
+            marker,
             MAX_PUBLISHED_REVIEW_BODY_BYTES,
-            label="published change-request body",
+            label="approval eligibility marker",
             allow_empty=False,
         )
     except ReviewInputError as exc:
         raise GitHubPublicationError(
-            "formatted review exceeds the configured publication limit"
+            "approval eligibility exceeds the configured publication limit"
         ) from exc
-    return body
+    return marker
 
 
-def finding_review_event(
-    *,
-    auto_approve: bool,
-    result: ReviewResult,
-    policy: ReviewConvergencePolicy | None = None,
-) -> tuple[str, str]:
-    """Return the GitHub review event and state for one finding publication.
+def approval_eligibility_from_body(body: object) -> ReviewApprovalEligibility | None:
+    """Read back one persisted eligibility document, failing closed to ``None``.
 
-    ``automatic_github_review_events=False`` (advisory) withholds
-    ``APPROVE`` / ``REQUEST_CHANGES``. The publisher still posts a
-    ``COMMENT`` review so folded observations have a summary body.
+    A missing, unreadable, or malformed document returns ``None``: every caller
+    withholds approval rather than inferring eligibility from a partial read.
     """
 
-    if policy is not None and not policy.automatic_github_review_events:
-        return "COMMENT", "COMMENTED"
-    if auto_approve and has_blocking_findings(result):
-        return "REQUEST_CHANGES", "CHANGES_REQUESTED"
-    return "COMMENT", "COMMENTED"
+    if not isinstance(body, str):
+        return None
+    match = _APPROVAL_ELIGIBILITY_RE.search(body)
+    if match is None:
+        return None
+    # The marker carries base64url text, whose padding is re-added here so both
+    # a padded and a stripped payload decode to the same document.
+    payload = match.group("payload").rstrip("=")
+    try:
+        raw = base64.urlsafe_b64decode(
+            (payload + "=" * (-len(payload) % 4)).encode("ascii")
+        )
+        document = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        return None
+    try:
+        return ReviewApprovalEligibility.from_dict(document)
+    except ReviewInputError:
+        return None
 
 
 def finding_blocks_approval(
@@ -600,21 +612,21 @@ class _FinalizationPreflight:
     app_authored: bool = False
 
 
-@dataclass(frozen=True)
-class _BlockingThreadScan:
-    open_blocking: bool
-    excerpts: tuple[str, ...] = ()
-
-
 class ReviewApprovalFinalizer:
-    """Converge an eligible exact-head PR to one App approval or change request.
+    """Converge an eligible exact-head PR to one App approval decision.
 
     This is deliberately independent of a provider result. It reads durable
     per-finding classifications from review-thread roots, so it can be invoked
-    both after review publication and after an AI resolution mutation. On one
-    exact head, unresolved blocking findings always win over a concurrent or
-    earlier APPROVE: the later blocking execution still emits REQUEST_CHANGES.
-    A later APPROVE wins only after blocking ReviewSensei roots are resolved.
+    both after review publication and after an AI resolution mutation. The
+    stable ReviewSensei check is the only imposed merge gate (ADR 0057): this
+    finalizer never emits ``REQUEST_CHANGES``, and it emits ``APPROVE`` only
+    from a trusted eligibility document whose exact head matches the reviewed
+    head and whose live thread state is still clean.
+
+    A concurrent blocking run still wins over an earlier approval: a newly
+    visible App blocking root on the same head withholds the approval, and an
+    existing ReviewSensei change request is never silently cleared while its
+    blocking roots remain unresolved.
     """
 
     def __init__(self, *, http: GitHubHttp) -> None:
@@ -628,20 +640,38 @@ class ReviewApprovalFinalizer:
         pull_request: int,
         head_sha: str,
         app_slug: str,
-        enabled: bool = True,
-        known_blocking_finding: bool = False,
-        approval_permitted: bool = True,
+        eligibility: ReviewApprovalEligibility,
     ) -> PublicationResult:
-        if not isinstance(enabled, bool):
-            raise GitHubPublicationError("review auto_approve must be a boolean")
-        if not isinstance(known_blocking_finding, bool):
-            raise GitHubPublicationError("known blocking finding is invalid")
-        if not isinstance(approval_permitted, bool):
-            raise GitHubPublicationError("review approval permission is invalid")
-        if not enabled:
-            return PublicationResult(status="auto_approval_disabled")
+        """Emit at most one exact-head APPROVE from trusted eligibility.
+
+        The eligibility document is the only source of approval facts. A
+        document for another head, or one whose static facts already withhold,
+        is reported before any thread read so a withheld approval costs no
+        mutations. The live thread scan is authoritative for the remaining
+        blockers: an unresolved App blocking root on this exact head always
+        withholds.
+        """
+
+        if not isinstance(eligibility, ReviewApprovalEligibility):
+            raise GitHubPublicationError("approval eligibility is invalid")
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubPublicationError("review head sha is invalid")
+        if eligibility.head_sha != head_sha:
+            return PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        # Evaluate the persisted facts with the thread state assumed clean so
+        # every non-thread blocker is reported before any network read.
+        static = evaluate_approval_facts(
+            replace(eligibility.facts, has_open_review_threads=False)
+        )
+        if "auto-approval-disabled" in static.blockers:
+            return PublicationResult(status="auto_approval_disabled")
+        if not static.approved:
+            return PublicationResult(
+                status="approval_withheld",
+                diagnostic=approval_withheld_diagnostic(static),
+            )
         preflight = self._preflight(
             token=token,
             repository=repository,
@@ -654,23 +684,17 @@ class ReviewApprovalFinalizer:
         if preflight.app_authored:
             return PublicationResult(status="skipped_app_authored")
         assert preflight.repository_id is not None and preflight.base_sha is not None
-        excerpts: tuple[str, ...] = ()
-        if known_blocking_finding:
-            open_blocking = True
-        else:
-            scan = self._scan_blocking_threads(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                repository_id=preflight.repository_id,
-                head_sha=head_sha,
-                base_sha=preflight.base_sha,
-                app_slug=app_slug,
-            )
-            open_blocking = scan.open_blocking
-            excerpts = scan.excerpts
+        open_blocking = self._scan_blocking_threads(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=preflight.repository_id,
+            head_sha=head_sha,
+            base_sha=preflight.base_sha,
+            app_slug=app_slug,
+        )
         # The thread scan can paginate, so bind the write to the same exact PR
-        # identity immediately before emitting APPROVE or REQUEST_CHANGES.
+        # identity immediately before emitting APPROVE.
         write_preflight = self._preflight(
             token=token,
             repository=repository,
@@ -687,91 +711,18 @@ class ReviewApprovalFinalizer:
             or write_preflight.base_sha != preflight.base_sha
         ):
             return PublicationResult(status="skipped_stale_base")
-        if open_blocking:
-            marker = changes_requested_marker(
-                repository_id=preflight.repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=preflight.base_sha,
+        decision = eligibility.evaluate(
+            app_authored=write_preflight.app_authored,
+            has_open_review_threads=open_blocking,
+        )
+        if not decision.approved:
+            return PublicationResult(
+                status="approval_withheld",
+                diagnostic=approval_withheld_diagnostic(decision),
             )
-            reviews = self._load_head_reviews(
-                token=token, repository=repository, pull_request=pull_request
-            )
-            if self._reviews_have_app_head_state(
-                reviews,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                state="CHANGES_REQUESTED",
-                body_contains=marker,
-            ):
-                return PublicationResult(status="already_changes_requested")
-            return self._post_head_review(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                body=changes_requested_review_body(excerpts=excerpts, marker=marker),
-                event="REQUEST_CHANGES",
-                already=lambda: self._is_already_changes_requested(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    marker=marker,
-                    app_slug=app_slug,
-                ),
-                success_status="changes_requested",
-                already_status="already_changes_requested",
-                rejected="change-request publication was rejected",
-                permission="change-request publication lacks permission",
-                transient="change-request publication failed temporarily",
-            )
-        if not approval_permitted:
-            # An open blocking thread is re-asserted above, so the gate stays
-            # red; this run may not APPROVE because its analysis is incomplete,
-            # a human assessment is pending, or coverage was not complete.
-            return PublicationResult(status="approval_withheld")
-        # Recheck reviews immediately before APPROVE so a change request that
-        # landed during the first thread sweep is not dismissed.
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
-        kept = self._keep_existing_change_request(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            repository_id=preflight.repository_id,
-            base_sha=preflight.base_sha,
-            reviews=reviews,
-        )
-        if kept is not None:
-            return kept
-        if self._reviews_have_app_head_state(
-            reviews,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            state="CHANGES_REQUESTED",
-        ):
-            # A concurrent blocking run may POST REQUEST_CHANGES during the
-            # second sweep. Re-read immediately before APPROVE and keep that
-            # change request when newly visible roots are still open.
-            reviews = self._load_head_reviews(
-                token=token, repository=repository, pull_request=pull_request
-            )
-            kept = self._keep_existing_change_request(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                repository_id=preflight.repository_id,
-                base_sha=preflight.base_sha,
-                reviews=reviews,
-            )
-            if kept is not None:
-                return kept
         marker = approval_marker(
             repository_id=preflight.repository_id,
             pull_request=pull_request,
@@ -807,54 +758,6 @@ class ReviewApprovalFinalizer:
             permission="approval finalization lacks permission",
             transient="approval finalization failed temporarily",
         )
-
-    def _keep_existing_change_request(
-        self,
-        *,
-        token: str,
-        repository: str,
-        pull_request: int,
-        head_sha: str,
-        app_slug: str,
-        repository_id: int,
-        base_sha: str,
-        reviews: list[Any],
-    ) -> PublicationResult | None:
-        if not self._reviews_have_app_head_state(
-            reviews,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            state="CHANGES_REQUESTED",
-        ):
-            return None
-        open_blocking = self._scan_blocking_threads(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            repository_id=repository_id,
-            head_sha=head_sha,
-            base_sha=base_sha,
-            app_slug=app_slug,
-        ).open_blocking
-        write_preflight = self._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-        )
-        if write_preflight.result is not None:
-            return write_preflight.result
-        if write_preflight.app_authored:
-            return PublicationResult(status="skipped_app_authored")
-        if (
-            write_preflight.repository_id != repository_id
-            or write_preflight.base_sha != base_sha
-        ):
-            return PublicationResult(status="skipped_stale_base")
-        if open_blocking:
-            return PublicationResult(status="already_changes_requested")
-        return None
 
     def _post_head_review(
         self,
@@ -986,27 +889,6 @@ class ReviewApprovalFinalizer:
             app_authored=author["login"] == app_slug,
         )
 
-    def _has_open_blocking_findings(
-        self,
-        *,
-        token: str,
-        repository: str,
-        pull_request: int,
-        repository_id: int,
-        head_sha: str,
-        base_sha: str,
-        app_slug: str,
-    ) -> bool:
-        return self._scan_blocking_threads(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            repository_id=repository_id,
-            head_sha=head_sha,
-            base_sha=base_sha,
-            app_slug=app_slug,
-        ).open_blocking
-
     def _scan_blocking_threads(
         self,
         *,
@@ -1017,13 +899,14 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         base_sha: str,
         app_slug: str,
-    ) -> _BlockingThreadScan:
+    ) -> bool:
+        """Return whether this exact head still has an unresolved App blocking root."""
+
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
             raise GitHubPublicationError("review thread repository is invalid")
         after: str | None = None
         open_blocking = False
-        excerpts: list[str] = []
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
                 status, payload = self.http.request(
@@ -1093,18 +976,11 @@ class ReviewApprovalFinalizer:
                 )
                 if blocking is not False:
                     open_blocking = True
-                    excerpt = _change_request_excerpt(root.get("body"))
-                    if excerpt and len(excerpts) < MAX_CHANGE_REQUEST_EXCERPTS:
-                        excerpts.append(excerpt)
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return _BlockingThreadScan(
-                    open_blocking=open_blocking, excerpts=tuple(excerpts)
-                )
-            if open_blocking and len(excerpts) >= MAX_CHANGE_REQUEST_EXCERPTS:
-                return _BlockingThreadScan(open_blocking=True, excerpts=tuple(excerpts))
+                return open_blocking
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")
@@ -1134,27 +1010,46 @@ class ReviewApprovalFinalizer:
             failed="approval reconciliation failed",
         )
 
-    def _is_already_changes_requested(
+    def load_eligibility(
         self,
         *,
         token: str,
         repository: str,
         pull_request: int,
         head_sha: str,
-        marker: str,
         app_slug: str,
-    ) -> bool:
-        return self._has_app_head_review(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            state="CHANGES_REQUESTED",
-            body_contains=marker,
-            transient="change-request reconciliation failed temporarily",
-            failed="change-request reconciliation failed",
+    ) -> ReviewApprovalEligibility | None:
+        """Read the persisted eligibility document for one reviewed head.
+
+        A delayed finalization (a resolved thread) has no access to the
+        publishing process, so it re-reads the document that publication
+        persisted beside this exact head. Only an App-authored review on this
+        head can carry it, and a missing, malformed, or other-head document
+        returns ``None`` so the caller withholds instead of trusting a claim it
+        cannot verify.
+        """
+
+        if not GIT_SHA_HEX.fullmatch(head_sha):
+            raise GitHubPublicationError("review head sha is invalid")
+        if not isinstance(app_slug, str) or not app_slug.strip():
+            raise GitHubPublicationError("review app slug is invalid")
+        reviews = self._load_head_reviews(
+            token=token, repository=repository, pull_request=pull_request
         )
+        expected = app_slug.casefold()
+        for review in reversed(reviews):
+            if not isinstance(review, dict):
+                continue
+            if review.get("commit_id") != head_sha:
+                continue
+            user = review.get("user")
+            login = user.get("login") if isinstance(user, dict) else None
+            if not isinstance(login, str) or login.casefold() != expected:
+                continue
+            eligibility = approval_eligibility_from_body(review.get("body"))
+            if eligibility is not None and eligibility.head_sha == head_sha:
+                return eligibility
+        return None
 
     def _reviews_have_app_head_state(
         self,
@@ -1164,7 +1059,6 @@ class ReviewApprovalFinalizer:
         app_slug: str,
         state: str,
         body: str | None = None,
-        body_contains: str | None = None,
     ) -> bool:
         for review in reviews:
             if not isinstance(review, dict):
@@ -1177,10 +1071,6 @@ class ReviewApprovalFinalizer:
                 and isinstance(user, dict)
                 and user.get("login") == app_slug
                 and (body is None or review_body == body)
-                and (
-                    body_contains is None
-                    or (isinstance(review_body, str) and body_contains in review_body)
-                )
             ):
                 return True
         return False
@@ -1195,7 +1085,6 @@ class ReviewApprovalFinalizer:
         app_slug: str,
         state: str,
         body: str | None = None,
-        body_contains: str | None = None,
         transient: str,
         failed: str,
     ) -> bool:
@@ -1216,7 +1105,6 @@ class ReviewApprovalFinalizer:
             app_slug=app_slug,
             state=state,
             body=body,
-            body_contains=body_contains,
         )
 
 
@@ -1282,6 +1170,7 @@ class ReviewPublisher:
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http
         self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.checks = ReviewCheckPublisher(http=http)
 
     def prepare(
         self,
@@ -1323,6 +1212,151 @@ class ReviewPublisher:
             authorized_dispositions=authorized_dispositions,
         )
 
+    def _publish_check_state(
+        self,
+        *,
+        check_token: str | None,
+        repository: str,
+        head_sha: str,
+        app_slug: str,
+        outcome: CheckOutcome | None,
+    ) -> str | None:
+        """Write one gate state for a reviewed head and report an unusable capability.
+
+        ``outcome=None`` publishes the pending state. A missing or unauthorized
+        check capability is reported as a ``check_permission`` diagnostic rather
+        than raised: the review itself is still published, and the withheld
+        approval tells the operator that enforcement is not in place.
+        """
+
+        if check_token is None:
+            return "check_permission"
+        if outcome is None:
+            result = self.checks.start(
+                token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+        else:
+            result = self.checks.complete(
+                token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                outcome=outcome,
+            )
+        if result.status == "check_permission_denied":
+            return "check_permission"
+        return None
+
+    def _check_state_or_diagnostic(
+        self,
+        *,
+        check_token: str | None,
+        repository: str,
+        head_sha: str,
+        app_slug: str,
+        outcome: CheckOutcome | None,
+    ) -> str | None:
+        """Write one gate state, reporting an unusable capability as a diagnostic.
+
+        A gate that cannot be written must not suppress the review itself: the
+        review content is what the operator needs, and the withheld approval
+        plus the ``check_permission`` diagnostic tell them enforcement is not in
+        place instead of implying it. A pending conclusion left behind by a
+        transient failure is overwritten by the next run for the same head.
+        """
+
+        try:
+            return self._publish_check_state(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                outcome=outcome,
+            )
+        except (GitHubHTTPError, GitHubPublicationError):
+            return "check_permission"
+
+    def _complete_failed_check(
+        self,
+        *,
+        check_token: str | None,
+        repository: str,
+        head_sha: str,
+        app_slug: str,
+        policy: str,
+        transient: bool,
+    ) -> None:
+        """Publish the non-passing gate state for one failed publication attempt.
+
+        A failure of this write is not raised: the caller is already failing
+        with the publication error, and the next attempt for the same head
+        republishes the same head-bound gate state.
+        """
+
+        self._check_state_or_diagnostic(
+            check_token=check_token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            outcome=review_check_outcome_for_publication_failure(
+                policy=policy, transient=transient
+            ),
+        )
+
+    def _finalize_published_result(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        check_token: str | None,
+        result: ReviewResult,
+        policy: str,
+        approval_enabled: bool,
+        qualification: str,
+    ) -> PublicationResult:
+        """Re-assert one already-published result's gate and approval decision.
+
+        The gate is published for every reviewed head, including one whose
+        review already exists, so an interrupted earlier run cannot leave a
+        pending conclusion standing for this result. App-authored pull requests
+        never reach this helper: the preflight reports them before publication.
+        The reported diagnostic is the one a fresh publication would report, so
+        a repeated run explains its withholding the same way.
+        """
+
+        check_diagnostic = self._check_state_or_diagnostic(
+            check_token=check_token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            outcome=check_outcome_for_result(result, policy=policy),
+        )
+        finalized = self.finalizer.finalize(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            eligibility=approval_eligibility_from_result(
+                result,
+                head_sha=head_sha,
+                enabled=approval_enabled,
+                app_authored=False,
+                qualification=qualification,
+                check_published=check_diagnostic is None,
+            ),
+        )
+        diagnostic = check_diagnostic
+        if diagnostic is None and finalized.status == "approval_withheld":
+            diagnostic = finalized.diagnostic
+        return PublicationResult(status="already_published", diagnostic=diagnostic)
+
     def publish(
         self,
         *,
@@ -1337,6 +1371,9 @@ class ReviewPublisher:
         diff: str,
         app_slug: str,
         auto_approve: bool = True,
+        reviews_policy: str = "auto-approve",
+        check_token: str | None = None,
+        qualification: str = "not-required",
         candidates: Sequence[CandidateFinding] | None = None,
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
@@ -1400,6 +1437,16 @@ class ReviewPublisher:
         auto_approve = (
             auto_approve and convergence_policy.automatic_github_review_events
         )
+        if reviews_policy not in REVIEW_POLICY_MODES:
+            raise GitHubPublicationError("review policy mode is invalid")
+        # An operator mode that withholds GitHub review events is advisory by
+        # construction, whatever the configured policy says.
+        effective_policy = (
+            reviews_policy
+            if convergence_policy.automatic_github_review_events
+            else "advisory"
+        )
+        approval_enabled = auto_approve and effective_policy == "auto-approve"
         if prepared_review is not None:
             if not isinstance(prepared_review, PublishableReview):
                 raise GitHubPublicationError("prepared review is invalid")
@@ -1501,15 +1548,17 @@ class ReviewPublisher:
             if has_blocking_findings(result):
                 if result_states:
                     if not preflight.app_authored:
-                        self.finalizer.finalize(
+                        return self._finalize_published_result(
                             token=token,
                             repository=repository,
                             pull_request=pull_request,
                             head_sha=head_sha,
                             app_slug=app_slug,
-                            enabled=auto_approve,
-                            known_blocking_finding=True,
-                            approval_permitted=approval_eligible,
+                            check_token=check_token,
+                            result=result,
+                            policy=effective_policy,
+                            approval_enabled=approval_enabled,
+                            qualification=qualification,
                         )
                     return PublicationResult(status="already_published")
             else:
@@ -1517,15 +1566,17 @@ class ReviewPublisher:
                     return PublicationResult(status="already_published")
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
                     if not preflight.app_authored:
-                        self.finalizer.finalize(
+                        return self._finalize_published_result(
                             token=token,
                             repository=repository,
                             pull_request=pull_request,
                             head_sha=head_sha,
                             app_slug=app_slug,
-                            enabled=auto_approve,
-                            known_blocking_finding=False,
-                            approval_permitted=approval_eligible,
+                            check_token=check_token,
+                            result=result,
+                            policy=effective_policy,
+                            approval_enabled=approval_enabled,
+                            qualification=qualification,
                         )
                     return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
@@ -1551,10 +1602,38 @@ class ReviewPublisher:
         )
         if write_preflight.result is not None:
             return write_preflight.result
-        event, published_state = finding_review_event(
-            auto_approve=auto_approve,
-            result=result,
-            policy=convergence_policy,
+        # An old success on this head must not stand in for the review that is
+        # about to be published, so the pending gate state is written first and
+        # concluded before the review body is composed. The persisted
+        # eligibility document therefore agrees with the diagnostic this run
+        # reports; a failed publication overrides the conclusion below. An
+        # App-authored pull request receives no gate: its review is
+        # informational and this run never approves it.
+        if write_preflight.app_authored:
+            check_diagnostic: str | None = "app_authored"
+        else:
+            check_diagnostic = self._check_state_or_diagnostic(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                outcome=None,
+            )
+            if check_diagnostic is None:
+                check_diagnostic = self._check_state_or_diagnostic(
+                    check_token=check_token,
+                    repository=repository,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    outcome=check_outcome_for_result(result, policy=effective_policy),
+                )
+        eligibility = approval_eligibility_from_result(
+            result,
+            head_sha=head_sha,
+            enabled=approval_enabled,
+            app_authored=write_preflight.app_authored,
+            qualification=qualification,
+            check_published=check_diagnostic is None,
         )
         try:
             prepared_comments, summary = self._assemble_review_body(
@@ -1576,7 +1655,10 @@ class ReviewPublisher:
                 label="published review summary",
                 allow_empty=False,
             )
-            body = f"{_with_discussion_instruction(summary)}\n\n{marker}"
+            body = (
+                f"{_with_discussion_instruction(summary)}\n\n{marker}\n\n"
+                f"{approval_eligibility_marker(eligibility)}"
+            )
             validate_bounded_text(
                 body,
                 MAX_PUBLISHED_REVIEW_BODY_BYTES,
@@ -1617,21 +1699,11 @@ class ReviewPublisher:
                 comment_payload["line"] = comment.line
                 comment_payload["side"] = "RIGHT"
             comments.append(comment_payload)
-        # Blocking findings request changes on this exact head. The shared
-        # finalizer remains the sole APPROVE writer, and it re-asserts
-        # REQUEST_CHANGES when a later execution still sees unresolved
-        # blocking ReviewSensei roots.
-        if (
-            auto_approve
-            and prepared_comments
-            and not comments
-            and has_blocking_findings(result)
-        ):
-            # Every inline finding already has a thread on this pull request.
-            # REQUEST_CHANGES with an empty inline payload would mislead readers
-            # on a same-head re-review while the existing threads still carry
-            # the blocking state.
-            event, published_state = "COMMENT", "COMMENTED"
+        # The stable ReviewSensei check run is the only imposed merge gate
+        # (ADR 0057). The review itself is always published as a COMMENT so a
+        # persistent REQUEST_CHANGES cannot become a second, stale gate, and an
+        # empty inline payload can never misrepresent a same-head re-review.
+        event, published_state = "COMMENT", "COMMENTED"
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",
@@ -1658,39 +1730,60 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._handle_after_findings(
+                return self._finalize_after_publication(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    auto_approve=auto_approve,
-                    result=result,
-                    app_authored=write_preflight.app_authored,
-                    finding_event=event,
+                    eligibility=eligibility,
+                    check_diagnostic=check_diagnostic,
+                    status="already_published",
                 )
-                return PublicationResult(status="already_published")
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=True,
+            )
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily"
             ) from exc
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
-                self._handle_after_findings(
+                return self._finalize_after_publication(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    auto_approve=auto_approve,
-                    result=result,
-                    app_authored=write_preflight.app_authored,
-                    finding_event=event,
+                    eligibility=eligibility,
+                    check_diagnostic=check_diagnostic,
+                    status="published",
+                    review_id=review_id,
                 )
-                return PublicationResult(status="published", review_id=review_id)
         if status == 404:
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=False,
+            )
             raise GitHubPublicationError("review target was not found")
         if status == 403:
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=False,
+            )
             raise GitHubPublicationError("review publication lacks permission")
         if status == 422:
             # Ambiguous failure: reconcile the marker before deciding.
@@ -1703,18 +1796,24 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._handle_after_findings(
+                return self._finalize_after_publication(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    auto_approve=auto_approve,
-                    result=result,
-                    app_authored=write_preflight.app_authored,
-                    finding_event=event,
+                    eligibility=eligibility,
+                    check_diagnostic=check_diagnostic,
+                    status="already_published",
                 )
-                return PublicationResult(status="already_published")
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=False,
+            )
             raise GitHubPublicationError("review publication was rejected")
         if status == 409 or status == 429 or status >= 500:
             if self._reconcile_marker(
@@ -1726,24 +1825,38 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                self._handle_after_findings(
+                return self._finalize_after_publication(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    auto_approve=auto_approve,
-                    result=result,
-                    app_authored=write_preflight.app_authored,
-                    finding_event=event,
+                    eligibility=eligibility,
+                    check_diagnostic=check_diagnostic,
+                    status="already_published",
                 )
-                return PublicationResult(status="already_published")
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=True,
+            )
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily"
             )
+        self._complete_failed_check(
+            check_token=check_token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            policy=effective_policy,
+            transient=False,
+        )
         raise GitHubPublicationError("review publication was rejected")
 
-    def _handle_after_findings(
+    def _finalize_after_publication(
         self,
         *,
         token: str,
@@ -1751,27 +1864,35 @@ class ReviewPublisher:
         pull_request: int,
         head_sha: str,
         app_slug: str,
-        auto_approve: bool,
-        result: ReviewResult,
-        app_authored: bool,
-        finding_event: str,
-    ) -> None:
-        # App-authored PRs stay on the skipped_app_authored preflight path:
-        # never APPROVE or REQUEST_CHANGES from the finalizer.
-        # A finding review that already submitted REQUEST_CHANGES must not
-        # post a second identical event; a later execution or resolved-root
-        # pass is what may APPROVE.
-        if app_authored or finding_event == "REQUEST_CHANGES":
-            return
-        self.finalizer.finalize(
+        eligibility: ReviewApprovalEligibility,
+        check_diagnostic: str | None,
+        status: str,
+        review_id: int | None = None,
+    ) -> PublicationResult:
+        """Finalize approval for one published head and report its withholding.
+
+        The persisted eligibility document is the only approval input, so an
+        app-authored pull request withholds here as well: the finalizer reports
+        it before any network read. A ``check_diagnostic`` wins over the
+        finalizer's reason because an unpublished gate is an enforcement gap
+        that must be reported rather than folded into a quieter explanation.
+        """
+
+        finalized = self.finalizer.finalize(
             token=token,
             repository=repository,
             pull_request=pull_request,
             head_sha=head_sha,
             app_slug=app_slug,
-            enabled=auto_approve,
-            known_blocking_finding=has_blocking_findings(result),
-            approval_permitted=_approval_eligible(result),
+            eligibility=eligibility,
+        )
+        diagnostic = check_diagnostic
+        if diagnostic is None and finalized.status == "approval_withheld":
+            diagnostic = finalized.diagnostic
+        return PublicationResult(
+            status=status,
+            review_id=review_id,
+            diagnostic=diagnostic,
         )
 
     def _published_finding_suppression(
