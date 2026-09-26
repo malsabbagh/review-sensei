@@ -158,6 +158,20 @@ setup pull request before writing, and rechecks after branch creation to close
 the race between concurrent deliveries. Insufficient App permissions produce
 a skipped result without writing to the repository.
 
+An install that selects more than one repository, and an installation
+lifecycle event whose payload omits the repository list, is reconciled one
+repository per alarm. The Workers Free plan allows 10 ms of CPU and 50
+subrequests per invocation; reconciling several repositories inside the
+webhook invocation exceeds those limits and GitHub records a 503. The webhook
+claims the delivery, stores a bounded continuation cursor, arms the ledger
+alarm, and only then returns 202. Each alarm reconciles one repository and
+arms the next. The lease is refreshed on each step. Transient GitHub failures
+retry that repository after one second, then five seconds. A fatal configuration
+error, or a repository that still fails after retries, releases the claim and
+retains an outcome record with the stable error code, failure count, and
+repository slug for the one-hour retention window. Logs record the error code
+and failure count only.
+
 When setup permissions are available, the Worker also creates the missing
 repository variables `REVIEWSENSEI_PROVIDER_MODE=local`,
 `REVIEWSENSEI_LOCAL_MODEL=qwen3.5:4b`, and

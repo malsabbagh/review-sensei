@@ -5,9 +5,12 @@ import { TokenBroker } from "./token-broker";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
+  deferInstallationSetup,
   parseVerifiedDelivery,
   processDelivery,
+  type VerifiedDelivery,
 } from "./github-app";
+import type { SetupContinuationRequest } from "./setup-continuation";
 
 const LEDGER_NAME = "reviewsensei-deliveries";
 
@@ -78,6 +81,12 @@ export function setupErrorCode(error: unknown): string {
   }
   if (message === "public workflow tag unavailable") {
     return "public_workflow_tag_unavailable";
+  }
+  if (
+    message === "setup_continuation_unavailable" ||
+    message === "setup_continuation_invalid"
+  ) {
+    return message;
   }
   return "setup_failed";
 }
@@ -327,22 +336,35 @@ interface LedgerReply {
 
 async function ledgerRequest(
   env: WorkerEnv,
-  action: "claim" | "complete" | "release",
+  action: "claim" | "complete" | "release" | "schedule",
   app: number,
   deliveryId: string,
   digest: string,
+  extra?: Record<string, unknown>,
 ): Promise<LedgerReply> {
   const id = env.DELIVERY_LEDGER.idFromName(LEDGER_NAME);
   const stub = env.DELIVERY_LEDGER.get(id);
   const request = await stub.fetch(`https://ledger/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ app_id: app, delivery_id: deliveryId, digest }),
+    body: JSON.stringify({
+      app_id: app,
+      delivery_id: deliveryId,
+      digest,
+      ...extra,
+    }),
   });
   if (!request.ok) {
-    throw new Error("delivery ledger request failed");
+    throw new LedgerRequestError(request.status);
   }
   return (await request.json()) as LedgerReply;
+}
+
+class LedgerRequestError extends Error {
+  constructor(readonly status: number) {
+    super(status === 409 ? "delivery_conflict" : "delivery ledger request failed");
+    this.name = "LedgerRequestError";
+  }
 }
 
 async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
@@ -402,6 +424,15 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
 
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
+    if (delivery !== null && deferInstallationSetup(delivery)) {
+      // The claim above is already durable. Scheduling persists the cursor and
+      // arms the ledger alarm before this 202, so a dropped waitUntil cannot
+      // ack the delivery with no continuation.
+      await ledgerRequest(env, "schedule", app, deliveryId, digest, {
+        continuation: continuationRequest(delivery, digest),
+      });
+      return response({ accepted: true }, 202);
+    }
     if (delivery !== null) {
       await processDelivery(delivery, env);
     }
@@ -416,6 +447,19 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
       }
       return response({ accepted: false }, 202);
     }
+    if (error instanceof LedgerRequestError && error.status === 409) {
+      try {
+        await ledgerRequest(env, "release", app, deliveryId, digest);
+      } catch {
+        // The lease expiry remains the recovery path if release also fails.
+      }
+      console.error("github_setup_failed", {
+        delivery_id: deliveryId,
+        event,
+        error_code: "delivery_conflict",
+      });
+      return response({ error: "delivery_conflict", error_code: "delivery_conflict" }, 409, true);
+    }
     try {
       await ledgerRequest(env, "release", app, deliveryId, digest);
     } catch {
@@ -429,6 +473,28 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
     });
     return response({ error: "setup_unavailable", error_code: errorCode }, 503, true);
   }
+}
+
+function continuationRequest(
+  delivery: VerifiedDelivery,
+  digest: string,
+): SetupContinuationRequest {
+  return {
+    appId: delivery.appId,
+    event: delivery.event,
+    action: delivery.action,
+    installationId: delivery.installationId,
+    deliveryId: delivery.deliveryId,
+    digest,
+    permissions: delivery.permissions,
+    repositories: delivery.repositories.length === 0 ? [] : [...delivery.repositories],
+    unresolved: delivery.repositories.length === 0,
+    attempt: 0,
+    failed: false,
+    failureCode: null,
+    failureCount: 0,
+    failedRepository: null,
+  };
 }
 
 const worker = {

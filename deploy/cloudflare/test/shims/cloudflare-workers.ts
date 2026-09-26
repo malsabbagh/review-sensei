@@ -8,3 +8,4 @@ export class DurableObject<Env> {
     this.env = env;
   }
 }
+
