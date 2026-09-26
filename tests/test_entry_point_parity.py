@@ -64,6 +64,25 @@ CLEAN_RESPONSE = {
 }
 
 
+def _write_native_shim() -> Path:
+    """Write a launcher the smoke can execute on this platform."""
+
+    if os.name == "nt":
+        shim = Path.cwd() / "standalone-shim.cmd"
+        shim.write_text(
+            f'@echo off\r\n"{sys.executable}" -m review_sensei %*\r\n',
+            encoding="utf-8",
+        )
+        return shim
+    shim = Path.cwd() / "standalone-shim"
+    shim.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" -m review_sensei "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    return shim
+
+
 def projection(result: ReviewResult) -> dict[str, object]:
     """The parity surface: findings, coverage, and the merge disposition."""
 
@@ -249,12 +268,7 @@ class EntryPointParityTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_native_lane_runs_the_documented_cli_contract_on_this_fixture(self):
         smoke = load_smoke_module()
         self.assertEqual(smoke.smoke_fixture_root(), FIXTURES)
-        shim = Path.cwd() / "standalone-shim"
-        shim.write_text(
-            f'#!/bin/sh\nexec "{sys.executable}" -m review_sensei "$@"\n',
-            encoding="utf-8",
-        )
-        shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+        shim = _write_native_shim()
         repository = Path(tempfile.mkdtemp(dir=Path.cwd()))
         # The smoke runs its cases from the repository directory, so a relative
         # import path would resolve there instead of at this checkout.
