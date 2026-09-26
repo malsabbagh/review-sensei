@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.6.10 - 2026-09-26
+
+- Let a session advance again when its persisted path evidence exceeded
+  the envelope bound. A baseline that retained more path evidence than
+  the session envelope reserves could never progress and failed the
+  review with `session convergence history exceeds the configured
+  bound`; the persisted path projection is now narrowed to the envelope
+  bound, and a narrowed baseline reports itself incomplete, so a reader
+  released before the projection change plans a fallback-full pass
+  instead of classifying a dropped path (#188).
+
+- Publish one `ReviewSensei` check gate and decide default approval from
+  persisted eligibility (epic #181 slice F, #187). Publication writes a
+  single head-bound `ReviewSensei` check run — `in_progress` before
+  publication, then concluded from the same validated result: `success`
+  for a complete clean review, `failure` for required fixes,
+  `action_required` for an incomplete review or a publication failure,
+  `neutral` under the advisory policy, and `cancelled` on cancellation —
+  and reuses it across reruns only when it is produced by this
+  installation's App. It emits only `COMMENT` reviews: no persistent
+  `REQUEST_CHANGES`, no merge endpoint, no auto-merge enablement.
+  Automatic approval is decided from an eligibility document written
+  beside the published review and re-read at delayed finalization: an
+  eligible complete review of the exact head with no blocking or
+  human-adjudication findings and no unresolved ReviewSensei threads
+  emits exactly one `APPROVE`, optional-only findings stay genuinely
+  non-blocking, and partial coverage, unverified qualification, stale
+  heads, App-authored pull requests, and incomplete thread state
+  withhold approval with a distinct public diagnostic. A new
+  `check_publish` (`checks: write`) capability fails closed when the App
+  lacks `Checks: write`, a new `review-gate` doctor diagnostic names the
+  check identity and the administrator step that marks it required, and
+  the mention-reply path no longer accepts `--enable-auto-approve` or
+  `--no-auto-approve`.
+
+- Complete the transition onto the canonical configuration (epic #181
+  slice G, #188). Setup imports a retained
+  `.github/review-sensei/config.yml` once into `.reviewsensei.yml`
+  through one reviewed replacement: the import is bounded to an explicit
+  field map with no dual-read precedence, preserves explicit disabled
+  settings and provider choices, and reports a conflicting old/new value
+  instead of silently resolving it. The installation guide defines the
+  one-time, separately authorized removal of the managed obsolete
+  repository variables, bounded to the set the migration and `doctor`
+  report, with credentials and unrelated repository settings untouched.
+  A count-exhausted legacy session resumes on the next eligible trigger
+  without deleting findings, dispositions, transaction ownership, or
+  meaningful history, and without manufacturing an empty clean review;
+  the rollback limits are explicit and in-flight runs are defined.
+  Current README, site, configuration, and help snippets are executed
+  against the selected installed artifacts, and the retired variable
+  counts, advisory-default claims, and fixed-allowance guidance are
+  removed from current instructions.
+
+- Reconcile an existing gate state and prove entry-point parity (epic
+  #181 slice G, #188). The installation guide documents dismissing a
+  prior review only when it was authored by this installation's App and
+  reconciling a required `ReviewSensei` check across the rollback and
+  `github.writes: false` states; no dismissal or Administration
+  capability exists in the product, the App requests no `Administration`
+  permission, and it never changes branch protection. One trusted
+  fixture review is projected through the library, the CLI, the native
+  launcher, and the hosted entry point with equivalent findings,
+  dispositions, and coverage, and the differences between them are
+  explicit: the CLI exit contract, the `COMMENT`-only review, and the
+  check conclusion mapping.
+
+- The Python and npm package versions advance to `0.6.10`; the movable
+  `v5` reusable-workflow channel is unchanged.
+
 ## 0.6.9 - 2026-09-26
 
 - Bound the derived related-path set instead of failing a wide review. A
@@ -41,6 +111,42 @@
   a round: an operator pause, a no-progress verdict, or the per-head
   failed-attempt retry bound. The session ledger keeps completed-round
   counters as bounded diagnostic history.
+
+- Unify review presentation and placement (epic #181 slice D, #185). One
+  presentation layer renders the published summary and inline comments
+  with `RS-XXXXXX` identifiers that stay stable across reruns. Body
+  placement for non-enforced feedback is decided from host
+  conversation-resolution facts — branch rules, then classic branch
+  protection — never from a finding's own label: a positive requirement
+  is conclusive, only a conclusive absence permits optional inline
+  threads, unknown fails closed to the body, and blocking or anchored
+  findings stay inline under every state. Automatic approval now
+  requires an eligible admitted artifact — complete review status, no
+  pending human assessment, complete coverage — evaluated once on the
+  artifact that is actually published, so the published summary state
+  and the approval decision cannot disagree; an ineligible run reports
+  `approval_withheld` instead of approving. Thirteen golden fixtures pin
+  the published bodies byte-for-byte, including escaping, Unicode,
+  narrow-layout width, safe link schemes, and stable ordering
+  invariants.
+
+- Reduce setup to the thin **setup-v5** contract (epic #181 slice E,
+  #186). Setup and the Cloudflare Worker generate the same three files:
+  a read-only caller (`contents`, `pull-requests`, and `issues` read,
+  `id-token: write`) that routes only on event shape and calls the
+  public reusable workflow at the configured tag, the uninstall
+  workflow, and the canonical `.reviewsensei.yml`. The reusable
+  workflow resolves one hosted plan from the package, plans the runner
+  from the plan's backend — cloud backends on `ubuntu-latest`, local
+  backends on the operator's self-hosted `ollama` runner — installs the
+  exact `review-sensei==X.Y.Z` from PyPI with a SHA-verified commit
+  fallback only when that exact distribution is unavailable, and
+  forwards only the allowlisted provider credentials, failing closed
+  otherwise. Setup creates no repository variables, an installation
+  token that still reports the retired Variables scope is rejected
+  rather than normalized, and the retired
+  `.github/review-sensei/config.yml` is removed only by the uninstall
+  workflow.
 
 - The Python and npm package versions and generated setup defaults advance
   to `0.6.9`; the movable `v5` reusable-workflow channel is unchanged.
