@@ -455,8 +455,12 @@ class CliInferenceSkipTests(unittest.TestCase):
                             str(outcome_path),
                         ]
                     )
-            self.assertEqual(status, 1)
+            self.assertEqual(status, 0)
             self.assertIn("action_required", stdout.getvalue())
+            self.assertNotIn(
+                "A maintainer decision is required before another automated pass.",
+                stderr.getvalue(),
+            )
             payload = json.loads(outcome_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
             self.assertIn(payload["diagnostic"], PUBLIC_DIAGNOSTICS)

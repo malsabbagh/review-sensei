@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- When a pull request has used its automatic review budget, post a comment
+  with the maintainer continue and rescan commands and let the review job
+  succeed instead of failing.
+
 ## 0.6.7 - 2026-09-23
 
 - Prepare a new immutable PyPI and npm package cutoff after the published
