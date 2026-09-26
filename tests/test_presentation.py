@@ -5,6 +5,7 @@ from review_sensei.presentation import (
     format_review_comment,
     format_review_summary,
     humanize_lens,
+    render_review_markdown,
     render_review_text,
 )
 
@@ -190,6 +191,46 @@ class ReviewTextRenderingTests(unittest.TestCase):
         self.assertIn(r"model: qwen\x0d[2J", rendered)
         self.assertNotIn("\x1b", rendered)
         self.assertNotIn("\r", rendered)
+
+
+class ReviewMarkdownRenderingTests(unittest.TestCase):
+    def test_markdown_output_neutralizes_document_injection(self):
+        result = ReviewResult(
+            summary="# Not a heading\n<!-- hidden -->",
+            provider="fixture",
+            review_status="complete",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body=(
+                        "````\n![img](https://example.com/x)\n<script>alert(1)</script>"
+                    ),
+                ),
+            ),
+        )
+
+        rendered = render_review_markdown(result)
+
+        self.assertNotIn("\n# Not a heading", rendered)
+        self.assertIn(r"\# Not a heading", rendered)
+        self.assertIn(r"\<!-- hidden --\>", rendered)
+        self.assertIn(r"\`\`\`\`", rendered)
+        self.assertIn(r"!\[img\](https://example.com/x)", rendered)
+        self.assertIn(r"\<script\>alert(1)\</script\>", rendered)
+
+    def test_markdown_output_keeps_plain_text_and_line_structure(self):
+        result = ReviewResult(
+            summary="Two lines.\nSecond line.",
+            provider="fixture",
+            review_status="complete",
+            comments=(ReviewComment(path="src/app.py", line=2, body="plain body"),),
+        )
+
+        rendered = render_review_markdown(result)
+
+        self.assertIn("Two lines.\nSecond line.", rendered)
+        self.assertIn("plain body", rendered)
 
 
 if __name__ == "__main__":

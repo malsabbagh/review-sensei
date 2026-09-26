@@ -772,6 +772,7 @@ def _local_change_revision(label: str, content: str) -> str:
     """
 
     payload = (label + "\0" + content).encode("utf-8")
+    # Not a Git object id; the 40-hex shape is the ledger's identity contract.
     revision = hashlib.sha256(payload).hexdigest()[:40]
     if _LOCAL_REVISION.fullmatch(revision) is None:
         raise ReviewInputError(

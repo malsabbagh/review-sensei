@@ -137,6 +137,12 @@ selected backend, and the review-convergence mode:
 | `OPENAI_API_KEY` | empty | Bearer credential required by `openai-compatible` |
 | `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; setup replaces a stored `legacy` value with `merge-focused` in place. |
 
+Backend selection differs between the two surfaces: the local CLI reads
+`REVIEWSENSEI_PROVIDER` (or `--provider`), while an installed GitHub workflow
+selects its backend with the single `REVIEWSENSEI_PROVIDER_MODE` variable
+documented below. `REVIEWSENSEI_MODEL` and `REVIEWSENSEI_REVIEW_MODE` are read
+by both.
+
 Endpoint, timeout, and credential selection come from the command line flags
 (`--base-url`, `--allow-custom-endpoint`, `--timeout-seconds`, `--api-key-env`)
 or the selected backend's documented defaults; no other environment variable

@@ -13,7 +13,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path, PosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import patch
 
 from review_sensei.cli import _parser, main, resolve_review_inference
@@ -311,19 +311,30 @@ class LocalSessionTests(LocalReviewHarness, unittest.TestCase):
 
 
 class DefaultLocalSessionRootTests(unittest.TestCase):
-    """Each documented platform path is covered without a session run."""
+    """Each documented platform path is covered without a session run.
+
+    The simulated platform must pin the path class too: ``os.name`` selects
+    the concrete ``pathlib`` flavour, so patching it without pinning a pure
+    class builds a foreign path type on the real host and fails on Windows
+    runners.  The pure classes are host-neutral and compare by value.
+    """
 
     def test_macos_uses_application_support(self):
-        with patch("sys.platform", "darwin"):
+        with (
+            patch("sys.platform", "darwin"),
+            patch("review_sensei.session.Path", PurePosixPath),
+        ):
             root = default_local_session_root({"HOME": "/Users/tester"})
 
         self.assertEqual(
-            root, Path("/Users/tester/Library/Application Support/review-sensei")
+            root,
+            PurePosixPath("/Users/tester/Library/Application Support/review-sensei"),
         )
 
     def test_macos_falls_back_to_the_operating_system_home(self):
         with (
             patch("sys.platform", "darwin"),
+            patch("review_sensei.session.Path", PurePosixPath),
             patch(
                 "review_sensei.session._home_directory", return_value="/Users/tester"
             ),
@@ -331,55 +342,65 @@ class DefaultLocalSessionRootTests(unittest.TestCase):
             root = default_local_session_root({})
 
         self.assertEqual(
-            root, Path("/Users/tester/Library/Application Support/review-sensei")
+            root,
+            PurePosixPath("/Users/tester/Library/Application Support/review-sensei"),
         )
 
     def test_windows_uses_local_app_data(self):
-        # The Windows branch runs on a POSIX host, so the path type is pinned
-        # to the host's flavour; only the branch decision is under test.
         with (
             patch("sys.platform", "win32"),
             patch("os.name", "nt"),
-            patch("review_sensei.session.Path", PosixPath),
+            patch("review_sensei.session.Path", PureWindowsPath),
         ):
             root = default_local_session_root(
                 {"LOCALAPPDATA": "C:/Users/tester/AppData/Local"}
             )
 
-        self.assertEqual(root, PosixPath("C:/Users/tester/AppData/Local/review-sensei"))
+        self.assertEqual(
+            root, PureWindowsPath("C:/Users/tester/AppData/Local/review-sensei")
+        )
 
     def test_windows_falls_back_to_roaming_app_data(self):
         with (
             patch("sys.platform", "win32"),
             patch("os.name", "nt"),
-            patch("review_sensei.session.Path", PosixPath),
+            patch("review_sensei.session.Path", PureWindowsPath),
         ):
             root = default_local_session_root(
                 {"APPDATA": "C:/Users/tester/AppData/Roaming"}
             )
 
         self.assertEqual(
-            root, PosixPath("C:/Users/tester/AppData/Roaming/review-sensei")
+            root, PureWindowsPath("C:/Users/tester/AppData/Roaming/review-sensei")
         )
 
     def test_linux_prefers_xdg_state_home(self):
-        with patch("sys.platform", "linux"), patch("os.name", "posix"):
+        with (
+            patch("sys.platform", "linux"),
+            patch("os.name", "posix"),
+            patch("review_sensei.session.Path", PurePosixPath),
+        ):
             root = default_local_session_root(
                 {"XDG_STATE_HOME": "/home/tester/.state", "HOME": "/home/tester"}
             )
 
-        self.assertEqual(root, Path("/home/tester/.state/review-sensei"))
+        self.assertEqual(root, PurePosixPath("/home/tester/.state/review-sensei"))
 
     def test_linux_falls_back_to_the_home_state_directory(self):
-        with patch("sys.platform", "linux"), patch("os.name", "posix"):
+        with (
+            patch("sys.platform", "linux"),
+            patch("os.name", "posix"),
+            patch("review_sensei.session.Path", PurePosixPath),
+        ):
             root = default_local_session_root({"HOME": "/home/tester"})
 
-        self.assertEqual(root, Path("/home/tester/.local/state/review-sensei"))
+        self.assertEqual(root, PurePosixPath("/home/tester/.local/state/review-sensei"))
 
     def test_missing_state_directory_names_the_explicit_alternative(self):
         with (
             patch("sys.platform", "linux"),
             patch("os.name", "posix"),
+            patch("review_sensei.session.Path", PurePosixPath),
             patch("review_sensei.session._home_directory", return_value=""),
         ):
             with self.assertRaises(ReviewInputError) as raised:

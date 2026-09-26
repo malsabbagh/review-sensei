@@ -47,6 +47,12 @@ _CLEAN_HOST_OVERRIDDEN = (
 )
 
 
+# Hosted-run annotations are gated on GitHub Actions identity; a clean-host
+# case that printed one would still pass output parity, so every clean-host
+# case asserts its stderr stays free of them.
+_CLEAN_HOST_STDERR_EXCLUDES = ("::error",)
+
+
 def clean_host_environment(root: Path) -> dict[str, str]:
     """Return a deterministic workstation-like environment sandboxed in ``root``.
 
@@ -148,6 +154,7 @@ def compare_case(
     output_path: Path | None = None,
     shared_env: dict[str, str] | None = None,
     expected_returncode: int | None = None,
+    stderr_excludes: Sequence[str] | None = None,
 ) -> dict[str, object]:
     if output_path is not None and (output_path.exists() or output_path.is_symlink()):
         raise SmokeError(f"smoke output path already exists for {label}")
@@ -179,6 +186,12 @@ def compare_case(
                 raise SmokeError(
                     f"{name} {label} exit {completed.returncode} does not match "
                     f"the documented exit {expected_returncode}"
+                )
+    for name, text in (("standalone", native_err), ("direct", direct_err)):
+        for excluded in stderr_excludes or ():
+            if excluded in text:
+                raise SmokeError(
+                    f"{name} {label} stderr unexpectedly contains {excluded!r}"
                 )
     if output_path is not None:
         # A review that completed with or without required fixes writes its
@@ -215,6 +228,8 @@ def _local_review_cases(
     temporary directories instead of the caller's.  The blocking fixture keeps
     one required fix, so the review exit contract is observable: 1 while the
     fix remains, and the operational contract's 0 for the same completed run.
+    No case may print a hosted ``::error`` annotation: the annotation is gated
+    on Actions identity, which this host deliberately lacks.
     """
 
     fixture_root = smoke_fixture_root()
@@ -249,6 +264,7 @@ def _local_review_cases(
                 repository=repository,
                 shared_env=clean_env,
                 expected_returncode=returncode,
+                stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
             )
             for label, arguments, returncode in cases
         ]
@@ -268,6 +284,7 @@ def _local_review_cases(
                 repository=repository,
                 shared_env=clean_env,
                 expected_returncode=2,
+                stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
             )
         )
         descriptor, temporary_name = tempfile.mkstemp(
@@ -287,6 +304,7 @@ def _local_review_cases(
                     shared_env=clean_env,
                     output_path=output_path,
                     expected_returncode=1,
+                    stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
                 )
             )
         finally:

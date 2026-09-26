@@ -7,6 +7,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import replace
 
 from .errors import ReviewInputError
 from .models import ReviewComment, ReviewResult
@@ -63,6 +64,35 @@ def escape_markdown_label(value: str) -> str:
 
 def _escape_markdown_label(value: str) -> str:
     return escape_markdown_label(value)
+
+
+# Inline Markdown constructs reshape or hide content regardless of position:
+# raw HTML tags and comments, code spans and fences, links and images, and the
+# escape character itself.
+_MARKDOWN_INLINE_CHARS = re.compile(r"([\\`<>\[\]])")
+
+# Block markers only reshape the document when they open a line (after at most
+# three spaces, per CommonMark): headings, blockquotes, tables, lists, and
+# thematic or setext lines.
+_MARKDOWN_BLOCK_MARKER = re.compile(
+    r"(?m)^( {0,3})([#>|]|[-+=*_]+\s|[-=*+_]{3,}$|\d{1,9}[.)]\s)"
+)
+
+
+def escape_markdown_text(value: str) -> str:
+    """Escape untrusted text so it cannot reshape a rendered Markdown document.
+
+    The Markdown format is a document sink: provider text that opens a fence,
+    an HTML comment, or a heading would restructure (or hide parts of) the
+    review wherever the document is rendered.  Every inline construct and
+    every line-opening block marker is backslash-escaped, mirroring the
+    terminal renderer's neutralization.  Line feeds are the format's own line
+    structure and stay; the rendered text keeps its plain characters, only the
+    Markdown meaning is removed.
+    """
+
+    escaped = _MARKDOWN_INLINE_CHARS.sub(r"\\\1", value)
+    return _MARKDOWN_BLOCK_MARKER.sub(r"\1\\\2", escaped)
 
 
 # The control, format, and surrogate categories the repository already rejects
@@ -283,9 +313,17 @@ def render_review_text(result: ReviewResult) -> str:
 
 
 def render_review_markdown(result: ReviewResult) -> str:
-    """Render one validated review result as readable Markdown."""
+    """Render one validated review result as readable Markdown.
 
-    parts = [format_review_summary(result.summary, result.comments)]
+    Provider text passes through :func:`escape_markdown_text` at this sink, so
+    a provider can neither restructure the document nor hide parts of it; the
+    shared ``format_review_*`` helpers stay escaping-free because the hosted
+    publication renders into its own sanitized sink.
+    """
+
+    parts = [
+        format_review_summary(escape_markdown_text(result.summary), result.comments)
+    ]
     for title, group in _finding_groups(result):
         if not group:
             continue
@@ -295,7 +333,11 @@ def render_review_markdown(result: ReviewResult) -> str:
             parts.append("")
             parts.append(f"**{escape_markdown_label(_finding_location(comment))}**")
             parts.append("")
-            parts.append(format_review_comment(comment))
+            parts.append(
+                format_review_comment(
+                    replace(comment, body=escape_markdown_text(comment.body))
+                )
+            )
     return "\n".join(parts) + "\n"
 
 
@@ -316,6 +358,7 @@ def render_review(result: ReviewResult, *, output_format: str) -> str:
 __all__ = [
     "RENDER_FORMATS",
     "escape_markdown_label",
+    "escape_markdown_text",
     "escape_terminal_text",
     "format_review_comment",
     "format_review_summary",

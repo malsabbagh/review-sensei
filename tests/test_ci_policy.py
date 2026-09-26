@@ -773,6 +773,46 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('--repository-id "$REPOSITORY_ID"', publish_step)
         self.assertIn('--base-branch "$BASE_REF"', publish_step)
 
+    def test_reusable_workflow_review_lanes_pin_the_versioned_json_artifact(self):
+        # The provider lane selects its canonical backend and writes the
+        # versioned JSON document under the operational launcher contract; the
+        # publish step consumes that same path.  A future edit of the format
+        # value would silently change the artifact contract for callers of the
+        # tag-pinned reusable workflow, so the full tuple is pinned here.
+        reusable = _reusable_workflow_text()
+        lanes = (
+            (
+                "cloud",
+                "Run cloud-provider review",
+                "Publish or promote validated review through the broker",
+                "--provider cloud-ollama",
+            ),
+            (
+                "openrouter",
+                "Run OpenRouter-provider review",
+                "Publish or promote validated review through the broker",
+                "--provider openrouter",
+            ),
+            (
+                "local",
+                "Prepare and run trusted local review",
+                "Publish or promote trusted local review and learnings",
+                "--provider local-ollama",
+            ),
+        )
+        for job_id, review_step_name, publish_step_name, provider_flag in lanes:
+            with self.subTest(job=job_id):
+                job = _job_section(reusable, job_id)
+                review_step = _step_block(job, review_step_name)
+                self.assertIn(provider_flag, review_step)
+                self.assertIn("--format json", review_step)
+                self.assertIn("--exit-semantics operational", review_step)
+                self.assertIn("--output review.json", review_step)
+                publish_step = _step_block(job, publish_step_name)
+                self.assertIn("--result review.json", publish_step)
+                upload_step = _step_block(job, "Upload opt-in review artifact")
+                self.assertIn("\n            review.json\n", upload_step)
+
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
     ):

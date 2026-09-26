@@ -631,8 +631,10 @@ before release if a caller `with:` key is absent from
 A local review writes one document in the selected format to stdout or
 `--output`: readable terminal text by default, GitHub-flavored Markdown with
 `--format markdown`, or the versioned `review-result` document with
-`--format json`. Progress and diagnostics stay on stderr, so machine output is
-never polluted. Only an invocation rejected before inference writes no
+`--format json`. Warnings, diagnostics, and the final status and reason lines
+stay on stderr, so machine output is never polluted. Provider text is escaped
+in the Markdown format, so it cannot restructure the document or hide parts of
+it. Only an invocation rejected before inference writes no
 document: a review that was admitted writes the bounded document it produced,
 including one that could not complete, and a repeated local session whose
 round is already published writes no new document. The review exit contract is
@@ -654,7 +656,10 @@ directory (`~/Library/Application Support/review-sensei` on macOS,
 reuse one session, and `--session-ledger` still overrides that location. The
 session identity follows the working copy root, so invoking the CLI from a
 subdirectory of one Git checkout keeps one session, while renaming or moving
-that root starts a new one.
+that root starts a new one. A local session binds derived 40-character content
+digests, not Git object ids, as its base and head revisions (`base_sha` and
+`head_sha` in the outcome document); repeated runs of one change keep the same
+revision.
 
 `REVIEWSENSEI_PROVIDER` selects the canonical backend and `REVIEWSENSEI_MODEL`
 overrides its model. Those are the two supported environment overrides for
