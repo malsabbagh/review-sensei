@@ -31,8 +31,8 @@ from .convergence import (
     ATTRIBUTIONS,
     LATE_REASONS,
     OPERATOR_REVIEW_MODES,
-    BlockerCandidate,
     PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS,
+    BlockerCandidate,
     ReviewConvergencePolicy,
     derive_blocker_candidate,
 )
