@@ -58,8 +58,11 @@ Request only the permissions needed by the features you deploy:
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
-| `Variables` | Write | Required to create visible repository defaults used by the generated workflow; GitHub payloads name this permission `actions_variables`; existing values are never overwritten |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
+
+Setup provisions no repository variables, so `Variables` is not requested and
+is not needed: setup and capability token requests never name the retired
+scope, and a token response that still reports it fails closed.
 
 Do not request organization administration, secrets, checks, or
 unrelated repository permissions, including `Issues: write`, unless a separate
@@ -75,9 +78,9 @@ The setup bootstrap handles the following webhook events:
 
 | Event | Actions | Behavior |
 | --- | --- | --- |
-| `installation` | `created`, `new_permissions_accepted` | Create a setup pull request and default repository variables for selected repositories when `contents`, `pull_requests`, `variables` (payload key `actions_variables`), and `workflows` are write |
+| `installation` | `created`, `new_permissions_accepted` | Create a setup pull request for selected repositories when `contents`, `pull_requests`, and `workflows` are write |
 | `installation` | `deleted`, `removed`, `suspended`, `unsuspend` | No setup writes |
-| `installation_repositories` | `added` | Create setup pull requests and missing default repository variables for added repositories |
+| `installation_repositories` | `added` | Create setup pull requests for added repositories |
 | `installation_repositories` | `removed` | No setup writes |
 
 All other events are acknowledged as no-ops before setup processing. Suspended
@@ -125,26 +128,27 @@ For emergency revocation:
 
 Generated setup pull requests contain only:
 
-- `.github/workflows/review-sensei-review.yml` with immutable Action pins;
+- `.github/workflows/review-sensei-review.yml` with an immutable Action pin;
 - `.github/workflows/review-sensei-uninstall.yml` with an immutable Action pin;
-- `.github/review-sensei/config.yml` with local-first provider defaults;
-- a short pull request body explaining the repository variables and that cloud
-  mode requires `OLLAMA_API_KEY` as a repository secret.
+- `.reviewsensei.yml` with local-first provider defaults;
+- a short pull request body naming the generated files and the optional
+  provider credentials.
 
-The bootstrap creates these plain-text repository variables when they are
-missing: `REVIEWSENSEI_PROVIDER_MODE=local`,
-`REVIEWSENSEI_LOCAL_MODEL=qwen3.5:4b`, and
-`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4.1-flash:cloud`. It never creates a blank
-secret or reads/writes `OLLAMA_API_KEY`; operators add that value through
-Repository Settings when they opt into cloud mode.
+The bootstrap creates no repository variables at all. The only two product
+overrides are the optional `REVIEWSENSEI_PROVIDER` (canonical
+`inference.backend`) and `REVIEWSENSEI_MODEL` (canonical `inference.model`)
+Action variables an operator may set by hand. It never creates a blank secret
+or reads/writes `OLLAMA_API_KEY`; operators add that value through Repository
+Settings when they opt into cloud mode.
 
 To uninstall, run the generated **Remove ReviewSensei setup** workflow. It uses
 the repository's built-in `GITHUB_TOKEN` to open a cleanup PR that deletes only
-the generated workflow/configuration files. This is intentionally manual:
+the generated workflow/configuration files, including the retired
+`.github/review-sensei/config.yml` location. This is intentionally manual:
 GitHub revokes the App installation token when the App is uninstalled, so the
 App cannot reliably create a PR after that event. The cleanup workflow leaves
-learnings, repository variables, and secrets untouched for an operator to
-review and remove separately.
+learnings and secrets untouched for an operator to review and remove
+separately.
 
 Setup pull request content must reference only public ReviewSensei artifacts
 and repositories. It must not present internal development repositories as

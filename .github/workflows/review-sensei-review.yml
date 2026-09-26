@@ -2,19 +2,17 @@
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
-# The installer and this example follow the operator-managed v5 git tag. Moving
-# that tag is the public setup-v5 release action. The reusable workflow installs
-# the requested package from PyPI first and falls back to its executing commit
-# only when the package version is not yet published.
+# Configuration lives in .reviewsensei.yml at the repository root of the
+# trusted policy commit (the repository default branch) that the reusable
+# workflow freezes. This caller reads no repository variables: the only two
+# product overrides are REVIEWSENSEI_PROVIDER (inference.backend) and
+# REVIEWSENSEI_MODEL (inference.model), and the reusable workflow maps them,
+# once, from configuration.
 #
-# REVIEWSENSEI_GITHUB_WRITES also exposes the maintainer command surface:
-# @sensei review status|pause|continue|reenroll, @sensei verify, and
-# @sensei dismiss|defer|accept-risk run whenever github writes are enabled,
-# regardless of REVIEWSENSEI_MENTION_REPLIES. That variable now only controls
-# conversational @sensei replies. Commands are read from the pull-request
-# conversation (issue comments); an inline review comment on a diff line
-# always resolves as a conversational reply and still requires
-# REVIEWSENSEI_MENTION_REPLIES=true.
+# The installer and this caller follow the operator-managed v5 git tag. Moving
+# that tag is the public setup-v5 release action, so the reusable workflow,
+# its exact package install, and every policy decision arrive without editing
+# this file.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -26,35 +24,11 @@ on:
         default: review
         type: choice
         options: [review]
-      base_ref:
-        description: Repository default branch (must match the repository setting)
-        required: true
-      head_ref:
-        description: Head branch or ref to review
-        required: true
-      head_repository:
-        description: Optional owner/repo slug for fork review
-        required: false
       pull_request_number:
         description: Pull request number to review
         required: true
-      head_sha:
-        description: Exact pull request head commit SHA
-        required: true
-      base_sha:
-        description: Exact reviewed base commit SHA
-        required: false
-      review_sensei_version:
-        description: Exact ReviewSensei package version (X.Y.Z or vX.Y.Z)
-        required: true
-      pull_request_title:
-        description: Authoritative pull request title for review context
-        required: false
-      stages_dir:
-        description: Trusted-base stage JSON directory (optional)
-        required: false
-      categories_dir:
-        description: Trusted-base category JSON directory (optional)
+      head_repository:
+        description: Optional owner/repo slug for fork review
         required: false
       source_kind:
         description: Source kind for manual dispatch (issue or inline)
@@ -73,22 +47,24 @@ on:
   pull_request_review_comment:
     types: [created]
 
+# Read-only plus OIDC. The reusable workflow needs no write scope from this
+# repository - every publication is authorized by the broker - and it can
+# never exceed what this caller grants. Whether anything is published is
+# github.writes in .reviewsensei.yml, not a permission.
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  pull-requests: read
+  issues: read
   id-token: write
 
 jobs:
   resolve-trigger:
+    # Event shape only: which events may start a run, and which commenters may
+    # address @sensei. Nothing here depends on configuration.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
-      github.event.pull_request.draft != true &&
-      github.event.pull_request.head.repo.full_name == github.repository) ||
-      (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      ((github.event_name == 'issue_comment' &&
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@sensei') &&
@@ -102,7 +78,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot')))
+      github.event.comment.user.type != 'Bot')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -115,8 +91,6 @@ jobs:
       base_ref: ${{ steps.resolve.outputs.base_ref }}
       base_sha: ${{ steps.resolve.outputs.base_sha }}
       pull_request_number: ${{ steps.resolve.outputs.pull_request_number }}
-      pull_request_title: ${{ steps.resolve.outputs.pull_request_title }}
-      enable_review: ${{ steps.resolve.outputs.enable_review }}
     steps:
       - name: Check out trusted trigger resolver
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,7 +107,6 @@ jobs:
           PULL_REQUEST: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
           PULL_REQUEST_URL: ${{ github.event.comment.pull_request_url }}
           COMMENT_BODY: ${{ github.event.comment.body }}
-          AUTO_REVIEW: ${{ vars.REVIEWSENSEI_AUTO_REVIEW || 'false' }}
           PULL_REQUEST_JSON: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request) || '' }}
         run: |
           set -euo pipefail
@@ -166,11 +139,10 @@ jobs:
             PYTHONPATH=src python "$resolver" \
               --event "$EVENT_NAME" \
               --comment-body "$COMMENT_BODY" \
-              --pull-json "$pull_json" \
-              --auto-review "$AUTO_REVIEW"
+              --pull-json "$pull_json"
             exit 0
           fi
-          python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY" <<'PY'
+          python - "$pull_json" "$EVENT_NAME" "$COMMENT_BODY" <<'PY'
           import json
           import os
           import re
@@ -183,9 +155,8 @@ jobs:
           rescan = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
           commit_sha = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          auto_review = sys.argv[2]
-          event_name = sys.argv[3]
-          comment_body = sys.argv[4] if len(sys.argv) > 4 else ""
+          event_name = sys.argv[2]
+          comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
 
           def valid_ref(value):
               return (
@@ -204,8 +175,6 @@ jobs:
           head_ref = head.get("ref")
           base_sha = base.get("sha")
           base_ref = base.get("ref")
-          title = pull.get("title") if isinstance(pull.get("title"), str) else ""
-          title = " ".join(title.split())
           if (
               isinstance(number, bool)
               or not isinstance(number, int)
@@ -241,15 +210,11 @@ jobs:
               raise SystemExit(1)
 
           operation = "review"
-          enable_review = "true" if auto_review == "true" else "false"
           resolved_head = head_sha
-          if event_name == "pull_request":
+          if event_name == "pull_request" or event_name == "workflow_dispatch":
               pass
-          elif event_name == "workflow_dispatch":
-              enable_review = "true"
           elif event_name == "pull_request_review_comment":
               operation = "reply"
-              enable_review = "false"
           elif event_name == "issue_comment":
               wants_rescan = (
                   isinstance(comment_body, str)
@@ -257,7 +222,6 @@ jobs:
                   and rescan.search(comment_body) is not None
               )
               if wants_rescan:
-                  enable_review = "true"
                   match = commit_sha.search(comment_body)
                   token = match.group(1).casefold() if match is not None else None
                   if token is not None and not (
@@ -267,10 +231,8 @@ jobs:
                   resolved_head = choose_head(token)
               elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
-                  enable_review = "false"
               else:
                   operation = "reply"
-                  enable_review = "false"
           else:
               print("::error::unsupported event", file=sys.stderr)
               raise SystemExit(1)
@@ -278,9 +240,6 @@ jobs:
           if not output:
               print("::error::GITHUB_OUTPUT is unavailable", file=sys.stderr)
               raise SystemExit(1)
-          delimiter = "RS_PULL_REQUEST_TITLE"
-          while delimiter in title:
-              delimiter += "_EOF"
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"operation={operation}\n")
               handle.write(f"head_sha={resolved_head}\n")
@@ -288,53 +247,25 @@ jobs:
               handle.write(f"base_ref={base_ref}\n")
               handle.write(f"base_sha={base_sha}\n")
               handle.write(f"pull_request_number={number}\n")
-              handle.write(f"pull_request_title<<{delimiter}\n")
-              handle.write(f"{title}\n{delimiter}\n")
-              handle.write(f"enable_review={enable_review}\n")
           PY
 
   review-or-reply:
+    # A skipped dependency skips this job, so the event guard above is the
+    # only guard: the reusable workflow decides eligibility, authorization,
+    # and whether anything is published.
     needs: resolve-trigger
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-      vars.REVIEWSENSEI_AUTO_REVIEW == 'true' &&
-      github.event.pull_request.draft != true &&
-      github.event.pull_request.head.repo.full_name == github.repository) ||
-      (vars.REVIEWSENSEI_GITHUB_WRITES == 'true' &&
-      ((github.event_name == 'issue_comment' &&
-      github.event.action == 'created' &&
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@sensei') &&
-      (github.event.comment.author_association == 'OWNER' ||
-      github.event.comment.author_association == 'MEMBER' ||
-      github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot' &&
-      (needs.resolve-trigger.outputs.operation == 'command' ||
-      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||
-      (vars.REVIEWSENSEI_MENTION_REPLIES == 'true' &&
-      github.event_name == 'pull_request_review_comment' &&
-      github.event.action == 'created' &&
-      contains(github.event.comment.body, '@sensei') &&
-      (github.event.comment.author_association == 'OWNER' ||
-      github.event.comment.author_association == 'MEMBER' ||
-      github.event.comment.author_association == 'COLLABORATOR') &&
-      github.event.comment.user.type != 'Bot')))
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
-      review_mode: ${{ vars.REVIEWSENSEI_REVIEW_MODE || 'merge-focused' }}
-      provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}
-      model: ${{ vars.REVIEWSENSEI_MODEL || '' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
-      pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}
-      base_ref: ${{ needs.resolve-trigger.outputs.base_ref || inputs.base_ref || github.event.pull_request.base.ref || github.event.repository.default_branch }}
-      base_sha: ${{ needs.resolve-trigger.outputs.base_sha || inputs.base_sha || github.event.pull_request.base.sha }}
-      head_ref: ${{ needs.resolve-trigger.outputs.head_ref || inputs.head_ref || github.event.pull_request.head.ref || '' }}
+      pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}
+      base_ref: ${{ needs.resolve-trigger.outputs.base_ref }}
+      base_sha: ${{ needs.resolve-trigger.outputs.base_sha }}
+      head_ref: ${{ needs.resolve-trigger.outputs.head_ref }}
       head_repository: ${{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}
-      head_sha: ${{ needs.resolve-trigger.outputs.head_sha || inputs.head_sha || github.event.pull_request.head.sha }}
+      head_sha: ${{ needs.resolve-trigger.outputs.head_sha }}
       source_kind: ${{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}
       source_comment_id: ${{ inputs.source_comment_id || github.event.comment.id }}
       source_updated_at: ${{ inputs.source_updated_at || github.event.comment.updated_at }}
@@ -343,17 +274,7 @@ jobs:
       comment_actor: ${{ github.event.comment.user.login || '' }}
       comment_actor_type: ${{ github.event.comment.user.type || 'User' }}
       comment_association: ${{ github.event.comment.author_association || '' }}
-      review_sensei_version: ${{ inputs.review_sensei_version || vars.REVIEWSENSEI_VERSION }}
-      pull_request_title: ${{ needs.resolve-trigger.outputs.pull_request_title || inputs.pull_request_title || github.event.pull_request.title }}
-      stages_dir: ${{ inputs.stages_dir || vars.REVIEWSENSEI_STAGES_DIR || '' }}
-      categories_dir: ${{ inputs.categories_dir || vars.REVIEWSENSEI_CATEGORIES_DIR || '' }}
-      enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}
-      enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}
-      enable_learning_proposals: ${{ vars.REVIEWSENSEI_LEARNING_PROPOSALS || 'false' }}
-      enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}
-      enable_learning_prs: ${{ vars.REVIEWSENSEI_LEARNING_PRS }}
-      enable_mention_replies: ${{ vars.REVIEWSENSEI_MENTION_REPLIES }}
-      upload_artifacts: ${{ vars.REVIEWSENSEI_UPLOAD_ARTIFACTS }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

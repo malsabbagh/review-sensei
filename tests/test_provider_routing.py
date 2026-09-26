@@ -287,7 +287,7 @@ class ProviderRoutingTests(unittest.TestCase):
             self.assertEqual(profile.structured_output, "json_object")
             self.assertEqual(profile.permitted_fallback, "none")
 
-    def test_installed_workflows_do_not_pass_profile_or_custom_provider_url(
+    def test_installed_workflows_do_not_pass_profile_or_hard_code_provider_details(
         self,
     ) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -300,17 +300,24 @@ class ProviderRoutingTests(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
         example = example_path.read_text(encoding="utf-8")
         for text in (workflow, example):
-            self.assertNotIn("OPENAI_API_KEY", text)
+            self.assertNotIn("--profile", text)
             self.assertNotIn("api.openai.com", text)
-        cloud_start = workflow.index("  cloud:")
-        openrouter_start = workflow.index("  openrouter:")
-        local_start = workflow.index("  local:")
-        self.assertNotIn("--profile", workflow[cloud_start:openrouter_start])
-        self.assertNotIn("--profile", workflow[local_start:])
-        openrouter = workflow[openrouter_start:local_start]
-        self.assertNotIn("--profile", openrouter)
-        self.assertIn("--provider openrouter --model", openrouter)
-        self.assertNotIn("--profile", example)
+            self.assertNotIn("openrouter.ai", text)
+        # Backend, endpoint, and model are always plan outputs of the trusted
+        # configuration: the runner holds no provider default and no model chain.
+        self.assertIn(
+            'review_args+=(--provider "$BACKEND" --base-url "$BASE_URL"'
+            ' --model "$MODEL")',
+            workflow,
+        )
+        # Each credential is an optional declared secret, referenced only
+        # through the secrets context: nothing is embedded, and the runner
+        # rejects any credential reference outside the declared set.
+        for name in ("OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+            with self.subTest(secret=name):
+                self.assertIn(f"      {name}:\n        required: false\n", workflow)
+                self.assertIn(f"{name}: ${{{{ secrets.{name} }}}}", workflow)
+        self.assertIn("OLLAMA_API_KEY|OPENROUTER_API_KEY|OPENAI_API_KEY", workflow)
 
 
 class StageProviderProfileTests(unittest.TestCase):

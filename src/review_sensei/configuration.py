@@ -147,21 +147,38 @@ RETIRED_ENVIRONMENT_SETTINGS: Mapping[str, str] = {
     ),
 }
 RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS: Mapping[str, str] = {
-    "REVIEWSENSEI_AUTO_APPROVE": "set github.reviews: auto-approve",
+    # Managed repository variables, reported once per hosted run by the
+    # reusable workflow, and process settings reported by `config validate`.
     "AUTO_APPROVE": "set github.reviews in .reviewsensei.yml",
     "AUTO_REVIEW": "set github.automatic_reviews in .reviewsensei.yml",
     "GITHUB_WRITES": "set github.writes in .reviewsensei.yml",
     "MENTION_REPLIES": "set github.mentions in .reviewsensei.yml",
+    "OPENROUTER_UPSTREAM_PROVIDER": (
+        "set advanced.routing.upstream_provider in .reviewsensei.yml"
+    ),
+    "REVIEWSENSEI_AUTO_APPROVE": "set github.reviews in .reviewsensei.yml",
+    "REVIEWSENSEI_AUTO_REVIEW": "set github.automatic_reviews in .reviewsensei.yml",
+    "REVIEWSENSEI_CATEGORIES_DIR": (
+        "place category JSON files under .reviewsensei/categories/"
+    ),
+    "REVIEWSENSEI_GITHUB_WRITES": "set github.writes in .reviewsensei.yml",
+    "REVIEWSENSEI_LEARNING_PRS": (
+        "set github.learning: pull-requests in .reviewsensei.yml"
+    ),
+    "REVIEWSENSEI_LEARNING_PROPOSALS": "set github.learning in .reviewsensei.yml",
+    "REVIEWSENSEI_MENTION_REPLIES": "set github.mentions in .reviewsensei.yml",
+    "REVIEWSENSEI_PROVIDER_PROFILE": (
+        "select inference.backend and set the advanced.endpoint fields in "
+        ".reviewsensei.yml"
+    ),
     "REVIEWSENSEI_REVIEW_MODE": (
         "one evidence-focused pipeline is the only engine; set github.reviews"
     ),
     "REVIEWSENSEI_STAGES_DIR": "place stage JSON files under .reviewsensei/stages/",
-    "REVIEWSENSEI_CATEGORIES_DIR": (
-        "place category JSON files under .reviewsensei/categories/"
+    "REVIEWSENSEI_UPLOAD_ARTIFACTS": (
+        "set github.artifacts: diagnostics in .reviewsensei.yml"
     ),
-    "OPENROUTER_UPSTREAM_PROVIDER": (
-        "set advanced.routing.upstream_provider in .reviewsensei.yml"
-    ),
+    "REVIEWSENSEI_VERSION": "release/installer identity; remove it",
 }
 # Provider variables the canonical review resolver deliberately does not
 # consult: a review resolves its backend, model, endpoint, and timeout from the

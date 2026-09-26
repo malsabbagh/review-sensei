@@ -40,12 +40,12 @@ Recommended setup:
   secret before accepting any installation event.
 - Permissions: request only what the deployed feature needs. GitHub App
   registration requires implicit `Metadata: read`. For the setup bootstrap,
-  request `Contents: write`, `Pull requests: write`, `Variables: write`, and
-  `Workflows: write`.
+  request `Contents: write`, `Pull requests: write`, and `Workflows: write`.
   The same `Pull requests: write` permission covers App reviews, inline
   replies, and top-level pull-request conversation replies. ReviewSensei does
-  not request `Issues: write` because it does not reply on ordinary issues.
-  Do not request organization, administration, checks, or unrelated
+  not request `Issues: write` because it does not reply on ordinary issues, and
+  it does not request `Variables: write` because setup provisions no repository
+  variables. Do not request organization, administration, checks, or unrelated
   permissions without a separate design.
 - Repository access: selected repositories, so installation scope stays
   explicit.

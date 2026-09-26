@@ -4,9 +4,7 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -190,11 +188,49 @@ def _init_review_repository(root: Path) -> Path:
 class CallerRunnerInputContractTests(unittest.TestCase):
     def test_callers_pass_only_declared_reusable_runner_inputs(self):
         runner_inputs = reusable_runner_input_names(RUNNER.read_text(encoding="utf-8"))
-        self.assertIn("stages_dir", runner_inputs)
-        self.assertIn("categories_dir", runner_inputs)
-        self.assertIn("pull_request_title", runner_inputs)
-        self.assertIn("provider_profile", runner_inputs)
-        self.assertNotIn("OLLAMA_API_KEY", runner_inputs)
+        invocation_inputs = {
+            "mode",
+            "operation",
+            "repository",
+            "repository_id",
+            "pull_request_number",
+            "base_ref",
+            "base_sha",
+            "head_ref",
+            "head_repository",
+            "head_sha",
+            "source_kind",
+            "source_comment_id",
+            "source_updated_at",
+            "root_comment_id",
+            "comment_body",
+            "comment_actor",
+            "comment_actor_type",
+            "comment_association",
+        }
+        self.assertEqual(runner_inputs, invocation_inputs)
+        # No policy or infrastructure travels as an input: a caller cannot
+        # restate configuration, and no run can be steered through an input.
+        for retired in (
+            "stages_dir",
+            "categories_dir",
+            "provider_profile",
+            "pull_request_title",
+            "provider",
+            "provider_mode",
+            "model",
+            "review_mode",
+            "enable_review",
+            "enable_github_writes",
+            "enable_auto_approve",
+            "enable_mention_replies",
+            "enable_learning_proposals",
+            "enable_learning_prs",
+            "upload_artifacts",
+            "review_sensei_version",
+        ):
+            with self.subTest(input=retired):
+                self.assertNotIn(retired, runner_inputs)
         callers = {
             "repo": REPO_CALLER.read_text(encoding="utf-8"),
             "example": EXAMPLE_CALLER.read_text(encoding="utf-8"),
@@ -207,25 +243,29 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             callers["repo"],
         )
-        self.assertIn("model:", callers["repo"])
-        self.assertIn("model:", callers["example"])
-        repo_passed = caller_reusable_with_keys(callers["repo"])
-        example_passed = caller_reusable_with_keys(callers["example"])
-        self.assertIn("model", repo_passed)
-        self.assertIn("model", example_passed)
-        self.assertLessEqual(repo_passed, runner_inputs)
-        self.assertLessEqual(example_passed, runner_inputs)
-        self.assertNotEqual(callers["generated"], callers["historical-parity"])
-        for name, text in callers.items():
+        for name in ("repo", "example", "generated", "generated-stable"):
             with self.subTest(caller=name):
-                passed = caller_reusable_with_keys(text)
-                self.assertTrue(passed, f"{name} passed no reusable-workflow inputs")
-                extra = sorted(passed - runner_inputs)
+                passed = caller_reusable_with_keys(callers[name])
                 self.assertEqual(
-                    extra,
-                    [],
-                    f"{name} passes inputs absent from review-sensei-run.yml: {extra}",
+                    passed,
+                    invocation_inputs,
+                    f"{name} does not pass exactly the declared invocation inputs",
                 )
+                # The scoped credentials are forwarded as optional secrets,
+                # never as inputs and never inline.
+                for secret in (
+                    "OLLAMA_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "OPENAI_API_KEY",
+                ):
+                    self.assertIn(
+                        f"{secret}: ${{{{ secrets.{secret} }}}}", callers[name]
+                    )
+        # The frozen v4 caller still carries the retired policy inputs; it is
+        # recognized for migration and is never generated.
+        historical = caller_reusable_with_keys(callers["historical-parity"])
+        self.assertIn("stages_dir", historical)
+        self.assertNotEqual(callers["generated"], callers["historical-parity"])
 
 
 class InactiveLensDocumentationTests(unittest.TestCase):
@@ -244,65 +284,27 @@ class InactiveLensDocumentationTests(unittest.TestCase):
         self.assertIn("pull-request head", text.lower())
 
 
-def runner_stage_path_gate_script(text: str) -> str:
-    marker = 'for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do'
-    start = text.find(marker)
-    if start < 0:
-        raise AssertionError("runner is missing the stage/category path gate")
-    end = text.find("done\n", start)
-    if end < 0:
-        raise AssertionError("runner path gate is incomplete")
-    block = textwrap.dedent(text[start : end + len("done")])
-    return "set -euo pipefail\n" + block + "\n"
-
-
 class TrustedStageIntegrationTests(unittest.TestCase):
-    def test_workflow_rejects_unsafe_stage_paths_before_provider_jobs(self):
+    def test_workflow_reads_no_stage_or_category_path_configuration(self):
         text = RUNNER.read_text(encoding="utf-8")
-        self.assertIn(
-            "trusted stage/category paths must be repository-relative",
-            text,
-        )
-        self.assertEqual(
-            text.count('for config_path in "$STAGES_DIR" "$CATEGORIES_DIR"; do'),
-            1,
-        )
-        self.assertIn('"$config_path" = /*', text)
-        self.assertIn("\"$config_path\" == *'..'*", text)
-        script = runner_stage_path_gate_script(text)
-        self.assertIn('"$config_path" = /*', script)
-        self.assertIn("\"$config_path\" == *'..'*", script)
-        if sys.platform == "win32":
-            return
-        allowed = ("", "stages", ".github/review-sensei/stages", "review/stages_v2")
-        rejected = (
-            "/tmp/stages",
-            "../stages",
-            "stages/../secret",
-            "stages;rm",
-            "stages with space",
-        )
-        for value in allowed:
-            with self.subTest(path=value):
-                result = subprocess.run(
-                    ["bash", "-c", script],
-                    env={**os.environ, "STAGES_DIR": value, "CATEGORIES_DIR": ""},
-                    capture_output=True,
-                    text=True,
-                    check=False,
+        # Stage and category documents come from the conventional directories
+        # of the trusted policy commit, resolved by the installed package:
+        # there is no path input and no path variable left to validate. The
+        # retired variables appear only in the report step, which reads them
+        # once to print a remedy and never feeds them to any command.
+        for name in ("REVIEWSENSEI_STAGES_DIR", "REVIEWSENSEI_CATEGORIES_DIR"):
+            with self.subTest(variable=name):
+                self.assertEqual(
+                    [line for line in text.splitlines() if name in line],
+                    [f"          {name}: ${{{{ vars.{name} }}}}"],
                 )
-                self.assertEqual(result.returncode, 0, result.stderr)
-        for value in rejected:
-            with self.subTest(path=value):
-                result = subprocess.run(
-                    ["bash", "-c", script],
-                    env={**os.environ, "STAGES_DIR": value, "CATEGORIES_DIR": ""},
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("repository-relative", result.stderr)
+        self.assertIn("retired_environment_remedies", text)
+        self.assertNotIn("stages_dir", reusable_runner_input_names(text))
+        self.assertNotIn("categories_dir", reusable_runner_input_names(text))
+        self.assertNotIn("--stages-dir", text)
+        # The policy workspace is the repository default branch, so a
+        # pull-request head can never contribute stage or category content.
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", text)
 
     def test_hostile_pr_head_stage_json_is_not_used(self):
         with tempfile.TemporaryDirectory() as temporary:

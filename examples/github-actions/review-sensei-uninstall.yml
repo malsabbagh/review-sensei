@@ -1,9 +1,6 @@
-# ReviewSensei setup version: 3
+# ReviewSensei setup version: 5
 name: Remove ReviewSensei setup
 
-# Run this manually before or after uninstalling the GitHub App. It uses the
-# repository's built-in GITHUB_TOKEN and opens a reviewable PR; it does not
-# require the ReviewSensei App to remain installed.
 on:
   workflow_dispatch:
 
@@ -45,6 +42,7 @@ jobs:
           paths = (
               ".github/workflows/review-sensei-review.yml",
               ".github/workflows/review-sensei-uninstall.yml",
+              ".reviewsensei.yml",
               ".github/review-sensei/config.yml",
           )
           subprocess.run(["git", "switch", "--create", branch], check=True)

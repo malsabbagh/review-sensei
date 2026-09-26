@@ -74,9 +74,12 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("@cloudflare/containers", worker)
         self.assertIn("RSASSA-PKCS1-v1_5", github_app)
         self.assertIn("review-sensei/setup", github_app)
-        self.assertIn('"actions_variables"', github_app)
-        self.assertIn('"variables"', github_app)
-        self.assertIn("actions/variables", github_app)
+        # Setup provisions no repository variables, so the App holds no
+        # variable API surface at all: there is nothing left that could write
+        # customer settings the product does not read.
+        self.assertNotIn("actions_variables", github_app)
+        self.assertNotIn("variables", github_app)
+        self.assertNotIn("actions/variables", github_app)
         self.assertIn("skipped_unknown_setup", github_app)
         self.assertIn("contents/", github_app)
 
@@ -100,128 +103,101 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
         self.assertNotIn("PUBLIC_WORKFLOW_LEGACY_SHAS", source)
-        self.assertIn("secrets.OLLAMA_API_KEY", source)
-        self.assertIn("secrets.OPENROUTER_API_KEY", source)
-        self.assertIn("REVIEWSENSEI_MODEL", source)
-        self.assertIn("github.event.comment.author_association == 'OWNER'", source)
-        self.assertIn("github.event.comment.user.type != 'Bot'", source)
-        # The Worker's copy of the caller must re-apply the mention,
-        # association, and user-type checks on the command arm itself, not only
-        # in the resolver job's condition that produces operation=command.
-        self.assertIn(
-            "      ((github.event_name == 'issue_comment' &&\n"
-            "      github.event.action == 'created' &&\n"
-            "      github.event.issue.pull_request &&\n"
-            "      contains(github.event.comment.body, '@sensei') &&\n"
-            "      (github.event.comment.author_association == 'OWNER' ||\n"
-            "      github.event.comment.author_association == 'MEMBER' ||\n"
-            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
-            "      github.event.comment.user.type != 'Bot' &&\n"
-            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
-            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
-            source,
-        )
+        # Every credential is a declared, name-only optional secret, and the
+        # current caller forwards exactly the three provider keys.
+        for name in ("OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+            with self.subTest(secret=name):
+                self.assertIn(f"secrets.{name}", source)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@", source
         )
-        self.assertIn("id-token: write", source)
-        self.assertNotIn("OLLAMA_API_KEY_VALUE", source)
-        self.assertIn(
-            "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", source
-        )
-        self.assertIn("REVIEWSENSEI_PROVIDER_MODE", source)
-        self.assertIn("REVIEWSENSEI_LOCAL_MODEL", source)
-        self.assertIn("REVIEWSENSEI_CLOUD_MODEL", source)
-        self.assertIn("qwen3.5:4b", source)
-        self.assertIn("deepseek-v4.1-flash:cloud", source)
         self.assertIn("review-sensei-uninstall.yml", source)
+        self.assertNotIn("OLLAMA_API_KEY_VALUE", source)
         self.assertNotIn("GITHUB_APP_PRIVATE_KEY", source)
         self.assertNotIn("GITHUB_APP_WEBHOOK_SECRET", source)
+        # The current caller is the same thin bootstrap the Python package
+        # emits: event-shape-only routing, read-only plus OIDC permissions, and
+        # no configuration read of any kind.
+        caller = source.split("function resolveTriggerWorkflowTemplate", 1)[1]
+        caller = caller.split("\n}\n", 1)[0]
+        self.assertIn("github.event.comment.author_association == 'OWNER'", caller)
+        self.assertIn("github.event.comment.user.type != 'Bot'", caller)
         self.assertIn(
-            'DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"', source
+            "      (github.event.comment.author_association == 'OWNER' ||\n"
+            "      github.event.comment.author_association == 'MEMBER' ||\n"
+            "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
+            "      github.event.comment.user.type != 'Bot') ||\n",
+            caller,
         )
+        self.assertIn(
+            "permissions:\n"
+            "  contents: read\n"
+            "  pull-requests: read\n"
+            "  issues: read\n"
+            "  id-token: write\n",
+            caller,
+        )
+        self.assertIn("needs.resolve-trigger.outputs.operation", caller)
+        self.assertIn(
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", caller
+        )
+        self.assertNotIn("vars.", caller)
 
     def test_current_config_matches_ts_builder_bytes(self):
-        from review_sensei.hosting.github.setup import (
-            CURRENT_PACKAGE_VERSION,
-            DEFAULT_CLOUD_MODEL,
-            DEFAULT_LOCAL_MODEL,
-            _current_config_file,
-        )
+        from review_sensei.hosting.github.setup import _current_config_file
 
-        expected_ts = (
-            "# ReviewSensei setup version: 5\n"
-            "setup_version: 5\n"
-            "provider: ollama\n"
-            "provider_mode: local\n"
-            "model: ''\n"
-            "review_mode: merge-focused\n"
-            "base_url: http://127.0.0.1:11434/api\n"
-            "cloud_base_url: https://ollama.com/api\n"
-            f"local_model: {DEFAULT_LOCAL_MODEL}\n"
-            f"cloud_model: {DEFAULT_CLOUD_MODEL}\n"
-            f"version: {CURRENT_PACKAGE_VERSION}\n"
-            "auto_review: false\n"
-            "learning_proposals: false\n"
-            "github_writes: false\n"
-            "learning_prs: false\n"
-            "mention_replies: false\n"
-            "upload_artifacts: false\n"
-            "stages_dir: ''\n"
-            "categories_dir: ''\n"
-        )
-        self.assertEqual(_current_config_file(), expected_ts)
-
-    def test_current_config_core_fields_match_ts_builder(self):
-        from review_sensei.hosting.github.setup import (
-            CURRENT_PACKAGE_VERSION,
-            DEFAULT_CLOUD_MODEL,
-            DEFAULT_LOCAL_MODEL,
-            _current_config_file,
-        )
-
-        def parse_fields(content: str) -> dict[str, str]:
-            fields: dict[str, str] = {}
-            for line in content.splitlines():
-                if not line or line.startswith("#"):
-                    continue
-                key, _, value = line.partition(":")
-                fields[key.strip()] = value.strip()
-            return fields
-
-        py_fields = parse_fields(_current_config_file())
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(
-            py_fields,
-            {
-                "setup_version": "5",
-                "provider": "ollama",
-                "provider_mode": "local",
-                "model": "''",
-                "review_mode": "merge-focused",
-                "base_url": "http://127.0.0.1:11434/api",
-                "cloud_base_url": "https://ollama.com/api",
-                "local_model": DEFAULT_LOCAL_MODEL,
-                "cloud_model": DEFAULT_CLOUD_MODEL,
-                "version": CURRENT_PACKAGE_VERSION,
-                "auto_review": "false",
-                "learning_proposals": "false",
-                "github_writes": "false",
-                "learning_prs": "false",
-                "mention_replies": "false",
-                "upload_artifacts": "false",
-                "stages_dir": "''",
-                "categories_dir": "''",
-            },
+        builder = ts_source.split("export function currentConfigFile", 1)[1]
+        builder = builder.split("\n}\n", 1)[0]
+        # The Worker builder concatenates the same literal fragments the Python
+        # builder emits, so a change to either side breaks this test.
+        fragments = (
+            "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
+            '"schema: 1\\n"',
+            '"\\n"',
+            '"inference:\\n"',
+            '"  backend: local-ollama\\n"',
         )
-        self.assertIn("provider_mode: local", ts_source)
-        self.assertIn("model: ''", ts_source)
-        self.assertIn("review_mode: merge-focused", ts_source)
-        self.assertIn("local_model: ${DEFAULT_LOCAL_MODEL}", ts_source)
-        self.assertIn("cloud_model: ${DEFAULT_CLOUD_MODEL}", ts_source)
-        self.assertIn("learning_proposals: false", ts_source)
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, builder)
+        self.assertEqual(
+            _current_config_file(),
+            "# ReviewSensei setup version: 5\n"
+            "schema: 1\n"
+            "\n"
+            "inference:\n"
+            "  backend: local-ollama\n",
+        )
+
+    def test_current_config_names_no_behavior_switch(self):
+        from review_sensei.hosting.github.setup import _current_config_file
+
+        content = _current_config_file()
+        self.assertIn("schema: 1", content)
+        self.assertIn("inference:", content)
+        self.assertIn("  backend: local-ollama", content)
+        # The minimal file the App generates names the setup-time backend
+        # choice and nothing else: every behavior field lives in the operator
+        # copy of the file, not in generated bytes.
+        for retired in (
+            "provider_mode",
+            "review_mode",
+            "local_model",
+            "cloud_model",
+            "auto_review",
+            "github_writes",
+            "learning_prs",
+            "learning_proposals",
+            "mention_replies",
+            "upload_artifacts",
+            "stages_dir",
+            "categories_dir",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, content)
 
     def test_released_runner_switch_v4_fixture_copies_share_canonical_digest(self):
         import hashlib
@@ -277,84 +253,93 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("releasedRunnerSwitchV4CallerFixture", ts_source)
         self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
 
-    def test_setup_builders_share_constants_and_variables(self):
-        import re
-
+    def test_setup_builders_share_paths_and_minimal_bytes(self):
         from review_sensei.hosting.github.setup import (
-            CURRENT_PACKAGE_VERSION,
-            DEFAULT_CLOUD_MODEL,
-            DEFAULT_LOCAL_MODEL,
-            DEFAULT_OPENROUTER_MODEL,
-            DEFAULT_PROVIDER_MODE,
-            SETUP_VARIABLES,
+            SETUP_FILE_PATHS,
             SetupPlanBuilder,
+            _current_config_file,
+            _current_uninstall_workflow,
         )
 
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
             encoding="utf-8"
         )
-        for const_name, value in (
-            ("DEFAULT_PROVIDER_MODE", DEFAULT_PROVIDER_MODE),
-            ("DEFAULT_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
-            ("DEFAULT_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
-            ("DEFAULT_OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
-        ):
-            self.assertIn(f'{const_name} = "{value}"', ts_source)
-        ts_constants = {
-            "DEFAULT_PROVIDER_MODE": DEFAULT_PROVIDER_MODE,
-            "DEFAULT_LOCAL_MODEL": DEFAULT_LOCAL_MODEL,
-            "DEFAULT_CLOUD_MODEL": DEFAULT_CLOUD_MODEL,
-            "DEFAULT_OPENROUTER_MODEL": DEFAULT_OPENROUTER_MODEL,
-            "REVIEWSENSEI_VERSION": CURRENT_PACKAGE_VERSION,
-        }
-        block_match = re.search(
-            r"export const SETUP_VARIABLES.*?=\s*\[(.*?)\];",
-            ts_source,
-            re.DOTALL,
+        # Python and the Worker manage exactly the same three paths, and no
+        # builder on either side creates a repository variable.
+        self.assertEqual(
+            SETUP_FILE_PATHS,
+            (
+                ".github/workflows/review-sensei-review.yml",
+                ".github/workflows/review-sensei-uninstall.yml",
+                ".reviewsensei.yml",
+            ),
         )
-        self.assertIsNotNone(block_match)
-        ts_variables: list[tuple[str, str]] = []
-        for match in re.finditer(
-            r'\{\s*name:\s*"([^"]+)"\s*,\s*value:\s*(?:"([^"]*)"|([A-Z][A-Z0-9_]*))\s*\}',
-            block_match.group(1),
-        ):
-            name, literal, const_ref = match.groups()
-            value = literal if literal is not None else ts_constants[const_ref]
-            ts_variables.append((name, value))
-        self.assertEqual(ts_variables, list(SETUP_VARIABLES))
-        py_workflow = SetupPlanBuilder().build("owner/repo").files[0].content
+        block_start = ts_source.index("export const SETUP_FILE_PATHS")
+        block_end = ts_source.index("];", block_start) + len("];")
+        self.assertEqual(
+            "export const SETUP_FILE_PATHS: readonly string[] = [\n"
+            "  SETUP_WORKFLOW_PATH,\n"
+            "  SETUP_UNINSTALL_WORKFLOW_PATH,\n"
+            "  CONFIG_PATH,\n"
+            "];",
+            ts_source[block_start:block_end],
+        )
+        for path in SETUP_FILE_PATHS:
+            with self.subTest(path=path):
+                self.assertIn(f'"{path}"', ts_source)
+        self.assertNotIn("SETUP_VARIABLES", ts_source)
+        self.assertNotIn("actions/variables", ts_source)
+        # Both uninstall builders remove the retired configuration location
+        # alongside the current files.
+        for content in (_current_uninstall_workflow(), ts_source):
+            with self.subTest(builder="uninstall"):
+                self.assertIn('".github/review-sensei/config.yml",', content)
+        self.assertIn('".reviewsensei.yml",', _current_uninstall_workflow())
+        plan = SetupPlanBuilder().build("owner/repo")
+        self.assertEqual([file.path for file in plan.files], list(SETUP_FILE_PATHS))
+        self.assertEqual(plan.files[-1].content, _current_config_file())
         example = (
             ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
-        self.assertEqual(py_workflow, example)
+        self.assertEqual(plan.files[0].content, example)
+        self.assertEqual(plan.files[1].content, _current_uninstall_workflow())
 
     def test_user_guidance_describes_setup_v5_publication_contract(self):
-        from review_sensei.hosting.github.setup import (
-            SETUP_FILE_PATHS,
-            SETUP_VARIABLES,
-        )
+        from review_sensei.hosting.github.setup import SETUP_FILE_PATHS
 
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
-        controls = {
-            name for name, value in SETUP_VARIABLES if value in {"true", "false"}
-        }
         for content in (readme, installation):
             normalized = " ".join(content.split())
             self.assertIn("setup-v5", content)
-            self.assertIn(f"{len(SETUP_VARIABLES)} repository variables", normalized)
-            self.assertIn(f"{len(controls)} boolean controls", normalized)
             self.assertIn(f"{len(SETUP_FILE_PATHS)} generated files", normalized)
+            self.assertIn("creates no repository variables", normalized)
+            self.assertIn("REVIEWSENSEI_PROVIDER", content)
+            self.assertIn("REVIEWSENSEI_MODEL", content)
+            self.assertIn(".reviewsensei.yml", content)
             self.assertIn("automatic", content)
             self.assertIn("summary", content)
             self.assertIn("inline", content)
-            self.assertIn("REVIEWSENSEI_UPLOAD_ARTIFACTS", content)
             self.assertNotIn("review-sensei-version.txt", content)
-        for name in controls:
-            self.assertIn(f"`{name}`", installation)
+            self.assertNotIn("repository variables, including", normalized)
+            self.assertNotIn("boolean controls", normalized)
         for path in SETUP_FILE_PATHS:
-            self.assertIn(f"`{path}`", installation)
-        self.assertNotIn("REVIEWSENSEI_REVIEW_MODE", controls)
+            with self.subTest(path=path):
+                self.assertIn(f"`{path}`", installation)
+        # Every behavior the old variable surface controlled is now a
+        # documented field of the canonical configuration.
+        for field_path in (
+            "github.automatic_reviews",
+            "github.writes",
+            "github.reviews",
+            "github.mentions",
+            "github.learning",
+            "github.artifacts",
+        ):
+            with self.subTest(field=field_path):
+                self.assertIn(field_path, installation)
+        self.assertIn("inference.backend", installation)
+        self.assertIn("inference.model", installation)
 
     def test_worker_does_not_dispatch_reviews_or_invent_sha_concurrency_keys(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text(encoding="utf-8")
