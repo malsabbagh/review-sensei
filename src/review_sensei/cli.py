@@ -2499,9 +2499,9 @@ def _run_config_command(arguments: list[str]) -> int:
                 f"{name} ({replacement})" for name, replacement in retired
             )
             raise ConfigurationError(
-                "retired settings are present in the environment and have no "
-                f"effect: {detail}. Move them into "
-                f"{configuration.source or '.reviewsensei.yml'}"
+                f"retired settings have no effect: {detail}. Move them into "
+                f"{configuration.source or '.reviewsensei.yml'}",
+                source="environment",
             )
         customization = customization_directories(configuration)
         if args.command == "validate":

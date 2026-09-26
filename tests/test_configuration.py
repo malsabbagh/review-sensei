@@ -21,6 +21,7 @@ from review_sensei.configuration import (
     resolve_inference,
     retired_environment_settings,
 )
+from review_sensei.errors import ReviewInputError
 
 SOURCE = ".reviewsensei.yml"
 MINIMAL = """schema: 1
@@ -356,7 +357,10 @@ class ConfigurationResolutionTests(unittest.TestCase):
             )
         message = str(error.exception)
         self.assertIn("REVIEWSENSEI_PROVIDER", message)
-        self.assertIn("not a canonical backend; use 'cloud-ollama'", message)
+        self.assertIn(
+            "set inference.backend in .reviewsensei.yml to 'cloud-ollama'", message
+        )
+        self.assertTrue(message.startswith("environment variable: "), message)
         with self.assertRaises(ConfigurationError) as provider_mode:
             parse("schema: 1\ninference:\n  provider_mode: local\n")
         self.assertIn("was retired", str(provider_mode.exception))
@@ -425,15 +429,35 @@ class ConfigurationResolutionTests(unittest.TestCase):
                 environ={},
             )
         self.assertIn("must use https", str(error.exception))
-        resolved = resolve_inference(
-            parse(
-                "schema: 1\nadvanced:\n  endpoint:\n"
-                "    base_url: http://gpu-box:11434/api\n"
-                "    allow_custom_endpoint: true\n"
-            ),
-            environ={},
-        )
-        self.assertEqual(resolved.inference_location, "remote")
+        for base_url in (
+            "http://gpu-box:11434/api",
+            "http://127.attacker.example/api",
+            "http://10.example.com/api",
+        ):
+            with self.assertRaises(ConfigurationError):
+                resolve_inference(
+                    parse(
+                        "schema: 1\nadvanced:\n  endpoint:\n"
+                        f"    base_url: {base_url}\n"
+                        "    allow_custom_endpoint: true\n"
+                    ),
+                    environ={},
+                )
+        for base_url in (
+            "http://gpu-box.local:11434/api",
+            "http://10.4.0.9:11434/api",
+            "http://192.168.1.9:11434/api",
+            "http://172.20.3.4:11434/api",
+        ):
+            resolved = resolve_inference(
+                parse(
+                    "schema: 1\nadvanced:\n  endpoint:\n"
+                    f"    base_url: {base_url}\n"
+                    "    allow_custom_endpoint: true\n"
+                ),
+                environ={},
+            )
+            self.assertEqual(resolved.inference_location, "remote")
 
     def test_openrouter_keeps_its_allowlisted_endpoint(self):
         with self.assertRaises(ConfigurationError) as error:
@@ -628,9 +652,22 @@ class ConfigurationLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.yml"
             path.write_text("schema: 1\n" + "# pad\n" * 20000, encoding="utf-8")
-            with self.assertRaises(Exception) as error:
+            with self.assertRaises(ReviewInputError) as error:
                 load_configuration(path)
-            self.assertIn("exceeds", str(error.exception))
+            self.assertIn(
+                "configuration exceeds the configured size limit",
+                str(error.exception),
+            )
+
+    def test_symlinked_configuration_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "real.yml"
+            target.write_text(MINIMAL, encoding="utf-8")
+            link = Path(tmp) / ".reviewsensei.yml"
+            link.symlink_to(target)
+            with self.assertRaises(ConfigurationError) as error:
+                load_configuration(link)
+            self.assertIn("must not be a symbolic link", str(error.exception))
 
 
 class ConfigurationRenderingTests(unittest.TestCase):
@@ -672,6 +709,33 @@ class ConfigurationRenderingTests(unittest.TestCase):
         self.assertIn("advanced:", output)
         self.assertIn("egress.allow_data_egress: true", output)
         self.assertIn("large_changes.orchestrate: true", output)
+
+    def test_explain_reports_declared_symbol_context_fields_when_disabled(self):
+        configuration = parse(
+            "schema: 1\nadvanced:\n  context:\n    symbol_context:\n"
+            "      enabled: false\n      max_files: 4\n"
+        )
+        resolved = resolve_inference(configuration, environ={})
+        output = render_configuration(configuration, resolved, explain=True)
+        self.assertIn("context.symbol_context.enabled: false", output)
+        self.assertIn("context.symbol_context.max_files: 4", output)
+
+    def test_explain_lists_advanced_defaults_as_omitted(self):
+        resolved = resolve_inference(parse(MINIMAL), environ={})
+        output = render_configuration(parse(MINIMAL), resolved, explain=True)
+        self.assertIn(
+            "advanced.endpoint.allow_custom_endpoint: false [packaged default]",
+            output,
+        )
+        self.assertIn(
+            "advanced.egress.allow_data_egress: false [packaged default]", output
+        )
+        self.assertIn(
+            "advanced.large_changes.orchestrate: false [packaged default]", output
+        )
+        self.assertIn(
+            "advanced.context.symbol_context.enabled: false [packaged default]", output
+        )
 
 
 class ConfigurationCliTests(unittest.TestCase):
@@ -725,8 +789,25 @@ class ConfigurationCliTests(unittest.TestCase):
                     with patch("sys.stdout", io.StringIO()):
                         status = main(["config", "validate", "--config", str(path)])
             self.assertEqual(status, 2)
-            self.assertIn("AUTO_APPROVE", stderr.getvalue())
-            self.assertIn("github.reviews", stderr.getvalue())
+            message = stderr.getvalue()
+            self.assertIn("review-sensei: environment: retired settings", message)
+            self.assertIn("AUTO_APPROVE", message)
+            self.assertIn("github.reviews", message)
+
+    def test_config_validate_attributes_retired_provider_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, MINIMAL)
+            stderr = io.StringIO()
+            with patch.dict("os.environ", {"OLLAMA_MODEL": "qwen3.5:4b"}):
+                with redirect_stderr(stderr):
+                    with patch("sys.stdout", io.StringIO()):
+                        status = main(["config", "validate", "--config", str(path)])
+            self.assertEqual(status, 2)
+            message = stderr.getvalue()
+            self.assertIn(
+                "review-sensei: environment: OLLAMA_MODEL is retired", message
+            )
+            self.assertIn("REVIEWSENSEI_MODEL", message)
 
     def test_config_show_explain_prints_defaults_and_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -780,6 +861,28 @@ class ConfigurationScalarTests(unittest.TestCase):
         self.assertEqual(configuration.inference.model, "qwen3.5:4b")
         resolved = resolve_inference(configuration, environ={})
         self.assertEqual(resolved.model, "qwen3.5:4b")
+
+    def test_single_quoted_values_decode_doubled_quotes(self):
+        configuration = parse(
+            "schema: 1\nadvanced:\n  endpoint:\n"
+            "    base_url: 'https://gateway.example.com/it''s/api'\n"
+            "    allow_custom_endpoint: true\n"
+        )
+        self.assertEqual(
+            configuration.advanced.endpoint.base_url,
+            "https://gateway.example.com/it's/api",
+        )
+        for text in (
+            "schema: 1\nadvanced:\n  endpoint:\n    base_url: 'a'b'\n",
+            "schema: 1\nadvanced:\n  endpoint:\n    base_url: '''''\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(ConfigurationError) as error:
+                    parse(text)
+                self.assertIn(
+                    "single quotes inside a single-quoted value must be doubled",
+                    str(error.exception),
+                )
 
     def test_unsupported_escapes_are_rejected(self):
         for text, expected in (

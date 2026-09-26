@@ -384,7 +384,13 @@ def load_configuration(path: Path | None = None) -> ProductConfiguration:
         path = candidate
     elif not path.exists() and not path.is_symlink():
         raise ConfigurationError(f"configuration file not found: {path}")
+    if path.is_symlink():
+        raise ConfigurationError(
+            f"configuration file must not be a symbolic link: {path}"
+        )
     text = read_bounded_utf8(path, maximum=MAX_CONFIG_BYTES, label="configuration")
+    # the file's directory is the trusted root for the conventional directories,
+    # so it is resolved once, here, rather than at each lookup
     return parse_configuration_text(text, source=str(path), root=path.resolve().parent)
 
 
@@ -747,14 +753,29 @@ def _parse_quoted_scalar(text: str, *, source: str, line: int) -> str:
         raise ConfigurationError("unterminated quoted value", source=source, line=line)
     body = text[1:-1]
     if quote == "'":
-        if re.search(r"(?<!')'", body.replace("''", "")):
-            raise ConfigurationError(
-                "single quotes inside a single-quoted value must be doubled",
-                source=source,
-                line=line,
-            )
-        return body.replace("''", "'")
+        return _decode_single_quoted(body, source=source, line=line)
     return _decode_double_quoted(body, source=source, line=line)
+
+
+def _decode_single_quoted(body: str, *, source: str, line: int) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character != "'":
+            result.append(character)
+            index += 1
+            continue
+        if index + 1 < len(body) and body[index + 1] == "'":
+            result.append("'")
+            index += 2
+            continue
+        raise ConfigurationError(
+            "single quotes inside a single-quoted value must be doubled",
+            source=source,
+            line=line,
+        )
+    return "".join(result)
 
 
 _QUOTE_ESCAPES = {
@@ -1486,7 +1507,9 @@ def _first_non_empty(
         if raw is None:
             continue
         if not isinstance(raw, str):
-            raise ConfigurationError(f"{provenance.detail} must be a string")
+            raise ConfigurationError(
+                f"{provenance.detail} must be a string", source=provenance.source
+            )
         value = raw.strip()
         if not value:
             continue
@@ -1513,20 +1536,34 @@ def _normalize_backend(
         "ollama-cloud": "cloud-ollama",
         "openai": "openai-compatible",
     }
+    from_file = provenance.source == "configuration file"
+    field_path = "inference.backend" if from_file else None
     replacement = legacy.get(candidate)
     if replacement is not None:
-        raise _located(
-            configuration,
-            "inference.backend" if provenance.source == "configuration file" else None,
-            f"backend '{_bounded_echo(raw)}' from {provenance.detail} is not a "
-            f"canonical backend; use '{replacement}'",
+        remedy = (
+            f"use '{replacement}'"
+            if from_file
+            else f"set inference.backend in {DEFAULT_CONFIG_FILENAME} to "
+            f"'{replacement}'"
         )
-    raise _located(
-        configuration,
-        "inference.backend" if provenance.source == "configuration file" else None,
-        f"backend '{_bounded_echo(raw)}' from {provenance.detail} is not "
-        f"supported; supported backends are {', '.join(documented_backend_names())}",
-    )
+        message = (
+            f"backend '{_bounded_echo(raw)}' from {provenance.detail} is not a "
+            f"canonical backend; {remedy}"
+        )
+    else:
+        guidance = (
+            ""
+            if from_file
+            else f"; set inference.backend in {DEFAULT_CONFIG_FILENAME} to one of these"
+        )
+        message = (
+            f"backend '{_bounded_echo(raw)}' from {provenance.detail} is not "
+            f"supported; supported backends are "
+            f"{', '.join(documented_backend_names())}{guidance}"
+        )
+    if field_path is None:
+        raise ConfigurationError(message, source=provenance.source)
+    raise _located(configuration, field_path, message)
 
 
 def _located(
@@ -1724,7 +1761,8 @@ def _validate_transport(url: str, *, configuration: ProductConfiguration) -> Non
     if parsed.scheme == "http" and not _is_plaintext_transport_allowed(parsed.hostname):
         raise fail(
             "advanced.endpoint.base_url must use https for a non-local host; "
-            "plaintext transport is limited to loopback and private hosts"
+            "plaintext transport is limited to loopback names, private IPv4 "
+            "literals, and .local or .internal names"
         )
 
 
@@ -1732,15 +1770,23 @@ def _is_plaintext_transport_allowed(hostname: str) -> bool:
     host = hostname.casefold()
     if host in _LOOPBACK_HOSTS:
         return True
-    if host.startswith("127.") or host.startswith("10.") or host.startswith("192.168."):
+    if _is_private_ipv4_literal(host):
         return True
-    if host.startswith("172."):
-        parts = host.split(".")
-        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            return True
-    if host.endswith(".local") or host.endswith(".internal"):
+    return host.endswith(".local") or host.endswith(".internal")
+
+
+def _is_private_ipv4_literal(host: str) -> bool:
+    parts = host.split(".")
+    if len(parts) != 4 or not all(part.isascii() and part.isdigit() for part in parts):
+        return False
+    octets = [int(part) for part in parts]
+    if any(octet > 255 for octet in octets):
+        return False
+    if octets[0] in {10, 127}:
         return True
-    return "." not in host
+    if octets[0] == 192 and octets[1] == 168:
+        return True
+    return octets[0] == 172 and 16 <= octets[1] <= 31
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -1832,7 +1878,8 @@ def _reject_retired_provider_environment(environ: Mapping[str, str]) -> None:
         value = environ.get(name)
         if isinstance(value, str) and value.strip():
             raise ConfigurationError(
-                f"{name} is retired and has no effect; {replacement}"
+                f"{name} is retired and has no effect; {replacement}",
+                source="environment",
             )
 
 
@@ -2026,10 +2073,20 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
     if advanced.routing.upstream_provider is not None:
         rows.append(f"routing.upstream_provider: {advanced.routing.upstream_provider}")
     symbol_context = advanced.context.symbol_context
-    if symbol_context.enabled:
-        rows.append("context.symbol_context.enabled: true")
+    if symbol_context.enabled or configuration.is_declared(
+        "advanced.context.symbol_context.enabled"
+    ):
+        state = "true" if symbol_context.enabled else "false"
+        rows.append(f"context.symbol_context.enabled: {state}")
     for path in symbol_context.allowed_paths:
         rows.append(f"context.symbol_context.allowed_paths: {path}")
+    for field_path, value in (
+        ("advanced.context.symbol_context.max_files", symbol_context.max_files),
+        ("advanced.context.symbol_context.max_bytes", symbol_context.max_bytes),
+        ("advanced.context.symbol_context.max_depth", symbol_context.max_depth),
+    ):
+        if configuration.is_declared(field_path):
+            rows.append(f"{field_path.removeprefix('advanced.')}: {value}")
     if advanced.egress.allow_data_egress:
         rows.append("egress.allow_data_egress: true")
     if advanced.large_changes.orchestrate:
@@ -2055,6 +2112,16 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "github.mentions": True,
     "github.learning": "disabled",
     "github.artifacts": "none",
+    "advanced.endpoint.allow_custom_endpoint": False,
+    "advanced.routing.upstream_provider": "not set",
+    "advanced.context.symbol_context.enabled": False,
+    "advanced.context.symbol_context.max_files": SYMBOL_CONTEXT_MAX_FILES_CEILING,
+    "advanced.context.symbol_context.max_bytes": SYMBOL_CONTEXT_MAX_BYTES_CEILING,
+    "advanced.context.symbol_context.max_depth": SYMBOL_CONTEXT_MAX_DEPTH_CEILING,
+    "advanced.egress.allow_data_egress": False,
+    "advanced.large_changes.orchestrate": False,
+    "advanced.resources.timeout_seconds": ("packaged default for the selected backend"),
+    "advanced.resources.max_provider_calls": DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
 }
 
 
@@ -2106,5 +2173,6 @@ __all__ = [
     "parse_configuration_text",
     "render_configuration",
     "resolve_inference",
+    "retired_environment_remedies",
     "retired_environment_settings",
 ]
