@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-09-20
+Last updated: 2026-09-26
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -64,6 +64,7 @@ Process: `docs/process/adr-process.md`
 | [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger |
 | [0054](0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6 | Real internal seams, bounded fixture edges, explicit unknown metrics |
 | [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
+| [0056](0056-host-fact-placement-and-honest-approval-presentation.md) | Proposed | Host-fact placement and honest approval presentation | #181 D | Conversation resolution is host authority; approval only from an eligible admitted artifact |
 
 ## Policy
 
