@@ -32,6 +32,16 @@
   their environment overrides. `--local-session` is the one explicit
   persistent-local-session operation.
 
+- Remove the PR-wide review count caps (epic #181 slice C, #184). Rounds
+  are no longer capped: a legitimate changed-head update is reviewable no
+  matter how many rounds the pull request has completed. The five-round
+  default, the eight-round ceiling, count vetoes, the workflow budget
+  pre-check, and one-use count grants are gone, and the retired `--rounds`
+  spellings are rejected rather than reinterpreted. Only live causes refuse
+  a round: an operator pause, a no-progress verdict, or the per-head
+  failed-attempt retry bound. The session ledger keeps completed-round
+  counters as bounded diagnostic history.
+
 - The Python and npm package versions and generated setup defaults advance
   to `0.6.9`; the movable `v5` reusable-workflow channel is unchanged.
 

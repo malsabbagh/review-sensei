@@ -661,7 +661,9 @@ A local review writes one document in the selected format to stdout or
 `--output`: readable terminal text by default, GitHub-flavored Markdown with
 `--format markdown`, or the versioned `review-result` document with
 `--format json`. Warnings, diagnostics, and the final status and reason lines
-stay on stderr, so machine output is never polluted. Provider text is escaped
+stay on stderr, so machine output is never polluted. Stdout and stderr carry
+UTF-8 regardless of the platform's default codec, so a legacy console codec
+cannot fail an otherwise completed review. Provider text is escaped
 in the Markdown format, so it cannot restructure the document or hide parts of
 it. Only an invocation rejected before inference writes no
 document: a review that was admitted writes the bounded document it produced,

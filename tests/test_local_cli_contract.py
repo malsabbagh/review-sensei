@@ -10,6 +10,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -132,6 +134,36 @@ class LocalReviewContractTests(LocalReviewHarness, unittest.TestCase):
         self.assertIn("### Required fixes", stdout)
         self.assertIn("**src/pagination.py:3**", stdout)
         self.assertNotIn("ReviewSensei review: complete", stdout)
+
+    def test_review_output_survives_a_legacy_console_codec(self):
+        # Windows pipes default to a legacy locale codec (cp1252) that cannot
+        # encode arbitrary review text; a completed review must still exit 1
+        # and stream UTF-8 rather than fail as invalid input.
+        response = self.blocking_response()
+        response["summary"] = (
+            "The slice end must be start + page_size → the last item is dropped."
+        )
+        environment = clean_host_environment(self.root / "home")
+        environment["PYTHONIOENCODING"] = "cp1252"
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "review_sensei",
+                *[str(argument) for argument in self.base_arguments(response)],
+                "--format",
+                "markdown",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("→", completed.stdout.decode("utf-8"))
+        self.assertIn("reason=required-fixes-remain", completed.stderr.decode("utf-8"))
 
     def test_json_output_is_the_validated_versioned_document(self):
         status, stdout, _ = self.run_review(
