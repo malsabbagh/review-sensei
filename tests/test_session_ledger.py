@@ -717,7 +717,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -757,7 +757,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -800,7 +800,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -853,7 +853,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -978,7 +978,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             now=FIXED_NOW - timedelta(days=31),
             ttl=timedelta(days=30),
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
             failed_attempts=1,
             generation=4,
             convergence_history=history,
@@ -3234,42 +3234,6 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
                     pull_request=IDENTITY.pull_request,
                     head_sha="a" * 40,
                 )
-
-
-class HandoffNoticeTests(unittest.TestCase):
-    def test_spent_budget_posts_one_author_comment(self):
-        from review_sensei.disposition import render_maintainer_handoff_notice
-
-        head = "a" * 40
-        body = render_maintainer_handoff_notice(
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
-        self.assertIn("`@sensei review continue --rounds 1`", body)
-        self.assertIn("`@sensei re-scan`", body)
-        http, calls = make_http(
-            [
-                json_response([]),
-                json_response({"id": 9, "body": body}),
-                json_response([{"id": 9, "body": body}]),
-            ]
-        )
-        ledger = GitHubIssueCommentSessionLedger(http, token="token")
-        ledger.publish_handoff_notice(
-            IDENTITY,
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
-        ledger.publish_handoff_notice(
-            IDENTITY,
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
-        methods = [method for method, _url, _data in calls]
-        self.assertEqual(methods, ["GET", "POST", "GET"])
-        posted = json.loads(calls[1][2].decode("utf-8"))
-        self.assertEqual(posted["body"], body)
-        self.assertNotIn("reviewsensei:session:", posted["body"])
 
 
 if __name__ == "__main__":

@@ -22,7 +22,6 @@ import re
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
-from ...disposition import handoff_notice_marker, render_maintainer_handoff_notice
 from ...errors import ReviewInputError
 from ...session import (
     MAX_SESSION_COMMENT_BYTES,
@@ -475,45 +474,6 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
         record = mutate(SessionRecord.create(identity, now=now, expires_at=expires_at))
         return self._create_initial_record(identity, record, now=now)
-
-    def publish_handoff_notice(
-        self,
-        identity: SessionIdentity,
-        *,
-        diagnostic: str,
-        head_sha: str,
-    ) -> None:
-        """Post one author-facing comment for a spent automatic review budget.
-
-        A later run for the same head and reason finds the marker and returns
-        without posting again. The marker is not a session document.
-        """
-
-        body = render_maintainer_handoff_notice(
-            diagnostic=diagnostic, head_sha=head_sha
-        )
-        marker = handoff_notice_marker(head_sha=head_sha, diagnostic=diagnostic)
-        try:
-            items = self.http.paginate(
-                path=self._comments_path(identity), token=self.token
-            )
-        except GitHubHTTPTransientError as exc:
-            raise GitHubPublicationTransientError(
-                "handoff notice discovery failed"
-            ) from exc
-        except (GitHubHTTPError, GitHubHTTPPaginationLimitError) as exc:
-            raise GitHubPublicationError("handoff notice discovery failed") from exc
-        for item in items:
-            if isinstance(item, dict) and isinstance(item.get("body"), str):
-                if marker in item["body"]:
-                    return
-        status, _payload = self._request(
-            "POST",
-            self._comments_path(identity),
-            body={"body": body},
-        )
-        if not 200 <= status < 300:
-            raise GitHubPublicationError("handoff notice create failed")
 
     def _create_initial_record(
         self,

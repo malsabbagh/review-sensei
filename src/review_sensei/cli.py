@@ -2331,6 +2331,24 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 label="second-verification",
             ),
             SequenceStep(
+                head_sha="e" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="third-verification",
+            ),
+            SequenceStep(
+                head_sha="f" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="fourth-verification",
+            ),
+            SequenceStep(
+                head_sha="1" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="fifth-verification",
+            ),
+            SequenceStep(
                 head_sha="d" * 40,
                 blocking_identities=(),
                 independently_approval_eligible=True,
@@ -2853,35 +2871,17 @@ def main(argv: list[str] | None = None) -> int:
                     if prepared_round.decision.handoff
                     else "skipped_policy"
                 )
-                diagnostic = admission_diagnostic(prepared_round.decision)
                 outcome = RunOutcome(
                     status,
                     repository=args.repository,
                     pull_request_number=args.pull_request,
                     base_sha=resolved_base_sha,
                     head_sha=head_sha,
-                    diagnostic=diagnostic,
+                    diagnostic=admission_diagnostic(prepared_round.decision),
                     provider_calls=0,
                 )
-                # A spent review budget is an instruction to the author, not a
-                # failed check. Other handoffs still fail closed.
-                budget_notice = diagnostic == "round-budget-exhausted"
-                if budget_notice and identity is not None and ledger is not None:
-                    publish_notice = getattr(ledger, "publish_handoff_notice", None)
-                    if callable(publish_notice):
-                        publish_notice(
-                            identity,
-                            diagnostic=diagnostic,
-                            head_sha=head_sha,
-                        )
-                emit_host_outcome(
-                    outcome,
-                    output_path=args.outcome,
-                    annotate=not budget_notice,
-                )
+                emit_host_outcome(outcome, output_path=args.outcome)
                 print(outcome.status)
-                if budget_notice:
-                    return 0
                 return run_outcome_exit_code(outcome.status)
         provider, stage_providers = bind_stage_providers(
             registry=default_registry(),

@@ -48,6 +48,14 @@ def _run_block_containing(text: str, marker: str) -> str:
     return matches[0]
 
 
+def _install_fallback_region(block: str) -> str:
+    """Return the tagged-SHA fallback body of one PyPI-fallback install step."""
+
+    start = block.index('source_dir="$RUNNER_TEMP/review-sensei-workflow-source"')
+    end = block.index('"$python_bin" -m pip install', start)
+    return block[start:end]
+
+
 def _reusable_workflow_text() -> str:
     return (
         Path(__file__).resolve().parents[1]
@@ -789,7 +797,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
-            self.assertEqual(job.count(pull_request_env), 4)
+            self.assertEqual(job.count(pull_request_env), 5)
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
@@ -999,7 +1007,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count(
                 "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
             ),
-            3,
+            6,
         )
         self.assertEqual(
             text.count(
@@ -1488,6 +1496,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                         '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
                     ),
                 )
+        # The tagged-SHA fallback is one behavior shared by four install steps,
+        # so assert its shape once and assert the four copies stay identical
+        # instead of counting marker strings anywhere in the file.
+        regions = [_install_fallback_region(block) for block in install_blocks]
+        self.assertEqual(len(set(regions)), 1)
+        region = regions[0]
+        self.assertIn("fetch --depth=1", region)
+        self.assertIn('cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA"', region)
+        self.assertIn('if [[ "$object_type" == "tag" ]]; then', region)
+        self.assertIn(
+            'rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"',
+            region,
+        )
+        self.assertIn('elif [[ "$object_type" != "commit" ]]; then', region)
+        self.assertIn(
+            "The ReviewSensei workflow SHA is not a commit or an annotated tag.",
+            region,
+        )
 
     def test_setup_v4_run_name_matches_worker_template(self):
         from review_sensei.hosting.github.setup import _resolve_trigger_workflow
@@ -1663,17 +1689,28 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
+        budget_guard = (
+            " && steps.budget-admission.outcome == 'success'"
+            " && steps.budget-admission.outputs.spent != 'true'"
+        )
         handoff_guard = (
-            " && steps.provider-review.outputs.outcome_status != 'action_required'"
+            budget_guard
+            + " && steps.provider-review.outputs.outcome_status != 'action_required'"
         )
         publish_if = (
             admission_if
             + handoff_guard
             + " && steps.publish-admission.outputs.status == 'current'"
         )
+        upload_if = (
+            "if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'"
+            + handoff_guard
+        )
         confirm_name = "Confirm live pull-request head is still current"
+        upload_name = "Upload opt-in review artifact"
         self.assertEqual(text.count(confirm_name), 3)
         self.assertEqual(text.count(publish_if), 3)
+        self.assertEqual(text.count(upload_if), 3)
         self.assertEqual(text.count("id: publish-admission"), 3)
         self.assertNotIn(
             "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
@@ -1717,10 +1754,49 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertNotIn("id-token", revalidate)
                 self.assertNotIn("OLLAMA_API_KEY", revalidate)
                 self.assertIn("github review", publish)
+                upload = _step_block(job, upload_name)
+                self.assertIn(upload_if, upload)
+                self.assertIn("if-no-files-found: error", upload)
 
         cloud_confirm = _step_block(_job_section(text, "cloud"), confirm_name)
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
         self.assertEqual(cloud_confirm, local_confirm)
+
+    def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
+        text = _reusable_workflow_text()
+        self.assertNotIn("def automatic_budget_spent", text)
+        blocks = [
+            block for block in _run_blocks(text) if "budget_admission decide" in block
+        ]
+        self.assertEqual(len(blocks), 3)
+        self.assertEqual(len(set(blocks)), 1)
+        block = blocks[0]
+        self.assertIn("ENABLE_GITHUB_WRITES", block)
+        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN:-", block)
+        self.assertIn("per_page=100&page=", block)
+        self.assertNotIn("grep -F", block)
+        self.assertIn("budget_admission assemble", block)
+        self.assertIn("budget_admission notice-status", block)
+        self.assertIn("budget_admission render-notice", block)
+
+        for job_id, review_name in (
+            ("cloud", "Run cloud-provider review"),
+            ("openrouter", "Run OpenRouter-provider review"),
+            ("local", "Prepare and run trusted local review"),
+        ):
+            with self.subTest(job=job_id):
+                names = _named_steps(_job_section(text, job_id))
+                review_index = names.index(review_name)
+                self.assertEqual(
+                    names[review_index - 1],
+                    "Decide whether the automatic review budget is already spent",
+                )
+                review = _step_block(_job_section(text, job_id), review_name)
+                self.assertIn(
+                    "steps.budget-admission.outcome == 'success'"
+                    " && steps.budget-admission.outputs.spent != 'true'",
+                    review,
+                )
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):

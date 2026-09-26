@@ -249,6 +249,19 @@ These imports are public and stable within a major version:
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`; `run_outcome_exit_code` maps every
 `FAILURE_RUN_STATUSES` value, including `action_required`, to exit code 1.
+A spent automatic review budget is one of those `action_required` results.
+This is a behavior change for direct callers: the CLI previously posted the
+maintainer notice itself and exited `0`, and it now reports
+`action_required` with exit code `1` and leaves the notice to its caller. The
+reusable GitHub Actions workflow is what turns that case into a successful
+check: before it starts the review command, it verifies the session comment
+and skips the command when the allowance is used. It posts the continue and
+rescan notice only when GitHub writes are enabled and the Actions OIDC token
+is available. A host that calls the CLI directly has to make that same
+pre-check if a spent budget should not fail the job.
+`GitHubIssueCommentSessionLedger` is the hosted runner's own adapter and is
+not part of this list, so removing its notice-publishing method is not a
+contract change; a caller that relied on it posts the notice itself.
 `ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
 validate against the review-convergence schemas. `SessionRecord.to_dict()`

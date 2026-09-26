@@ -165,7 +165,9 @@ class SequenceReplayTests(unittest.TestCase):
                     label="at-cap",
                 ),
             ),
-            _policy(),
+            ReviewConvergencePolicy(
+                mode="merge-focused", max_completed_verification_rounds=2
+            ),
         )
         self.assertTrue(report.steps[1].admit)
         self.assertEqual(report.steps[1].round_kind, "verification")
@@ -284,7 +286,9 @@ class ObservedSequenceTests(unittest.TestCase):
                 SequenceStep(head_sha="c" * 40, label="clean-repeat"),
                 SequenceStep(head_sha="d" * 40, label="over-cap"),
             ),
-            _policy(),
+            ReviewConvergencePolicy(
+                mode="merge-focused", max_completed_verification_rounds=2
+            ),
         )
         self.assertEqual(
             [
@@ -1035,7 +1039,7 @@ class ShadowObservationTests(unittest.TestCase):
         decision = observe_shadow_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
                 latest_head_reviewed=True,
                 coverage_complete=True,
             ),
@@ -1084,7 +1088,7 @@ class ShadowObservationTests(unittest.TestCase):
                 IDENTITY,
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             )
             ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
             reviewer = RecordingReviewer()

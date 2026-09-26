@@ -588,40 +588,6 @@ def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...
     )
 
 
-def handoff_notice_marker(*, head_sha: str, diagnostic: str) -> str:
-    """Stable marker so a repeated handoff does not post a second comment."""
-
-    return f"<!-- reviewsensei:handoff:v1 head={head_sha} reason={diagnostic} -->"
-
-
-def render_maintainer_handoff_notice(*, diagnostic: str, head_sha: str) -> str:
-    """Tell the pull-request author how a maintainer allows one more pass.
-
-    The body is a conversation comment, not a command. The continue line must
-    be posted alone, and the rescan is a second comment, because the workflow
-    treats a command and a review request as different operations.
-    """
-
-    from .convergence import HANDOFF_REASONS
-
-    if diagnostic != "round-budget-exhausted" or diagnostic not in HANDOFF_REASONS:
-        raise ReviewInputError("handoff notice diagnostic is invalid")
-    if not isinstance(head_sha, str) or _HEAD_SHA.fullmatch(head_sha) is None:
-        raise ReviewInputError("handoff notice head is invalid")
-    return (
-        "ReviewSensei did not start another automated review. "
-        "The automatic review budget for this pull request is used up, "
-        "so the check completed without failing.\n\n"
-        "The pull request author can allow one more verification pass when "
-        "they are an owner, member, or collaborator. Comment on this pull "
-        "request with exactly this line and nothing else:\n\n"
-        "`@sensei review continue --rounds 1`\n\n"
-        "Then start that pass with a second comment, exactly:\n\n"
-        "`@sensei re-scan`\n\n"
-        f"{handoff_notice_marker(head_sha=head_sha, diagnostic=diagnostic)}\n"
-    )
-
-
 def render_convergence_summary(
     *,
     mode: str,
