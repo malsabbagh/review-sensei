@@ -308,6 +308,16 @@ uses reviewed synthetic data; bound privileges to that repository; retain
 sanitized outcomes bound to the exact workflow/package digest; and clean up.
 Flaky live canaries must not weaken deterministic required gates.
 
+The optional [`.github/workflows/local-review-contract.yml`](../.github/workflows/local-review-contract.yml)
+workflow exercises the documented local review contract on a hosted runner. It
+is manual-only and not a required CI gate: dispatching it installs the package
+from the selected ref and runs the standalone smoke, which asserts the default
+three-tier review exits (`0` clean, `1` required fixes, `2` could not complete),
+the output formats, the clean-host local review, and the operational contract.
+The hosted review lanes select `--exit-semantics operational`, so this lane is
+what keeps the default review contract exercised end to end at the workflow
+level.
+
 The release workflow also writes `SHA256SUMS` and an SPDX JSON SBOM. Verify a
 downloaded bundle before installing it:
 

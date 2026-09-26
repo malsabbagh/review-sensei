@@ -336,11 +336,11 @@ review-sensei doctor --json</pre>
         <p style="color:#a4a8a5">Install the published Python package or npm launcher, prepare a bounded diff, run offline diagnostics, then generate a review artifact.</p>
         <dl class="meta-grid">
           <div class="meta-item"><dt>Execution location</dt><dd>Your workstation. Python 3.11+ or Node.js 22+. External <code>git</code> required for <code>prepare-diff</code>.</dd></div>
-          <div class="meta-item"><dt>Provider destination</dt><dd>Local Ollama at <code>http://127.0.0.1:11434/api</code> by default.</dd></div>
-          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code>, <code>OLLAMA_BASE_URL</code>, <code>REVIEWSENSEI_PROVIDER_MODE</code>, <code>REVIEWSENSEI_LOCAL_MODEL</code>, <code>REVIEWSENSEI_CLOUD_MODEL</code>.</dd></div>
+          <div class="meta-item"><dt>Provider destination</dt><dd>Local Ollama at <code>http://127.0.0.1:11434/api</code> by default; <code>--provider</code> or <code>REVIEWSENSEI_PROVIDER</code> selects another canonical backend.</dd></div>
+          <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), <code>OPENAI_API_KEY</code> (OpenAI-compatible), <code>REVIEWSENSEI_PROVIDER</code>, <code>REVIEWSENSEI_MODEL</code>.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>Your machine plus model inference. <code>doctor</code> and <code>plan</code> perform zero provider calls.</dd></div>
           <div class="meta-item"><dt>Enabled writes</dt><dd>None from CLI alone.</dd></div>
-          <div class="meta-item"><dt>First-success output</dt><dd><code>review-sensei doctor --json</code> reports <code>status: pass</code>; full review writes <code>review.json</code>.</dd></div>
+          <div class="meta-item"><dt>First-success output</dt><dd><code>review-sensei doctor --json</code> reports <code>status: pass</code>; a full review writes readable text by default (<code>--format markdown</code> or <code>--format json</code> to change it) and exits 0, 1, or 2.</dd></div>
         </dl>
         <div class="command-wrap">
           <pre class="command" id="cmd-cli-pip">pip install review-sensei==0.6.8
@@ -360,7 +360,7 @@ review-sensei plan --diff pr.patch --repository owner/repo --pull-request 42 \
           <button class="copy" type="button" data-copy="cmd-cli-plan" aria-label="Copy plan commands">Copy</button>
         </div>
         <div class="command-wrap">
-          <pre class="command" id="cmd-cli-review">review-sensei --diff pr.patch --repository owner/repo --pull-request 42 --output review.json</pre>
+          <pre class="command" id="cmd-cli-review">review-sensei --diff pr.patch --repository owner/repo --pull-request 42 --format json --output review.json</pre>
           <button class="copy" type="button" data-copy="cmd-cli-review" aria-label="Copy review command">Copy</button>
         </div>
         <h4>Cleanup / disable / uninstall</h4>

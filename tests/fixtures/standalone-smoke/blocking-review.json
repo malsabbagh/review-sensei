@@ -1,0 +1,16 @@
+{
+  "summary": "The pagination slice end is off by one, so the last item of every page is dropped.",
+  "comments": [
+    {
+      "path": "src/pagination.py",
+      "line": 3,
+      "side": "RIGHT",
+      "body": "The slice end must be start plus page_size; subtracting two drops the final item.",
+      "blocking": true,
+      "severity": "high",
+      "category": "correctness",
+      "fix_effort": "trivial"
+    }
+  ],
+  "learning_proposals": []
+}

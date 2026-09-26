@@ -206,14 +206,24 @@ jobs:
             --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
           python scripts/validate_npm_package.py dist/npm --expected-version "${GITHUB_REF_NAME#v}"
           python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - name: Install standalone smoke oracle
+        # The oracle runs the checkout source's `python -m review_sensei`; this
+        # job validates the packaged launcher, so the installed distribution is
+        # only the comparison baseline.
+        run: python -m pip install --disable-pip-version-check .
       - name: Run native smoke harness where the runner can execute it
         shell: bash
         run: |
           set -euo pipefail
           # The matrix already exercised the native executable. This check
-          # validates launcher inputs and keeps the smoke contract explicit;
-          # clean-machine registry smoke remains a maintainer-owned gate.
-          python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
+          # re-runs the documented local review contract for the assembled
+          # launcher package, including the clean-host, format, and exit-code
+          # cases; clean-machine registry smoke remains a maintainer-owned gate.
+          python scripts/standalone_smoke.py \
+            --executable dist/npm/linux-x64-gnu/bin/review-sensei \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json
       - name: Pack and validate exact npm tarballs
         shell: bash
         run: |

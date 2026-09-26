@@ -51,4 +51,32 @@ docker run --rm --platform "$platform" --network none \
     "$executable" plan \
       --diff evaluation/v1/diffs/off-by-one.patch \
       --provider ollama --json >/dev/null
+    # The local review contract must hold with no host identity, no Python,
+    # and no network: one required fix exits 1, and the same completed run
+    # under the operational contract exits 0.
+    set +e
+    "$executable" --provider fixture \
+      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --no-learning-proposals --format markdown >/tmp/review.md
+    review_status=$?
+    "$executable" --provider fixture \
+      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --no-learning-proposals --exit-semantics operational >/dev/null
+    operational_status=$?
+    # One explicit persistent-local session must also start with no ledger or
+    # artifact path supplied, storing its state under the platform default.
+    "$executable" --provider fixture \
+      --fixture-response tests/fixtures/standalone-smoke/blocking-review.json \
+      --diff tests/fixtures/standalone-smoke/blocking-review.patch \
+      --no-learning-proposals --local-session >/dev/null
+    session_status=$?
+    set -e
+    test "$review_status" -eq 1 || { echo "local review exit $review_status" >&2; exit 1; }
+    test "$operational_status" -eq 0 || { echo "operational exit $operational_status" >&2; exit 1; }
+    test "$session_status" -eq 1 || { echo "local session exit $session_status" >&2; exit 1; }
+    test -s /tmp/review.md
+    find "$HOME" -name "*.json" -type f | grep -q . || \
+      { echo "local session state was not stored" >&2; exit 1; }
   '

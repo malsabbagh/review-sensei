@@ -39,7 +39,7 @@ from review_sensei.models import (
     ReviewTransaction,
     build_transaction_configuration_context,
 )
-from review_sensei.outcomes import RunOutcome, run_outcome_exit_code
+from review_sensei.outcomes import RunOutcome, review_exit_code
 from review_sensei.providers import ProviderSettings
 from review_sensei.schemas import validate_public_document
 from review_sensei.service import ReviewRun, ReviewService
@@ -990,6 +990,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "merge-focused",
                 "--session-ledger",
                 str(ledger_path),
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--outcome",
@@ -1042,7 +1044,10 @@ diff --git a/src/helper.py b/src/helper.py
                 ),
             ):
                 malformed_exit = main(malformed_argv)
-            self.assertEqual(malformed_exit, run_outcome_exit_code("action_required"))
+            self.assertEqual(
+                malformed_exit,
+                review_exit_code(status="action_required", required_fixes=False),
+            )
             self.assertNotEqual(malformed_exit, 0)
             malformed_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
             malformed_record = LocalSessionLedger(ledger_path).load(IDENTITY).record
@@ -1080,7 +1085,8 @@ diff --git a/src/helper.py b/src/helper.py
                 return_value=RecordingRegistry(provider),
             ):
                 self.assertEqual(
-                    main(stage_mismatch_argv), run_outcome_exit_code("action_required")
+                    main(stage_mismatch_argv),
+                    review_exit_code(status="action_required", required_fixes=False),
                 )
             self.assertEqual(provider.calls, stage_mismatch_provider_calls)
             self.assertEqual(provider.calls, 1)
@@ -1371,6 +1377,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "merge-focused",
                 "--session-ledger",
                 str(ledger_path),
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--configuration-context-output",
@@ -1573,7 +1581,7 @@ diff --git a/src/helper.py b/src/helper.py
                 ),
                 redirect_stderr(stderr),
             ):
-                self.assertEqual(main(argv), 1)
+                self.assertEqual(main(argv), 2)
 
             message = stderr.getvalue()
             self.assertIn("review-sensei:", message)
@@ -1635,6 +1643,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "merge-focused",
                 "--session-ledger",
                 str(ledger_path),
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--no-learning-proposals",
@@ -1706,6 +1716,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "--session-ledger",
                 str(ledger_path),
                 "--transaction",
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--no-learning-proposals",
@@ -1814,6 +1826,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "merge-focused",
                 "--session-ledger",
                 str(ledger_path),
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--configuration-context-output",
@@ -1906,7 +1920,7 @@ diff --git a/src/helper.py b/src/helper.py
                 return_value=RecordingRegistry(),
             ):
                 with redirect_stderr(io.StringIO()):
-                    self.assertEqual(main(argv), 1)
+                    self.assertEqual(main(argv), 2)
 
             record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertIsNone(record.transaction)
@@ -1984,6 +1998,8 @@ diff --git a/src/helper.py b/src/helper.py
                 "merge-focused",
                 "--session-ledger",
                 str(ledger_path),
+                "--format",
+                "json",
                 "--output",
                 str(output_path),
                 "--transaction",
@@ -1996,7 +2012,7 @@ diff --git a/src/helper.py b/src/helper.py
                 ),
                 patch("review_sensei.cli.ReviewService.run", return_value=run),
             ):
-                self.assertEqual(main(argv), 0)
+                self.assertEqual(main(argv), 2)
 
             rendered = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(rendered["review_status"], "partial")
@@ -2096,7 +2112,7 @@ diff --git a/src/helper.py b/src/helper.py
                 patch("review_sensei.cli.ReviewService.run", return_value=run),
                 redirect_stderr(stderr),
             ):
-                self.assertEqual(main(argv), 1)
+                self.assertEqual(main(argv), 2)
 
             self.assertIn(
                 "identity-bound analysis produced a partial review that cannot "
@@ -3191,7 +3207,7 @@ class HostedAnalysisCliTests(unittest.TestCase):
                 return_value=self._Registry(self._Provider()),
             ):
                 with redirect_stderr(io.StringIO()):
-                    self.assertEqual(main(argv), 1)
+                    self.assertEqual(main(argv), 2)
 
             ledger = LocalSessionLedger(root / "ledger")
             loaded = ledger.load(IDENTITY)
