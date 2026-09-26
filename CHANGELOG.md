@@ -2,15 +2,28 @@
 
 ## 0.6.8 - 2026-09-26
 
-- Allow five automatic verification rounds. When those rounds are used, the
-  reusable workflow reads the session ledger before starting the review CLI,
-  posts the continue and rescan instructions, and completes the check
-  successfully. A maintainer can allow another round, and the pull request
-  author can do that when they are an owner, member, or collaborator. A
-  baseline stays reusable when the only policy difference is the verification
-  allowance. The workflow verifies the session comment before trusting it,
-  and it posts the notice only when GitHub writes and the Actions token are
-  available.
+- Allow five automatic verification rounds. The default verification
+  allowance rises from two to five, so installations that resolve the default
+  policy get three more automatic rounds; a caller that supplies its own
+  `review-convergence-policy` document, or constructs a
+  `ReviewConvergencePolicy`, keeps the allowance it names, and the field
+  stays bounded at eight. When those rounds are used, the reusable workflow
+  reads the session ledger before starting the review CLI, posts the continue
+  and rescan instructions, and completes the check successfully. A maintainer
+  can allow another round, and the pull request author can do that when they
+  are an owner, member, or collaborator. A baseline stays reusable when the
+  only policy difference is the verification allowance. The workflow verifies
+  the session comment before trusting it, and it posts the notice only when
+  GitHub writes and the Actions token are available.
+
+- The spent-budget hand-off moves from the CLI to the reusable workflow. The
+  CLI no longer posts the maintainer notice and no longer exits `0` for a
+  spent automatic review budget: it reports `action_required` with exit code
+  `1`, like every other `action_required` result. A host that calls the CLI
+  directly has to run the same ledger pre-check to keep the check
+  successful, and a caller that relied on the removed
+  `GitHubIssueCommentSessionLedger.publish_handoff_notice` method now posts
+  the notice itself.
 
 ## 0.6.7 - 2026-09-23
 

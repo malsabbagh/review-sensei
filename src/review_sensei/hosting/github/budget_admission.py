@@ -4,6 +4,14 @@ The reusable workflow owns the check result. This module only verifies the
 session comment the way the ledger does, then reports whether the current
 policy would refuse another round. A comment that fails that verification is
 not treated as spent.
+
+The decision reads the same ledger-owned facts the runtime round admission
+reads: the pause flag, the failed-attempt budget, the initial and verification
+counters, and an active continuation grant. The grant lookup uses the current
+policy digest alone, exactly as the hosted runtime does; accepting a grant the
+runtime ignores would start the review CLI only for the CLI to refuse and fail
+the check. Facts the ledger does not own, such as coverage, are decided after
+inference, so anything unverifiable fails open to ``review``.
 """
 
 from __future__ import annotations
@@ -11,15 +19,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from ...convergence import (
-    MAX_COMPLETED_VERIFICATION_ROUNDS,
-    ReviewConvergencePolicy,
-)
+from ...convergence import ReviewConvergencePolicy
 from ...errors import ReviewInputError
 from ...session import (
     SessionIdentity,
@@ -136,6 +140,9 @@ def decide_automatic_review_budget(
             return "review"
         if record is None:
             return "review"
+        # The ledger's own loader accepts a record without a repository id and
+        # rejects one that names another repository; keeping that rule here
+        # keeps the pre-check and the loaded session in agreement.
         if record.repository_id not in {None, repository_id}:
             return "review"
         found.append(record)
@@ -144,25 +151,16 @@ def decide_automatic_review_budget(
     record = found[0]
     if load_session_status(record, now=now).status != "ok":
         return "review"
-    grant_digest = None
-    for allowance in range(MAX_COMPLETED_VERIFICATION_ROUNDS + 1):
-        candidate = (
-            resolved
-            if allowance == resolved.max_completed_verification_rounds
-            else replace(resolved, max_completed_verification_rounds=allowance)
+    if (
+        active_continuation_grant(
+            record,
+            head_sha=head_sha,
+            policy_digest=resolved.digest(),
+            now=now,
         )
-        if (
-            active_continuation_grant(
-                record,
-                head_sha=head_sha,
-                policy_digest=candidate.digest(),
-                now=now,
-            )
-            is not None
-        ):
-            grant_digest = candidate.digest()
-            break
-    if grant_digest is not None or record.operator_paused:
+        is not None
+        or record.operator_paused
+    ):
         return "review"
     if record.failed_attempts >= resolved.max_failed_attempts:
         return "review"

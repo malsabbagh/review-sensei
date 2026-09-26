@@ -26,6 +26,7 @@ from review_sensei.context import (
     finding_lifecycle_for_comment,
 )
 from review_sensei.convergence import (
+    MAX_COMPLETED_VERIFICATION_ROUNDS,
     ReviewConvergencePolicy,
     admit_review_result,
     derive_blocker_candidate,
@@ -366,6 +367,37 @@ class BaselinePlanTests(unittest.TestCase):
                 baseline,
                 current_key=_key(head_sha=SHA_C),
                 policy=different_failures,
+            ),
+            "policy-change",
+        )
+        upper_bound = ReviewConvergencePolicy(
+            mode="merge-focused",
+            max_completed_verification_rounds=MAX_COMPLETED_VERIFICATION_ROUNDS,
+        )
+        self.assertIsNone(
+            evaluate_baseline_compatibility(
+                baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=upper_bound,
+            )
+        )
+
+    def test_allowance_compatibility_stays_inside_one_mode(self) -> None:
+        legacy = ReviewConvergencePolicy(
+            mode="legacy", max_completed_verification_rounds=2
+        )
+        baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=legacy,
+        )
+        self.assertEqual(
+            evaluate_baseline_compatibility(
+                baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=ReviewConvergencePolicy(
+                    mode="merge-focused", max_completed_verification_rounds=5
+                ),
             ),
             "policy-change",
         )

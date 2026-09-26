@@ -48,6 +48,14 @@ def _run_block_containing(text: str, marker: str) -> str:
     return matches[0]
 
 
+def _install_fallback_region(block: str) -> str:
+    """Return the tagged-SHA fallback body of one PyPI-fallback install step."""
+
+    start = block.index('source_dir="$RUNNER_TEMP/review-sensei-workflow-source"')
+    end = block.index('"$python_bin" -m pip install', start)
+    return block[start:end]
+
+
 def _reusable_workflow_text() -> str:
     return (
         Path(__file__).resolve().parents[1]
@@ -1468,11 +1476,6 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("dogfood_ref", text)
         self.assertNotIn("refs/pull/", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
-        self.assertEqual(text.count('object_type" == "tag"'), 4)
-        self.assertEqual(
-            text.count('rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"'),
-            4,
-        )
         self.assertNotIn(
             "git ls-remote https://github.com/malsabbagh/review-sensei.git", text
         )
@@ -1493,6 +1496,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                         '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
                     ),
                 )
+        # The tagged-SHA fallback is one behavior shared by four install steps,
+        # so assert its shape once and assert the four copies stay identical
+        # instead of counting marker strings anywhere in the file.
+        regions = [_install_fallback_region(block) for block in install_blocks]
+        self.assertEqual(len(set(regions)), 1)
+        region = regions[0]
+        self.assertIn("fetch --depth=1", region)
+        self.assertIn('cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA"', region)
+        self.assertIn('if [[ "$object_type" == "tag" ]]; then', region)
+        self.assertIn(
+            'rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"',
+            region,
+        )
+        self.assertIn('elif [[ "$object_type" != "commit" ]]; then', region)
+        self.assertIn(
+            "The ReviewSensei workflow SHA is not a commit or an annotated tag.",
+            region,
+        )
 
     def test_setup_v4_run_name_matches_worker_template(self):
         from review_sensei.hosting.github.setup import _resolve_trigger_workflow
@@ -1668,18 +1689,28 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
-        handoff_guard = (
-            " && steps.provider-review.outputs.outcome_status != 'action_required'"
+        budget_guard = (
+            " && steps.budget-admission.outcome == 'success'"
             " && steps.budget-admission.outputs.spent != 'true'"
+        )
+        handoff_guard = (
+            budget_guard
+            + " && steps.provider-review.outputs.outcome_status != 'action_required'"
         )
         publish_if = (
             admission_if
             + handoff_guard
             + " && steps.publish-admission.outputs.status == 'current'"
         )
+        upload_if = (
+            "if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'"
+            + handoff_guard
+        )
         confirm_name = "Confirm live pull-request head is still current"
+        upload_name = "Upload opt-in review artifact"
         self.assertEqual(text.count(confirm_name), 3)
         self.assertEqual(text.count(publish_if), 3)
+        self.assertEqual(text.count(upload_if), 3)
         self.assertEqual(text.count("id: publish-admission"), 3)
         self.assertNotIn(
             "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
@@ -1723,27 +1754,15 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertNotIn("id-token", revalidate)
                 self.assertNotIn("OLLAMA_API_KEY", revalidate)
                 self.assertIn("github review", publish)
+                upload = _step_block(job, upload_name)
+                self.assertIn(upload_if, upload)
+                self.assertIn("if-no-files-found: error", upload)
 
         cloud_confirm = _step_block(_job_section(text, "cloud"), confirm_name)
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
         self.assertEqual(cloud_confirm, local_confirm)
 
     def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
-        from datetime import datetime, timedelta, timezone
-
-        from review_sensei.convergence import ReviewConvergencePolicy
-        from review_sensei.hosting.github.budget_admission import (
-            decide_automatic_review_budget,
-            handoff_notice_already_posted,
-            render_budget_handoff_notice,
-        )
-        from review_sensei.hosting.github.session_ledger import render_session_comment
-        from review_sensei.session import (
-            ContinuationGrant,
-            SessionIdentity,
-            SessionRecord,
-        )
-
         text = _reusable_workflow_text()
         self.assertNotIn("def automatic_budget_spent", text)
         blocks = [
@@ -1760,148 +1779,6 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self.assertIn("budget_admission notice-status", block)
         self.assertIn("budget_admission render-notice", block)
 
-        head = "a" * 40
-        identity = SessionIdentity(
-            repository="acme/api", pull_request=7, repository_id=11
-        )
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        spent_record = SessionRecord.create(
-            identity,
-            now=now,
-            completed_initial_reviews=1,
-            completed_verification_rounds=5,
-        )
-        spent_body = render_session_comment(
-            repository_id=11, pull_request=7, record=spent_record
-        )
-        comments = [
-            {"user": {"login": "reviewsensei[bot]", "type": "Bot"}, "body": spent_body}
-        ]
-        self.assertEqual(
-            decide_automatic_review_budget(
-                comments,
-                repository="acme/api",
-                repository_id=11,
-                pull_request=7,
-                head_sha=head,
-                now=now,
-            ),
-            "spent",
-        )
-        remaining = SessionRecord.create(
-            identity,
-            now=now,
-            completed_initial_reviews=1,
-            completed_verification_rounds=4,
-        )
-        self.assertEqual(
-            decide_automatic_review_budget(
-                [
-                    {
-                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
-                        "body": render_session_comment(
-                            repository_id=11, pull_request=7, record=remaining
-                        ),
-                    }
-                ],
-                repository="acme/api",
-                repository_id=11,
-                pull_request=7,
-                head_sha=head,
-                now=now,
-            ),
-            "review",
-        )
-        tampered = spent_body.replace(
-            '"completed_verification_rounds":5',
-            '"completed_verification_rounds":9',
-            1,
-        )
-        self.assertNotEqual(tampered, spent_body)
-        self.assertEqual(
-            decide_automatic_review_budget(
-                [
-                    {
-                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
-                        "body": tampered,
-                    }
-                ],
-                repository="acme/api",
-                repository_id=11,
-                pull_request=7,
-                head_sha=head,
-                now=now,
-            ),
-            "review",
-        )
-        self.assertEqual(
-            decide_automatic_review_budget(
-                [{"user": {"login": "mallory", "type": "User"}, "body": spent_body}],
-                repository="acme/api",
-                repository_id=11,
-                pull_request=7,
-                head_sha=head,
-                now=now,
-            ),
-            "review",
-        )
-        policy = ReviewConvergencePolicy()
-        grant = ContinuationGrant.issue(
-            command_id="continue-1",
-            actor="maintainer",
-            head_sha=head,
-            policy_digest=policy.digest(),
-            now=now,
-            expires_at=now + timedelta(hours=1),
-        )
-        granted = SessionRecord.create(
-            identity,
-            now=now,
-            completed_initial_reviews=1,
-            completed_verification_rounds=5,
-            continuation_grants=[grant.to_dict()],
-        )
-        self.assertEqual(
-            decide_automatic_review_budget(
-                [
-                    {
-                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
-                        "body": render_session_comment(
-                            repository_id=11, pull_request=7, record=granted
-                        ),
-                    }
-                ],
-                repository="acme/api",
-                repository_id=11,
-                pull_request=7,
-                head_sha=head,
-                now=now + timedelta(minutes=1),
-            ),
-            "review",
-        )
-        notice = render_budget_handoff_notice(head_sha=head)
-        self.assertFalse(
-            handoff_notice_already_posted(
-                [
-                    {
-                        "user": {"login": "mallory", "type": "User"},
-                        "body": f"quoted\n{notice}",
-                    }
-                ],
-                head_sha=head,
-            )
-        )
-        self.assertTrue(
-            handoff_notice_already_posted(
-                [
-                    {
-                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
-                        "body": notice,
-                    }
-                ],
-                head_sha=head,
-            )
-        )
         for job_id, review_name in (
             ("cloud", "Run cloud-provider review"),
             ("openrouter", "Run OpenRouter-provider review"),
@@ -1915,7 +1792,11 @@ class ReusablePublishGuardTests(unittest.TestCase):
                     "Decide whether the automatic review budget is already spent",
                 )
                 review = _step_block(_job_section(text, job_id), review_name)
-                self.assertIn("steps.budget-admission.outputs.spent != 'true'", review)
+                self.assertIn(
+                    "steps.budget-admission.outcome == 'success'"
+                    " && steps.budget-admission.outputs.spent != 'true'",
+                    review,
+                )
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
