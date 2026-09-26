@@ -28,6 +28,27 @@ def json_response(value, status=200):
     return FakeHTTPResponse(json.dumps(value).encode("utf-8"), status)
 
 
+def placement_responses(*, required=False):
+    """Script the conversation-resolution reads in host-call order.
+
+    A positive requirement is answered by the branch rules read alone; an
+    unlisted requirement answers "no rules" and then "no branch protection".
+    """
+
+    if required:
+        return [
+            json_response(
+                [
+                    {
+                        "type": "pull_request",
+                        "parameters": {"required_review_thread_resolution": True},
+                    }
+                ]
+            )
+        ]
+    return [json_response([]), json_response({"message": "Not Found"}, 404)]
+
+
 def make_http(responses, routes=()):
     """Build a fake transport from a positional queue and optional routes.
 

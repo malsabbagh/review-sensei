@@ -139,7 +139,8 @@ class CutoverDefaultTests(unittest.TestCase):
                 body = json.loads(payload.decode("utf-8"))
                 self.assertEqual(body["event"], "COMMENT")
                 self.assertEqual(body["comments"], [])
-                self.assertIn("## Advisory observations", body["body"])
+                self.assertIn("## Findings explained in this review body", body["body"])
+                self.assertIn("**Optional improvement**", body["body"])
 
     def test_legacy_prepared_artifact_cannot_enter_the_default_publication_path(self):
         http, calls = make_http([])
