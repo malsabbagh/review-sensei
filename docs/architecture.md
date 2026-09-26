@@ -667,15 +667,17 @@ only hashed identities and bounded counters. Current, custom, malformed, and
 future clients are no-write cases. A byte-exact managed v3 workflow or managed
 v4 workflow following another valid public tag is stale and is migrated; absent
 and legacy/v2 clients are also reconciled through at most one reviewable
-setup-v4 PR per selected repository.
+setup-v5 PR per selected repository.
 
-One generated caller passes `provider_mode` and `model` explicitly. Local,
-cloud, and OpenRouter runtime jobs expose the same operation matrix—automatic/manual
-review, review and learning publication, optional artifacts, and bounded
-`@sensei` replies—while retaining different compute and egress boundaries.
-`local-ollama` uses the labelled self-hosted Ollama runner; `cloud-ollama`
-uses GitHub-hosted Ollama Cloud; `openrouter` uses GitHub-hosted OpenRouter with
-`REVIEWSENSEI_MODEL`.
+The generated caller is invocation-only: backend, model, endpoint, credential,
+and every `github.*` policy resolve from `.reviewsensei.yml` on the trusted
+policy commit, with `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` as the
+only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
+same operation matrix—automatic/manual review, review and learning publication,
+optional artifacts, and bounded `@sensei` replies—while retaining different
+compute and egress boundaries. `local-ollama` uses the labelled self-hosted
+Ollama runner; `cloud-ollama` uses GitHub-hosted Ollama Cloud; `openrouter`
+uses GitHub-hosted OpenRouter for allowlisted models.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
@@ -724,7 +726,9 @@ runtime default and retires live `legacy` selection, so the policy is now bound
 into publication: operator modes run the blocker-admission evaluator before
 GitHub review events and comment rendering, and only historical `legacy`
 records keep the explicit finding `blocking` bit described above.
-`REVIEWSENSEI_AUTO_APPROVE=false` remains the comment-only opt-out.
+The approval choice is `github.reviews` in `.reviewsensei.yml`: `blocking`
+publishes and enforces without ever approving, and `advisory` imposes no
+ReviewSensei merge gate.
 
 F1 of issue #146 adds an identity-bound `ReviewTransaction` handoff for
 operator-ledger runs. Analysis reserves once, checkpoints the validated result

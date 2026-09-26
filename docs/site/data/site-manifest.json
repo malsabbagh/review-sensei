@@ -18,7 +18,7 @@
         "name": "Reusable runner",
         "path": ".github/workflows/review-sensei-run.yml",
         "ref": "v5",
-        "notes": "Public setup-v4 callers pin this reusable workflow through the operator-managed v5 tag."
+        "notes": "Public setup-v5 callers pin this reusable workflow through the operator-managed v5 tag."
       },
       {
         "name": "Example caller",
@@ -52,8 +52,8 @@
       },
       "workflow_support": {
         "reusable_workflow": true,
-        "provider_mode": "local",
-        "notes": "Default installed workflow path via REVIEWSENSEI_PROVIDER_MODE=local and local model variables."
+        "provider_mode": "local-ollama",
+        "notes": "Default installed workflow path: inference.backend: local-ollama in .reviewsensei.yml, with the packaged local model unless inference.model names another one."
       },
       "status_labels": [
         "implemented-on-main",
@@ -88,8 +88,8 @@
       },
       "workflow_support": {
         "reusable_workflow": true,
-        "provider_mode": "cloud",
-        "notes": "Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=cloud and repository OLLAMA_API_KEY secret."
+        "provider_mode": "cloud-ollama",
+        "notes": "Installed workflows opt in with inference.backend: cloud-ollama in .reviewsensei.yml and the repository OLLAMA_API_KEY secret."
       },
       "status_labels": [
         "implemented-on-main",
@@ -163,7 +163,7 @@
       "workflow_support": {
         "reusable_workflow": true,
         "provider_mode": "openrouter",
-        "notes": "Installed workflows opt in with REVIEWSENSEI_PROVIDER_MODE=openrouter and repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only."
+        "notes": "Installed workflows opt in with inference.backend: openrouter in .reviewsensei.yml and the repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only."
       },
       "status_labels": [
         "implemented-on-main",

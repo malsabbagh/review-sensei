@@ -195,8 +195,9 @@ check is matched to its producing App, an administrator who makes
 check required, and GitHub does not run required checks on App-authored pull
 requests, so those are reported as `app_authored` instead of gated.
 
-Automatic approval defaults to enabled and may be disabled with
-`REVIEWSENSEI_AUTO_APPROVE=false`. The shared finalizer runs after review
+Automatic approval is the `github.reviews: auto-approve` default and may be
+disabled with `github.reviews: blocking` (publish and enforce, never approve)
+or `github.reviews: advisory` (no ReviewSensei merge gate). The shared finalizer runs after review
 publication and after an AI resolution of a blocking ReviewSensei root. It
 emits `APPROVE` only for an eligible exact head with a complete, qualified
 review and no unresolved ReviewSensei root classified blocking, deciding from

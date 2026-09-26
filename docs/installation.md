@@ -47,22 +47,34 @@ Repair actions:
 | `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
 | `compatibility` action | Supply a validated compatibility manifest path. |
 
-Optional `--network` probes are read-only GETs. Example local output:
+Optional `--network` probes are read-only GETs. Example output from a bare
+directory with only the packaged defaults — no repository, session ledger, or
+network probe — so the automated-review admission check reports `action` and
+doctor exits `2`:
 
 ```text
-status: pass
+status: action
 version: 0.6.8
 pass: package — 0.6.8
 pass: packaged-assets — default stages and categories available
 pass: provider-mode — local (offline check)
+pass: review-convergence — mode=merge-focused enforcement=publication compatibility=explicit-opt-in rounds=uncapped failed_attempts=6
+action: automation-admission — operator mode cannot report automated-review admission without a session ledger
+pass: verification-scope — status=baseline-required round=initial late_admission=False reason=missing-baseline
 pass: stages — packaged default stages selected
 pass: categories — packaged default categories selected
 pass: context — no supplemental context configured
-pass: endpoint — local runner endpoint reachable
-pass: model — configured model is installed
-unknown: repository-metadata — repository metadata not checked (repository not supplied)
-unknown: compatibility — compatibility evidence not supplied
+pass: symbol-context — opt-in trusted-base symbol context is disabled by default
+pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei cannot read or change branch protection), the App needs Checks: write, and GitHub never runs required checks on App-authored pull requests
+unknown: network — not checked (offline mode)
 ```
+
+`status: pass` (exit `0`) appears only when every configured check passes —
+including `automation-admission`, which reports `pass` when the session ledger
+for the configured repository and pull request admits the round. `review-gate`
+reports `pass` as guidance that the gate contract is understood, not as proof
+that branch protection is configured. See
+[`docs/diagnostics.md`](diagnostics.md) for the exit-code contract.
 
 Preview a review without provider or GitHub writes:
 
@@ -236,8 +248,9 @@ uses the operator-managed `v5` git tag directly. The Worker validates that tag
 during installation/reconciliation, and the broker resolves the same tag when
 authorizing a run (using the public Git ref advertisement before a bounded REST
 fallback on GitHub.com). That workflow
-tries to install the exact `REVIEWSENSEI_VERSION` from PyPI in a separate
-`RUNNER_TEMP` environment. When that exact distribution/version is unavailable,
+installs the exact release its workflow commit belongs to (the version its
+`pyproject.toml` declares) from PyPI in a separate `RUNNER_TEMP` environment;
+no repository variable selects it. When that exact distribution is unavailable,
 it installs from the public ReviewSensei repository at the executing workflow
 commit SHA;
 other PyPI failures remain fatal, including network and authentication errors.

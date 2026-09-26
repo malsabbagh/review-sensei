@@ -227,7 +227,9 @@ def render_providers_page(manifest: dict[str, Any]) -> str:
         workflow = entry["workflow_support"]
         provider_mode = workflow.get("provider_mode")
         provider_mode_text = (
-            provider_mode if isinstance(provider_mode, str) else "not applicable"
+            f"inference.backend: {provider_mode}"
+            if isinstance(provider_mode, str)
+            else "not applicable"
         )
         evidence = "".join(
             f'<code class="path-chip">{html.escape(path)}</code>'
