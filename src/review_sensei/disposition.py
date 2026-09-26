@@ -591,9 +591,7 @@ def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...
 def handoff_notice_marker(*, head_sha: str, diagnostic: str) -> str:
     """Stable marker so a repeated handoff does not post a second comment."""
 
-    return (
-        f"<!-- reviewsensei:handoff:v1 head={head_sha} reason={diagnostic} -->"
-    )
+    return f"<!-- reviewsensei:handoff:v1 head={head_sha} reason={diagnostic} -->"
 
 
 def render_maintainer_handoff_notice(*, diagnostic: str, head_sha: str) -> str:
