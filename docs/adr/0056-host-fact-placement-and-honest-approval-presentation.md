@@ -185,6 +185,7 @@ the acceptance matrix that cites these fixtures.
 ## Links
 
 - [Issue #181](https://github.com/malsabbagh/review-sensei/issues/181)
+- [Pull request #185](https://github.com/malsabbagh/review-sensei/pull/185)
 - [ADR 0026](0026-stable-reviewsensei-learning-pull-request-identity-and-reconciliation.md)
 - [ADR 0029](0029-finding-classification-and-lens-presentation.md)
 - [ADR 0030](0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md)
