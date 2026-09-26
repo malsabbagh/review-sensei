@@ -30,8 +30,8 @@ from .context import (
 from .convergence import (
     ATTRIBUTIONS,
     LATE_REASONS,
+    MAX_COMPLETED_VERIFICATION_ROUNDS,
     OPERATOR_REVIEW_MODES,
-    PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS,
     BlockerCandidate,
     ReviewConvergencePolicy,
     derive_blocker_candidate,
@@ -567,13 +567,15 @@ def evaluate_baseline_compatibility(
             else "coverage-incomplete"
         )
     if policy.digest() != baseline.policy_digest:
-        previous_allowance = replace(
-            policy,
-            max_completed_verification_rounds=(
-                PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS
-            ),
-        )
-        if previous_allowance.digest() != baseline.policy_digest:
+        # A stored baseline stays reusable when the only policy difference is
+        # the verification allowance. Every other identity field still invalidates.
+        allowance_match = False
+        for allowance in range(MAX_COMPLETED_VERIFICATION_ROUNDS + 1):
+            candidate = replace(policy, max_completed_verification_rounds=allowance)
+            if candidate.digest() == baseline.policy_digest:
+                allowance_match = True
+                break
+        if not allowance_match:
             return "policy-change"
     previous = baseline.cache_key
     if previous.base_sha != current_key.base_sha:

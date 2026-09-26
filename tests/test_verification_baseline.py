@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -342,18 +343,29 @@ class BaselinePlanTests(unittest.TestCase):
                 policy=current,
             )
         )
+        other_allowance = ReviewConvergencePolicy(
+            mode="merge-focused", max_completed_verification_rounds=4
+        )
         other_baseline = baseline_from_review(
             _result(_comment()),
             cache_key=_key(),
-            policy=ReviewConvergencePolicy(
-                mode="merge-focused", max_completed_verification_rounds=4
-            ),
+            policy=other_allowance,
         )
-        self.assertEqual(
+        self.assertIsNone(
             evaluate_baseline_compatibility(
                 other_baseline,
                 current_key=_key(head_sha=SHA_C),
                 policy=current,
+            )
+        )
+        different_failures = replace(
+            current, max_failed_attempts=current.max_failed_attempts - 1
+        )
+        self.assertEqual(
+            evaluate_baseline_compatibility(
+                baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=different_failures,
             ),
             "policy-change",
         )

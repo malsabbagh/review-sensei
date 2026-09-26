@@ -7,7 +7,10 @@
   posts the continue and rescan instructions, and completes the check
   successfully. A maintainer can allow another round, and the pull request
   author can do that when they are an owner, member, or collaborator. A
-  baseline recorded under the previous two-round allowance stays reusable.
+  baseline stays reusable when the only policy difference is the verification
+  allowance. The workflow verifies the session comment before trusting it,
+  and it posts the notice only when GitHub writes and the Actions token are
+  available.
 
 ## 0.6.7 - 2026-09-23
 

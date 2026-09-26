@@ -1729,58 +1729,179 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self.assertEqual(cloud_confirm, local_confirm)
 
     def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
-        text = _reusable_workflow_text()
-        chunks = re.findall(
-            r"          def automatic_budget_spent\(record, head_sha\):.*?\n              return True\n",
-            text,
-            flags=re.S,
-        )
-        self.assertEqual(len(chunks), 3)
-        self.assertEqual(len(set(chunks)), 1)
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
-        namespace: dict[str, object] = {
-            "datetime": datetime,
-            "timezone": timezone,
-        }
-        exec(textwrap.dedent(chunks[0]), namespace)
-        spent = namespace["automatic_budget_spent"]
-        assert callable(spent)
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.hosting.github.budget_admission import (
+            decide_automatic_review_budget,
+            handoff_notice_already_posted,
+            render_budget_handoff_notice,
+        )
+        from review_sensei.hosting.github.session_ledger import render_session_comment
+        from review_sensei.session import (
+            ContinuationGrant,
+            SessionIdentity,
+            SessionRecord,
+        )
+
+        text = _reusable_workflow_text()
+        self.assertNotIn("def automatic_budget_spent", text)
+        blocks = [
+            block for block in _run_blocks(text) if "budget_admission decide" in block
+        ]
+        self.assertEqual(len(blocks), 3)
+        self.assertEqual(len(set(blocks)), 1)
+        block = blocks[0]
+        self.assertIn("ENABLE_GITHUB_WRITES", block)
+        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN:-", block)
+        self.assertIn("per_page=100&page=", block)
+        self.assertNotIn("grep -F", block)
+        self.assertIn("budget_admission assemble", block)
+        self.assertIn("budget_admission notice-status", block)
+        self.assertIn("budget_admission render-notice", block)
+
         head = "a" * 40
-        record = {
-            "completed_initial_reviews": 1,
-            "completed_verification_rounds": 5,
-            "failed_attempts": 0,
-        }
-        self.assertTrue(spent(record, head))
-        self.assertFalse(spent({**record, "completed_verification_rounds": 4}, head))
-        self.assertFalse(spent({**record, "completed_verification_rounds": 1}, head))
-        self.assertFalse(spent({**record, "operator_paused": True}, head))
-        self.assertFalse(spent({**record, "failed_attempts": 6}, head))
-        self.assertFalse(spent(None, head))
-        future = "2099-01-01T00:00:00+00:00"
-        granted = {
-            **record,
-            "continuation_grants": [
-                {
-                    "consumed_reservation_id": None,
-                    "head_sha": head,
-                    "expires_at": future,
-                }
-            ],
-        }
-        self.assertFalse(spent(granted, head))
-        consumed = {
-            **record,
-            "continuation_grants": [
-                {
-                    "consumed_reservation_id": "reservation",
-                    "head_sha": head,
-                    "expires_at": future,
-                }
-            ],
-        }
-        self.assertTrue(spent(consumed, head))
+        identity = SessionIdentity(
+            repository="acme/api", pull_request=7, repository_id=11
+        )
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        spent_record = SessionRecord.create(
+            identity,
+            now=now,
+            completed_initial_reviews=1,
+            completed_verification_rounds=5,
+        )
+        spent_body = render_session_comment(
+            repository_id=11, pull_request=7, record=spent_record
+        )
+        comments = [
+            {"user": {"login": "reviewsensei[bot]", "type": "Bot"}, "body": spent_body}
+        ]
+        self.assertEqual(
+            decide_automatic_review_budget(
+                comments,
+                repository="acme/api",
+                repository_id=11,
+                pull_request=7,
+                head_sha=head,
+                now=now,
+            ),
+            "spent",
+        )
+        remaining = SessionRecord.create(
+            identity,
+            now=now,
+            completed_initial_reviews=1,
+            completed_verification_rounds=4,
+        )
+        self.assertEqual(
+            decide_automatic_review_budget(
+                [
+                    {
+                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        "body": render_session_comment(
+                            repository_id=11, pull_request=7, record=remaining
+                        ),
+                    }
+                ],
+                repository="acme/api",
+                repository_id=11,
+                pull_request=7,
+                head_sha=head,
+                now=now,
+            ),
+            "review",
+        )
+        tampered = spent_body.replace(
+            '"completed_verification_rounds":5',
+            '"completed_verification_rounds":9',
+            1,
+        )
+        self.assertNotEqual(tampered, spent_body)
+        self.assertEqual(
+            decide_automatic_review_budget(
+                [
+                    {
+                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        "body": tampered,
+                    }
+                ],
+                repository="acme/api",
+                repository_id=11,
+                pull_request=7,
+                head_sha=head,
+                now=now,
+            ),
+            "review",
+        )
+        self.assertEqual(
+            decide_automatic_review_budget(
+                [{"user": {"login": "mallory", "type": "User"}, "body": spent_body}],
+                repository="acme/api",
+                repository_id=11,
+                pull_request=7,
+                head_sha=head,
+                now=now,
+            ),
+            "review",
+        )
+        policy = ReviewConvergencePolicy()
+        grant = ContinuationGrant.issue(
+            command_id="continue-1",
+            actor="maintainer",
+            head_sha=head,
+            policy_digest=policy.digest(),
+            now=now,
+            expires_at=now + timedelta(hours=1),
+        )
+        granted = SessionRecord.create(
+            identity,
+            now=now,
+            completed_initial_reviews=1,
+            completed_verification_rounds=5,
+            continuation_grants=[grant.to_dict()],
+        )
+        self.assertEqual(
+            decide_automatic_review_budget(
+                [
+                    {
+                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        "body": render_session_comment(
+                            repository_id=11, pull_request=7, record=granted
+                        ),
+                    }
+                ],
+                repository="acme/api",
+                repository_id=11,
+                pull_request=7,
+                head_sha=head,
+                now=now + timedelta(minutes=1),
+            ),
+            "review",
+        )
+        notice = render_budget_handoff_notice(head_sha=head)
+        self.assertFalse(
+            handoff_notice_already_posted(
+                [
+                    {
+                        "user": {"login": "mallory", "type": "User"},
+                        "body": f"quoted\n{notice}",
+                    }
+                ],
+                head_sha=head,
+            )
+        )
+        self.assertTrue(
+            handoff_notice_already_posted(
+                [
+                    {
+                        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        "body": notice,
+                    }
+                ],
+                head_sha=head,
+            )
+        )
         for job_id, review_name in (
             ("cloud", "Run cloud-provider review"),
             ("openrouter", "Run OpenRouter-provider review"),

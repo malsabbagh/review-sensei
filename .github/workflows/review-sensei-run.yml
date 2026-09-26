@@ -814,6 +814,7 @@ jobs:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
           GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -822,85 +823,31 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
           comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          if ! GH_TOKEN="$GH_READ_TOKEN" gh api --paginate "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" >"$comments_file"; then
-            echo '::error::review budget ledger could not be read' >&2
-            exit 1
-          fi
-          decision="$(COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import json
-          import os
-          import re
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          def automatic_budget_spent(record, head_sha):
-              if not isinstance(record, dict) or not isinstance(head_sha, str):
-                  return False
-              if record.get("operator_paused") is True:
-                  return False
-              initial = record.get("completed_initial_reviews", 0)
-              verification = record.get("completed_verification_rounds", 0)
-              failed = record.get("failed_attempts", 0)
-              if type(initial) is not int or type(verification) is not int or type(failed) is not int:
-                  return False
-              if initial < 1 or verification < 5 or failed >= 6:
-                  return False
-              grants = record.get("continuation_grants", [])
-              if not isinstance(grants, list):
-                  return False
-              now = datetime.now(timezone.utc)
-              for grant in grants:
-                  if not isinstance(grant, dict):
-                      return False
-                  if grant.get("consumed_reservation_id") is not None:
-                      continue
-                  if grant.get("head_sha") != head_sha:
-                      continue
-                  expires = grant.get("expires_at")
-                  if not isinstance(expires, str):
-                      return False
-                  try:
-                      expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                  except ValueError:
-                      return False
-                  if expiry.tzinfo is None or expiry > now:
-                      return False
-              return True
-
-          comments = json.loads(Path(os.environ["COMMENTS_FILE"]).read_text(encoding="utf-8"))
-          if not isinstance(comments, list):
-              raise SystemExit("review budget ledger response is invalid")
-          repository_id = os.environ["REPOSITORY_ID"]
-          pull_request = os.environ["PULL_REQUEST"]
-          head_sha = os.environ["HEAD_SHA"]
-          marker = re.compile(
-              rf"^<!-- reviewsensei:session:v1 repo={repository_id} pr={pull_request} "
-              rf"gen=(?:0|[1-9][0-9]*) digest=[a-f0-9]{{64}} -->$"
-          )
-          matches = []
-          for item in comments:
-              if not isinstance(item, dict) or not isinstance(item.get("body"), str):
-                  continue
-              body = item["body"]
-              terminal = body.rstrip().rsplit("\n", 1)[-1].strip()
-              if marker.fullmatch(terminal) is None:
-                  continue
-              prefix = body[: body.rstrip().rfind(terminal)].rstrip()
-              fence_at = prefix.rfind("```json\n")
-              fenced = prefix[fence_at + len("```json\n") :] if fence_at >= 0 else ""
-              if not fenced.endswith("```"):
-                  raise SystemExit("session ledger comment is invalid")
-              payload = fenced[: -len("```")].strip()
-              parsed = json.loads(payload)
-              if not isinstance(parsed, dict):
-                  raise SystemExit("session ledger comment is invalid")
-              matches.append(parsed)
-          if len(matches) > 1:
-              raise SystemExit("session ledger comment is ambiguous")
-          record = matches[0] if matches else None
-          print("spent" if record is not None and automatic_budget_spent(record, head_sha) else "review")
-          PY
-          )"
+          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
+          rm -rf "$page_dir"
+          mkdir -p "$page_dir"
+          page=1
+          while [[ "$page" -le 10 ]]; do
+            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
+              echo '::error::review budget ledger could not be read' >&2
+              exit 1
+            fi
+            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
+            if [[ "$count" -lt 0 ]]; then
+              echo '::error::review budget comment page is invalid' >&2
+              exit 1
+            fi
+            if [[ "$count" -lt 100 ]]; then
+              break
+            fi
+            if [[ "$page" -eq 10 ]]; then
+              echo '::error::review budget comments exceed the configured bound' >&2
+              exit 1
+            fi
+            page=$((page + 1))
+          done
+          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
+          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
           if [[ "$decision" == "review" ]]; then
             echo "spent=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -910,13 +857,21 @@ jobs:
             exit 1
           fi
           echo "spent=true" >> "$GITHUB_OUTPUT"
-          marker="<!-- reviewsensei:handoff:v1 head=${HEAD_SHA} reason=round-budget-exhausted -->"
-          if grep -F -q "$marker" "$comments_file"; then
+          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
+          if [[ "$notice_state" == "posted" ]]; then
             echo "spent-budget notice already posted"
             exit 0
           fi
+          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
+            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
+            exit 0
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
+            exit 0
+          fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
@@ -1392,6 +1347,7 @@ jobs:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
           GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -1400,85 +1356,31 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
           comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          if ! GH_TOKEN="$GH_READ_TOKEN" gh api --paginate "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" >"$comments_file"; then
-            echo '::error::review budget ledger could not be read' >&2
-            exit 1
-          fi
-          decision="$(COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import json
-          import os
-          import re
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          def automatic_budget_spent(record, head_sha):
-              if not isinstance(record, dict) or not isinstance(head_sha, str):
-                  return False
-              if record.get("operator_paused") is True:
-                  return False
-              initial = record.get("completed_initial_reviews", 0)
-              verification = record.get("completed_verification_rounds", 0)
-              failed = record.get("failed_attempts", 0)
-              if type(initial) is not int or type(verification) is not int or type(failed) is not int:
-                  return False
-              if initial < 1 or verification < 5 or failed >= 6:
-                  return False
-              grants = record.get("continuation_grants", [])
-              if not isinstance(grants, list):
-                  return False
-              now = datetime.now(timezone.utc)
-              for grant in grants:
-                  if not isinstance(grant, dict):
-                      return False
-                  if grant.get("consumed_reservation_id") is not None:
-                      continue
-                  if grant.get("head_sha") != head_sha:
-                      continue
-                  expires = grant.get("expires_at")
-                  if not isinstance(expires, str):
-                      return False
-                  try:
-                      expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                  except ValueError:
-                      return False
-                  if expiry.tzinfo is None or expiry > now:
-                      return False
-              return True
-
-          comments = json.loads(Path(os.environ["COMMENTS_FILE"]).read_text(encoding="utf-8"))
-          if not isinstance(comments, list):
-              raise SystemExit("review budget ledger response is invalid")
-          repository_id = os.environ["REPOSITORY_ID"]
-          pull_request = os.environ["PULL_REQUEST"]
-          head_sha = os.environ["HEAD_SHA"]
-          marker = re.compile(
-              rf"^<!-- reviewsensei:session:v1 repo={repository_id} pr={pull_request} "
-              rf"gen=(?:0|[1-9][0-9]*) digest=[a-f0-9]{{64}} -->$"
-          )
-          matches = []
-          for item in comments:
-              if not isinstance(item, dict) or not isinstance(item.get("body"), str):
-                  continue
-              body = item["body"]
-              terminal = body.rstrip().rsplit("\n", 1)[-1].strip()
-              if marker.fullmatch(terminal) is None:
-                  continue
-              prefix = body[: body.rstrip().rfind(terminal)].rstrip()
-              fence_at = prefix.rfind("```json\n")
-              fenced = prefix[fence_at + len("```json\n") :] if fence_at >= 0 else ""
-              if not fenced.endswith("```"):
-                  raise SystemExit("session ledger comment is invalid")
-              payload = fenced[: -len("```")].strip()
-              parsed = json.loads(payload)
-              if not isinstance(parsed, dict):
-                  raise SystemExit("session ledger comment is invalid")
-              matches.append(parsed)
-          if len(matches) > 1:
-              raise SystemExit("session ledger comment is ambiguous")
-          record = matches[0] if matches else None
-          print("spent" if record is not None and automatic_budget_spent(record, head_sha) else "review")
-          PY
-          )"
+          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
+          rm -rf "$page_dir"
+          mkdir -p "$page_dir"
+          page=1
+          while [[ "$page" -le 10 ]]; do
+            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
+              echo '::error::review budget ledger could not be read' >&2
+              exit 1
+            fi
+            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
+            if [[ "$count" -lt 0 ]]; then
+              echo '::error::review budget comment page is invalid' >&2
+              exit 1
+            fi
+            if [[ "$count" -lt 100 ]]; then
+              break
+            fi
+            if [[ "$page" -eq 10 ]]; then
+              echo '::error::review budget comments exceed the configured bound' >&2
+              exit 1
+            fi
+            page=$((page + 1))
+          done
+          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
+          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
           if [[ "$decision" == "review" ]]; then
             echo "spent=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -1488,13 +1390,21 @@ jobs:
             exit 1
           fi
           echo "spent=true" >> "$GITHUB_OUTPUT"
-          marker="<!-- reviewsensei:handoff:v1 head=${HEAD_SHA} reason=round-budget-exhausted -->"
-          if grep -F -q "$marker" "$comments_file"; then
+          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
+          if [[ "$notice_state" == "posted" ]]; then
             echo "spent-budget notice already posted"
             exit 0
           fi
+          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
+            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
+            exit 0
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
+            exit 0
+          fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
@@ -1958,6 +1868,7 @@ jobs:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
           GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -1966,85 +1877,31 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
           comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          if ! GH_TOKEN="$GH_READ_TOKEN" gh api --paginate "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" >"$comments_file"; then
-            echo '::error::review budget ledger could not be read' >&2
-            exit 1
-          fi
-          decision="$(COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
-          import json
-          import os
-          import re
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          def automatic_budget_spent(record, head_sha):
-              if not isinstance(record, dict) or not isinstance(head_sha, str):
-                  return False
-              if record.get("operator_paused") is True:
-                  return False
-              initial = record.get("completed_initial_reviews", 0)
-              verification = record.get("completed_verification_rounds", 0)
-              failed = record.get("failed_attempts", 0)
-              if type(initial) is not int or type(verification) is not int or type(failed) is not int:
-                  return False
-              if initial < 1 or verification < 5 or failed >= 6:
-                  return False
-              grants = record.get("continuation_grants", [])
-              if not isinstance(grants, list):
-                  return False
-              now = datetime.now(timezone.utc)
-              for grant in grants:
-                  if not isinstance(grant, dict):
-                      return False
-                  if grant.get("consumed_reservation_id") is not None:
-                      continue
-                  if grant.get("head_sha") != head_sha:
-                      continue
-                  expires = grant.get("expires_at")
-                  if not isinstance(expires, str):
-                      return False
-                  try:
-                      expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                  except ValueError:
-                      return False
-                  if expiry.tzinfo is None or expiry > now:
-                      return False
-              return True
-
-          comments = json.loads(Path(os.environ["COMMENTS_FILE"]).read_text(encoding="utf-8"))
-          if not isinstance(comments, list):
-              raise SystemExit("review budget ledger response is invalid")
-          repository_id = os.environ["REPOSITORY_ID"]
-          pull_request = os.environ["PULL_REQUEST"]
-          head_sha = os.environ["HEAD_SHA"]
-          marker = re.compile(
-              rf"^<!-- reviewsensei:session:v1 repo={repository_id} pr={pull_request} "
-              rf"gen=(?:0|[1-9][0-9]*) digest=[a-f0-9]{{64}} -->$"
-          )
-          matches = []
-          for item in comments:
-              if not isinstance(item, dict) or not isinstance(item.get("body"), str):
-                  continue
-              body = item["body"]
-              terminal = body.rstrip().rsplit("\n", 1)[-1].strip()
-              if marker.fullmatch(terminal) is None:
-                  continue
-              prefix = body[: body.rstrip().rfind(terminal)].rstrip()
-              fence_at = prefix.rfind("```json\n")
-              fenced = prefix[fence_at + len("```json\n") :] if fence_at >= 0 else ""
-              if not fenced.endswith("```"):
-                  raise SystemExit("session ledger comment is invalid")
-              payload = fenced[: -len("```")].strip()
-              parsed = json.loads(payload)
-              if not isinstance(parsed, dict):
-                  raise SystemExit("session ledger comment is invalid")
-              matches.append(parsed)
-          if len(matches) > 1:
-              raise SystemExit("session ledger comment is ambiguous")
-          record = matches[0] if matches else None
-          print("spent" if record is not None and automatic_budget_spent(record, head_sha) else "review")
-          PY
-          )"
+          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
+          rm -rf "$page_dir"
+          mkdir -p "$page_dir"
+          page=1
+          while [[ "$page" -le 10 ]]; do
+            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
+              echo '::error::review budget ledger could not be read' >&2
+              exit 1
+            fi
+            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
+            if [[ "$count" -lt 0 ]]; then
+              echo '::error::review budget comment page is invalid' >&2
+              exit 1
+            fi
+            if [[ "$count" -lt 100 ]]; then
+              break
+            fi
+            if [[ "$page" -eq 10 ]]; then
+              echo '::error::review budget comments exceed the configured bound' >&2
+              exit 1
+            fi
+            page=$((page + 1))
+          done
+          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
+          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
           if [[ "$decision" == "review" ]]; then
             echo "spent=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -2054,13 +1911,21 @@ jobs:
             exit 1
           fi
           echo "spent=true" >> "$GITHUB_OUTPUT"
-          marker="<!-- reviewsensei:handoff:v1 head=${HEAD_SHA} reason=round-budget-exhausted -->"
-          if grep -F -q "$marker" "$comments_file"; then
+          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
+          if [[ "$notice_state" == "posted" ]]; then
             echo "spent-budget notice already posted"
             exit 0
           fi
+          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
+            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
+            exit 0
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
+            exit 0
+          fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"

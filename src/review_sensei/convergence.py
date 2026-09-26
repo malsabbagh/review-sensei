@@ -40,8 +40,6 @@ OPERATOR_REVIEW_MODES = frozenset({"advisory", "merge-focused", "strict"})
 ENFORCEMENT_MODES = frozenset({"display-only", "publication"})
 DEFAULT_MAX_COMPLETED_INITIAL_REVIEWS = 1
 DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS = 5
-# Sessions recorded while the allowance was 2 stay reusable after the raise.
-PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS = 2
 DEFAULT_MAX_FAILED_ATTEMPTS = 6
 MAX_COMPLETED_INITIAL_REVIEWS = 8
 MAX_COMPLETED_VERIFICATION_ROUNDS = 8
