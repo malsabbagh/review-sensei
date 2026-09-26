@@ -462,6 +462,105 @@ managed v4/v5 caller that follows an older tag. It skips custom or future
 versions for manual review, preserves learnings and repository secrets, and
 never creates, reads, or rewrites a repository variable.
 
+## Session state: upgrade, rollback, and in-flight runs
+
+Review state persists in three places, and every transition below respects all
+three: the session ledger record carried by the broker-attested comment (or the
+local session file), the repository learnings under
+`.github/review-sensei/learnings`, and the Worker's Durable Object namespaces
+(`DeliveryLedger`, `BrokerLedger`, and the enrollment witness). No upgrade or
+rollback deletes any of them - learnings, review evidence, and the Durable
+Object migration history are part of the compatibility contract - and the
+Worker procedure in
+[`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md) redeploys a
+known commit with the same Wrangler configuration and migration history instead
+of resetting a namespace. Multi-repository continuation and alarm recovery are
+preserved as deployed: each alarm reconciles one repository, and the recovery
+state lives in Durable Object storage that no engine transition rewrites.
+
+### Upgrading a running installation
+
+The current engine reads every record vintage of the durable ledger, including
+records that predate the convergence envelope, and the next checkpoint rewrites
+a loaded record in the current shape. A local operator-ledger file still in the
+bounded v0.1 legacy shape migrates on load; a GitHub-carried marker whose shape
+is not recognized fails closed rather than being reinterpreted. Missing history
+is never read as success; the transition rules are:
+
+- **A record without `convergence_history`** loads, and its next checkpoint
+  adds the integrity-covered envelope in place
+  (`test_legacy_record_gains_a_covered_history_in_place`).
+- **An F2 three-finding envelope** stays read-compatible; a later checkpoint
+  rewrites the two-finding/three-marker projection, and an integrity-valid
+  record is never truncated at load (`test_f2_three_finding_history_remains_read_compatible`).
+- **Completed counters at any value**, including past the retired 8/32
+  thresholds, are diagnostic history: no count gate refuses a round, a session
+  that was paused for exhaustion is admitted on the next eligible trigger, and
+  a manual pause keeps blocking until continued
+  (`test_old_exhausted_session_admits_a_changed_head_resume`,
+  `test_manual_pause_and_dispositions_survive_the_upgrade`). The session keeps
+  its identity: a later head starts the same logical review, not a fresh one.
+- **Retained continuation grants** are kept verbatim as inert evidence, bounded
+  and digest-protected; no command grants new allowances
+  (`test_retained_continuation_grants_round_trip_verbatim`).
+- **Findings, dispositions, and the baseline** are retained: the persisted
+  baseline feeds the next round's classification, dispositions remain
+  authoritative for approval eligibility, and the transaction record keeps its
+  phase and result digest while never storing the result body
+  (`test_checkpoint_persists_completed_baseline_for_a_fresh_ledger`).
+- **An expired, witness-only, or integrity-failed record** fails closed and
+  names `@sensei review reenroll`; established but lost state requires that
+  repair and is never reinitialized into an empty clean review
+  (`test_expired_established_history_never_reopens_an_initial_allowance`).
+
+### Rolling back
+
+A rollback rolls the engine version back; it never edits or deletes persisted
+state, and it never authorizes publishing from a record that failed the current
+integrity or shape checks. Compatibility holds in one direction only, and the
+engine keeps it:
+
+- A reader released before a writer change still reads what the current engine
+  writes: an F2 reader accepts the F3 projection, and a reader released before
+  the narrowed path projection treats a narrowed record as an incomplete
+  baseline and plans a fallback-full pass
+  (`test_narrowed_path_projection_requires_a_fallback_full_pass`).
+- A narrowed record never authorizes publishing from the narrowed scope under
+  any reader. When the envelope bound forces the writer to drop persisted path
+  evidence, it clears both completeness flags, so the stored baseline reports
+  itself incomplete instead of reading as a complete reviewed scope
+  (`test_narrowed_projection_never_reads_a_dropped_path_as_unreviewed`).
+- `publication_suppressed` is terminal for that transaction: a retry returns
+  the handoff with its transaction identity and performs no new inference, and
+  only a later head or an authenticated reenrollment creates the new
+  transaction (`test_publication_suppression_is_terminal_and_idempotent`).
+- Rolling the code back does not reset counters, grants, or identity, and it
+  does not reintroduce the retired count policy; that requires a forward
+  version change ([ADR 0056](adr/0056-remove-pr-wide-review-count-caps.md)).
+
+### In-flight runs
+
+A run executes the release identity it started with: the reusable workflow
+installs the version its own workflow commit declares and proves that identity
+against the compatibility manifest, so moving a channel tag does not
+retroactively change an in-flight or rerun job. A job whose broker or identity
+check cannot be satisfied fails closed - retrying the same stale event does not
+pass, and a fresh triggering event is the supported recovery. When a
+write-channel tag moves during a run, the default is fail-closed retry; bounded
+grace exists only as an explicit in-memory authorized record for that run.
+Because the ledger lives in the broker-attested comment, a job that dies
+mid-transaction leaves the transaction record behind: the next run resumes from
+the record instead of starting clean, a completed analysis continues from
+`publication_pending`, publication failures stay retryable, and a suppressed
+transaction hands off terminally as above. A Worker deploy during in-flight
+runs is safe by the same rule: the broker accepts both channel targets across a
+migration, and an existing run's accepted identity state is preserved.
+
+Package publication, public channel movement, App permission acceptance,
+Worker deployment, production settings changes, and paid live inference remain
+explicit operator operations. No upgrade, rollback, or cleanup step in this
+guide performs any of them.
+
 ## Setup-v5 and tag-based reusable workflow
 
 The current generated setup is version 5. The caller is a thin bootstrap: it
