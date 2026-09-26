@@ -42,7 +42,7 @@ Repair actions:
 | `packaged-assets` action | Reinstall the package so default stages/categories are present. |
 | `stages`/`categories` action | Point `--stages-dir`/`--categories-dir` at trusted-base directories that contain valid JSON, not a PR-head copy. |
 | `provider-mode` action | Set `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud` (Ollama only; not OpenRouter). |
-| `endpoint` action | Start a local Ollama runner on loopback, or correct `OLLAMA_BASE_URL`. |
+| `endpoint` action | Start a local Ollama runner on loopback, or pass an explicit `--base-url`. |
 | `model` action | `ollama pull` the configured model. |
 | `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
 | `compatibility` action | Supply a validated compatibility manifest path. |
@@ -125,32 +125,34 @@ is operator-gated and is not a required CI job.
 
 ## Configuration
 
-Copy the documented variables from [`.env.example`](../.env.example) into the
-environment used to run ReviewSensei. The CLI reads:
+The local CLI reads two inference overrides, the credential variable of the
+selected backend, and the review-convergence mode:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REVIEWSENSEI_PROVIDER` | `ollama` | Provider registry key |
-| `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
-| `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
-| `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
+| `REVIEWSENSEI_PROVIDER` | `local-ollama` | Canonical backend: `local-ollama`, `cloud-ollama`, `openai-compatible`, `openrouter`, or `fixture` |
+| `REVIEWSENSEI_MODEL` | backend default | Model override for the selected backend |
+| `OLLAMA_API_KEY` | empty | Bearer credential required by `cloud-ollama` |
+| `OPENROUTER_API_KEY` | empty | Bearer credential required by `openrouter` |
+| `OPENAI_API_KEY` | empty | Bearer credential required by `openai-compatible` |
 | `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; setup replaces a stored `legacy` value with `merge-focused` in place. |
-| `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
-| `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
-| `OLLAMA_API_KEY` | empty | Optional bearer credential |
-| `OLLAMA_TIMEOUT_SECONDS` | `900` | Total request timeout |
+
+Endpoint, timeout, and credential selection come from the command line flags
+(`--base-url`, `--allow-custom-endpoint`, `--timeout-seconds`, `--api-key-env`)
+or the selected backend's documented defaults; no other environment variable
+moves a review's endpoint or timeout. A backend that requires no credential
+never receives one implicitly: an exported cloud key does not travel to a local
+endpoint unless `--api-key-env` names it.
 
 Optional GitHub App-identity publication uses `GITHUB_APP_PRIVATE_KEY` by
 default through `EnvPrivateKeySource`. The App id is passed when constructing
 `GitHubAppAuth`. See [`docs/github-app-auth.md`](github-app-auth.md) for
 registration and secrets guidance.
 
-The default configuration is local-first: `REVIEWSENSEI_PROVIDER_MODE=local`
-selects `qwen3.5:4b`, points at a local Ollama API, and leaves
-`OLLAMA_API_KEY` empty. Cloud egress is explicit opt-in: set
-`REVIEWSENSEI_PROVIDER_MODE=cloud` and `OLLAMA_API_KEY`; the default cloud model
-is `deepseek-v4.1-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
-available as explicit overrides.
+The default configuration is local-first: `local-ollama` selects `qwen3.5:4b`,
+points at a local Ollama API, and requires no credential. Cloud egress is
+explicit opt-in: select `cloud-ollama` and provide `OLLAMA_API_KEY`; its
+default model is `deepseek-v4.1-flash:cloud`.
 
 Optional CLI `--profile` selects a named preset (`local-private`,
 `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`)
@@ -191,17 +193,20 @@ allowlist in
 `deepseek/deepseek-v4.1-flash`, plus `anthropic/claude-3.5-sonnet` and
 `openai/gpt-4o-mini`).
 
-OpenRouter CLI flags and environment (used with `--provider openrouter` or
-`--profile openrouter-sonnet` / `openrouter-gpt` for local CLI runs):
+OpenRouter credentials and routing (used with `--provider openrouter`, the
+`openrouter-sonnet` / `openrouter-gpt` profiles, and hosted workflow lanes):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
-| `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Default model for unprofiled OpenRouter CLI runs |
-| `OPENROUTER_UPSTREAM_PROVIDER` | `morph` | Upstream slug for unprofiled OpenRouter routing policy |
-| `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
-| `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
+| `OPENROUTER_UPSTREAM_PROVIDER` | `morph` | Upstream slug for OpenRouter routing policy |
+
+A local `--provider openrouter` review fixes its API root at
+`https://openrouter.ai/api/v1` and its timeout at the documented backend
+default: `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL`,
+`OPENROUTER_TIMEOUT_SECONDS`, and `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS`
+are not consulted by it. Pass `--base-url`, `--model`, or `--timeout-seconds`
+explicitly instead.
 
 `doctor` and `plan` report credential presence only; they never print the key.
 OpenRouter CLI profiles start `unqualified` and require
@@ -214,8 +219,10 @@ allowlist in `provider_config.py`.
 Every OpenRouter request includes `provider.data_collection=deny` (plus
 no fallbacks and zero-data-retention) through the typed routing policy.
 
-To roll back from OpenRouter, set `REVIEWSENSEI_PROVIDER_MODE` back to `local`
-or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.
+To roll back from OpenRouter in a local run, select another backend with
+`REVIEWSENSEI_PROVIDER` or `--provider` and remove `OPENROUTER_API_KEY` when it
+is no longer needed; installed workflows roll back with their
+`REVIEWSENSEI_PROVIDER_MODE` repository variable.
 
 ## GitHub workflow example
 

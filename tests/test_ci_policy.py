@@ -737,7 +737,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             openrouter_job,
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
-        self.assertIn("--provider openrouter --model", review_step)
+        # The review lane selects its canonical backend explicitly, passes the
+        # validated model, and takes the versioned JSON document under the
+        # operational launcher contract.
+        self.assertIn("--provider openrouter", review_step)
+        self.assertIn('--model "$MODEL"', review_step)
+        self.assertIn("--format json", review_step)
+        self.assertIn("--exit-semantics operational", review_step)
         self.assertIn("VALIDATED_MODEL=", review_step)
         self.assertIn(
             "resolved hosted OpenRouter model does not match workflow env",

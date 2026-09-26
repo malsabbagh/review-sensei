@@ -21,13 +21,15 @@ from context documents.
 ## Storage and logging
 
 The library does not persist review prompts or raw provider responses. The CLI
-writes the validated result when `--output` is supplied and the structured
-`RunOutcome` when `--outcome` or GitHub Actions summary/output files are
-present. An identity-bound `RecoveryArtifact` is written only when
-`--recovery-artifact` is explicit; it expires automatically, contains only a
-publisher-validated result, and is not uploaded unless the existing
-`upload_artifacts` opt-in is enabled. Repository learnings are ordinary files
-owned and retained by the repository; publication recovery never writes them.
+writes the selected result document to stdout, or to `--output` when supplied
+(readable terminal text by default; `--format markdown` or `--format json` to
+select another form), and the structured `RunOutcome` when `--outcome` or
+GitHub Actions summary/output files are present. An identity-bound
+`RecoveryArtifact` is written only when `--recovery-artifact` is explicit; it
+expires automatically, contains only a publisher-validated result, and is not
+uploaded unless the existing `upload_artifacts` opt-in is enabled. Repository
+learnings are ordinary files owned and retained by the repository; publication
+recovery never writes them.
 Lens documents are read only for the current review and are not persisted by
 the core. The optional in-memory `ReviewContextCache` stores only bounded
 metadata such as coverage mode and generation; it is repository/PR-scoped,
@@ -54,7 +56,11 @@ and emergency revocation.
 ## Ollama configurations
 
 - `http://127.0.0.1:11434/api` is the default local Ollama configuration. Data
-  stays on the configured local service.
+  stays on the configured local service, and the default local review selects
+  it without requiring an Ollama key.
+- A backend that requires no credential never receives one implicitly: with the
+  local Ollama backend an exported `OLLAMA_API_KEY` or another provider key is
+  not attached to requests unless `--api-key-env` names it.
 - `https://ollama.com/api` is explicit cloud opt-in and sends source data to
   Ollama Cloud.
 - Any other private service URL sends source data to that configured service

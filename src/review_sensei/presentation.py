@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from collections.abc import Iterable
 
-from .models import ReviewComment
+from .errors import ReviewInputError
+from .models import ReviewComment, ReviewResult
 
+RENDER_FORMATS = ("text", "markdown", "json")
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _QUICK_WIN_EFFORTS = frozenset(("trivial", "small"))
 _MARKDOWN_LABEL_CHARS = re.compile(r"([\\`*_[\]{}()<>#!|~])")
@@ -184,9 +187,108 @@ def format_review_summary(summary: str, comments: Iterable[ReviewComment]) -> st
     return f"{summary}\n\n" + "\n".join(lines)
 
 
+def _finding_groups(
+    result: ReviewResult,
+) -> tuple[tuple[str, tuple[ReviewComment, ...]], ...]:
+    required = tuple(comment for comment in result.comments if comment.blocks_approval)
+    optional = tuple(
+        comment for comment in result.comments if not comment.blocks_approval
+    )
+    return (("Required fixes", required), ("Optional findings", optional))
+
+
+def _finding_location(comment: ReviewComment) -> str:
+    if comment.side == "FILE" or comment.line is None:
+        return comment.path
+    return f"{comment.path}:{comment.line}"
+
+
+def _finding_labels(comment: ReviewComment) -> str:
+    labels = ["required fix" if comment.blocks_approval else "optional"]
+    if comment.severity is not None:
+        labels.append(f"severity: {comment.severity.lower()}")
+    if comment.category is not None:
+        labels.append(f"lens: {humanize_lens(comment.category)}")
+    if comment.fix_effort is not None:
+        labels.append(f"effort: {comment.fix_effort.lower()}")
+    if comment.needs_human:
+        labels.append("needs human")
+    return " ".join(f"[{label}]" for label in labels)
+
+
+def render_review_text(result: ReviewResult) -> str:
+    """Render one validated review result as readable terminal text."""
+
+    groups = _finding_groups(result)
+    lines = [
+        f"ReviewSensei review: {result.review_status}",
+        f"provider: {result.provider}",
+    ]
+    if result.model:
+        lines.append(f"model: {result.model}")
+    if result.coverage_mode != "full":
+        lines.append(f"coverage: {result.coverage_mode}")
+    for title, group in groups:
+        lines.append(f"{title.lower()}: {len(group)}")
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(result.summary)
+    index = 0
+    for title, group in groups:
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"{title}:")
+        for comment in group:
+            index += 1
+            lines.append("")
+            lines.append(f"{index}) {_finding_location(comment)}")
+            labels = _finding_labels(comment)
+            if labels:
+                lines.append(f"   {labels}")
+            lines.append("")
+            lines.append(comment.body)
+    return "\n".join(lines) + "\n"
+
+
+def render_review_markdown(result: ReviewResult) -> str:
+    """Render one validated review result as readable Markdown."""
+
+    parts = [format_review_summary(result.summary, result.comments)]
+    for title, group in _finding_groups(result):
+        if not group:
+            continue
+        parts.append("")
+        parts.append(f"### {title}")
+        for comment in group:
+            parts.append("")
+            parts.append(f"**{escape_markdown_label(_finding_location(comment))}**")
+            parts.append("")
+            parts.append(format_review_comment(comment))
+    return "\n".join(parts) + "\n"
+
+
+def render_review(result: ReviewResult, *, output_format: str) -> str:
+    """Render one validated review result in the requested explicit format."""
+
+    if output_format == "text":
+        return render_review_text(result)
+    if output_format == "markdown":
+        return render_review_markdown(result)
+    if output_format == "json":
+        # The versioned ``review-result`` v1 document, unchanged from the
+        # historical single-format output.
+        return json.dumps(result.to_dict(), indent=2) + "\n"
+    raise ReviewInputError(f"unsupported review output format: {output_format}")
+
+
 __all__ = [
+    "RENDER_FORMATS",
     "escape_markdown_label",
     "format_review_comment",
     "format_review_summary",
     "humanize_lens",
+    "render_review",
+    "render_review_markdown",
+    "render_review_text",
 ]

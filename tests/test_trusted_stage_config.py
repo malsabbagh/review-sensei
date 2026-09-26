@@ -32,7 +32,7 @@ HOSTILE_MARKER = "HOSTILE_PR_HEAD_STAGE_MARKER"
 
 TRUSTED_STAGE = {
     "name": "Trusted summary",
-    "outputs": ["summary"],
+    "outputs": ["summary", "comments"],
     "prompt_template": f"{TRUSTED_MARKER} Review {{diff}}",
 }
 HOSTILE_STAGE = {
@@ -430,7 +430,8 @@ class TrustedStageIntegrationTests(unittest.TestCase):
                                 str(directory),
                             ]
                         )
-                    self.assertEqual(status, 1)
+                    self.assertEqual(status, 2)
+                    self.assertIn("reason=invalid-input", stderr.getvalue())
                     self.assertEqual(registry.created, [])
                     self.assertEqual(registry.provider.requests, [])
                     self.assertIn(message, stderr.getvalue())

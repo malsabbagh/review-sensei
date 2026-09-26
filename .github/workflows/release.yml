@@ -211,9 +211,14 @@ jobs:
         run: |
           set -euo pipefail
           # The matrix already exercised the native executable. This check
-          # validates launcher inputs and keeps the smoke contract explicit;
-          # clean-machine registry smoke remains a maintainer-owned gate.
-          python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
+          # re-runs the documented local review contract for the assembled
+          # launcher package, including the clean-host, format, and exit-code
+          # cases; clean-machine registry smoke remains a maintainer-owned gate.
+          python scripts/standalone_smoke.py \
+            --executable dist/npm/linux-x64-gnu/bin/review-sensei \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json
       - name: Pack and validate exact npm tarballs
         shell: bash
         run: |

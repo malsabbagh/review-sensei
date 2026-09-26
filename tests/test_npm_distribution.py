@@ -465,10 +465,23 @@ class SmokeTests(unittest.TestCase):
                 )
 
             def fake_run(command, cwd, env):
+                # Every smoke case now pins the documented exit, so the stub
+                # reports the contract the harness expects: 0 for version,
+                # help, and the operational exit semantics, 2 for the
+                # rejected local provider/model override, and 1 for a
+                # completed review that still has a required fix.
+                if "--version" in command or "--help" in command:
+                    returncode = 0
+                elif "--exit-semantics" in command:
+                    returncode = 0
+                elif "not-a-local-model:cloud" in command:
+                    returncode = 2
+                else:
+                    returncode = 1
                 if "--output" in command:
                     output_name = command[command.index("--output") + 1]
                     (Path(cwd) / output_name).write_bytes(b"matching patch")
-                return subprocess.CompletedProcess(command, 0, "ok\n", "")
+                return subprocess.CompletedProcess(command, returncode, "ok\n", "")
 
             with patch.object(SMOKE, "_run", side_effect=fake_run):
                 report = SMOKE.run_smoke(
@@ -478,7 +491,7 @@ class SmokeTests(unittest.TestCase):
                     head_ref="head",
                     python_executable="python",
                 )
-            self.assertEqual(len(report), 3)
+            self.assertEqual(len(report), 9)
             self.assertEqual(sentinel.read_bytes(), b"keep me")
 
 

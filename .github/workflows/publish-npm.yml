@@ -231,7 +231,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/standalone_smoke.py --executable dist/npm/linux-x64-gnu/bin/review-sensei --check
+          python scripts/standalone_smoke.py \
+            --executable dist/npm/linux-x64-gnu/bin/review-sensei \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json
 
       - name: Pack and validate exact npm tarballs
         shell: bash
