@@ -721,6 +721,42 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY:", text)
         self.assertIn("OPENAI_API_KEY:", text)
 
+    def test_reusable_workflow_review_lanes_pin_the_versioned_json_artifact(self):
+        # The provider lane selects its canonical backend from the resolved
+        # plan and writes the versioned JSON document under the operational
+        # launcher contract; the publish step consumes that same path.  A
+        # future edit of the format value would silently change the artifact
+        # contract for callers of the tag-pinned reusable workflow, so the
+        # full tuple is pinned here.
+        reusable = _reusable_workflow_text()
+        lanes = (
+            (
+                "hosted",
+                "Run hosted review",
+                "Publish or promote validated review through the broker",
+            ),
+            (
+                "local",
+                "Run local review",
+                "Publish or promote validated local review and learnings",
+            ),
+        )
+        for job_id, review_step_name, publish_step_name in lanes:
+            with self.subTest(job=job_id):
+                job = _job_section(reusable, job_id)
+                review_step = _step_block(job, review_step_name)
+                self.assertIn(
+                    '--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL"',
+                    review_step,
+                )
+                self.assertIn("--format json", review_step)
+                self.assertIn("--exit-semantics operational", review_step)
+                self.assertIn("--output review.json", review_step)
+                publish_step = _step_block(job, publish_step_name)
+                self.assertIn("--result review.json", publish_step)
+                upload_step = _step_block(job, "Upload diagnostics artifact")
+                self.assertIn("\n            review.json\n", upload_step)
+
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
     ):

@@ -55,7 +55,8 @@ python -m pip install .
 review-sensei --version
 ```
 
-The default is a local Ollama server using the packaged local model. A
+The default backend is a local Ollama server using the packaged local model,
+so a local review runs with no credential and no repository setup at all. A
 repository selects its backend in `.reviewsensei.yml` at the repository root,
 and a repository without that file uses the packaged defaults:
 
@@ -66,6 +67,21 @@ inference:
   backend: local-ollama
 ```
 
+Select a backend on the command line when one run needs a different one:
+
+```bash
+review-sensei --diff pr.patch --provider local-ollama
+review-sensei --diff pr.patch --provider local-ollama --model qwen3.5:8b
+```
+
+The hosted backends are explicit, and each one requires its own credential:
+
+```bash
+OLLAMA_API_KEY="your-key" review-sensei --diff pr.patch --provider cloud-ollama
+OPENROUTER_API_KEY="your-key" review-sensei --diff pr.patch --provider openrouter
+OPENAI_API_KEY="your-key" review-sensei --diff pr.patch --provider openai-compatible
+```
+
 Ollama Cloud is explicit opt-in and requires `OLLAMA_API_KEY`:
 
 ```yaml
@@ -74,6 +90,9 @@ schema: 1
 inference:
   backend: cloud-ollama
 ```
+
+A backend that needs no credential never receives one implicitly: a key
+exported for another backend does not travel to `local-ollama`.
 
 The packaged model for the selected backend applies unless `inference.model`
 names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` remain the
@@ -105,7 +124,14 @@ release tag. See [`docs/installation.md`](docs/installation.md),
 for prerequisites, release ordering, provenance, and version-forward rollback
 guidance.
 
-Generate a bounded diff and run a review:
+Generate a bounded diff and review it. The shortest local run needs nothing
+but the diff and a reachable local model server:
+
+```bash
+review-sensei --diff pr.patch
+```
+
+Repository context, learnings, and an explicit change identity are optional:
 
 ```bash
 review-sensei prepare-diff \
@@ -122,12 +148,39 @@ review-sensei \
   --title "Reviewable change" \
   --learning-root /path/to/target-branch-checkout \
   --context-root /path/to/target-branch-checkout \
+  --format json \
   --output review.json
 ```
 
-The output is a validated JSON document containing `summary`, `comments`,
-`provider`, `model`, and `learning_proposals`. Learning proposals are not
+The default output is readable terminal text. `--format markdown` and
+`--format json` are explicit, and only the selected format is written to
+stdout or `--output` while warnings, diagnostics, and the final status and
+reason lines stay on stderr. The JSON format
+is the validated `review-result` document containing `summary`, `comments`,
+`provider`, `model`, and `learning_proposals`; learning proposals are not
 stored or used automatically.
+
+The review exit contract is stable:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The review completed and no required fixes remain |
+| `1` | The review completed with required fixes remaining |
+| `2` | The review could not complete, the input was invalid, or a human decision is required |
+
+A non-zero exit prints a `review-sensei: reason=<token>` line naming the cause,
+and the exit codes are unchanged by the selected output format. Hosts and
+launchers that select a lane from the historical 0/1 contract pass
+`--exit-semantics operational`.
+
+A local review is a bounded one-shot and needs no GitHub identity, OIDC token,
+broker, or hosted state. `--local-session` is the one explicit
+persistent-local-session operation: it keeps the durable session ledger in the
+platform's per-user state directory (`~/Library/Application Support/review-sensei`
+on macOS, `%LOCALAPPDATA%\review-sensei` on Windows, and
+`$XDG_STATE_HOME/review-sensei` or `~/.local/state/review-sensei` elsewhere) so
+repeated runs of the same change reuse one session, and `--session-ledger`
+still overrides that location.
 
 The published schema files live under `src/review_sensei/schemas/` and are
 included in the installed package. Public compatibility rules, CLI flags, error
@@ -499,6 +552,10 @@ See [ADR 0036](docs/adr/0036-learning-lifecycle-diagnostics-and-feedback.md).
 
 ## Local Ollama
 
+A local review defaults to the `local-ollama` backend and needs no credential.
+State it explicitly in `.reviewsensei.yml` when the repository should not rely
+on the packaged default:
+
 ```yaml
 schema: 1
 
@@ -510,9 +567,18 @@ inference:
 review-sensei --diff pr.patch
 ```
 
+Select the backend and model explicitly when you need to
+(`--provider local-ollama --model qwen3.5:8b`, or `REVIEWSENSEI_PROVIDER` and
+`REVIEWSENSEI_MODEL`). A backend that requires no credential never receives one
+implicitly, so an exported `OLLAMA_API_KEY` is not attached to loopback
+requests unless `--api-key-env` names it.
+
 ## Providers
 
-The shipped registry keys are `ollama`, `openai-compatible`, and `openrouter`.
+The shipped registry adapters are `ollama`, `openai-compatible`,
+`openrouter`, and the `fixture` test seam. Canonical backends — `local-ollama`,
+`cloud-ollama`, `openai-compatible`, `openrouter`, and `fixture` — are what
+`--provider`, `REVIEWSENSEI_PROVIDER`, and inference configuration name.
 Operator defaults, workflow modes, named profiles, credentials, and hosted
 OpenRouter allowlists are documented in [`docs/installation.md`](docs/installation.md).
 The release-aware public matrix lives at

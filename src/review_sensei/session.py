@@ -21,6 +21,7 @@ import json
 import ntpath
 import os
 import re
+import sys
 import tempfile
 from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -3105,6 +3106,49 @@ class LocalSessionLedger:
             ),
             now=now,
         )
+
+
+def default_local_session_root(
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Return the per-user state directory that holds local sessions.
+
+    The persistent-local-session command needs one documented location that
+    does not require the caller to invent a ledger path.  Each platform's
+    conventional per-user state directory is used, and no new dependency is
+    introduced to find it.
+    """
+
+    environment = os.environ if environ is None else environ
+    if sys.platform == "darwin":
+        home = environment.get("HOME", "").strip() or _home_directory()
+        if home:
+            return Path(home) / "Library" / "Application Support" / "review-sensei"
+    elif os.name == "nt":
+        base = (
+            environment.get("LOCALAPPDATA", "").strip()
+            or environment.get("APPDATA", "").strip()
+        )
+        if base:
+            return Path(base) / "review-sensei"
+    else:
+        state_home = environment.get("XDG_STATE_HOME", "").strip()
+        if state_home:
+            return Path(state_home) / "review-sensei"
+        home = environment.get("HOME", "").strip() or _home_directory()
+        if home:
+            return Path(home) / ".local" / "state" / "review-sensei"
+    raise ReviewInputError(
+        "no per-user state directory is available; pass --session-ledger "
+        "with an explicit directory"
+    )
+
+
+def _home_directory() -> str:
+    try:
+        return str(Path.home())
+    except RuntimeError:  # pragma: no cover - no resolvable home directory
+        return ""
 
 
 def resolve_local_session_ledger(
