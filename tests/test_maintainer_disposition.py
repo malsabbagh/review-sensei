@@ -363,7 +363,7 @@ class SessionCommandTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )

@@ -614,12 +614,7 @@ def render_actions_summary(outcome: RunOutcome) -> str:
     return "\n".join(lines) + "\n"
 
 
-def emit_host_outcome(
-    outcome: RunOutcome,
-    *,
-    output_path: Path | None = None,
-    annotate: bool = True,
-) -> None:
+def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -> None:
     """Write the machine-readable outcome and optional Actions annotations."""
 
     outcome = replace(outcome, diagnostic=sanitize_diagnostic(outcome.diagnostic))
@@ -636,7 +631,7 @@ def emit_host_outcome(
             handle.write(f"outcome_status={outcome.status}\n")
             if outcome.diagnostic is not None:
                 handle.write(f"outcome_diagnostic={outcome.diagnostic}\n")
-    if annotate and outcome.status == "action_required":
+    if outcome.status == "action_required":
         print(
             "::error title=ReviewSensei maintainer attention required::"
             "A maintainer decision is required before another automated pass.",

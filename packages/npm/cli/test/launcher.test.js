@@ -135,7 +135,7 @@ test("validates exact installed package metadata and regular payload", () => {
     fs.writeFileSync(executable, "#!/bin/sh\n", { mode: 0o755 });
     const manifest = {
       name: "@reviewsensei/cli-darwin-arm64",
-      version: "0.6.7",
+      version: "0.6.8",
     };
     const fakeRequire = (request) => {
       assert.equal(request, "@reviewsensei/cli-darwin-arm64/package.json");

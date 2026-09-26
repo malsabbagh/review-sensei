@@ -77,7 +77,7 @@ class AutomationAdmissionTests(unittest.TestCase):
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -96,7 +96,7 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertTrue(should_skip_automation(prepared.decision, inference=False))
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertIsNone(loaded.record.reservation_id)
-        self.assertEqual(loaded.record.completed_verification_rounds, 2)
+        self.assertEqual(loaded.record.completed_verification_rounds, 5)
         self.assertEqual(loaded.record.failed_attempts, 0)
         self.assertEqual(loaded.record.generation, record.generation)
         self.assertEqual(
@@ -127,7 +127,7 @@ class AutomationAdmissionTests(unittest.TestCase):
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         prepared = prepare_session_round(
@@ -183,7 +183,7 @@ class AutomationAdmissionTests(unittest.TestCase):
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -224,7 +224,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         reviewer = RecordingReviewer()
@@ -262,7 +262,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         reviewer = RecordingReviewer()
@@ -371,7 +371,7 @@ class DiagnosticAutomationTests(unittest.TestCase):
                 IDENTITY,
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             )
             ledger._write(IDENTITY, record)
             doctor = run_doctor(
@@ -399,7 +399,7 @@ class CliInferenceSkipTests(unittest.TestCase):
                 IDENTITY,
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             )
             ledger._write(IDENTITY, record)
             diff_path = root / "review.patch"
@@ -455,12 +455,8 @@ class CliInferenceSkipTests(unittest.TestCase):
                             str(outcome_path),
                         ]
                     )
-            self.assertEqual(status, 0)
+            self.assertEqual(status, 1)
             self.assertIn("action_required", stdout.getvalue())
-            self.assertNotIn(
-                "A maintainer decision is required before another automated pass.",
-                stderr.getvalue(),
-            )
             payload = json.loads(outcome_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
             self.assertIn(payload["diagnostic"], PUBLIC_DIAGNOSTICS)
