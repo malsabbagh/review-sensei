@@ -95,7 +95,7 @@ function harness(
     pullRequestHead: vi.fn(async () => SHA),
     issueComment: vi.fn(async () => ({
       id: 13579,
-      body: "@sensei review continue --rounds 1",
+      body: "@sensei review continue",
       login: "octocat",
       userType: "User",
       association: "OWNER",

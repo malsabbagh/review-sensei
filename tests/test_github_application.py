@@ -746,13 +746,12 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(command.action, "pause")
         self.assertEqual(command.actor, "alice")
 
-    def test_hosted_continue_revalidates_rounds_against_the_durable_ledger(self):
-        body = "@sensei review continue --rounds 1"
+    def test_hosted_continue_unpauses_without_a_round_grant(self):
+        body = "@sensei review continue"
         head_sha = "b" * 40
-        policy_digest = ReviewConvergencePolicy().digest()
         ledger = InMemorySessionLedger()
 
-        class GrantBroker:
+        class SessionBroker:
             def __init__(self):
                 self.attestation = None
 
@@ -763,9 +762,11 @@ class GitHubApplicationTests(unittest.TestCase):
                     attestation=self.attestation,
                 )
 
-        broker = GrantBroker()
+        broker = SessionBroker()
 
-        def attestation_for(source_comment_id, *, actor="alice", head=head_sha):
+        def attestation_for(
+            source_comment_id, *, actor="alice", head=head_sha, body=body
+        ):
             return {
                 "repository": "owner/repo",
                 "repository_id": 99,
@@ -789,8 +790,10 @@ class GitHubApplicationTests(unittest.TestCase):
         )
         identity = SessionIdentity("owner/repo", 136, repository_id=99)
 
-        def deliver(source_comment_id, *, head=head_sha):
-            broker.attestation = attestation_for(source_comment_id, head=head)
+        def deliver(source_comment_id, *, head=head_sha, body=body):
+            broker.attestation = attestation_for(
+                source_comment_id, head=head, body=body
+            )
             with mock.patch.object(
                 application, "_session_ledger_for_token", return_value=ledger
             ):
@@ -812,38 +815,41 @@ class GitHubApplicationTests(unittest.TestCase):
                     session_attestation={"version": 1},
                 )
 
+        paused = deliver(70, body="@sensei review pause")
+        self.assertTrue(paused.applied)
+        self.assertTrue(ledger.load(identity).record.operator_paused)
+
         first = deliver(71)
         self.assertTrue(first.applied)
         self.assertEqual(
-            first.summary,
-            "one-use continuation grant issued for the exact head and policy",
+            first.summary, "automated review may continue; rounds are uncapped"
         )
-        granted = ledger.load(identity).record
-        self.assertEqual(len(granted.continuation_grants), 1)
+        resumed = ledger.load(identity).record
+        self.assertFalse(resumed.operator_paused)
+        self.assertEqual(resumed.continuation_grants, ())
 
-        # A workflow redelivery of the identical command is idempotent rather
-        # than a second grant: --rounds cannot mint authority twice.
+        # A workflow redelivery of the identical command is idempotent: the
+        # unpause was already applied, so nothing mutates a second time.
         replay = deliver(71)
         self.assertTrue(replay.applied)
         replayed = ledger.load(identity).record
-        self.assertEqual(replayed.continuation_grants, granted.continuation_grants)
-        self.assertEqual(replayed.generation, granted.generation)
+        self.assertEqual(replayed.generation, resumed.generation)
 
-        # A distinct continuation command for the same head and policy while
-        # the grant is still pending is refused by the durable ledger rather
-        # than admitted, so repeated --rounds 1 cannot stack invocations.
-        with self.assertRaisesRegex(ReviewInputError, "already pending"):
-            deliver(72)
+        # A distinct continuation command is also an unpause, not a new
+        # allowance, so it neither stacks authority nor bumps the generation.
+        distinct = deliver(72)
+        self.assertTrue(distinct.applied)
+        self.assertEqual(ledger.load(identity).record.generation, resumed.generation)
 
-        # The same command id may not be replayed against a different head.
-        with self.assertRaisesRegex(ReviewInputError, "conflicts with persisted grant"):
-            deliver(71, head="c" * 40)
-
-        record = ledger.load(identity).record
-        self.assertEqual(len(record.continuation_grants), 1)
-        self.assertEqual(record.continuation_grants[0]["head_sha"], head_sha)
-        self.assertEqual(record.continuation_grants[0]["policy_digest"], policy_digest)
-        self.assertEqual(record.operator_paused, False)
+        # The retired --rounds spelling is not a command at all: nothing is
+        # granted, paused, or parsed as a continuation.
+        retired = deliver(73, body="@sensei review continue --rounds 1")
+        self.assertFalse(retired.applied)
+        self.assertEqual(retired.summary, "not-a-command")
+        after = ledger.load(identity).record
+        self.assertEqual(after.generation, resumed.generation)
+        self.assertEqual(after.continuation_grants, ())
+        self.assertFalse(after.operator_paused)
 
     def test_hosted_command_rejects_an_injected_local_ledger(self):
         application = GitHubApplication(

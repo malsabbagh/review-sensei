@@ -405,32 +405,20 @@ aggregate size violations. Selection and serialization are deterministic.
 - Expected failures from the bounded path, diff, request, transport, and result
   seams are static/sanitized and do not include supplied secret markers.
 
-## Automatic review budget pre-check
+## Review admission without a PR-wide count
 
-The reusable GitHub Actions runner (`hosting/github/budget_admission.py`,
-invoked by `review-sensei-run.yml`) reads the pull request's session ledger
-before it starts the review CLI. A spent automatic review budget is an
-`action_required` result, and the runner turns that one case into a
-successful check instead: it starts no review process and completes the job,
-posting the continue and rescan instructions when GitHub writes and the
-Actions OIDC token are available. The decision reads the ledger-owned facts
-the runtime admission reads — the pause bit, the completed initial and
-verification counters, the failed-attempt budget, and an active continuation
-grant — and it matches a grant with the current policy digest alone, exactly
-as the hosted runtime does. So the pre-check reports `spent` only where the
-runtime's budget admission would hand off, and it never admits a round on a
-grant the runtime ignores. Facts the ledger does not own — coverage,
-no-progress, an already-reviewed head — are decided after inference, so
-anything the pre-check cannot verify fails open to running the review.
-
-The pre-check crosses a trust boundary: it reads pull-request comments with
-the workflow's own `GITHUB_TOKEN`, so it trusts only comments authored by the
-App installation whose body carries a valid terminal session marker with a
-matching record digest, generation, and repository identity. Human-authored,
-quoted, malformed, or integrity-mismatched comments are ignored, and anything
-the pre-check cannot verify — an absent or unreadable ledger, a truncated
-comment page set, a session record naming another repository — fails open to
-running the review, which then fails closed on its own admission path.
+There is no automatic-review budget to spend: a legitimate changed-head
+update is reviewable no matter how many rounds this pull request has already
+completed, and no workflow pre-check, grant, or `--rounds` request exists to
+extend or refuse an allowance. The reusable runner (`review-sensei-run.yml`)
+starts the review CLI directly; the package still enforces work admission
+immediately before inference through the durable session ledger
+(`session.prepare_session_round`), and it rechecks publication identity and
+authorization at the write boundary. What can still refuse a round is a live
+condition, not a lifetime count: an operator pause, a no-progress verdict, or
+the per-head failed-attempt retry bound. Counters in the ledger
+(`completed_initial_reviews`, `completed_verification_rounds`) are diagnostic
+history, bounded for storage only, and never decide admission.
 
 ## Future extension points
 

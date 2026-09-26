@@ -21,14 +21,16 @@ import json
 import ntpath
 import os
 import re
+import sys
 import tempfile
 from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .convergence import (
+    DIAGNOSTIC_ROUND_CEILING,
     MAX_FAILED_ATTEMPTS,
     OPERATOR_REVIEW_MODES,
     ReviewConvergencePolicy,
@@ -49,9 +51,9 @@ MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
 # The record bound stays twice the envelope bound. The largest members that
 # are not the envelope (a publication transaction, four maximal dispositions,
-# and four maximal continuation grants) measured 5704 bytes, so a realistic
-# record still binds on the envelope while a pathological combination of both
-# is refused rather than silently truncated.
+# and four retained continuation-grant records) measured 5704 bytes, so a
+# realistic record still binds on the envelope while a pathological
+# combination of both is refused rather than silently truncated.
 MAX_SESSION_RECORD_BYTES = 8192
 # ADR 0053 reserves room in the envelope for two findings and three trusted
 # blocker-set identities. Measured with repository-realistic identity content
@@ -69,10 +71,11 @@ SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 # driving an allocation without coupling the ledger to provider-specific
 # limits or to the serialized record size.
 MAX_DURABLE_BLOCKER_COUNT = 4_096
+# Continuation grants are obsolete: no code path issues, consults, or consumes
+# one.  Records written while the protocol existed still carry them, and an
+# upgrade must keep that history and its integrity digest instead of failing
+# the load, so the retained envelope stays bounded and readable.
 MAX_STORED_CONTINUATION_GRANTS = 4
-MAX_CONTINUATION_COMMAND_ID_BYTES = 128
-MAX_CONTINUATION_GRANT_TTL = timedelta(days=7)
-DEFAULT_CONTINUATION_GRANT_TTL = timedelta(days=1)
 # GitHub comments include a bounded intro, JSON fence, and marker around the
 # serialized record. Keep that framing allowance named and tied to the record
 # bound so the two adapters cannot drift independently.
@@ -87,7 +90,6 @@ _DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
 _SHA256 = re.compile(SESSION_SHA256_PATTERN)
-_CONTINUATION_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 LOAD_STATUSES = frozenset(
     {"ok", "missing", "expired", "integrity-failed", "conflict", "migrated"}
 )
@@ -132,153 +134,17 @@ _CONVERGENCE_HISTORY_STATES = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class ContinuationGrant:
-    """One bounded, identity- and scope-bound continuation authorization."""
-
-    command_id: str
-    actor: str
-    head_sha: str
-    policy_digest: str
-    issued_at: str
-    expires_at: str
-    consumed_reservation_id: str | None = None
-    consumed_generation: int | None = None
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.command_id, str)
-            or not _CONTINUATION_COMMAND_ID_RE.fullmatch(self.command_id)
-            or len(self.command_id.encode("utf-8")) > MAX_CONTINUATION_COMMAND_ID_BYTES
-        ):
-            raise ReviewInputError("continuation command_id is invalid")
-        if (
-            not isinstance(self.actor, str)
-            or not self.actor.strip()
-            or len(self.actor.encode("utf-8")) > MAX_DISPOSITION_ACTOR_BYTES
-            or not self.actor.isprintable()
-        ):
-            raise ReviewInputError("continuation grant actor is invalid")
-        if not isinstance(self.head_sha, str) or not _DISPOSITION_HEAD_RE.fullmatch(
-            self.head_sha
-        ):
-            raise ReviewInputError("continuation grant head_sha is invalid")
-        if not isinstance(self.policy_digest, str) or not _SHA256.fullmatch(
-            self.policy_digest
-        ):
-            raise ReviewInputError("continuation grant policy_digest is invalid")
-        issued = _parse_aware_datetime(
-            self.issued_at, label="continuation grant issued_at"
-        )
-        expires = _parse_aware_datetime(
-            self.expires_at, label="continuation grant expires_at"
-        )
-        if expires <= issued or expires - issued > MAX_CONTINUATION_GRANT_TTL:
-            raise ReviewInputError("continuation grant expiry is invalid")
-        consumed_id = _reservation_id(
-            self.consumed_reservation_id,
-            label="continuation grant consumed_reservation_id",
-        )
-        object.__setattr__(self, "consumed_reservation_id", consumed_id)
-        if (consumed_id is None) != (self.consumed_generation is None):
-            raise ReviewInputError("continuation grant consumption state is invalid")
-        if self.consumed_generation is not None:
-            _require_bounded_int(
-                self.consumed_generation,
-                label="continuation grant consumed_generation",
-                minimum=1,
-                maximum=MAX_GENERATION,
-            )
-
-    @classmethod
-    def issue(
-        cls,
-        *,
-        command_id: str,
-        actor: str,
-        head_sha: str,
-        policy_digest: str,
-        now: datetime | None = None,
-        expires_at: datetime | None = None,
-    ) -> "ContinuationGrant":
-        issued = _aware_now(now)
-        expires = (
-            _aware_now(expires_at)
-            if expires_at is not None
-            else issued + DEFAULT_CONTINUATION_GRANT_TTL
-        )
-        return cls(
-            command_id=command_id,
-            actor=actor,
-            head_sha=head_sha,
-            policy_digest=policy_digest,
-            issued_at=_format_datetime(issued),
-            expires_at=_format_datetime(expires),
-        )
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> "ContinuationGrant":
-        if not isinstance(value, Mapping):
-            raise ReviewInputError("continuation grant is invalid")
-        required = {
-            "command_id",
-            "actor",
-            "head_sha",
-            "policy_digest",
-            "issued_at",
-            "expires_at",
-            "consumed_reservation_id",
-            "consumed_generation",
-        }
-        if set(value) != required:
-            raise ReviewInputError("continuation grant is invalid")
-        return cls(
-            command_id=cast(str, value["command_id"]),
-            actor=cast(str, value["actor"]),
-            head_sha=cast(str, value["head_sha"]),
-            policy_digest=cast(str, value["policy_digest"]),
-            issued_at=cast(str, value["issued_at"]),
-            expires_at=cast(str, value["expires_at"]),
-            consumed_reservation_id=cast(str | None, value["consumed_reservation_id"]),
-            consumed_generation=cast(int | None, value["consumed_generation"]),
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "command_id": self.command_id,
-            "actor": self.actor,
-            "head_sha": self.head_sha,
-            "policy_digest": self.policy_digest,
-            "issued_at": self.issued_at,
-            "expires_at": self.expires_at,
-            "consumed_reservation_id": self.consumed_reservation_id,
-            "consumed_generation": self.consumed_generation,
-        }
-
-    def active_for(
-        self, *, head_sha: str, policy_digest: str, now: datetime | None = None
-    ) -> bool:
-        return (
-            self.consumed_reservation_id is None
-            and self.head_sha == head_sha
-            and self.policy_digest == policy_digest
-            and _parse_aware_datetime(
-                self.expires_at, label="continuation grant expires_at"
-            )
-            > _aware_now(now)
-        )
-
-    def consume(self, *, reservation_id: str, generation: int) -> "ContinuationGrant":
-        if self.consumed_reservation_id is not None:
-            raise ReviewInputError("continuation grant is already consumed")
-        return replace(
-            self,
-            consumed_reservation_id=reservation_id,
-            consumed_generation=generation,
-        )
-
-
 def _stored_continuation_grants(value: object) -> tuple[dict[str, object], ...]:
+    """Retain bounded, obsolete continuation-grant history verbatim.
+
+    The grant protocol is gone: nothing issues, consults, or consumes a
+    continuation grant.  A record written while it existed still carries one,
+    and the re-serialized payload must stay byte-identical or its stored
+    digest would no longer verify, so the history is kept as inert data.  The
+    ``session-record`` schema owns the item shape; this helper only bounds the
+    envelope and refuses anything that is not a plain string-keyed object.
+    """
+
     if value is None:
         raise ReviewInputError("continuation grants must be an array")
     if (
@@ -286,12 +152,14 @@ def _stored_continuation_grants(value: object) -> tuple[dict[str, object], ...]:
         or len(value) > MAX_STORED_CONTINUATION_GRANTS
     ):
         raise ReviewInputError("continuation grants exceed the configured bound")
-    grants = tuple(ContinuationGrant.from_dict(item) for item in value)
-    if len({grant.command_id for grant in grants}) != len(grants):
-        raise ReviewInputError("continuation grant command_id is duplicated")
-    if sum(grant.consumed_reservation_id is None for grant in grants) > 1:
-        raise ReviewInputError("multiple continuation grants are pending")
-    return tuple(grant.to_dict() for grant in grants)
+    grants: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or any(
+            not isinstance(key, str) for key in item
+        ):
+            raise ReviewInputError("continuation grant is invalid")
+        grants.append(dict(item))
+    return tuple(grants)
 
 
 def _stored_convergence_history(
@@ -726,6 +594,7 @@ class SessionRecord:
     expires_at: str
     record_sha256: str
     operator_paused: bool = False
+    failed_attempts_head_sha: str | None = None
     dispositions: tuple[Mapping[str, object], ...] = ()
     continuation_grants: tuple[Mapping[str, object], ...] = ()
     transaction: ReviewTransaction | None = None
@@ -745,14 +614,24 @@ class SessionRecord:
         for label in (
             "completed_initial_reviews",
             "completed_verification_rounds",
-            "failed_attempts",
         ):
             _require_bounded_int(
                 getattr(self, label),
                 label=label,
                 minimum=0,
-                maximum=MAX_FAILED_ATTEMPTS,
+                maximum=DIAGNOSTIC_ROUND_CEILING,
             )
+        _require_bounded_int(
+            self.failed_attempts,
+            label="failed_attempts",
+            minimum=0,
+            maximum=MAX_FAILED_ATTEMPTS,
+        )
+        if (
+            self.failed_attempts_head_sha is not None
+            and not _DISPOSITION_HEAD_RE.fullmatch(self.failed_attempts_head_sha)
+        ):
+            raise ReviewInputError("failed_attempts_head_sha is invalid")
         _require_bounded_int(
             self.generation, label="generation", minimum=0, maximum=MAX_GENERATION
         )
@@ -795,17 +674,11 @@ class SessionRecord:
         _require_bool(self.operator_paused, label="operator_paused")
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
-        normalized_grants = _stored_continuation_grants(self.continuation_grants)
-        object.__setattr__(self, "continuation_grants", normalized_grants)
-        for grant_data in normalized_grants:
-            grant = ContinuationGrant.from_dict(grant_data)
-            if (
-                _parse_aware_datetime(
-                    grant.expires_at, label="continuation grant expires_at"
-                )
-                > expires
-            ):
-                raise ReviewInputError("continuation grant exceeds session expiry")
+        object.__setattr__(
+            self,
+            "continuation_grants",
+            _stored_continuation_grants(self.continuation_grants),
+        )
         object.__setattr__(
             self,
             "convergence_history",
@@ -848,6 +721,15 @@ class SessionRecord:
             self.dispositions or self.continuation_grants
         ):
             raise ReviewInputError("operator-paused session record has C6 fields")
+        if (
+            self._digest_shape != "current"
+            and self.failed_attempts_head_sha is not None
+        ):
+            # Only the current payload covers the per-head attempt scope, so a
+            # record carrying one must never be written under an older shape.
+            raise ReviewInputError(
+                "session failed-attempt head requires the current digest shape"
+            )
         if self._digest_shape != "current" and self.convergence_history is not None:
             # Only the current payload covers the convergence history, so a
             # record carrying one must never be written under the legacy or
@@ -883,6 +765,8 @@ class SessionRecord:
         payload = self._legacy_payload()
         payload["operator_paused"] = self.operator_paused
         payload["dispositions"] = list(self.dispositions)
+        if self.failed_attempts_head_sha is not None:
+            payload["failed_attempts_head_sha"] = self.failed_attempts_head_sha
         if self.continuation_grants:
             payload["continuation_grants"] = list(self.continuation_grants)
         if self.transaction is not None:
@@ -934,6 +818,7 @@ class SessionRecord:
         updated_at: str,
         expires_at: str,
         operator_paused: bool = False,
+        failed_attempts_head_sha: str | None = None,
         dispositions: Sequence[Mapping[str, object]] = (),
         continuation_grants: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
@@ -959,6 +844,8 @@ class SessionRecord:
             "operator_paused": operator_paused,
             "dispositions": list(normalized_dispositions),
         }
+        if failed_attempts_head_sha is not None:
+            payload["failed_attempts_head_sha"] = failed_attempts_head_sha
         if normalized_grants:
             payload["continuation_grants"] = list(normalized_grants)
         if transaction is not None:
@@ -991,6 +878,7 @@ class SessionRecord:
             expires_at=expires_at,
             record_sha256=_digest_payload(payload),
             operator_paused=operator_paused,
+            failed_attempts_head_sha=failed_attempts_head_sha,
             dispositions=normalized_dispositions,
             continuation_grants=normalized_grants,
             transaction=transaction,
@@ -1013,11 +901,13 @@ class SessionRecord:
             repository_id=self.repository_id,
         )
 
-    def to_round_state(self, **flags: bool) -> RoundSessionState:
+    def to_round_state(
+        self, *, head_sha: str | None = None, **flags: bool
+    ) -> RoundSessionState:
         return RoundSessionState(
             completed_initial_reviews=self.completed_initial_reviews,
             completed_verification_rounds=self.completed_verification_rounds,
-            failed_attempts=self.failed_attempts,
+            failed_attempts=failed_attempts_for_head(self, head_sha),
             same_head_duplicate=bool(flags.get("same_head_duplicate", False)),
             publication_recovery=bool(flags.get("publication_recovery", False)),
             transport_or_structural_retry=bool(
@@ -1046,13 +936,18 @@ class SessionRecord:
         has_grants = "continuation_grants" in value
         has_transaction = "transaction" in value
         has_history = "convergence_history" in value
+        has_attempt_head = value.get("failed_attempts_head_sha") is not None
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
                 "session record dispositions require operator_paused"
             )
         digest_shape = (
             "current"
-            if has_dispositions or has_grants or has_transaction or has_history
+            if has_dispositions
+            or has_grants
+            or has_transaction
+            or has_history
+            or has_attempt_head
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1087,13 +982,13 @@ class SessionRecord:
                 value.get("completed_initial_reviews", 0),
                 label="completed_initial_reviews",
                 minimum=0,
-                maximum=MAX_FAILED_ATTEMPTS,
+                maximum=DIAGNOSTIC_ROUND_CEILING,
             ),
             completed_verification_rounds=_require_bounded_int(
                 value.get("completed_verification_rounds", 0),
                 label="completed_verification_rounds",
                 minimum=0,
-                maximum=MAX_FAILED_ATTEMPTS,
+                maximum=DIAGNOSTIC_ROUND_CEILING,
             ),
             failed_attempts=_require_bounded_int(
                 value.get("failed_attempts", 0),
@@ -1115,6 +1010,11 @@ class SessionRecord:
             expires_at=str(value.get("expires_at", "")),
             record_sha256=str(value.get("record_sha256", "")),
             operator_paused=_operator_paused(value.get("operator_paused", False)),
+            failed_attempts_head_sha=(
+                None
+                if value.get("failed_attempts_head_sha") is None
+                else str(value["failed_attempts_head_sha"])
+            ),
             dispositions=_stored_dispositions(value.get("dispositions", [])),
             continuation_grants=_stored_continuation_grants(
                 value.get("continuation_grants", [])
@@ -1143,6 +1043,7 @@ class SessionRecord:
         reservation_id: str | None = None,
         reserved_slot: str | None = None,
         last_committed_reservation_id: str | None = None,
+        failed_attempts_head_sha: str | None = None,
         dispositions: Sequence[Mapping[str, object]] = (),
         continuation_grants: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
@@ -1177,6 +1078,7 @@ class SessionRecord:
             updated_at=created_stamp,
             expires_at=_format_datetime(expires),
             operator_paused=False,
+            failed_attempts_head_sha=failed_attempts_head_sha,
             dispositions=dispositions,
             continuation_grants=continuation_grants,
             transaction=transaction,
@@ -1195,6 +1097,7 @@ class SessionRecord:
         reserved_slot: str | None | object = ...,
         last_committed_reservation_id: str | None | object = ...,
         operator_paused: bool | None = None,
+        failed_attempts_head_sha: str | None = None,
         dispositions: Sequence[Mapping[str, object]] | None = None,
         continuation_grants: Sequence[Mapping[str, object]] | None = None,
         transaction: ReviewTransaction | None | object = ...,
@@ -1239,6 +1142,11 @@ class SessionRecord:
             expires_at=self.expires_at,
             operator_paused=(
                 self.operator_paused if operator_paused is None else operator_paused
+            ),
+            failed_attempts_head_sha=(
+                self.failed_attempts_head_sha
+                if failed_attempts_head_sha is None
+                else failed_attempts_head_sha
             ),
             dispositions=(self.dispositions if dispositions is None else dispositions),
             continuation_grants=(
@@ -1324,6 +1232,7 @@ class SessionLedger(Protocol):
         slot: str,
         reservation_id: str,
         expected_generation: int,
+        head_sha: str | None = None,
         now: datetime | None = None,
     ) -> SessionRecord: ...
 
@@ -1387,15 +1296,39 @@ def next_session_generation(record: SessionRecord) -> int:
     return _next_generation(record)
 
 
+def _failed_attempt_scope(
+    record: SessionRecord, head_sha: str | None
+) -> dict[str, Any]:
+    """Return the failed-attempt bookkeeping a reservation for this head owes.
+
+    The retry budget belongs to the head that burned it.  A changed head
+    starts a fresh per-invocation budget instead of inheriting another head's
+    failures, and a record written before per-head scoping carries no head at
+    all, so an upgrade never keeps an obsolete cumulative count.
+    """
+
+    if head_sha is None or record.failed_attempts_head_sha == head_sha:
+        return {}
+    return {"failed_attempts": 0, "failed_attempts_head_sha": head_sha}
+
+
+def failed_attempts_for_head(record: SessionRecord, head_sha: str | None) -> int:
+    """Return the failed attempts an admission decision may hold against a head."""
+
+    if record.failed_attempts_head_sha is None:
+        return 0
+    if head_sha is not None and record.failed_attempts_head_sha != head_sha:
+        return 0
+    return record.failed_attempts
+
+
 def mutate_reserved(
     record: SessionRecord,
     *,
     slot: str,
     reservation_id: str,
     expected_generation: int,
-    continuation_command_id: str | None = None,
-    continuation_head_sha: str | None = None,
-    continuation_policy_digest: str | None = None,
+    head_sha: str | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
     if record.last_committed_reservation_id == reservation_id:
@@ -1418,128 +1351,13 @@ def mutate_reserved(
     if slot not in RESERVATION_SLOTS:
         raise ReviewInputError("reserved_slot is invalid")
     _reservation_id(reservation_id, label="reservation_id")
-    grants = record.continuation_grants
-    next_generation = _next_generation(record)
-    if continuation_command_id is not None:
-        if (
-            continuation_head_sha is None
-            or continuation_policy_digest is None
-            or slot != "verification"
-        ):
-            raise ReviewInputError("continuation grant reservation is invalid")
-        consumed = False
-        replaced_grants: list[dict[str, object]] = []
-        for raw in grants:
-            grant = ContinuationGrant.from_dict(raw)
-            if grant.command_id == continuation_command_id:
-                if not grant.active_for(
-                    head_sha=continuation_head_sha,
-                    policy_digest=continuation_policy_digest,
-                    now=now,
-                ):
-                    raise ReviewInputError("continuation grant is unavailable")
-                grant = grant.consume(
-                    reservation_id=reservation_id, generation=next_generation
-                )
-                consumed = True
-            replaced_grants.append(grant.to_dict())
-        if not consumed:
-            raise ReviewInputError("continuation grant is unavailable")
-        grants = tuple(replaced_grants)
-    return record.evolve(
-        now=now,
-        generation=next_generation,
-        reservation_id=reservation_id,
-        reserved_slot=slot,
-        continuation_grants=grants,
-    )
-
-
-def issue_continuation_grant(
-    record: SessionRecord,
-    *,
-    command_id: str,
-    actor: str,
-    head_sha: str,
-    policy_digest: str,
-    now: datetime | None = None,
-) -> SessionRecord:
-    """Durably issue an idempotent one-use grant for an authenticated command."""
-
-    grant = ContinuationGrant.issue(
-        command_id=command_id,
-        actor=actor,
-        head_sha=head_sha,
-        policy_digest=policy_digest,
-        now=now,
-    )
-    session_expires = _parse_aware_datetime(record.expires_at, label="expires_at")
-    if (
-        _parse_aware_datetime(grant.expires_at, label="continuation grant expires_at")
-        > session_expires
-    ):
-        grant = replace(grant, expires_at=record.expires_at)
-    existing = tuple(
-        ContinuationGrant.from_dict(raw) for raw in record.continuation_grants
-    )
-    for item in existing:
-        if item.command_id != grant.command_id:
-            continue
-        if (
-            item.actor == grant.actor
-            and item.head_sha == grant.head_sha
-            and item.policy_digest == grant.policy_digest
-        ):
-            return record
-        raise ReviewInputError("continuation command_id conflicts with persisted grant")
-    now_value = _aware_now(now)
-    if any(
-        item.consumed_reservation_id is None
-        and _parse_aware_datetime(
-            item.expires_at, label="continuation grant expires_at"
-        )
-        > now_value
-        and item.head_sha == grant.head_sha
-        and item.policy_digest == grant.policy_digest
-        for item in existing
-    ):
-        raise ReviewInputError("continuation grant is already pending")
-    # A grant for a prior head or policy cannot ever become active again. A
-    # newly authenticated command may supersede that stale pending grant so a
-    # head advance does not strand the session until the old TTL expires.
-    # The bounded record permits at most one unconsumed grant. A same-scope
-    # pending grant was rejected above; any remaining unconsumed grant is
-    # therefore the stale scope being superseded. Preserve consumed history
-    # while dropping only that pending authority.
-    retained = tuple(
-        item for item in existing if item.consumed_reservation_id is not None
-    )
-    if len(retained) >= MAX_STORED_CONTINUATION_GRANTS:
-        raise ReviewInputError("continuation grant history limit reached")
     return record.evolve(
         now=now,
         generation=_next_generation(record),
-        operator_paused=False,
-        continuation_grants=(*[item.to_dict() for item in retained], grant.to_dict()),
+        reservation_id=reservation_id,
+        reserved_slot=slot,
+        **_failed_attempt_scope(record, head_sha),
     )
-
-
-def active_continuation_grant(
-    record: SessionRecord,
-    *,
-    head_sha: str | None,
-    policy_digest: str,
-    now: datetime | None = None,
-) -> ContinuationGrant | None:
-    """Return the only pending grant matching the exact current scope."""
-
-    if head_sha is None:
-        return None
-    for raw in record.continuation_grants:
-        grant = ContinuationGrant.from_dict(raw)
-        if grant.active_for(head_sha=head_sha, policy_digest=policy_digest, now=now):
-            return grant
-    return None
 
 
 def mutate_commit(
@@ -1627,7 +1445,6 @@ def prepare_session_round(
     *,
     reservation_id: str,
     now: datetime | None = None,
-    continuation_rounds: int = 0,
     head_sha: str | None = None,
     **state_flags: bool,
 ) -> PreparedSessionRound:
@@ -1641,6 +1458,11 @@ def prepare_session_round(
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
+    retired = sorted({"continuation_rounds"} & set(state_flags))
+    if retired:
+        raise ReviewInputError(
+            "round count continuation is no longer supported: " + ", ".join(retired)
+        )
     loaded = ledger.load(identity, now=now)
     if loaded.status == "missing":
         record = ledger.initialize(identity, now=now)
@@ -1665,22 +1487,9 @@ def prepare_session_round(
         flags.setdefault("paused", True)
     elif record.last_committed_reservation_id == reservation_id and held is None:
         flags.setdefault("same_head_duplicate", True)
-    grant = active_continuation_grant(
-        record,
-        head_sha=head_sha,
-        policy_digest=policy.digest(),
-        now=now,
-    )
-    # A record which has entered the durable-grant protocol never accepts the
-    # caller-controlled compatibility integer.  This prevents an old host
-    # parameter from bypassing a scoped command while preserving its behavior
-    # for legacy/non-hosted callers whose records predate grants.
-    direct_continuation = 0 if record.continuation_grants else continuation_rounds
-    effective_continuation = 1 if grant is not None else direct_continuation
     decision = evaluate_round_admission(
-        record.to_round_state(**flags),
+        record.to_round_state(head_sha=head_sha, **flags),
         policy,
-        continuation_rounds=effective_continuation,
     )
     if (
         policy.mode not in OPERATOR_REVIEW_MODES
@@ -1702,40 +1511,14 @@ def prepare_session_round(
         return PreparedSessionRound(
             record=record, decision=decision, reservation_id=None
         )
-    extra_verification = (
-        grant is not None
-        and record.completed_initial_reviews >= policy.max_completed_initial_reviews
-        and record.completed_verification_rounds
-        >= policy.max_completed_verification_rounds
+    reserved = ledger.reserve(
+        identity,
+        slot=decision.round_kind,
+        reservation_id=reservation_id,
+        expected_generation=record.generation,
+        head_sha=head_sha,
+        now=now,
     )
-    if extra_verification:
-        # ``extra_verification`` implies an active grant; keep the stable id
-        # outside the closure so static and runtime checks agree.
-        if grant is None:
-            raise ReviewInputError("continuation grant is unavailable")
-        grant_command_id = grant.command_id
-        reserved = ledger.replace(
-            identity,
-            lambda current: mutate_reserved(
-                current,
-                slot=decision.round_kind,
-                reservation_id=reservation_id,
-                expected_generation=record.generation,
-                continuation_command_id=grant_command_id,
-                continuation_head_sha=head_sha,
-                continuation_policy_digest=policy.digest(),
-                now=now,
-            ),
-            now=now,
-        )
-    else:
-        reserved = ledger.reserve(
-            identity,
-            slot=decision.round_kind,
-            reservation_id=reservation_id,
-            expected_generation=record.generation,
-            now=now,
-        )
     return PreparedSessionRound(
         record=reserved, decision=decision, reservation_id=reservation_id
     )
@@ -1752,7 +1535,6 @@ def prepare_review_transaction(
     configuration_digest: str,
     evidence_digest: str,
     now: datetime | None = None,
-    continuation_rounds: int = 0,
     **state_flags: bool,
 ) -> PreparedSessionRound:
     """Reserve and bind one logical analysis transaction before inference."""
@@ -1777,7 +1559,6 @@ def prepare_review_transaction(
         policy,
         reservation_id=reservation_id,
         now=now,
-        continuation_rounds=continuation_rounds,
         head_sha=head_sha,
         **state_flags,
     )
@@ -2393,11 +2174,6 @@ def admission_diagnostic(decision: RoundAdmissionDecision) -> str:
     if decision.handoff_reason is not None:
         return decision.handoff_reason
     if decision.handoff:
-        if (
-            decision.remaining_initial_reviews == 0
-            and decision.remaining_verification_rounds == 0
-        ):
-            return "round-budget-exhausted"
         return "incomplete-coverage"
     return "already_published"
 
@@ -2429,6 +2205,7 @@ def record_session_failed_attempt(
     identity: SessionIdentity,
     *,
     reservation_id: str,
+    head_sha: str | None = None,
     expected_generation: int | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
@@ -2464,6 +2241,7 @@ def record_session_failed_attempt(
         slot="failed-attempt",
         reservation_id=fail_id,
         expected_generation=record.generation,
+        head_sha=head_sha,
         now=now,
     )
     return ledger.commit(
@@ -2565,6 +2343,7 @@ class InMemorySessionLedger:
         slot: str,
         reservation_id: str,
         expected_generation: int,
+        head_sha: str | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -2574,6 +2353,7 @@ class InMemorySessionLedger:
                 slot=slot,
                 reservation_id=reservation_id,
                 expected_generation=expected_generation,
+                head_sha=head_sha,
                 now=now,
             ),
             now=now,
@@ -3054,6 +2834,7 @@ class LocalSessionLedger:
         slot: str,
         reservation_id: str,
         expected_generation: int,
+        head_sha: str | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -3063,6 +2844,7 @@ class LocalSessionLedger:
                 slot=slot,
                 reservation_id=reservation_id,
                 expected_generation=expected_generation,
+                head_sha=head_sha,
                 now=now,
             ),
             now=now,
@@ -3105,6 +2887,49 @@ class LocalSessionLedger:
             ),
             now=now,
         )
+
+
+def default_local_session_root(
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Return the per-user state directory that holds local sessions.
+
+    The persistent-local-session command needs one documented location that
+    does not require the caller to invent a ledger path.  Each platform's
+    conventional per-user state directory is used, and no new dependency is
+    introduced to find it.
+    """
+
+    environment = os.environ if environ is None else environ
+    if sys.platform == "darwin":
+        home = environment.get("HOME", "").strip() or _home_directory()
+        if home:
+            return Path(home) / "Library" / "Application Support" / "review-sensei"
+    elif os.name == "nt":
+        base = (
+            environment.get("LOCALAPPDATA", "").strip()
+            or environment.get("APPDATA", "").strip()
+        )
+        if base:
+            return Path(base) / "review-sensei"
+    else:
+        state_home = environment.get("XDG_STATE_HOME", "").strip()
+        if state_home:
+            return Path(state_home) / "review-sensei"
+        home = environment.get("HOME", "").strip() or _home_directory()
+        if home:
+            return Path(home) / ".local" / "state" / "review-sensei"
+    raise ReviewInputError(
+        "no per-user state directory is available; pass --session-ledger "
+        "with an explicit directory"
+    )
+
+
+def _home_directory() -> str:
+    try:
+        return str(Path.home())
+    except RuntimeError:  # pragma: no cover - no resolvable home directory
+        return ""
 
 
 def resolve_local_session_ledger(

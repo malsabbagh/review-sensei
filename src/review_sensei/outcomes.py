@@ -67,6 +67,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "deadline_exceeded",
         "durable_baseline_recovery_required",
         "draft_pr",
+        "failed-attempt-budget-exhausted",
         "fork_not_allowed",
         "human_adjudication_open",
         "incomplete-coverage",
@@ -93,8 +94,6 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "required_fixes_open",
         "review_incomplete",
         "review_threads_incomplete",
-        "round-budget-exhausted",
-        "failed-attempt-budget-exhausted",
         "secret_redacted",
         "skipped_pr_state",
         "skipped_repository_mismatch",
@@ -597,6 +596,53 @@ def run_outcome_exit_code(status: str) -> int:
     return 1 if status in FAILURE_RUN_STATUSES else 0
 
 
+# The local review exit contract is separate from the operational host
+# contract above: 0 means the review completed with no required fixes, 1 means
+# it completed with required fixes remaining, and 2 means it could not complete
+# or needs a human decision.
+REVIEW_EXIT_CLEAN = 0
+REVIEW_EXIT_REQUIRED_FIXES = 1
+REVIEW_EXIT_INCOMPLETE = 2
+COMPLETED_REVIEW_STATUSES = frozenset({"reviewed"})
+_REVIEW_EXIT_REASONS = {
+    "partial": "coverage-partial",
+    "skipped_stale": "change-superseded",
+    "skipped_policy": "skipped-by-policy",
+    "provider_failed": "provider-failed",
+    "budget_exhausted": "resource-budget-exhausted",
+    "publication_failed": "publication-failed",
+    "already_published": "already-published",
+    "action_required": "human-intervention-required",
+}
+
+
+def review_exit_code(*, status: str, required_fixes: bool) -> int:
+    """Return the documented local review exit code for one run outcome.
+
+    Only a run that produced a review document can exit 0 or 1; every other
+    status means this invocation produced no review for its caller.
+    """
+
+    if status not in COMPLETED_REVIEW_STATUSES:
+        return REVIEW_EXIT_INCOMPLETE
+    return REVIEW_EXIT_REQUIRED_FIXES if required_fixes else REVIEW_EXIT_CLEAN
+
+
+def review_exit_reason(*, status: str, diagnostic: str | None = None) -> str | None:
+    """Return the structured reason for a non-completing review exit.
+
+    The reason is a closed token: the published run-outcome diagnostic when the
+    outcome carries one, otherwise the documented reason for the run status.
+    """
+
+    if status in COMPLETED_REVIEW_STATUSES:
+        return None
+    token = sanitize_diagnostic(diagnostic)
+    if token is not None and token != "secret_redacted":
+        return token
+    return _REVIEW_EXIT_REASONS.get(status, "review-incomplete")
+
+
 def render_actions_summary(outcome: RunOutcome) -> str:
     """Return a human-readable Actions summary without source or secrets."""
 
@@ -639,7 +685,7 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
             handle.write(f"outcome_status={outcome.status}\n")
             if outcome.diagnostic is not None:
                 handle.write(f"outcome_diagnostic={outcome.diagnostic}\n")
-    if outcome.status == "action_required":
+    if outcome.status == "action_required" and os.environ.get("GITHUB_ACTIONS"):
         print(
             "::error title=ReviewSensei maintainer attention required::"
             "A maintainer decision is required before another automated pass.",

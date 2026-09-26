@@ -690,6 +690,7 @@ class GitHubIssueCommentSessionLedger:
         slot: str,
         reservation_id: str,
         expected_generation: int,
+        head_sha: str | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -699,6 +700,7 @@ class GitHubIssueCommentSessionLedger:
                 slot=slot,
                 reservation_id=reservation_id,
                 expected_generation=expected_generation,
+                head_sha=head_sha,
                 now=now,
             ),
             now=now,

@@ -28,7 +28,9 @@ identity-bound session state is an execution prerequisite, not a reason to
 fall back to legacy. A default setup-v5 install never hits this case on the
 hosted path: its generated workflow passes `--github-session-ledger`, so a
 `status=action` result for a missing ledger means you are running the bare
-local CLI without that flag, not that a hosted install is broken. These
+local CLI without that flag, not that a hosted install is broken. A local
+review supplies its own ledger only when you ask for one with `--local-session`
+(platform per-user state directory, overridable with `--session-ledger`). These
 diagnostic commands do not initialize or mutate a ledger, reset counters,
 invoke a model, or write to GitHub.
 
@@ -66,3 +68,17 @@ Exit codes:
 | `plan` | `0` | Plan is ready (diff analyzed) |
 | `plan` | `2` | Input or validation error |
 | `plan` | `3` | Plan is incomplete (no diff supplied) |
+| `review` | `0` | The review completed and no required fixes remain |
+| `review` | `1` | The review completed with required fixes remaining |
+| `review` | `2` | The review could not complete, the input was invalid, or an operator must intervene |
+
+`review` exits `1` and `2` print one `review-sensei: reason=<token>` line on
+stderr; the selected `--format` never changes the exit. Exit `2` includes
+`already_published`: a repeated `--local-session` review of an unchanged change
+serves its persisted round instead of paying for a second inference call, so it
+reports that reason and writes no new document. Hosts and launchers that
+select a lane from the historical 0/1 contract pass `--exit-semantics
+operational`: it exits `1` only for the failure statuses
+(`provider_failed`, `budget_exhausted`, `publication_failed`,
+`action_required`) and `0` otherwise, including a completed review with
+required fixes.

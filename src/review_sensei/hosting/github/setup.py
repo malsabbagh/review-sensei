@@ -47,7 +47,7 @@ REQUIRED_SETUP_PERMISSIONS = frozenset(
 )
 SETUP_VERSION = 5
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
-CURRENT_PACKAGE_VERSION = "0.6.8"
+CURRENT_PACKAGE_VERSION = "0.6.9"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
 CONFIG_PATH = ".github/review-sensei/config.yml"
@@ -60,7 +60,7 @@ SETUP_VARIABLES = (
     ("REVIEWSENSEI_MODEL", ""),
     ("REVIEWSENSEI_LOCAL_MODEL", DEFAULT_LOCAL_MODEL),
     ("REVIEWSENSEI_CLOUD_MODEL", DEFAULT_CLOUD_MODEL),
-    ("REVIEWSENSEI_VERSION", "0.6.8"),
+    ("REVIEWSENSEI_VERSION", "0.6.9"),
     ("REVIEWSENSEI_REVIEW_MODE", "merge-focused"),
     ("REVIEWSENSEI_AUTO_REVIEW", "false"),
     ("REVIEWSENSEI_AUTO_APPROVE", "true"),
@@ -1106,7 +1106,7 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue(?:\s+--rounds\s+[01])?|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
                   enable_review = "false"
               else:

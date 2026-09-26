@@ -748,7 +748,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             openrouter_job,
         )
         review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
-        self.assertIn("--provider openrouter --model", review_step)
+        # The review lane selects its canonical backend explicitly, passes the
+        # validated model, and takes the versioned JSON document under the
+        # operational launcher contract.
+        self.assertIn("--provider openrouter", review_step)
+        self.assertIn('--model "$MODEL"', review_step)
+        self.assertIn("--format json", review_step)
+        self.assertIn("--exit-semantics operational", review_step)
         self.assertIn("VALIDATED_MODEL=", review_step)
         self.assertIn(
             "resolved hosted OpenRouter model does not match workflow env",
@@ -777,6 +783,46 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn('--repository-id "$REPOSITORY_ID"', publish_step)
         self.assertIn('--base-branch "$BASE_REF"', publish_step)
+
+    def test_reusable_workflow_review_lanes_pin_the_versioned_json_artifact(self):
+        # The provider lane selects its canonical backend and writes the
+        # versioned JSON document under the operational launcher contract; the
+        # publish step consumes that same path.  A future edit of the format
+        # value would silently change the artifact contract for callers of the
+        # tag-pinned reusable workflow, so the full tuple is pinned here.
+        reusable = _reusable_workflow_text()
+        lanes = (
+            (
+                "cloud",
+                "Run cloud-provider review",
+                "Publish or promote validated review through the broker",
+                "--provider cloud-ollama",
+            ),
+            (
+                "openrouter",
+                "Run OpenRouter-provider review",
+                "Publish or promote validated review through the broker",
+                "--provider openrouter",
+            ),
+            (
+                "local",
+                "Prepare and run trusted local review",
+                "Publish or promote trusted local review and learnings",
+                "--provider local-ollama",
+            ),
+        )
+        for job_id, review_step_name, publish_step_name, provider_flag in lanes:
+            with self.subTest(job=job_id):
+                job = _job_section(reusable, job_id)
+                review_step = _step_block(job, review_step_name)
+                self.assertIn(provider_flag, review_step)
+                self.assertIn("--format json", review_step)
+                self.assertIn("--exit-semantics operational", review_step)
+                self.assertIn("--output review.json", review_step)
+                publish_step = _step_block(job, publish_step_name)
+                self.assertIn("--result review.json", publish_step)
+                upload_step = _step_block(job, "Upload opt-in review artifact")
+                self.assertIn("\n            review.json\n", upload_step)
 
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
@@ -808,7 +854,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
-            self.assertEqual(job.count(pull_request_env), 5)
+            # Provider review, publication admission, publication, and the
+            # mention reply each carry the pull request env; the retired
+            # budget-admission step was the fifth.
+            self.assertEqual(job.count(pull_request_env), 4)
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
@@ -1017,11 +1066,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             "&& inputs.enable_mention_replies == 'true')"
         )
         self.assertEqual(text.count(expected_gate), 3)
+        # One gated provider-review step per provider job. The retired
+        # budget-admission step carried this same gate, so the count is exactly
+        # the number of provider jobs.
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
             ),
-            6,
+            3,
         )
         self.assertEqual(
             text.count(
@@ -1703,13 +1755,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
-        budget_guard = (
-            " && steps.budget-admission.outcome == 'success'"
-            " && steps.budget-admission.outputs.spent != 'true'"
-        )
         handoff_guard = (
-            budget_guard
-            + " && steps.provider-review.outputs.outcome_status != 'action_required'"
+            " && steps.provider-review.outputs.outcome_status != 'action_required'"
         )
         publish_if = (
             admission_if
@@ -1776,22 +1823,12 @@ class ReusablePublishGuardTests(unittest.TestCase):
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
         self.assertEqual(cloud_confirm, local_confirm)
 
-    def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
+    def test_review_starts_without_a_spent_budget_precheck(self):
         text = _reusable_workflow_text()
         self.assertNotIn("def automatic_budget_spent", text)
-        blocks = [
-            block for block in _run_blocks(text) if "budget_admission decide" in block
-        ]
-        self.assertEqual(len(blocks), 3)
-        self.assertEqual(len(set(blocks)), 1)
-        block = blocks[0]
-        self.assertIn("ENABLE_GITHUB_WRITES", block)
-        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN:-", block)
-        self.assertIn("per_page=100&page=", block)
-        self.assertNotIn("grep -F", block)
-        self.assertIn("budget_admission assemble", block)
-        self.assertIn("budget_admission notice-status", block)
-        self.assertIn("budget_admission render-notice", block)
+        self.assertNotIn("budget-admission", text)
+        self.assertNotIn("budget_admission", text)
+        self.assertNotIn("automatic review budget", text)
 
         for job_id, review_name in (
             ("cloud", "Run cloud-provider review"),
@@ -1799,18 +1836,12 @@ class ReusablePublishGuardTests(unittest.TestCase):
             ("local", "Prepare and run trusted local review"),
         ):
             with self.subTest(job=job_id):
-                names = _named_steps(_job_section(text, job_id))
-                review_index = names.index(review_name)
-                self.assertEqual(
-                    names[review_index - 1],
-                    "Decide whether the automatic review budget is already spent",
-                )
                 review = _step_block(_job_section(text, job_id), review_name)
                 self.assertIn(
-                    "steps.budget-admission.outcome == 'success'"
-                    " && steps.budget-admission.outputs.spent != 'true'",
+                    "if: inputs.operation == 'review' && inputs.enable_review == 'true'",
                     review,
                 )
+                self.assertNotIn("spent", review)
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):

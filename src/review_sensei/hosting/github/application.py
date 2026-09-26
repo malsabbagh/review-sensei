@@ -142,7 +142,6 @@ class GitHubApplication:
         changed_paths: Sequence[str] | None = None,
         related_paths: Sequence[str] | None = None,
         evidence_confirmed_concerns: Sequence[str] = (),
-        continuation_rounds: int = 0,
         configuration_context: Mapping[str, object] | None = None,
         evidence_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
@@ -406,7 +405,7 @@ class GitHubApplication:
                     identity,
                     policy,
                     reservation_id=reservation,
-                    continuation_rounds=continuation_rounds,
+                    head_sha=head_sha,
                     coverage_complete=flags["coverage_complete"],
                     independently_approval_eligible=flags[
                         "independently_approval_eligible"
@@ -419,10 +418,7 @@ class GitHubApplication:
                             status="handoff",
                             diagnostic=admission_diagnostic(prepared.decision),
                         ),
-                        _shadow_observation(
-                            _shadow_state(prepared, flags),
-                            continuation_rounds=continuation_rounds,
-                        ),
+                        _shadow_observation(_shadow_state(prepared, flags)),
                     )
             except BaseException as preparation_error:
                 cleanup_error = self._abort_held_session_reservation(
@@ -557,10 +553,7 @@ class GitHubApplication:
                     status="handoff",
                     diagnostic="identity-bound transaction required",
                 ),
-                _shadow_observation(
-                    _shadow_state(prepared, flags),
-                    continuation_rounds=continuation_rounds,
-                ),
+                _shadow_observation(_shadow_state(prepared, flags)),
             )
         # A persisted baseline is not self-authenticating for a new head: the
         # caller must supply the independently constructed current context key.
@@ -747,10 +740,7 @@ class GitHubApplication:
                             transaction_id=durable_transaction.transaction_id,
                             generation=admitted_record.generation,
                         ),
-                        _shadow_observation(
-                            _shadow_state(prepared, flags),
-                            continuation_rounds=continuation_rounds,
-                        ),
+                        _shadow_observation(_shadow_state(prepared, flags)),
                     )
             publisher_has_prepare = callable(getattr(self.reviewer, "prepare", None))
             publisher_result = (
@@ -858,7 +848,10 @@ class GitHubApplication:
                 else:
                     try:
                         record_session_failed_attempt(
-                            ledger, identity, reservation_id=reservation
+                            ledger,
+                            identity,
+                            reservation_id=reservation,
+                            head_sha=head_sha,
                         )
                     except BaseException as cleanup_error:
                         publication_error.add_note(
@@ -912,10 +905,7 @@ class GitHubApplication:
             )
         return _with_shadow(
             publication,
-            _shadow_observation(
-                _shadow_state(prepared, flags),
-                continuation_rounds=continuation_rounds,
-            ),
+            _shadow_observation(_shadow_state(prepared, flags)),
         )
 
     def apply_maintainer_command(
@@ -1112,10 +1102,7 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "hosted maintainer mutations require atomic session initialization"
             )
-        command_policy = ReviewConvergencePolicy() if hosted_mutation else None
-        _record, result = apply_session_command(
-            ledger, identity, command, policy=command_policy
-        )
+        _record, result = apply_session_command(ledger, identity, command)
         return result
 
     def _check_capability_token(self, exchange_input: str) -> str | None:
@@ -1523,9 +1510,9 @@ def resolve_hosted_session_ledger(
     Publication reads the identity-bound transaction from this durability
     adapter, and the analysis checkpoint writes it there, so both boundaries
     of one logical review resolve the same issue comment. A fresh hosted job
-    therefore continues the rounds, baselines, and grants durable earlier
-    jobs recorded instead of depending on a runner-local file that the next
-    runner cannot read.
+    therefore continues the rounds, baselines, and dispositions durable
+    earlier jobs recorded instead of depending on a runner-local file that
+    the next runner cannot read.
     """
 
     from .session_ledger import GitHubIssueCommentSessionLedger
@@ -1659,10 +1646,8 @@ def _shadow_state(prepared: object, flags: Mapping[str, bool]) -> RoundSessionSt
 
 def _shadow_observation(
     state: RoundSessionState,
-    *,
-    continuation_rounds: int = 0,
 ) -> dict[str, object] | None:
-    decision = observe_shadow_admission(state, continuation_rounds=continuation_rounds)
+    decision = observe_shadow_admission(state)
     if decision is None:
         return None
     return {

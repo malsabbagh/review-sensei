@@ -1,20 +1,30 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
 import re
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 from .baseline import (
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
     plan_verification_scope,
+)
+from .configuration import (
+    BACKEND_DEFAULTS,
+    IGNORED_PROVIDER_ENVIRONMENT_SETTINGS,
+    documented_backend_names,
+    internal_backend_names,
+    load_configuration,
+    resolve_inference,
 )
 from .context import (
     ContextSnapshot,
@@ -42,6 +52,8 @@ from .models import (
 )
 from .outcomes import (
     DEFAULT_RECOVERY_TTL_SECONDS,
+    REVIEW_EXIT_INCOMPLETE,
+    REVIEW_EXIT_REQUIRED_FIXES,
     RecoveryArtifact,
     ResourceBudget,
     RunOutcome,
@@ -49,9 +61,12 @@ from .outcomes import (
     emit_host_outcome,
     load_recovery_artifact,
     recovery_expires_at,
+    review_exit_code,
+    review_exit_reason,
     run_outcome_exit_code,
 )
 from .planning import DEFAULT_TOTAL_WORK_BUDGET, related_paths_for_change
+from .presentation import RENDER_FORMATS, render_review
 from .provider_config import (
     openrouter_policy_from_env,
     openrouter_timeout_default,
@@ -221,9 +236,12 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
         raise ReviewInputError(
             "--allow-custom-endpoint cannot be combined with --profile"
         )
-    provider_name = str(args.provider).strip().lower()
     explicit = getattr(args, "_explicit_cli_options", None)
     if _cli_option_set(argv, "--provider", explicit=explicit):
+        provider_name = (
+            _adapter_for_provider(getattr(args, "provider", None))
+            or str(args.provider).strip().lower()
+        )
         if provider_name == "fixture":
             raise ReviewInputError(
                 "--provider fixture cannot be combined with --profile"
@@ -233,12 +251,6 @@ def _validate_profile_cli_args(args: argparse.Namespace, argv: list[str]) -> Non
                 f"--provider {provider_name} does not match profile "
                 f"'{selected.name}' (requires {selected.provider})"
             )
-    elif provider_name != selected.provider:
-        raise ReviewInputError(
-            f"profile '{selected.name}' requires --provider {selected.provider}; "
-            f"the current default is {provider_name!r} from --provider or "
-            "REVIEWSENSEI_PROVIDER"
-        )
     if _cli_option_set(argv, "--api-key-env", explicit=explicit):
         actual = getattr(args, "api_key_env", None)
         expected = selected.api_key_env
@@ -336,7 +348,7 @@ def _add_allow_custom_endpoint_argument(parser: argparse.ArgumentParser) -> None
         action="store_true",
         help=(
             "Allow an openai-compatible base URL outside api.openai.com; "
-            "required for OPENAI_BASE_URL or --base-url that is not allowlisted"
+            "required for an explicit --base-url that is not allowlisted"
         ),
     )
 
@@ -487,6 +499,327 @@ def _provider_settings_from_args(
     )
 
 
+def _canonical_backend_adapters() -> Mapping[str, str]:
+    """Return the provider adapter for every packaged canonical backend.
+
+    The backend names come from the packaged configuration table, so a
+    backend added there cannot be forgotten here without failing loudly.
+    """
+
+    adapters = {
+        "local-ollama": "ollama",
+        "cloud-ollama": "ollama",
+        "openrouter": "openrouter",
+        "openai-compatible": "openai-compatible",
+        "fixture": "fixture",
+    }
+    missing = sorted(set(BACKEND_DEFAULTS) - set(adapters))
+    if missing:
+        raise ReviewSenseiError(
+            "canonical backends lack a provider adapter mapping: " + ", ".join(missing)
+        )
+    return {backend: adapters[backend] for backend in BACKEND_DEFAULTS}
+
+
+_CANONICAL_BACKEND_ADAPTERS: Mapping[str, str] = _canonical_backend_adapters()
+# The canonical resolver owns backend, model, endpoint, and credential
+# selection.  Only the two documented overrides and the credential variables
+# participate, so a retired provider-mode or provider-specific model chain has
+# no runtime effect on a local review.
+_REVIEW_ENVIRON_KEYS = (
+    "REVIEWSENSEI_PROVIDER",
+    "REVIEWSENSEI_MODEL",
+    "OLLAMA_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+)
+
+
+def _review_environ() -> dict[str, str]:
+    return {
+        name: os.environ[name] for name in _REVIEW_ENVIRON_KEYS if name in os.environ
+    }
+
+
+def _warn_ignored_provider_environment() -> None:
+    """Report retired provider variables a shell or workflow still exports.
+
+    The resolver ignores them, so an upgraded caller would otherwise infer a
+    different backend, model, endpoint, or timeout than it asked for.  The
+    warning names the supported replacement instead of failing the review,
+    because installed workflows still export provider-mode variables.
+    """
+
+    for name, replacement in IGNORED_PROVIDER_ENVIRONMENT_SETTINGS.items():
+        if os.environ.get(name, "").strip():
+            print(
+                f"review-sensei: warning: {name} has no effect on a review; "
+                f"{replacement}",
+                file=sys.stderr,
+            )
+
+
+def _explicit_cli_value(
+    args: argparse.Namespace, argv: list[str], name: str
+) -> object | None:
+    """Return one option's value only when the caller passed it explicitly."""
+
+    explicit = getattr(args, "_explicit_cli_options", None)
+    if not _cli_option_set(argv, f"--{name}", explicit=explicit):
+        return None
+    return getattr(args, name.replace("-", "_"))
+
+
+def _adapter_for_provider(value: object) -> str | None:
+    """Return the registered adapter name for a canonical backend name."""
+
+    if not isinstance(value, str):
+        return None
+    return _CANONICAL_BACKEND_ADAPTERS.get(value.strip().lower())
+
+
+def resolve_review_inference(
+    args: argparse.Namespace,
+    argv: list[str],
+) -> tuple[ProviderSettings, str | None]:
+    """Resolve one review invocation's canonical inference configuration.
+
+    Returns the provider settings the registry consumes and the resolved API
+    key.  Named profiles keep their documented preset behavior; every other
+    invocation resolves the canonical backend, model, endpoint, credential,
+    and timeout from the command line, the two supported environment
+    overrides, the selected configuration file, and the packaged defaults.
+    """
+
+    explicit = getattr(args, "_explicit_cli_options", None)
+    _warn_ignored_provider_environment()
+    cli_provider = _explicit_cli_value(args, argv, "provider")
+    cli_model = _explicit_cli_value(args, argv, "model")
+    cli_base_url = _explicit_cli_value(args, argv, "base-url")
+    cli_api_key_env = _explicit_cli_value(args, argv, "api-key-env")
+    for option, value in (
+        ("--provider", cli_provider),
+        ("--model", cli_model),
+        ("--base-url", cli_base_url),
+        ("--api-key-env", cli_api_key_env),
+    ):
+        if isinstance(value, str) and not value.strip():
+            raise ReviewInputError(f"{option} requires a non-empty value")
+    if getattr(args, "profile", None):
+        profile = get_provider_profile(str(args.profile))
+        adapter = _adapter_for_provider(getattr(args, "provider", None))
+        if adapter is not None and adapter != profile.provider:
+            raise ReviewInputError(
+                f"--provider {args.provider} does not match profile "
+                f"'{profile.name}' (requires {profile.provider})"
+            )
+        args.provider = profile.provider
+        if not _cli_option_set(argv, "--model", explicit=explicit):
+            args.model = profile.model
+        api_key = _resolve_api_key(args, argv=argv)
+        return (
+            _provider_settings_from_args(
+                args,
+                api_key=api_key,
+                fixture_response=args.fixture_response,
+                argv=argv,
+            ),
+            api_key,
+        )
+    configuration = load_configuration(getattr(args, "config", None))
+    resolved = resolve_inference(
+        configuration,
+        cli_provider=cli_provider if isinstance(cli_provider, str) else None,
+        cli_model=cli_model if isinstance(cli_model, str) else None,
+        environ=_review_environ(),
+    )
+    args.provider = _CANONICAL_BACKEND_ADAPTERS[resolved.backend]
+    args.model = cli_model if isinstance(cli_model, str) else resolved.model
+    args.base_url = (
+        cli_base_url if isinstance(cli_base_url, str) else None
+    ) or resolved.base_url
+    args.api_key_env = (
+        cli_api_key_env if isinstance(cli_api_key_env, str) else None
+    ) or resolved.credential_env
+    cli_timeout = _explicit_cli_value(args, argv, "timeout-seconds")
+    args.timeout_seconds = (
+        cli_timeout
+        if isinstance(cli_timeout, int | float)
+        else resolved.timeout_seconds
+    )
+    if resolved.backend == "fixture":
+        if not args.fixture_response:
+            raise ReviewInputError("--provider fixture requires --fixture-response")
+        api_key = None
+    else:
+        if args.fixture_response is not None:
+            raise ReviewInputError(
+                "--fixture-response is only valid with --provider fixture"
+            )
+        api_key = _resolve_api_key(args, argv=argv)
+        if not resolved.credential_required:
+            # A backend that requires no credential never receives one
+            # implicitly: a cloud key exported for another backend must not
+            # travel to a local endpoint.  An explicit --api-key-env still
+            # passes the named variable through.
+            if not _cli_option_set(argv, "--api-key-env", explicit=explicit):
+                api_key = None
+        elif not api_key:
+            raise ReviewInputError(
+                f"environment variable {args.api_key_env} is unavailable"
+            )
+    return (
+        _provider_settings_from_args(
+            args,
+            api_key=api_key,
+            fixture_response=args.fixture_response,
+            argv=argv,
+        ),
+        api_key,
+    )
+
+
+DEFAULT_LOCAL_SESSION_SLOT = 1
+
+
+def _review_exit_status(
+    args: argparse.Namespace,
+    outcome: RunOutcome,
+    *,
+    required_fixes: bool = False,
+) -> int:
+    """Return the review exit code and report its structured reason.
+
+    The local review contract returns 0 for a completed review with no
+    required fixes, 1 when required fixes remain, and 2 when the review could
+    not complete or needs a human decision.  Host and launcher callers select
+    the separate operational 0/1 contract with ``--exit-semantics``.
+    """
+
+    if getattr(args, "exit_semantics", "review") == "operational":
+        return run_outcome_exit_code(outcome.status)
+    code = review_exit_code(status=outcome.status, required_fixes=required_fixes)
+    if code == REVIEW_EXIT_INCOMPLETE:
+        reason = review_exit_reason(
+            status=outcome.status, diagnostic=outcome.diagnostic
+        )
+    elif code == REVIEW_EXIT_REQUIRED_FIXES:
+        reason = "required-fixes-remain"
+    else:
+        return code
+    print(f"review-sensei: reason={reason}: {outcome.status}", file=sys.stderr)
+    return code
+
+
+class _SemanticsScanError(Exception):
+    """Internal: the quiet scanner below rejected the invocation."""
+
+
+class _QuietArgumentParser(argparse.ArgumentParser):
+    """Argument parser that reports failures without writing to stderr."""
+
+    def error(self, message: str) -> NoReturn:
+        raise _SemanticsScanError(message)
+
+
+def _operational_exit_semantics(argv: list[str]) -> bool:
+    """Detect the operational contract when the flags could not be parsed.
+
+    A dedicated scanner resolves the option the same way the review parser
+    would, so abbreviations and ``--exit-semantics=operational`` spellings
+    stay classified even when the review invocation itself was rejected.
+    """
+
+    scanner = _QuietArgumentParser(add_help=False)
+    scanner.add_argument("--exit-semantics", choices=("review", "operational"))
+    try:
+        namespace, _ = scanner.parse_known_args(argv)
+    except _SemanticsScanError:
+        return False
+    return namespace.exit_semantics == "operational"
+
+
+def _local_session_repository() -> str:
+    """Return the local session identity for the current working copy.
+
+    The identity follows the working copy root's directory name, so renaming
+    or moving that directory starts a new durable session.  Inside a Git
+    checkout the root is the directory that holds ``.git``, which keeps one
+    identity when the CLI is invoked from a subdirectory.
+    """
+
+    root = Path.cwd()
+    for candidate in (root, *root.parents):
+        if (candidate / ".git").exists():
+            root = candidate
+            break
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", root.name).strip("-._")
+    return f"local/{(slug or 'workspace')[:90]}"
+
+
+_LOCAL_REVISION = re.compile(r"^[a-f0-9]{40}$")
+
+
+def _local_change_revision(label: str, content: str) -> str:
+    """Return the derived 40-character revision for one local change.
+
+    The value is a truncated SHA-256 over the label and content, not a Git
+    object id.  The transaction gate, the durable session ledger, and the
+    context snapshots all validate identity as 40 lowercase hexadecimal
+    characters, so the derived shape is deliberate and validated here: a
+    future change to the derivation fails at its source instead of surfacing
+    as a misleading commit-SHA error from the transaction gate.
+    """
+
+    payload = (label + "\0" + content).encode("utf-8")
+    # Not a Git object id; the 40-hex shape is the ledger's identity contract.
+    revision = hashlib.sha256(payload).hexdigest()[:40]
+    if _LOCAL_REVISION.fullmatch(revision) is None:
+        raise ReviewInputError(
+            "the derived local session revision is not a 40-character "
+            "lowercase hexadecimal identity"
+        )
+    return revision
+
+
+def _prepare_local_session(
+    args: argparse.Namespace, *, hosted_session_ledger: bool
+) -> None:
+    """Fill in the identity and storage a persistent local session needs.
+
+    A local session reuses the durable session/transaction state under the
+    platform per-user state directory, so the caller never has to supply a
+    ledger path, a pull-request identity, or commit SHAs.  The head revision
+    is derived from the supplied diff, so the same change stays stable across
+    repeated local runs and an edited diff is a new round against the same
+    stable local base revision.
+    """
+
+    if hosted_session_ledger:
+        raise ReviewInputError(
+            "--local-session cannot be combined with --github-session-ledger"
+        )
+    from .session import default_local_session_root
+
+    if args.session_ledger is None:
+        args.session_ledger = default_local_session_root()
+    if not args.repository:
+        args.repository = _local_session_repository()
+    if args.pull_request is None:
+        args.pull_request = DEFAULT_LOCAL_SESSION_SLOT
+    if args.head_sha is None:
+        diff = read_bounded_utf8(
+            args.diff,
+            maximum=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
+            label="diff",
+        )
+        args.head_sha = _local_change_revision("review-sensei-local-head", diff)
+    if args.base_sha is None:
+        args.base_sha = _local_change_revision(
+            "review-sensei-local-base", args.repository
+        )
+
+
 def _checkpoint_cache_request(
     request: ReviewRequest,
     *,
@@ -589,16 +922,6 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _continuation_rounds(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed not in {0, 1}:
-        raise argparse.ArgumentTypeError("must be 0 or 1")
-    return parsed
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
@@ -617,6 +940,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--diff", type=Path, help="Path to a unified diff file")
     parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "Canonical .reviewsensei.yml configuration file "
+            "(default: ./.reviewsensei.yml)"
+        ),
+    )
+    parser.add_argument(
         "--profile",
         default=None,
         help=(
@@ -625,11 +956,19 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
+        "--provider",
+        default=None,
+        help=(
+            "Canonical inference backend: "
+            f"{', '.join(documented_backend_names())}, or "
+            f"{', '.join(internal_backend_names())} for a repository test "
+            "seam. Defaults to inference.backend, the REVIEWSENSEI_PROVIDER "
+            "override, or 'local-ollama'"
+        ),
     )
-    parser.add_argument("--base-url", default=_default_ollama_base_url())
-    parser.add_argument("--model", default=_default_ollama_model())
-    parser.add_argument("--api-key-env", default="OLLAMA_API_KEY")
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--api-key-env", default=None)
     parser.add_argument(
         "--fixture-response",
         type=Path,
@@ -641,7 +980,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout-seconds",
         type=_positive_float,
-        default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
+        default=None,
     )
     _add_allow_custom_endpoint_argument(parser)
     parser.add_argument(
@@ -752,7 +1091,31 @@ def _parser() -> argparse.ArgumentParser:
         help="Trusted directory containing ordered stage configuration JSON files",
     )
     parser.add_argument(
-        "--output", type=Path, help="Write JSON to a file instead of stdout"
+        "--output",
+        type=Path,
+        help="Write the rendered review to a file instead of stdout",
+    )
+    parser.add_argument(
+        "--format",
+        choices=RENDER_FORMATS,
+        default="text",
+        help=(
+            "Review output format: text (default, readable terminal text), "
+            "markdown, or json (the versioned review-result document). "
+            "Only the selected format is written to --output or stdout; "
+            "progress and errors stay on stderr"
+        ),
+    )
+    parser.add_argument(
+        "--exit-semantics",
+        choices=("review", "operational"),
+        default="review",
+        help=(
+            "Exit contract: 'review' (default) returns 0 with no required "
+            "fixes, 1 when required fixes remain, and 2 when the review could "
+            "not complete; 'operational' keeps the host/launcher contract of "
+            "0 for any completed run and 1 for a failed or skipped one"
+        ),
     )
     parser.add_argument(
         "--transaction",
@@ -811,11 +1174,25 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--local-session",
+        action="store_true",
+        help=(
+            "Run one explicit persistent-local session: opt into the "
+            "identity-bound transaction and store its ledger in the "
+            "platform-appropriate per-user state directory. No internal "
+            "artifact paths are required; override the location with "
+            "--session-ledger"
+        ),
+    )
+    parser.add_argument(
         "--session-ledger",
         type=Path,
         help=(
-            "Local directory for the issue #136 durable session ledger. "
-            "Operator modes reserve before inference and refuse unadmitted rounds."
+            "Local directory for the issue #136 durable session ledger; "
+            "defaults to the platform per-user state directory when "
+            "--local-session is set, otherwise a session ledger must be "
+            "supplied explicitly. Operator modes reserve before inference "
+            "and refuse unadmitted rounds."
         ),
     )
     parser.add_argument(
@@ -843,12 +1220,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--oidc-token",
         help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
-    )
-    parser.add_argument(
-        "--continue-rounds",
-        type=_continuation_rounds,
-        default=0,
-        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
     )
     return parser
 
@@ -1431,16 +1802,10 @@ def _github_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Persist the C3 session ledger as one GitHub issue comment on the "
-            "source pull request. Operator modes only count rounds."
+            "source pull request. Operator modes keep rounds, baselines, and "
+            "dispositions durable."
         ),
     )
-    review.add_argument(
-        "--continue-rounds",
-        type=_continuation_rounds,
-        default=0,
-        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
-    )
-
     command = subparsers.add_parser(
         "command",
         help="Apply an authenticated @sensei maintainer command to the session ledger",
@@ -1937,7 +2302,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 diff=diff,
                 app_slug=args.app_slug,
                 convergence_policy=convergence_policy,
-                continuation_rounds=getattr(args, "continue_rounds", 0),
                 configuration_context=configuration_context,
                 evidence_context=evidence_context,
                 baseline=admission_baseline,
@@ -2391,8 +2755,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 sys.stdout.write(
                     f"mode={observed.mode} events={len(observed.events)} "
                     f"cutover_status={observed.cutover_status} "
-                    f"approval_events={observed.approval_events} "
-                    f"cap_created_approval={observed.cap_created_approval}\n"
+                    f"approval_events={observed.approval_events}\n"
                 )
             unavailable_fields = [
                 label
@@ -2420,8 +2783,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             else:
                 sys.stdout.write(
                     f"default={payload['publication_default']} "
-                    f"proposed={report.mode} handoffs={report.handoffs} "
-                    f"cap_created_approval={payload['cap_created_approval']}\n"
+                    f"proposed={report.mode} handoffs={report.handoffs}\n"
                 )
             return 0
         if args.as_json:
@@ -2429,8 +2791,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
         else:
             sys.stdout.write(
                 f"mode={report.mode} default={DEFAULT_REVIEW_MODE} "
-                f"handoffs={report.handoffs} cap_created_approval="
-                f"{report.cap_created_approval}\n"
+                f"handoffs={report.handoffs}\n"
             )
         return 0
     except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
@@ -2617,7 +2978,10 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser().parse_args(args_list)
     except ReviewInputError as exc:
         print(f"review-sensei: {exc}", file=sys.stderr)
-        return 1
+        if _operational_exit_semantics(args_list):
+            return 1
+        print("review-sensei: reason=invalid-input", file=sys.stderr)
+        return REVIEW_EXIT_INCOMPLETE
     try:
         if args.version:
             print(_package_version())
@@ -2626,11 +2990,15 @@ def main(argv: list[str] | None = None) -> int:
             raise ReviewInputError("--diff is required")
         _validate_live_profile_gates(args, args_list)
         hosted_session_ledger = bool(getattr(args, "github_session_ledger", False))
+        local_session = bool(getattr(args, "local_session", False))
         transaction_requested = (
             bool(getattr(args, "transaction", False))
+            or local_session
             or args.configuration_context_output is not None
             or args.admission_context_output is not None
         )
+        if local_session:
+            _prepare_local_session(args, hosted_session_ledger=hosted_session_ledger)
         if not hosted_session_ledger:
             for flag, value in (
                 ("--oidc-token", getattr(args, "oidc_token", None)),
@@ -2676,17 +3044,7 @@ def main(argv: list[str] | None = None) -> int:
                     "(--session-ledger or --github-session-ledger), "
                     "repository/PR identity, and 40-character base/head SHAs"
                 )
-        provider_name = str(args.provider).strip().lower()
-        if provider_name == "fixture":
-            if not args.fixture_response:
-                raise ReviewInputError("--provider fixture requires --fixture-response")
-            api_key = None
-        else:
-            if args.fixture_response is not None:
-                raise ReviewInputError(
-                    "--fixture-response is only valid with --provider fixture"
-                )
-            api_key = _resolve_api_key(args, argv=args_list)
+        provider_settings, api_key = resolve_review_inference(args, args_list)
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
@@ -2753,12 +3111,6 @@ def main(argv: list[str] | None = None) -> int:
 
         policy = resolve_review_convergence_policy(
             mode=getattr(args, "review_mode", None)
-        )
-        provider_settings = _provider_settings_from_args(
-            args,
-            api_key=api_key,
-            fixture_response=args.fixture_response,
-            argv=args_list,
         )
         # Normalize the caller-supplied snapshot identity once.  The live
         # inference request intentionally remains unbound; these values are
@@ -2836,6 +3188,7 @@ def main(argv: list[str] | None = None) -> int:
                     ledger,
                     identity,
                     reservation_id=held_reservation,
+                    head_sha=head_sha,
                     expected_generation=current.generation,
                 )
             else:
@@ -2878,8 +3231,8 @@ def main(argv: list[str] | None = None) -> int:
                 provider_calls=0,
             )
             emit_host_outcome(outcome, output_path=args.outcome)
-            print(outcome.status)
-            return run_outcome_exit_code(outcome.status)
+            print(f"review-sensei: {outcome.status}", file=sys.stderr)
+            return _review_exit_status(args, outcome)
 
         if (
             ledger is not None
@@ -2921,7 +3274,6 @@ def main(argv: list[str] | None = None) -> int:
                         category_policy=category_policy,
                         publication_mode=policy.mode,
                         orchestration_enabled=orchestrate,
-                        continue_rounds=getattr(args, "continue_rounds", 0),
                     )
                 )
                 transaction_configuration_digest = (
@@ -2945,7 +3297,6 @@ def main(argv: list[str] | None = None) -> int:
                     head_sha=head_sha,
                     configuration_digest=transaction_configuration_digest,
                     evidence_digest=transaction_evidence_digest,
-                    continuation_rounds=getattr(args, "continue_rounds", 0),
                 )
                 prepared_transaction = prepared_round.transaction
             else:
@@ -2954,7 +3305,7 @@ def main(argv: list[str] | None = None) -> int:
                     identity,
                     policy,
                     reservation_id=reservation,
-                    continuation_rounds=getattr(args, "continue_rounds", 0),
+                    head_sha=head_sha,
                 )
             held_reservation = (
                 prepared_round.reservation_id if prepared_round.decision.admit else None
@@ -2975,8 +3326,8 @@ def main(argv: list[str] | None = None) -> int:
                     provider_calls=0,
                 )
                 emit_host_outcome(outcome, output_path=args.outcome)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
+                print(f"review-sensei: {outcome.status}", file=sys.stderr)
+                return _review_exit_status(args, outcome)
         provider, stage_providers = bind_stage_providers(
             registry=default_registry(),
             settings=provider_settings,
@@ -3126,9 +3477,7 @@ def main(argv: list[str] | None = None) -> int:
             emit_host_outcome(outcome, output_path=args.outcome)
             if run.error is not None:
                 print(f"review-sensei: {run.error}", file=sys.stderr)
-            else:
-                print(f"review-sensei: {outcome.status}", file=sys.stderr)
-            return run_outcome_exit_code(outcome.status)
+            return _review_exit_status(args, outcome)
         result = run.result
         if (
             prepared_transaction is not None
@@ -3299,7 +3648,7 @@ def main(argv: list[str] | None = None) -> int:
                 "admission context requires an admitted review transaction"
             )
         emit_host_outcome(outcome, output_path=args.outcome)
-        rendered = json.dumps(result.to_dict(), indent=2) + "\n"
+        rendered = render_review(result, output_format=args.format)
         if args.output:
             args.output.write_text(rendered, encoding="utf-8")
         else:
@@ -3325,7 +3674,14 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(artifact.to_dict(), indent=2) + "\n",
                 encoding="utf-8",
             )
-        return run_outcome_exit_code(outcome.status)
+        return _review_exit_status(
+            args,
+            outcome,
+            required_fixes=any(comment.blocks_approval for comment in result.comments),
+        )
     except (OSError, ValueError, ReviewSenseiError) as exc:
         print(f"review-sensei: {exc}", file=sys.stderr)
-        return 1
+        if getattr(args, "exit_semantics", "review") == "operational":
+            return 1
+        print("review-sensei: reason=invalid-input", file=sys.stderr)
+        return REVIEW_EXIT_INCOMPLETE

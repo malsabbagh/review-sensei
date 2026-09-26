@@ -54,10 +54,8 @@ from review_sensei.session import (
     complete_session_round,
     convergence_progress_blocker_markers,
     convergence_progress_blocker_sets,
-    issue_continuation_grant,
     migrate_session_document,
     prepare_session_round,
-    record_session_failed_attempt,
     resolve_local_session_ledger,
     session_reservation_id,
 )
@@ -73,122 +71,76 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
 class SessionRecordTests(unittest.TestCase):
-    def test_continuation_grant_requires_paired_consumption_state(self):
-        record = SessionRecord.create(IDENTITY, now=FIXED_NOW).to_dict()
-        record["operator_paused"] = False
-        record["dispositions"] = []
-        record["continuation_grants"] = [
-            {
-                "command_id": "comment-1",
-                "actor": "alice",
-                "head_sha": "a" * 40,
-                "policy_digest": "b" * 64,
-                "issued_at": "2026-09-19T12:00:00Z",
-                "expires_at": "2026-09-20T12:00:00Z",
-                "consumed_reservation_id": "abcd1234",
-                "consumed_generation": None,
-            }
-        ]
-        # Rebuild the digest through the public constructor so the validation
-        # oracle isolates the paired state rather than an integrity mismatch.
-        with self.assertRaisesRegex(ReviewInputError, "continuation grant"):
-            SessionRecord.from_dict(record)
+    @staticmethod
+    def _grant(**overrides: object) -> dict[str, object]:
+        value: dict[str, object] = {
+            "command_id": "comment-1",
+            "actor": "alice",
+            "head_sha": "a" * 40,
+            "policy_digest": "b" * 64,
+            "issued_at": "2026-09-19T12:00:00Z",
+            "expires_at": "2026-09-19T13:30:00Z",
+            "consumed_reservation_id": None,
+            "consumed_generation": None,
+        }
+        value.update(overrides)
+        return value
 
-    def test_continuation_grant_cannot_outlive_session(self):
-        def grant(*, command_id: str, expires_at: str) -> dict[str, object]:
-            return {
-                "command_id": command_id,
-                "actor": "alice",
-                "head_sha": "a" * 40,
-                "policy_digest": "b" * 64,
-                "issued_at": "2026-09-19T12:00:00Z",
-                "expires_at": expires_at,
-                "consumed_reservation_id": None,
-                "consumed_generation": None,
-            }
-
-        session_expires_at = "2026-09-19T13:00:00Z"
-        with self.assertRaisesRegex(ReviewInputError, "exceeds session expiry"):
-            SessionRecord.create(
-                IDENTITY,
-                now=FIXED_NOW,
-                expires_at=session_expires_at,
-                continuation_grants=[
-                    grant(
-                        command_id="grant-after-session",
-                        expires_at="2026-09-19T14:00:00Z",
-                    )
-                ],
-            )
-
-        for command_id, grant_expires_at in (
-            ("grant-at-session", session_expires_at),
-            ("grant-before-session", "2026-09-19T12:30:00Z"),
-        ):
-            record = SessionRecord.create(
-                IDENTITY,
-                now=FIXED_NOW,
-                expires_at=session_expires_at,
-                continuation_grants=[
-                    grant(command_id=command_id, expires_at=grant_expires_at)
-                ],
-            )
-            self.assertEqual(
-                record.continuation_grants[0]["expires_at"], grant_expires_at
-            )
-
-    def test_continuation_grant_rejects_an_expired_session(self):
+    def test_retained_continuation_grant_requires_paired_consumption_state(self):
         record = SessionRecord.create(
             IDENTITY,
             now=FIXED_NOW,
-            expires_at="2026-09-19T13:00:00Z",
+            expires_at="2026-09-19T14:00:00Z",
+            continuation_grants=[
+                self._grant(
+                    consumed_reservation_id="abcd1234",
+                    consumed_generation=None,
+                )
+            ],
         )
-        with self.assertRaisesRegex(ReviewInputError, "continuation grant expiry"):
-            issue_continuation_grant(
-                record,
-                command_id="grant-expired-session",
-                actor="alice",
-                head_sha="a" * 40,
-                policy_digest="b" * 64,
-                now=datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc),
-            )
+        with self.assertRaisesRegex(ReviewInputError, "failed schema validation"):
+            SessionRecord.from_dict(record.to_dict())
 
-    def test_continuation_grant_history_bound_is_explicit_and_preserves_replay_tombstones(
-        self,
-    ):
-        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
-        for index in range(MAX_STORED_CONTINUATION_GRANTS):
-            record = issue_continuation_grant(
-                record,
+    def test_retained_continuation_grants_round_trip_verbatim(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            expires_at="2026-09-19T14:00:00Z",
+            continuation_grants=[self._grant()],
+        )
+        reloaded = SessionRecord.from_dict(record.to_dict())
+        self.assertEqual(
+            [dict(grant) for grant in reloaded.continuation_grants],
+            [self._grant()],
+        )
+
+    def test_retained_continuation_grant_history_bound_is_enforced(self):
+        grants = [
+            self._grant(
                 command_id=f"grant-{index + 1}",
-                actor="alice",
                 head_sha=f"{index + 1:040x}",
-                policy_digest="b" * 64,
-                now=FIXED_NOW,
             )
-            pending = dict(record.continuation_grants[-1])
-            pending["consumed_reservation_id"] = f"{index + 1:08x}"
-            pending["consumed_generation"] = record.generation + 1
-            record = record.evolve(
+            for index in range(MAX_STORED_CONTINUATION_GRANTS)
+        ]
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            expires_at="2026-09-19T14:00:00Z",
+            continuation_grants=grants,
+        )
+        self.assertEqual(
+            len(record.continuation_grants), MAX_STORED_CONTINUATION_GRANTS
+        )
+        with self.assertRaisesRegex(ReviewInputError, "configured bound"):
+            SessionRecord.create(
+                IDENTITY,
                 now=FIXED_NOW,
-                generation=record.generation + 1,
-                continuation_grants=(
-                    *record.continuation_grants[:-1],
-                    pending,
-                ),
+                expires_at="2026-09-19T14:00:00Z",
+                continuation_grants=[
+                    *grants,
+                    self._grant(command_id="grant-over-bound", head_sha="f" * 40),
+                ],
             )
-
-        before = record.to_dict()
-        with self.assertRaisesRegex(ReviewInputError, "history limit"):
-            issue_continuation_grant(
-                record,
-                command_id="grant-over-bound",
-                actor="alice",
-                head_sha="f" * 40,
-                policy_digest="b" * 64,
-                now=FIXED_NOW,
-            )
-        self.assertEqual(record.to_dict(), before)
 
     @staticmethod
     def _history() -> dict[str, object]:
@@ -698,195 +650,6 @@ class SessionRecordTests(unittest.TestCase):
 
 
 class LocalSessionLedgerTests(unittest.TestCase):
-    def test_restart_retains_consumed_continuation_grant(self):
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        apply_session_command(
-            self.ledger,
-            IDENTITY,
-            parse_maintainer_command(
-                "@sensei review continue",
-                actor="alice",
-                head_sha="a" * 40,
-                command_id="comment-restart",
-            ),
-            now=FIXED_NOW,
-            policy=policy,
-        )
-        self.ledger.replace(
-            IDENTITY,
-            lambda current: current.evolve(
-                now=FIXED_NOW,
-                completed_initial_reviews=1,
-                completed_verification_rounds=5,
-            ),
-            now=FIXED_NOW,
-        )
-        prepared = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="abcd1234",
-            head_sha="a" * 40,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        self.assertIsNotNone(prepared.reservation_id)
-        restarted = LocalSessionLedger(Path(self.temp.name))
-        loaded = restarted.load(IDENTITY, now=FIXED_NOW)
-        self.assertEqual(
-            loaded.record.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
-        )
-
-    def test_grant_scope_mismatch_and_direct_rounds_cannot_consume_it(self):
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        apply_session_command(
-            self.ledger,
-            IDENTITY,
-            parse_maintainer_command(
-                "@sensei review continue",
-                actor="alice",
-                head_sha="a" * 40,
-                command_id="comment-scope",
-            ),
-            now=FIXED_NOW,
-            policy=policy,
-        )
-        self.ledger.replace(
-            IDENTITY,
-            lambda current: current.evolve(
-                now=FIXED_NOW,
-                completed_initial_reviews=1,
-                completed_verification_rounds=5,
-            ),
-            now=FIXED_NOW,
-        )
-        rejected = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="abcd1234",
-            head_sha="b" * 40,
-            continuation_rounds=1,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        self.assertFalse(rejected.decision.admit)
-        self.assertEqual(rejected.decision.handoff_reason, "round-budget-exhausted")
-        self.assertIsNone(rejected.reservation_id)
-        self.assertIsNone(
-            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0][
-                "consumed_reservation_id"
-            ]
-        )
-
-    def test_competing_reservations_consume_a_grant_once(self):
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        apply_session_command(
-            self.ledger,
-            IDENTITY,
-            parse_maintainer_command(
-                "@sensei review continue",
-                actor="alice",
-                head_sha="a" * 40,
-                command_id="comment-race",
-            ),
-            now=FIXED_NOW,
-            policy=policy,
-        )
-        self.ledger.replace(
-            IDENTITY,
-            lambda current: current.evolve(
-                now=FIXED_NOW,
-                completed_initial_reviews=1,
-                completed_verification_rounds=5,
-            ),
-            now=FIXED_NOW,
-        )
-        winner = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="abcd1234",
-            head_sha="a" * 40,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        loser = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="ffff1234",
-            head_sha="a" * 40,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        self.assertIsNotNone(winner.reservation_id)
-        self.assertIsNone(loser.reservation_id)
-        self.assertEqual(loser.decision.handoff_reason, "paused")
-        self.assertEqual(
-            self.ledger.load(IDENTITY, now=FIXED_NOW).record.continuation_grants[0][
-                "consumed_reservation_id"
-            ],
-            "abcd1234",
-        )
-
-    def test_failed_continuation_attempt_keeps_the_grant_consumed(self):
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        apply_session_command(
-            self.ledger,
-            IDENTITY,
-            parse_maintainer_command(
-                "@sensei review continue",
-                actor="alice",
-                head_sha="a" * 40,
-                command_id="comment-failure",
-            ),
-            now=FIXED_NOW,
-            policy=policy,
-        )
-        self.ledger.replace(
-            IDENTITY,
-            lambda current: current.evolve(
-                now=FIXED_NOW,
-                completed_initial_reviews=1,
-                completed_verification_rounds=5,
-            ),
-            now=FIXED_NOW,
-        )
-        prepared = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="abcd1234",
-            head_sha="a" * 40,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        record_session_failed_attempt(
-            self.ledger, IDENTITY, reservation_id=prepared.reservation_id, now=FIXED_NOW
-        )
-        replay = prepare_session_round(
-            self.ledger,
-            IDENTITY,
-            policy,
-            reservation_id="ffff1234",
-            head_sha="a" * 40,
-            now=FIXED_NOW,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        loaded = self.ledger.load(IDENTITY, now=FIXED_NOW).record
-        self.assertEqual(loaded.failed_attempts, 1)
-        self.assertEqual(
-            loaded.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
-        )
-        self.assertFalse(replay.decision.admit)
-
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))

@@ -806,87 +806,9 @@ jobs:
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
-              exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
-            exit 1
-          fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
-
       - name: Run cloud-provider review
         id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
+        if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
@@ -964,11 +886,15 @@ jobs:
           # published. The transaction lives in the broker-attested comment
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
+          # rounds, baselines, and dispositions.
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider cloud-ollama --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" \
@@ -979,7 +905,7 @@ jobs:
       # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1031,7 +957,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1160,7 +1086,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
@@ -1332,87 +1258,9 @@ jobs:
             "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
-              exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
-            exit 1
-          fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
-
       - name: Run OpenRouter-provider review
         id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
+        if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
@@ -1495,19 +1343,23 @@ jobs:
           # published. The transaction lives in the broker-attested comment
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
+          # rounds, baselines, and dispositions.
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider openrouter --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --provider openrouter --model "$MODEL" \
+            --model "$MODEL" \
             --output review.json --outcome outcome.json
 
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1559,7 +1411,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1696,7 +1548,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
@@ -1847,87 +1699,9 @@ jobs:
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
 
-      - name: Decide whether the automatic review budget is already spent
-        id: budget-admission
-        if: inputs.operation == 'review' && inputs.enable_review == 'true'
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          ENABLE_GITHUB_WRITES: ${{ inputs.enable_github_writes }}
-          GH_READ_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::review budget repository is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget repository id is invalid' >&2; exit 1; }
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::review budget pull request is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::review budget head is invalid' >&2; exit 1; }
-          comments_file="$RUNNER_TEMP/review-sensei-issue-comments.json"
-          page_dir="$RUNNER_TEMP/review-sensei-comment-pages"
-          rm -rf "$page_dir"
-          mkdir -p "$page_dir"
-          page=1
-          while [[ "$page" -le 10 ]]; do
-            if ! GH_TOKEN="$GH_READ_TOKEN" gh api "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments?per_page=100&page=${page}" >"$page_dir/$page.json"; then
-              echo '::error::review budget ledger could not be read' >&2
-              exit 1
-            fi
-            count="$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(len(value) if isinstance(value, list) else -1)' "$page_dir/$page.json")"
-            if [[ "$count" -lt 0 ]]; then
-              echo '::error::review budget comment page is invalid' >&2
-              exit 1
-            fi
-            if [[ "$count" -lt 100 ]]; then
-              break
-            fi
-            if [[ "$page" -eq 10 ]]; then
-              echo '::error::review budget comments exceed the configured bound' >&2
-              exit 1
-            fi
-            page=$((page + 1))
-          done
-          PAGE_DIR="$page_dir" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission assemble
-          decision="$(REPOSITORY="$REPOSITORY" REPOSITORY_ID="$REPOSITORY_ID" PULL_REQUEST="$PULL_REQUEST" HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission decide)"
-          if [[ "$decision" == "review" ]]; then
-            echo "spent=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$decision" != "spent" ]]; then
-            echo '::error::review budget decision was invalid' >&2
-            exit 1
-          fi
-          echo "spent=true" >> "$GITHUB_OUTPUT"
-          notice_state="$(HEAD_SHA="$HEAD_SHA" COMMENTS_FILE="$comments_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission notice-status)"
-          if [[ "$notice_state" == "posted" ]]; then
-            echo "spent-budget notice already posted"
-            exit 0
-          fi
-          if [[ "$ENABLE_GITHUB_WRITES" != "true" ]]; then
-            echo "automatic review budget is spent; github writes are disabled, skipping the notice"
-            exit 0
-          fi
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            echo "automatic review budget is spent; Actions OIDC token is unavailable, skipping the notice"
-            exit 0
-          fi
-          notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" "$RUNNER_TEMP/review-sensei-venv/bin/python" -m review_sensei.hosting.github.budget_admission render-notice "$notice_file"
-          oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
-          broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
-          unset oidc_token
-          broker_response="$(curl --fail --silent --show-error -H "Content-Type: application/json" -H "Accept: application/json" --data "$broker_body" https://github.reviewsensei.dev/github/token)"
-          unset broker_body
-          reply_token="$(BROKER_RESPONSE="$broker_response" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; value=json.loads(os.environ["BROKER_RESPONSE"]).get("token"); assert isinstance(value,str) and value.strip(); print(value)')"
-          unset broker_response
-          GH_TOKEN="$reply_token" gh api --method POST -H "Accept: application/vnd.github+json" "repos/${REPOSITORY}/issues/${PULL_REQUEST}/comments" -f body="$(cat "$notice_file")" >/dev/null
-          unset reply_token
-          echo "automatic review budget is spent; skipping the review CLI"
-
       - name: Prepare and run trusted local review
         id: provider-review
-        if: inputs.operation == 'review' && inputs.enable_review == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true'
+        if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
           MODE: ${{ inputs.mode }}
@@ -2010,11 +1784,15 @@ jobs:
           # published. The transaction lives in the broker-attested comment
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
-          # rounds, baselines, and grants.
+          # rounds, baselines, and dispositions.
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider local-ollama --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" \
@@ -2025,7 +1803,7 @@ jobs:
       # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -2077,7 +1855,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote trusted local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -2202,7 +1980,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.budget-admission.outcome == 'success' && steps.budget-admission.outputs.spent != 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review

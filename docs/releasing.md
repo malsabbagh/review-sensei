@@ -196,7 +196,7 @@ Keep these names distinct:
   format.
 - **`v5`** is the movable public workflow channel. Generated callers use
   `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.
-- **`0.6.8` / `v0.6.8`** is the immutable Python and npm package cutoff.
+- **`0.6.9` / `v0.6.9`** is the immutable Python and npm package cutoff.
   `release.yml` publishes PyPI from `v*.*.*` tags. Do not create a package tag
   named `v5.0.0`; that would collide with the `v*.*.*` release trigger and
   confuse the workflow channel with a library version.
@@ -307,6 +307,16 @@ with required reviewers; dispatch only against a disposable repository that
 uses reviewed synthetic data; bound privileges to that repository; retain
 sanitized outcomes bound to the exact workflow/package digest; and clean up.
 Flaky live canaries must not weaken deterministic required gates.
+
+The optional [`.github/workflows/local-review-contract.yml`](../.github/workflows/local-review-contract.yml)
+workflow exercises the documented local review contract on a hosted runner. It
+is manual-only and not a required CI gate: dispatching it installs the package
+from the selected ref and runs the standalone smoke, which asserts the default
+three-tier review exits (`0` clean, `1` required fixes, `2` could not complete),
+the output formats, the clean-host local review, and the operational contract.
+The hosted review lanes select `--exit-semantics operational`, so this lane is
+what keeps the default review contract exercised end to end at the workflow
+level.
 
 The release workflow also writes `SHA256SUMS` and an SPDX JSON SBOM. Verify a
 downloaded bundle before installing it:

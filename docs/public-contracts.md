@@ -63,14 +63,14 @@ containing `/v1/`.
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |
-| `review-convergence-policy.schema.json` | Trusted review-loop mode, round budgets, and enforcement (`display-only` or `publication`) |
+| `review-convergence-policy.schema.json` | Trusted review-loop mode, per-head failed-attempt bound, and enforcement (`display-only` or `publication`) |
 | `blocker-admission.schema.json` | Effective blocker disposition computed from trusted policy |
-| `review-round-decision.schema.json` | Round admission, remaining allowance, and human handoff |
-| `session-record.schema.json` | Durable PR-wide round counters, CAS generation, reservation, expiry, operator pause, and bounded human dispositions |
+| `review-round-decision.schema.json` | Round admission, live handoff reason, and human handoff; no remaining-allowance fields |
+| `session-record.schema.json` | Durable diagnostic round counters, CAS generation, reservation, expiry, operator pause, and bounded human dispositions |
 | `review-transaction.schema.json` | Identity-bound analysis checkpoint and publication phase metadata; no source or result body |
 | `verification-scope.schema.json` | Baseline-aware re-review scope, late-admission flag, and invalidation reason |
 | `later-finding-classification.schema.json` | Later-finding classification, late reason, and optional causal parent |
-| `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, limitations, and cap-never-approves flag |
+| `convergence-sequence-report.schema.json` | Offline C7 sequence replay metrics, counted-history counters, and limitations; no cap or remaining-allowance field |
 | `observed-convergence-report.schema.json` | F6 real-component evidence events and explicitly measured or unknown metrics |
 | `compatibility-manifest.schema.json` | Cross-runtime release compatibility manifest |
 | `canary-binding.schema.json` | Canary evidence bound to one compatibility-manifest digest |
@@ -249,16 +249,15 @@ These imports are public and stable within a major version:
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`; `run_outcome_exit_code` maps every
 `FAILURE_RUN_STATUSES` value, including `action_required`, to exit code 1.
-A spent automatic review budget is one of those `action_required` results.
-This is a behavior change for direct callers: the CLI previously posted the
-maintainer notice itself and exited `0`, and it now reports
-`action_required` with exit code `1` and leaves the notice to its caller. The
-reusable GitHub Actions workflow is what turns that case into a successful
-check: before it starts the review command, it verifies the session comment
-and skips the command when the allowance is used. It posts the continue and
-rescan notice only when GitHub writes are enabled and the Actions OIDC token
-is available. A host that calls the CLI directly has to make that same
-pre-check if a spent budget should not fail the job.
+A live-cause handoff is an `action_required` result: an operator pause, a
+no-progress verdict, or the per-head failed-attempt retry bound never yields a
+clean review, and the outcome is never approval. Reviews are not bounded by a
+PR-wide count, so there is no allowance to spend and no runner pre-check: the
+reusable GitHub Actions workflow starts the review command directly and treats
+the handoff as a non-passing check, skipping its publication and artifact
+steps. The CLI reports the outcome and exit code and posts no maintainer
+notice itself; a caller that wants an informational comment renders it from
+the public diagnostics.
 `GitHubIssueCommentSessionLedger` is the hosted runner's own adapter and is
 not part of this list, so removing its notice-publishing method is not a
 contract change; a caller that relied on it posts the notice itself.
@@ -380,7 +379,7 @@ An analysis that runs inside a GitHub-hosted job can resolve its session
 ledger from the broker instead of the runner filesystem. `--github-session-ledger`
 opens a broker-attested `review_session` for `--repository-id`, pull request,
 and head, and reads and writes the same issue-comment marker the hosted
-publication boundary uses, so rounds, baselines, and grants stay durable
+publication boundary uses, so rounds, baselines, and dispositions stay durable
 across jobs that share no local disk. `--repository-id` and `--oidc-token`
 are valid only with `--github-session-ledger`, and the broker session needs an
 operator `--review-mode`; a session whose broker verdict is `known` but whose
@@ -570,12 +569,16 @@ The command is `review-sensei`. Supported flags are:
 | --- | --- | --- |
 | `--version` | none | Print the installed ReviewSensei version and exit |
 | `--diff` | none | Required unified diff file path |
-| `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`) |
-| `--provider` | `REVIEWSENSEI_PROVIDER` | Provider registry key (`ollama`, `openai-compatible`, `openrouter`, `fixture`) |
-| `--base-url` | `OLLAMA_BASE_URL` | Optional Ollama API root override; mode defaults to loopback or Ollama Cloud |
-| `--model` | `OLLAMA_MODEL` | Optional model override; mode defaults to the configured local/cloud model |
+| `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`). A profile selects its own provider, model, endpoint, credential, and timeout, so `--profile` alone is a complete invocation; an explicit `--provider` is optional and must match it when supplied |
+| `--provider` | `REVIEWSENSEI_PROVIDER` | Canonical backend: `local-ollama`, `cloud-ollama`, `openai-compatible`, `openrouter`, or `fixture` |
+| `--base-url` | none | Explicit endpoint override. A non-allowlisted hosted endpoint additionally requires `--allow-custom-endpoint`; no environment variable can move a hosted endpoint |
+| `--allow-custom-endpoint` | none | Allow an `openai-compatible` base URL outside `api.openai.com`; this opt-in is only valid on the command line and never with `--profile` |
+| `--model` | `REVIEWSENSEI_MODEL` | Explicit model override validated against the selected backend |
 | `--api-key-env` | none | Name of environment variable holding the API key |
-| `--timeout-seconds` | `OLLAMA_TIMEOUT_SECONDS` | Provider request timeout |
+| `--timeout-seconds` | none | Provider request timeout; defaults to the selected backend's documented timeout |
+| `--format` | none | Review output format: `text` (default, readable terminal text), `markdown`, or `json` (the versioned `review-result` document) |
+| `--exit-semantics` | none | `review` (default) selects the 0/1/2 review exit contract; `operational` keeps the host/launcher 0/1 contract |
+| `--local-session` | none | Run one explicit persistent-local session: opt into the identity-bound transaction and store its ledger in the platform per-user state directory |
 | `--repository` | none | Repository identifier |
 | `--pull-request` | none | Pull request number |
 | `--title` | none | Review title metadata |
@@ -624,10 +627,44 @@ exist on the public reusable runner they reference. Compatibility tests fail
 before release if a caller `with:` key is absent from
 `review-sensei-run.yml` `workflow_call.inputs`.
 
-`REVIEWSENSEI_PROVIDER_MODE` defaults to `local` (alias for `local-ollama`).
-Hosted backends are `local-ollama`, `cloud-ollama`, or `openrouter`; `local`
-and `cloud` remain aliases. `REVIEWSENSEI_MODEL` overrides the model for the
-selected backend. Selecting hosted `openrouter` is the operator egress
+A local review writes one document in the selected format to stdout or
+`--output`: readable terminal text by default, GitHub-flavored Markdown with
+`--format markdown`, or the versioned `review-result` document with
+`--format json`. Warnings, diagnostics, and the final status and reason lines
+stay on stderr, so machine output is never polluted. Provider text is escaped
+in the Markdown format, so it cannot restructure the document or hide parts of
+it. Only an invocation rejected before inference writes no
+document: a review that was admitted writes the bounded document it produced,
+including one that could not complete, and a repeated local session whose
+round is already published writes no new document. The review exit contract is
+`0` for a completed review with no required fixes, `1` for a completed review
+with required fixes remaining, and `2` when the review could not complete, its
+input was invalid, or an operator must intervene. An unchanged repeated local
+session exits `2` with `already_published`: the persisted round is served
+instead of paying for a second inference call. Exits `1` and `2` add one
+`review-sensei: reason=<token>` line on stderr, and the exit is unchanged by
+the selected format. `--exit-semantics operational` keeps the host/launcher
+`0`/`1` contract for callers that select a lane from it.
+
+A local review needs no GitHub identity, OIDC token endpoint, broker, or hosted
+state. `--local-session` is the one explicit persistent-local-session
+operation: it stores the durable session ledger in the platform per-user state
+directory (`~/Library/Application Support/review-sensei` on macOS,
+`%LOCALAPPDATA%\review-sensei` on Windows, `$XDG_STATE_HOME/review-sensei` or
+`~/.local/state/review-sensei` elsewhere) so repeated runs of the same change
+reuse one session, and `--session-ledger` still overrides that location. The
+session identity follows the working copy root, so invoking the CLI from a
+subdirectory of one Git checkout keeps one session, while renaming or moving
+that root starts a new one. A local session binds derived 40-character content
+digests, not Git object ids, as its base and head revisions (`base_sha` and
+`head_sha` in the outcome document); repeated runs of one change keep the same
+revision.
+
+`REVIEWSENSEI_PROVIDER` selects the canonical backend and `REVIEWSENSEI_MODEL`
+overrides its model. Those are the two supported environment overrides for
+backend resolution; endpoint, timeout, and credential selection come from flags
+or backend defaults, and a backend that needs no credential never receives one
+implicitly. Selecting hosted `openrouter` is the operator egress
 acknowledgement; the reusable workflow rejects `allow_unqualified_profile=true`,
 does not forward `--allow-unqualified-profile`, and only runs models on the
 published hosted allowlist. OpenRouter requires the customer-owned
@@ -760,9 +797,11 @@ loaded and must not be read as "every known learning has feedback".
 
 The command also supports offline `evaluate-convergence` replay of a frozen
 synthetic sentinel against a convergence policy. It never constructs a
-provider or writes to GitHub. The compatible publication default remains
-`legacy`; `--compare-default` reports both arms. `cap_created_approval` is
-always false. See [ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md).
+provider or writes to GitHub. The publication default is `merge-focused`;
+`--compare-default` reports both arms. Rounds are uncounted, so the replay
+payload carries no cap or remaining-allowance fields. See
+[ADR 0051](adr/0051-sequential-evaluation-and-shadowing.md) and
+[ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md).
 
 `--observed` writes an observed-convergence report through
 `review_sensei.hosting.github.observed.run_observed_review_sequence`.
@@ -771,24 +810,42 @@ not load the GitHub host adapter. Import it from
 `review_sensei.hosting.github.observed`. The `hosting.github` package
 does not re-export it. A completed `--observed` run with unmet gates
 writes the report and exits 1. Invalid input, including `--review-mode
-legacy`, exits 1 without a report. In that report, `cap_created_approval:
-null` means the sequence never reached the round cap. A report with that
-null cannot have `cutover_status` `passed`. `approval_events` is the
-whole-run total, including approvals from in-budget rounds. The cap
-proof is `cap_created_approval` false together with zero approval events
-on the cap handoff and on every later event. `--source-identity` and
-`--workflow-identity` are recorded as the operator asserts them. The
-harness does not authenticate those values as a Git SHA or workflow ref.
+legacy`, exits 1 without a report. In that report, `approval_events` is
+the measured whole-run approval total and is never a remaining allowance,
+and `completed_verification_rounds` is counted history the harness reports;
+the report carries no round-cap field because no round is bounded by count.
+`--source-identity` and `--workflow-identity` are recorded as the operator
+asserts them. The harness does not authenticate those values as a Git SHA
+or workflow ref.
 
 ```bash
 review-sensei evaluate-convergence --json --compare-default
 ```
 
-Exit codes are stable:
+The review exit contract is stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Review completed and output was written; `doctor` configured checks passed; `plan` ready; `learnings` diagnostics/feedback rendered; `evaluate-convergence` replayed |
+| `0` | The review completed and no required fixes remain |
+| `1` | The review completed with required fixes remaining |
+| `2` | The review could not complete: invalid input, partial coverage, a failed provider or publication, an exhausted budget, an already-published session round (`already_published`), or a human decision |
+
+A review that could not complete writes a structured
+`review-sensei: reason=<token>` line to stderr naming the cause, and it still
+writes the bounded `review-result` document it produced to stdout or
+`--output` when it has one; only an invocation rejected before inference leaves
+no document, and an already-published round leaves no new document.
+`--format` never changes an exit code. Hosts and launchers that
+select a lane from the historical contract pass `--exit-semantics operational`
+instead: it returns `1` only for the failure statuses (`provider_failed`,
+`budget_exhausted`, `publication_failed`, `action_required`) and `0` otherwise,
+including a completed review with required fixes.
+
+The operator subcommands keep their own codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | `doctor` configured checks passed; `plan` ready; `learnings` diagnostics/feedback rendered; `evaluate-convergence` replayed |
 | `1` | Input, validation, provider, formatting, or filesystem failure |
 | `2` | `doctor` action required or diagnostic validation error; `plan` validation error |
 | `3` | `doctor` requested probe unverifiable with current permissions; `plan` incomplete (no diff) |

@@ -113,10 +113,6 @@ def _session_ledger_diagnostic(
         }
         if policy is not None:
             decision = evaluate_round_admission(record.to_round_state(), policy)
-            payload["remaining_initial_reviews"] = decision.remaining_initial_reviews
-            payload["remaining_verification_rounds"] = (
-                decision.remaining_verification_rounds
-            )
             payload["admit"] = decision.admit
             payload["handoff"] = decision.handoff
             payload["handoff_reason"] = decision.handoff_reason
@@ -660,15 +656,16 @@ def run_doctor(
                 DiagnosticCheck(
                     "automation-admission",
                     "action",
-                    "operator mode cannot enforce round budgets without a session ledger",
+                    "operator mode cannot report automated-review admission "
+                    "without a session ledger",
                 )
             )
         elif session_record is not None and session_record.get("status") == "ok":
             admit = session_record.get("admit")
             reason = session_record.get("handoff_reason")
             detail = (
-                f"admit={admit} remaining_verification="
-                f"{session_record.get('remaining_verification_rounds')}"
+                f"admit={admit} verification="
+                f"{session_record.get('completed_verification_rounds')}"
             )
             if not admit:
                 detail = f"{detail} diagnostic={session_record.get('diagnostic')}"
@@ -1095,8 +1092,7 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
             "review_convergence: "
             f"mode={review_convergence.get('mode')} "
             f"enforcement={review_convergence.get('enforcement')} "
-            f"initial={review_convergence.get('max_completed_initial_reviews')} "
-            f"verification={review_convergence.get('max_completed_verification_rounds')} "
+            "rounds=uncapped "
             f"failed_attempts={review_convergence.get('max_failed_attempts')}"
         )
     shadow_review = document.get("shadow_review_convergence")

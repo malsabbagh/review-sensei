@@ -719,7 +719,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
 const commands = {
   gh: '<span class="accent"># Install the ReviewSensei GitHub App</span><br><a href="https://github.com/apps/reviewsensei">Open the ReviewSensei GitHub App on GitHub →</a><br>Need a custom or self-hosted App? Read the <a href="https://github.com/malsabbagh/review-sensei/blob/main/docs/github-app-registration.md">GitHub App registration guide</a>.',
   action: '<span class="accent"># Add ReviewSensei to a GitHub Actions workflow</span><br># See the example workflow:<br>https://github.com/malsabbagh/review-sensei/blob/main/examples/github-actions/review-sensei-review.yml',
-  cli: '<span class="accent"># Install and run locally</span><br>pip install review-sensei<br>review-sensei prepare-diff --repository . --base-ref main --head-ref feature --output pr.patch<br>review-sensei --diff pr.patch --repository owner/repo --pull-request 42 --output review.json'
+  cli: '<span class="accent"># Install and run locally</span><br>pip install review-sensei<br>review-sensei prepare-diff --repository . --base-ref main --head-ref feature --output pr.patch<br>review-sensei --diff pr.patch --format json --output review.json'
 };
 const tabs = Array.from(document.querySelectorAll(".tab"));
 function selectTab(tab){
