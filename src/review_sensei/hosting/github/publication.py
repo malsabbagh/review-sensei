@@ -16,19 +16,37 @@ from ...convergence import (
     BlockerCandidate,
     ReviewConvergencePolicy,
 )
-from ...coverage import CoverageManifest
+from ...coverage import CoverageManifest, coverage_approval_state
 from ...diff import DiffAnalysis, analyze_diff
 from ...errors import ReviewInputError
 from ...models import ReviewComment, ReviewResult
 from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
+from ...placement import (
+    BODY_PLACEMENT,
+    CONVERSATION_RESOLUTION_NOT_REQUIRED,
+    CONVERSATION_RESOLUTION_REQUIRED,
+    HostPlacementFacts,
+    placement_note,
+    plan_finding_placement_detail,
+)
 from ...presentation import (
-    escape_markdown_label,
-    format_review_comment,
-    format_review_summary,
+    ADVISORY_STATE,
+    CHANGES_REQUIRED_STATE,
+    INCOMPLETE_STATE,
+    NO_REQUIRED_FIXES_STATE,
+    OPTIONAL_FINDING,
+    WITHHELD_STATE,
+    FindingView,
+    assign_finding_identifiers,
+    build_finding_view,
+    build_review_summary_view,
+    render_body_findings,
+    render_finding,
+    render_review_summary,
 )
 from ...validation import validate_bounded_text
 from ...verifier import CandidateFinding, PublishableReview, prepare_publishable_review
-from .approval import has_blocking_findings
+from .approval import has_blocking_findings, has_human_adjudication_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -113,6 +131,133 @@ def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
     return "summary"
 
 
+def _placement_needs_host_facts(
+    comment: ReviewComment,
+    *,
+    anchor: str,
+    policy: ReviewConvergencePolicy,
+    advisory: bool,
+) -> bool:
+    """Return whether conversation-resolution facts can change this placement.
+
+    Required findings stay inline and unanchored findings stay in the body
+    regardless of branch rules, so host facts are only read when an optional,
+    anchored finding could actually become a thread.
+    """
+
+    if advisory or comment.needs_human or comment.blocks_approval:
+        return False
+    if anchor not in ("left", "right"):
+        return False
+    return policy.inline_advisory_threads
+
+
+def _coverage_line(result: ReviewResult) -> str:
+    if result.coverage is not None:
+        line = format_coverage_digest(result.coverage).rstrip(".")
+    else:
+        line = "Coverage: complete within the configured review scope"
+    if result.coverage_mode != "full":
+        line = f"{line}. Coverage mode: {result.coverage_mode}"
+    return line
+
+
+def _review_summary_state(
+    result: ReviewResult,
+    *,
+    policy: ReviewConvergencePolicy,
+    auto_approve: bool,
+) -> tuple[str, str | None]:
+    """Classify the published summary without overstating enforcement.
+
+    A summary never claims an approval: the approval itself is a separate
+    review operation whose result is only knowable afterwards, so a clean
+    eligible review states that no required fixes were found and leaves the
+    approval claim to the approval review.
+    """
+
+    if not policy.automatic_github_review_events:
+        return ADVISORY_STATE, None
+    if has_blocking_findings(result):
+        return CHANGES_REQUIRED_STATE, None
+    incomplete_reason = _incomplete_reason(result)
+    if incomplete_reason is not None:
+        return INCOMPLETE_STATE, incomplete_reason
+    if has_human_adjudication_findings(result):
+        # A finding labeled for human assessment is not a proven defect, but
+        # it is also not a clean review: the summary must not claim that no
+        # required fixes were found while a maintainer decision is pending.
+        return WITHHELD_STATE, "a required human assessment is pending"
+    if not _coverage_complete(result):
+        return WITHHELD_STATE, "coverage was not complete for every changed file"
+    if auto_approve:
+        return NO_REQUIRED_FIXES_STATE, None
+    return WITHHELD_STATE, "automatic approval is disabled for this repository"
+
+
+def _incomplete_reason(result: ReviewResult) -> str | None:
+    if result.review_status != "complete":
+        return f"the review reported status {result.review_status}"
+    coverage = result.coverage
+    if coverage is not None and not coverage.enumeration_complete:
+        return "coverage enumeration was incomplete"
+    return None
+
+
+def _coverage_complete(result: ReviewResult) -> bool:
+    """Whether coverage supports an approval decision for every changed file."""
+
+    return (
+        result.coverage is None
+        or coverage_approval_state(result.coverage) == "reviewed"
+    )
+
+
+def _approval_eligible(result: ReviewResult) -> bool:
+    """Whether this result may converge to an automatic APPROVE.
+
+    The criteria match the independently computed round flags: a complete
+    review, no blocking findings, no pending human assessment, and complete
+    coverage. A partial or failed analysis must never be published as if a
+    maintainer had approved it.
+    """
+
+    return (
+        _incomplete_reason(result) is None
+        and not has_blocking_findings(result)
+        and not has_human_adjudication_findings(result)
+        and _coverage_complete(result)
+    )
+
+
+def _review_limitations(
+    result: ReviewResult, views: Sequence[FindingView]
+) -> tuple[str, ...]:
+    """Operational limitations stay separate from code defects."""
+
+    limitations: list[str] = []
+    reason = _incomplete_reason(result)
+    if reason is not None:
+        limitations.append(f"Incomplete analysis: {reason}.")
+    coverage = result.coverage
+    if coverage is not None:
+        exhausted = sum(
+            1 for entry in coverage.files if entry.outcome == "budget-exhausted"
+        )
+        if exhausted:
+            limitations.append(
+                f"Per-run resource limits were reached for {exhausted} file(s); "
+                "those files were not fully reviewed."
+            )
+    for view in views:
+        if view.needs_human:
+            limitations.append(
+                f"Required human assessment: {view.identifier} "
+                "is labeled for human assessment rather than asserted as a proven defect."
+            )
+    return tuple(limitations)
+
+
 def format_coverage_digest(coverage: CoverageManifest) -> str:
     counts: dict[str, int] = {}
     for entry in coverage.files:
@@ -126,23 +271,6 @@ def format_coverage_digest(coverage: CoverageManifest) -> str:
     ]
     enumeration = "complete" if coverage.enumeration_complete else "incomplete"
     return f"Coverage: {', '.join(parts)}. Enumeration {enumeration}."
-
-
-def format_unanchored_findings(
-    comments: tuple[ReviewComment, ...],
-    *,
-    heading: str = "## Findings without a publishable inline location",
-) -> str:
-    lines = [heading]
-    for comment in comments:
-        path = escape_markdown_label(comment.path)
-        rendered = format_review_comment(comment)
-        if "\n\n" in rendered:
-            labels, body = rendered.split("\n\n", 1)
-            lines.append(f"- `{path}`: {labels} {escape_markdown_label(body)}")
-        else:
-            lines.append(f"- `{path}`: {escape_markdown_label(comment.body)}")
-    return "\n".join(lines)
 
 
 def _with_discussion_instruction(text: str) -> str:
@@ -316,21 +444,6 @@ def changes_requested_review_body(*, excerpts: tuple[str, ...], marker: str) -> 
             "formatted review exceeds the configured publication limit"
         ) from exc
     return body
-
-
-def _keep_operator_inline_thread(
-    policy: ReviewConvergencePolicy, comment: ReviewComment
-) -> bool:
-    """Return whether an operator-mode finding stays as an inline thread.
-
-    Admitted blockers remain inline whenever automatic GitHub review events
-    are enabled, including when ``auto_approve`` is False (ADR 0035
-    comment-only). Non-blocking observations fold into the summary so
-    required conversation resolution cannot turn optional notes into
-    mechanical blockers. ``auto_approve`` is not part of this predicate.
-    """
-
-    return policy.automatic_github_review_events and comment.blocks_approval
 
 
 def finding_review_event(
@@ -517,11 +630,14 @@ class ReviewApprovalFinalizer:
         app_slug: str,
         enabled: bool = True,
         known_blocking_finding: bool = False,
+        approval_permitted: bool = True,
     ) -> PublicationResult:
         if not isinstance(enabled, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
         if not isinstance(known_blocking_finding, bool):
             raise GitHubPublicationError("known blocking finding is invalid")
+        if not isinstance(approval_permitted, bool):
+            raise GitHubPublicationError("review approval permission is invalid")
         if not enabled:
             return PublicationResult(status="auto_approval_disabled")
         if not GIT_SHA_HEX.fullmatch(head_sha):
@@ -610,6 +726,11 @@ class ReviewApprovalFinalizer:
                 permission="change-request publication lacks permission",
                 transient="change-request publication failed temporarily",
             )
+        if not approval_permitted:
+            # An open blocking thread is re-asserted above, so the gate stays
+            # red; this run may not APPROVE because its analysis is incomplete,
+            # a human assessment is pending, or coverage was not complete.
+            return PublicationResult(status="approval_withheld")
         # Recheck reviews immediately before APPROVE so a change request that
         # landed during the first thread sweep is not dismissed.
         reviews = self._load_head_reviews(
@@ -1327,6 +1448,16 @@ class ReviewPublisher:
                 authorized_dispositions=authorized_dispositions,
             )
         result = prepared.result
+        # Automatic approval also requires an eligible review: a partial or
+        # failed analysis, a pending human assessment, or incomplete coverage
+        # must never converge to APPROVE on the maintainer's behalf. Eligibility
+        # is evaluated once, on the admitted artifact that is actually
+        # published, so the summary state and the approval operation can never
+        # disagree. The finding review event and the finalizer's gate
+        # maintenance still follow the operator's opt-in, so a blocking finding
+        # keeps requesting changes on an ineligible review.
+        approval_eligible = _approval_eligible(result)
+        auto_approval = auto_approve and approval_eligible
         analysis = self._validate_locations(result, diff)
         marker = review_marker(
             repository_id=repository_id,
@@ -1378,6 +1509,7 @@ class ReviewPublisher:
                             app_slug=app_slug,
                             enabled=auto_approve,
                             known_blocking_finding=True,
+                            approval_permitted=approval_eligible,
                         )
                     return PublicationResult(status="already_published")
             else:
@@ -1393,6 +1525,7 @@ class ReviewPublisher:
                             app_slug=app_slug,
                             enabled=auto_approve,
                             known_blocking_finding=False,
+                            approval_permitted=approval_eligible,
                         )
                     return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
@@ -1418,76 +1551,25 @@ class ReviewPublisher:
         )
         if write_preflight.result is not None:
             return write_preflight.result
+        event, published_state = finding_review_event(
+            auto_approve=auto_approve,
+            result=result,
+            policy=convergence_policy,
+        )
         try:
-            summary = format_review_summary(result.summary, result.comments)
-            if result.coverage_mode != "full":
-                summary = f"{summary}\n\nCoverage mode: {result.coverage_mode}."
-            if result.coverage is not None:
-                summary = f"{summary}\n\n{format_coverage_digest(result.coverage)}"
-            lifecycle_by_fingerprint = {
-                item.fingerprint: item.state for item in result.finding_lifecycles
-            }
-            prepared_comments: list[tuple[ReviewComment, str, str, str]] = []
-            unanchored: list[ReviewComment] = []
-            for comment in result.comments:
-                lifecycle = finding_lifecycle_for_comment(comment)
-                state = lifecycle_by_fingerprint.get(lifecycle.fingerprint, "new")
-                comment_body = (
-                    f"{_with_discussion_instruction(format_review_comment(comment))}\n\n"
-                    f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=lifecycle.fingerprint, state=state)}"
-                )
-                validate_bounded_text(
-                    comment_body,
-                    result.limits.max_comment_body_bytes,
-                    label="published comment body",
-                    allow_empty=False,
-                )
-                anchor = _publication_anchor(comment, analysis)
-                if anchor == "summary":
-                    unanchored.append(comment)
-                    continue
-                prepared_comments.append(
-                    (comment, lifecycle.fingerprint, comment_body, anchor)
-                )
-            advisory_folded: list[ReviewComment] = []
-            if not convergence_policy.inline_advisory_threads:
-                kept_inline: list[tuple[ReviewComment, str, str, str]] = []
-                for entry in prepared_comments:
-                    if _keep_operator_inline_thread(convergence_policy, entry[0]):
-                        kept_inline.append(entry)
-                    else:
-                        advisory_folded.append(entry[0])
-                prepared_comments = kept_inline
-            # The batch create-review input type defines no file subject type:
-            # a live probe on a COMMENT review rejects a file-level entry with
-            # HTTP 422 ("Field is not defined on DraftPullRequestReviewComment",
-            # "0.position Expected value to not be null"), and an isolating
-            # probe with identical coordinates rejects only the entry carrying
-            # subject_type ("Field is not defined on
-            # DraftPullRequestReviewThread") while the same entry without it
-            # returns HTTP 200 COMMENTED, so a finding anchored to the file
-            # itself is always retained in the summary rather than published as
-            # an inline thread.
-            file_level = [entry[0] for entry in prepared_comments if entry[3] == "file"]
-            if file_level:
-                unanchored.extend(file_level)
-                prepared_comments = [
-                    entry for entry in prepared_comments if entry[3] != "file"
-                ]
-            if unanchored:
-                summary = (
-                    f"{summary}\n\n{format_unanchored_findings(tuple(unanchored))}"
-                )
-            if advisory_folded:
-                heading = (
-                    "## Review observations"
-                    if not convergence_policy.automatic_github_review_events
-                    else "## Advisory observations"
-                )
-                summary = (
-                    f"{summary}\n\n"
-                    f"{format_unanchored_findings(tuple(advisory_folded), heading=heading)}"
-                )
+            prepared_comments, summary = self._assemble_review_body(
+                result=result,
+                analysis=analysis,
+                convergence_policy=convergence_policy,
+                read_facts=lambda: self._conversation_resolution_facts(
+                    token=token, repository=repository, branch=base_branch
+                ),
+                auto_approve=auto_approval,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
             validate_bounded_text(
                 summary,
                 result.limits.max_summary_bytes,
@@ -1539,11 +1621,6 @@ class ReviewPublisher:
         # finalizer remains the sole APPROVE writer, and it re-asserts
         # REQUEST_CHANGES when a later execution still sees unresolved
         # blocking ReviewSensei roots.
-        event, published_state = finding_review_event(
-            auto_approve=auto_approve,
-            result=result,
-            policy=convergence_policy,
-        )
         if (
             auto_approve
             and prepared_comments
@@ -1694,6 +1771,7 @@ class ReviewPublisher:
             app_slug=app_slug,
             enabled=auto_approve,
             known_blocking_finding=has_blocking_findings(result),
+            approval_permitted=_approval_eligible(result),
         )
 
     def _published_finding_suppression(
@@ -1832,6 +1910,180 @@ class ReviewPublisher:
         except ReviewInputError as exc:
             raise GitHubPublicationError("review diff failed validation") from exc
         return analysis
+
+    def _assemble_review_body(
+        self,
+        *,
+        result: ReviewResult,
+        analysis: DiffAnalysis,
+        convergence_policy: ReviewConvergencePolicy,
+        read_facts: Callable[[], HostPlacementFacts],
+        auto_approve: bool,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+    ) -> tuple[list[tuple[ReviewComment, str, str, str]], str]:
+        """Plan placement and render one coherent review body.
+
+        Every finding is rendered through the shared typed renderers and gets
+        one stable ID projected from its concern fingerprint. Inline findings
+        are POSTed as threads; body findings keep their full explanation in the
+        review body, and an unanchored required finding retains its gate effect
+        through its finding marker.
+        """
+
+        advisory = not convergence_policy.automatic_github_review_events
+        lifecycle_by_fingerprint = {
+            item.fingerprint: item.state for item in result.finding_lifecycles
+        }
+        fingerprints = [
+            finding_lifecycle_for_comment(comment).fingerprint
+            for comment in result.comments
+        ]
+        identifiers = assign_finding_identifiers(fingerprints)
+        prepared_comments: list[tuple[ReviewComment, str, str, str]] = []
+        body_views: list[FindingView] = []
+        body_reasons: list[str] = []
+        all_views: list[FindingView] = []
+        facts: HostPlacementFacts | None = None
+        for comment, fingerprint in zip(result.comments, fingerprints, strict=True):
+            state = lifecycle_by_fingerprint.get(fingerprint, "new")
+            anchor = _publication_anchor(comment, analysis)
+            if facts is None and _placement_needs_host_facts(
+                comment,
+                anchor=anchor,
+                policy=convergence_policy,
+                advisory=advisory,
+            ):
+                facts = read_facts()
+            placement, body_reason = plan_finding_placement_detail(
+                comment,
+                anchor=anchor,
+                facts=facts or HostPlacementFacts(),
+                policy=convergence_policy,
+                advisory=advisory,
+            )
+            view = build_finding_view(
+                comment,
+                fingerprint=fingerprint,
+                identifier=identifiers[fingerprint],
+                lifecycle_state=state,
+                placement=placement,
+                advisory=advisory,
+            )
+            all_views.append(view)
+            if placement == BODY_PLACEMENT:
+                body_views.append(view)
+                if body_reason is not None:
+                    body_reasons.append(body_reason)
+                continue
+            comment_body = (
+                f"{_with_discussion_instruction(render_finding(view))}\n\n"
+                f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state)}"
+            )
+            validate_bounded_text(
+                comment_body,
+                result.limits.max_comment_body_bytes,
+                label="published comment body",
+                allow_empty=False,
+            )
+            prepared_comments.append((comment, fingerprint, comment_body, anchor))
+        state, reason = _review_summary_state(
+            result, policy=convergence_policy, auto_approve=auto_approve
+        )
+        summary = render_review_summary(
+            build_review_summary_view(
+                state=state,
+                head_sha=head_sha,
+                overview=result.summary,
+                coverage_line=_coverage_line(result),
+                required=tuple(
+                    view for view in all_views if view.requirement != OPTIONAL_FINDING
+                ),
+                optional=tuple(
+                    view for view in all_views if view.requirement == OPTIONAL_FINDING
+                ),
+                limitations=_review_limitations(result, all_views),
+                placement_note=placement_note(body_reasons) if body_views else None,
+                reason=reason,
+            )
+        )
+        repeated_body_views = tuple(view for view in body_views if view.repeat)
+        if repeated_body_views:
+            summary = f"{summary}\n\n{render_body_findings(repeated_body_views)}"
+        return prepared_comments, summary
+
+    def _conversation_resolution_facts(
+        self, *, token: str, repository: str, branch: str
+    ) -> HostPlacementFacts:
+        """Read branch conversation-resolution requirements through the host.
+
+        A positive requirement from either branch rules or branch protection is
+        conclusive. Any unreadable or unparseable surface leaves the state
+        unknown, which never permits optional inline threads.
+        """
+
+        required = False
+        unknown = False
+        try:
+            status, payload = self.http.request(
+                "GET",
+                self.http.repository_path(repository, f"/rules/branches/{branch}"),
+                token=token,
+            )
+        except GitHubHTTPError:
+            unknown = True
+        else:
+            if status == 200 and isinstance(payload, list):
+                for rule in payload:
+                    if not isinstance(rule, dict) or rule.get("type") != "pull_request":
+                        continue
+                    parameters = rule.get("parameters")
+                    if not isinstance(parameters, dict):
+                        continue
+                    if parameters.get("required_review_thread_resolution") is True:
+                        required = True
+            elif status == 404:
+                # Repositories without rulesets answer 404 for this endpoint.
+                unknown = True
+            else:
+                unknown = True
+        if required:
+            return HostPlacementFacts(
+                conversation_resolution=CONVERSATION_RESOLUTION_REQUIRED
+            )
+        try:
+            status, payload = self.http.request(
+                "GET",
+                self.http.repository_path(repository, f"/branches/{branch}/protection"),
+                token=token,
+            )
+        except GitHubHTTPError:
+            unknown = True
+        else:
+            if status == 404:
+                # No classic branch protection is configured.
+                pass
+            elif status == 200 and isinstance(payload, dict):
+                conversation = payload.get("required_conversation_resolution")
+                if isinstance(conversation, dict) and (
+                    conversation.get("enabled") is True
+                ):
+                    required = True
+                elif conversation is not None and not isinstance(conversation, dict):
+                    unknown = True
+            else:
+                unknown = True
+        if required:
+            return HostPlacementFacts(
+                conversation_resolution=CONVERSATION_RESOLUTION_REQUIRED
+            )
+        if unknown:
+            return HostPlacementFacts()
+        return HostPlacementFacts(
+            conversation_resolution=CONVERSATION_RESOLUTION_NOT_REQUIRED
+        )
 
     def _preflight_pr(
         self,

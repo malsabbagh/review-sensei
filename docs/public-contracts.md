@@ -468,6 +468,26 @@ batch create-review request type defines no file subject type and requires a
 review event. Inline threads are reserved for findings that carry a valid
 snapshot line.
 
+Placement is decided from host facts read through the adapter, not from a
+finding's label alone. The publisher reads whether the target branch requires
+conversation resolution — branch rules
+(`pull_request.required_review_thread_resolution`) first, then classic branch
+protection (`required_conversation_resolution.enabled`). A positive
+requirement is conclusive, and only a conclusive absence permits optional
+inline threads; an unreadable, unparseable, or unexpected response leaves the
+state unknown, which fails closed to the body and never creates a thread the
+branch would require to be resolved. A finding that blocks approval and
+carries a valid snapshot line keeps its inline thread and its gate under every
+conversation-resolution state, because it is enforced feedback. Non-enforced
+feedback is explained in the review body: findings awaiting a human
+assessment, findings without a publishable location, optional feedback under a
+policy that does not open advisory threads, optional feedback on a branch
+whose resolution requirement is present or unknown, and every advisory-mode
+finding. A non-blocking label cannot override the host's resolution rule. The
+body states placement once, using the rule that decided it, so a reader learns
+why the feedback is not an inline thread without re-deriving the planner's
+order; the explanation is not repeated per finding.
+
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
 `TotalWorkBudget` (default 8 chunks and 8 provider calls). The CLI and
@@ -497,6 +517,16 @@ severity, and lens, plus a quick-win count for trivial/small effort. Results wit
 metadata keep their existing summary and inline body text byte-for-byte. The
 GitHub publisher applies this rendering without changing marker hashing, exact
 head checks, event selection, location validation, or duplicate reconciliation.
+
+Advisory mode changes enforcement, not severity or disposition. Its summary
+heading states that enforcement is disabled and its next action states that the
+findings do not affect the review gate; the heading, count line, and section
+heading describe a serious finding as a defect rather than relabeling it as an
+optional improvement, and optional feedback keeps its explicit "This is not
+required for this PR." statement. The summary claims an approval only after an
+actual successful approval operation; every other run distinguishes no required
+fixes found, approval withheld (with the reason), and an incomplete review, and
+an advisory review never claims an approval it did not perform.
 
 ## Provider Protocol
 
@@ -1105,7 +1135,17 @@ request only once those roots are resolved. Non-blocking ReviewSensei
 follow-ups and human threads may remain open; blocking or unclassified
 ReviewSensei roots and `@sensei` replies remain ordinary comments except for
 the review event above. Partial, incomplete, or summary-only artifacts are
-always comments, even when approval is enabled. Draft, closed, stale, fork, or
+always comments, even when approval is enabled. Automatic approval also
+requires an eligible artifact: a complete review status, no finding awaiting a
+human assessment, and coverage that is either absent (a legacy or third-party
+result, which keeps the compatible path) or fully reviewed. When the operator
+enabled automatic approval but the artifact is ineligible, the finalizer still
+maintains the gate it owns — an open blocking root re-asserts
+`REQUEST_CHANGES` — and otherwise reports `approval_withheld` instead of
+approving on the maintainer's behalf. Eligibility is evaluated once, on the
+admitted artifact that is actually published, so the published summary state
+and the approval operation never disagree; a pre-admission runtime flag on an
+input comment is not authoritative. Draft, closed, stale, fork, or
 App-authored pull requests are never approved. A malformed, unauthorized,
 incomplete, or over-limit thread response fails closed before the write. The
 approval marker deduplicates each exact-head approval while repeated comments
