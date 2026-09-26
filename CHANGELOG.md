@@ -6,7 +6,8 @@
   reusable workflow reads the session ledger before starting the review CLI,
   posts the continue and rescan instructions, and completes the check
   successfully. A maintainer can allow another round, and the pull request
-  author can do that when they are an owner, member, or collaborator.
+  author can do that when they are an owner, member, or collaborator. A
+  baseline recorded under the previous two-round allowance stays reusable.
 
 ## 0.6.7 - 2026-09-23
 

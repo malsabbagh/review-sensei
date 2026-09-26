@@ -32,6 +32,7 @@ from .convergence import (
     LATE_REASONS,
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
+    PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS,
     ReviewConvergencePolicy,
     derive_blocker_candidate,
 )
@@ -566,7 +567,14 @@ def evaluate_baseline_compatibility(
             else "coverage-incomplete"
         )
     if policy.digest() != baseline.policy_digest:
-        return "policy-change"
+        previous_allowance = replace(
+            policy,
+            max_completed_verification_rounds=(
+                PREVIOUS_DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS
+            ),
+        )
+        if previous_allowance.digest() != baseline.policy_digest:
+            return "policy-change"
     previous = baseline.cache_key
     if previous.base_sha != current_key.base_sha:
         return "rebase-or-base-change"

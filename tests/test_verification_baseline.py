@@ -323,6 +323,41 @@ class BaselinePlanTests(unittest.TestCase):
             "model-change",
         )
 
+    def test_raised_verification_allowance_keeps_the_stored_baseline(self) -> None:
+        previous = ReviewConvergencePolicy(
+            mode="merge-focused", max_completed_verification_rounds=2
+        )
+        baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=previous,
+        )
+        current = ReviewConvergencePolicy(
+            mode="merge-focused", max_completed_verification_rounds=5
+        )
+        self.assertIsNone(
+            evaluate_baseline_compatibility(
+                baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=current,
+            )
+        )
+        other_baseline = baseline_from_review(
+            _result(_comment()),
+            cache_key=_key(),
+            policy=ReviewConvergencePolicy(
+                mode="merge-focused", max_completed_verification_rounds=4
+            ),
+        )
+        self.assertEqual(
+            evaluate_baseline_compatibility(
+                other_baseline,
+                current_key=_key(head_sha=SHA_C),
+                policy=current,
+            ),
+            "policy-change",
+        )
+
     def test_policy_change_invalidates_baseline(self) -> None:
         baseline = baseline_from_review(
             _result(_comment()),
