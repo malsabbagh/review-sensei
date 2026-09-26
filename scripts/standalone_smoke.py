@@ -120,6 +120,10 @@ def _run(
             shell=False,
             capture_output=True,
             text=True,
+            # The CLI contract streams UTF-8; the runner's locale codec (for
+            # example cp1252) may not decode the rendered emoji markers.
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError as exc:

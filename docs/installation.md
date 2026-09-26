@@ -9,8 +9,8 @@ install lifecycle hook. An external `git` executable is also required for
 `prepare-diff`.
 
 ```bash
-npx --yes @reviewsensei/cli@0.6.8 --version
-npx --yes @reviewsensei/cli@0.6.8 prepare-diff \
+npx --yes @reviewsensei/cli@0.6.9 --version
+npx --yes @reviewsensei/cli@0.6.9 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
 
@@ -54,8 +54,8 @@ doctor exits `2`:
 
 ```text
 status: action
-version: 0.6.8
-pass: package — 0.6.8
+version: 0.6.9
+pass: package — 0.6.9
 pass: packaged-assets — default stages and categories available
 pass: provider-mode — local (offline check)
 pass: review-convergence — mode=merge-focused enforcement=publication compatibility=explicit-opt-in rounds=uncapped failed_attempts=6

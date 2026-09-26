@@ -10,7 +10,7 @@ on:
         description: "Exact npm package version, for example 0.1.0"
         required: true
         type: string
-        default: "0.6.8"
+        default: "0.6.9"
       publish:
         description: "Publish after validation (false prepares only the attested package bundle)"
         required: true

@@ -2953,7 +2953,23 @@ _OFFLINE_COMMANDS = {
 }
 
 
+def _configure_standard_streams() -> None:
+    """Write UTF-8 to stdout and stderr whatever codec the platform chose."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            # Windows pipes default to a legacy locale codec (cp1252) that
+            # cannot encode the emoji markers in rendered markdown.
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_standard_streams()
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
     # required argparse subparsers. config/doctor/plan/learnings/
