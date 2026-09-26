@@ -665,6 +665,73 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         )
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
 
+    def test_hand_edited_retired_configuration_is_imported_into_the_setup(self):
+        transport = FileTransport(
+            files={
+                LEGACY_CONFIG_PATH: (
+                    "setup_version: 5\n"
+                    "provider: ollama\n"
+                    "provider_mode: cloud\n"
+                    "model: ''\n"
+                    "cloud_model: deepseek-v4.1-flash:cloud\n"
+                    "github_writes: true\n"
+                    "auto_approve: false\n"
+                ),
+            },
+        )
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        written = {file.path: file.content for file in branch_request[6]}
+        self.assertNotIn(LEGACY_CONFIG_PATH, written)
+        config = written[CONFIG_PATH]
+        self.assertIn("# One-time import of the retired", config)
+        self.assertIn("backend: cloud-ollama", config)
+        self.assertIn("model: deepseek-v4.1-flash:cloud", config)
+        self.assertIn("writes: true", config)
+        self.assertIn("reviews: advisory", config)
+        pull_request = next(
+            r for r in transport.requests if r[0] == "create_pull_request"
+        )
+        body = pull_request[6]
+        self.assertIn("carried these settings into .reviewsensei.yml:", body)
+        self.assertIn("github.writes", body)
+        self.assertIn("github.reviews: auto-approve", body)
+
+    def test_released_bytes_at_the_retired_path_are_replaced_not_imported(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[WORKFLOW_PATH] = _merge_focused_v4_workflow("v5")
+        files[UNINSTALL_WORKFLOW_PATH] = _historical_v4_uninstall_workflow()
+        files.pop(CONFIG_PATH)
+        files[LEGACY_CONFIG_PATH] = _v4_with_review_mode_config_file()
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        written = {file.path: file.content for file in branch_request[6]}
+        self.assertEqual(written[CONFIG_PATH], _current_config_file())
+        pull_request = next(
+            r for r in transport.requests if r[0] == "create_pull_request"
+        )
+        body = pull_request[6]
+        self.assertIn("backend choice and nothing else", body)
+        self.assertNotIn("carried these settings", body)
+
     def test_current_setup_does_not_create_another_pr(self):
         plan = SetupPlanBuilder().build("owner/repo")
         transport = FileTransport(

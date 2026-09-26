@@ -9,6 +9,7 @@ import {
 import {
   BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
   DEFAULT_PUBLIC_WORKFLOW_TAG,
+  LEGACY_SETUP_RETIRED_FIELDS,
   SETUP_VERSION,
   brokerAcceptedPublicWorkflowTags,
   buildHistoricalProviderParityV4SetupFiles,
@@ -16,10 +17,12 @@ import {
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   historicalV4UninstallWorkflow,
+  importLegacySetupConfiguration,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   publicWorkflowTagFromJobRef,
   releasedRunnerSwitchV4WorkflowTemplate,
+  setupPullRequestBody,
   validatePublicWorkflowTag,
   validatePublicWorkflowSha,
 } from "../src/setup-content";
@@ -352,5 +355,64 @@ describe("setup-v4 public boundary", () => {
         "utf8",
       ).replace("@v5", `@${tag}`),
     );
+  });
+});
+
+interface LegacySetupImportCase {
+  readonly name: string;
+  readonly content: string;
+  readonly carried: readonly string[];
+  readonly notes: readonly string[];
+  readonly rendered: string;
+  readonly pull_request_body: string;
+}
+
+function legacySetupImportCases(): readonly LegacySetupImportCase[] {
+  return (
+    JSON.parse(
+      readFileSync(
+        new URL("../../../tests/fixtures/legacy-setup-import.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { cases: readonly LegacySetupImportCase[] }
+  ).cases;
+}
+
+describe("retired setup configuration import", () => {
+  it("matches the shared importer fixture the package suite pins", () => {
+    // tests/fixtures/legacy-setup-import.json is asserted by this suite and by
+    // tests/test_legacy_setup_import.py; the fixture bytes are the parity
+    // contract between the Worker and the installed package.
+    const cases = legacySetupImportCases();
+    expect(cases.length).toBeGreaterThan(0);
+    for (const testCase of cases) {
+      const imported = importLegacySetupConfiguration(testCase.content);
+      expect(imported.carried, testCase.name).toEqual(testCase.carried);
+      expect(imported.notes, testCase.name).toEqual(testCase.notes);
+      expect(imported.content, testCase.name).toBe(testCase.rendered);
+      expect(setupPullRequestBody(imported.carried), testCase.name).toBe(
+        testCase.pull_request_body,
+      );
+    }
+  });
+
+  it("keeps the retired replacement table aligned with the package", () => {
+    // tests/test_legacy_setup_import.py compares these strings with the Python
+    // RETIRED_FIELDS table, so a replacement that exists on only one side fails.
+    expect(Object.keys(LEGACY_SETUP_RETIRED_FIELDS).length).toBeGreaterThan(0);
+    expect(LEGACY_SETUP_RETIRED_FIELDS.review_mode).toContain("github.reviews");
+    expect(LEGACY_SETUP_RETIRED_FIELDS.provider_mode).toContain("inference.backend");
+  });
+
+  it("shows the default approval policy and the import without the retired file", () => {
+    const plain = setupPullRequestBody();
+    expect(plain).toContain("github.reviews: auto-approve");
+    expect(plain).toContain("backend choice and nothing else");
+    expect(plain).not.toContain("carried these settings");
+    const imported = setupPullRequestBody(["inference.backend"]);
+    expect(imported).toContain(
+      "carried these settings into .reviewsensei.yml: inference.backend",
+    );
+    expect(imported).toContain("plus the settings imported from your retired configuration");
   });
 });

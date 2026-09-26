@@ -116,7 +116,14 @@ RETIRED_FIELDS: Mapping[str, str] = {
     "provider": "inference.backend",
     "backend": "inference.backend",
     "model": "inference.model",
+    "local_model": "inference.model",
+    "cloud_model": "inference.model",
     "provider_mode": "inference.backend (use 'local-ollama' or 'cloud-ollama')",
+    "provider_profile": (
+        "select inference.backend and set the advanced.endpoint fields"
+    ),
+    "base_url": "advanced.endpoint.base_url",
+    "cloud_base_url": "advanced.endpoint.base_url",
     "review_mode": (
         "one evidence-focused pipeline is the only engine; integration policy is "
         "github.reviews"
@@ -125,6 +132,9 @@ RETIRED_FIELDS: Mapping[str, str] = {
     "github_writes": "github.writes",
     "auto_approve": "github.reviews",
     "mention_replies": "github.mentions",
+    "learning_proposals": "github.learning: proposals",
+    "learning_prs": "github.learning: pull-requests",
+    "upload_artifacts": "github.artifacts: diagnostics",
     "version": "release/installer identity; the configuration version is 'schema'",
     "setup_version": "release/installer identity; the configuration version is 'schema'",
     "reviewsensei_version": "release/installer identity; remove it",
@@ -1890,6 +1900,314 @@ def retired_environment_remedies(
     )
 
 
+# The retired setup configuration file was a closed, flat scalar document: one
+# ``key: value`` line per setting, no nesting and no sequences. The one-time
+# import reads exactly that format with a bounded line parser instead of the
+# canonical loader so the Worker can mirror the same algorithm and render
+# byte-identical output for the same input, and so every value the import
+# cannot translate is reported in the file instead of guessed at.
+
+LEGACY_SETUP_IMPORT_MAX_LINES = 256
+LEGACY_SETUP_IMPORT_MAX_LINE_BYTES = 1_024
+LEGACY_SETUP_IMPORT_NOTE_LIMIT = 8
+
+_LEGACY_SETUP_BACKEND_ALIASES: Mapping[str, str] = {
+    "ollama": "local-ollama",
+    "local": "local-ollama",
+    "local-ollama": "local-ollama",
+    "local_ollama": "local-ollama",
+    "cloud": "cloud-ollama",
+    "cloud-ollama": "cloud-ollama",
+    "cloud_ollama": "cloud-ollama",
+    "ollama-cloud": "cloud-ollama",
+    "openrouter": "openrouter",
+    "openai": "openai-compatible",
+}
+_LEGACY_SETUP_BASE_URLS: Mapping[str, str] = {
+    "local-ollama": "http://127.0.0.1:11434/api",
+    "cloud-ollama": "https://ollama.com/api",
+}
+_LEGACY_SETUP_BEHAVIOR_KEYS = (
+    "auto_review",
+    "github_writes",
+    "auto_approve",
+    "mention_replies",
+    "learning_proposals",
+    "learning_prs",
+    "upload_artifacts",
+)
+_LEGACY_SETUP_IMPORTED_KEYS = frozenset(
+    {
+        "provider",
+        "provider_mode",
+        "model",
+        "local_model",
+        "cloud_model",
+        "base_url",
+        "cloud_base_url",
+        "schema",
+        *_LEGACY_SETUP_BEHAVIOR_KEYS,
+    }
+)
+
+
+@dataclass(frozen=True)
+class LegacySetupImport:
+    """One bounded translation of the retired setup configuration file."""
+
+    content: str
+    carried: tuple[str, ...]
+    notes: tuple[str, ...]
+
+
+def _legacy_setup_scalar(raw: str) -> str:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return raw[1:-1]
+    return raw
+
+
+def _legacy_setup_quoted(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*", value):
+        return value
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _legacy_setup_values(content: object) -> tuple[dict[str, str], list[str]]:
+    if not isinstance(content, str):
+        return {}, ["the retired file could not be read"]
+    try:
+        size = len(content.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError:
+        return {}, ["the retired file is not valid UTF-8"]
+    if size > MAX_CONFIG_BYTES:
+        return {}, ["the retired file is larger than the import bound"]
+    lines = content.splitlines()
+    if len(lines) > LEGACY_SETUP_IMPORT_MAX_LINES:
+        return {}, ["the retired file is longer than the import bound"]
+    values: dict[str, str] = {}
+    notes: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if (
+            len(line.encode("utf-8", errors="replace"))
+            > LEGACY_SETUP_IMPORT_MAX_LINE_BYTES
+        ):
+            notes.append("a line longer than the import bound was not imported")
+            continue
+        key, separator, raw = stripped.partition(":")
+        key = key.strip()
+        if not separator or not _KEY_PATTERN.fullmatch(key):
+            notes.append(f"the line '{_bounded_echo(stripped)}' was not imported")
+            continue
+        if key in values:
+            notes.append(f"'{key}' is repeated; the first value was kept")
+            continue
+        values[key] = _legacy_setup_scalar(raw.strip())
+    return values, notes
+
+
+def import_legacy_setup_configuration(content: object) -> LegacySetupImport:
+    """Translate the retired flat setup configuration into .reviewsensei.yml.
+
+    The retired file was never read by a runtime; this is the one bounded
+    import that preserves the explicit choices an operator made in it. Values
+    the import cannot translate are reported as comments in the rendered file
+    and never guessed at. The rendered document keeps the current setup marker
+    and is deliberately not the generated minimal bytes: the installation
+    becomes the operator's custom configuration, exactly as for any hand-edited
+    file.
+    """
+
+    values, notes = _legacy_setup_values(content)
+    if "schema" in values:
+        # A canonical document at the retired path is not a flat legacy file:
+        # translate nothing rather than misread nested keys as retired ones.
+        notes.append(
+            "the retired path holds a canonical configuration; it was not imported"
+        )
+        values = {}
+
+    def text(key: str) -> str | None:
+        raw = values.get(key)
+        if raw is None:
+            return None
+        value = raw.strip()
+        return value or None
+
+    def boolean(key: str) -> bool | None:
+        raw = text(key)
+        if raw is None:
+            return None
+        lowered = raw.lower()
+        if lowered in {"true", "false"}:
+            return lowered == "true"
+        notes.append(
+            f"'{key}': '{_bounded_echo(raw)}' is not a boolean and was not imported"
+        )
+        return None
+
+    carried: list[str] = []
+
+    backend: str | None = None
+    for key in ("provider_mode", "provider"):
+        raw = text(key)
+        if raw is None:
+            continue
+        mapped = _LEGACY_SETUP_BACKEND_ALIASES.get(raw.lower())
+        if mapped is None:
+            notes.append(
+                f"'{key}': '{_bounded_echo(raw)}' is not a backend; it was not imported"
+            )
+            continue
+        if backend is None:
+            backend = mapped
+            carried.append("inference.backend")
+    resolved_backend = backend or "local-ollama"
+
+    model = text("model")
+    selected_model_key = "model" if model is not None else None
+    if model is None and resolved_backend in _LEGACY_SETUP_BASE_URLS:
+        fallback_key = (
+            "cloud_model" if resolved_backend == "cloud-ollama" else "local_model"
+        )
+        model = text(fallback_key)
+        if model is not None:
+            selected_model_key = fallback_key
+    if model is not None:
+        carried.append("inference.model")
+    for key in ("local_model", "cloud_model"):
+        if key != selected_model_key and key in values:
+            notes.append(
+                f"'{key}' is not imported; the selected backend uses inference.model"
+            )
+
+    endpoint: str | None = None
+    selected_endpoint_key = {
+        "local-ollama": "base_url",
+        "cloud-ollama": "cloud_base_url",
+    }.get(resolved_backend)
+    for key, endpoint_backend in (
+        ("base_url", "local-ollama"),
+        ("cloud_base_url", "cloud-ollama"),
+    ):
+        raw_endpoint = text(key)
+        if raw_endpoint is None:
+            continue
+        default_endpoint = _LEGACY_SETUP_BASE_URLS[endpoint_backend]
+        if key == selected_endpoint_key:
+            if raw_endpoint != default_endpoint:
+                endpoint = raw_endpoint
+                carried.append("advanced.endpoint.base_url")
+            continue
+        if raw_endpoint != default_endpoint:
+            notes.append(
+                f"'{key}' is not imported for this backend; set "
+                "advanced.endpoint.base_url explicitly"
+            )
+
+    present_behavior = [key for key in _LEGACY_SETUP_BEHAVIOR_KEYS if key in values]
+
+    automatic_reviews = boolean("auto_review")
+    if automatic_reviews is not None:
+        carried.append("github.automatic_reviews")
+    writes = boolean("github_writes")
+    if writes is not None:
+        carried.append("github.writes")
+    auto_approve = boolean("auto_approve")
+    if auto_approve is not None:
+        carried.append("github.reviews")
+    mentions = boolean("mention_replies")
+    if mentions is not None:
+        carried.append("github.mentions")
+    proposals = boolean("learning_proposals")
+    learning_prs = boolean("learning_prs")
+    if "learning_proposals" in values or "learning_prs" in values:
+        carried.append("github.learning")
+    artifacts_flag = boolean("upload_artifacts")
+    if artifacts_flag is not None:
+        carried.append("github.artifacts")
+
+    for key in values:
+        if key in _LEGACY_SETUP_IMPORTED_KEYS:
+            continue
+        replacement = RETIRED_FIELDS.get(key)
+        if replacement is not None:
+            notes.append(f"'{key}' was retired; {replacement}")
+        else:
+            notes.append(f"'{key}' is not a retired setup setting and was not imported")
+
+    bounded_notes = notes[:LEGACY_SETUP_IMPORT_NOTE_LIMIT]
+    if len(notes) > LEGACY_SETUP_IMPORT_NOTE_LIMIT:
+        bounded_notes.append(
+            f"{len(notes) - LEGACY_SETUP_IMPORT_NOTE_LIMIT} more import notes "
+            "were omitted"
+        )
+
+    if not carried:
+        lines = [
+            "# ReviewSensei setup version: 5",
+            "# The retired .github/review-sensei/config.yml is no longer read, and",
+            "# this import did not translate anything from it. Review the retired",
+            "# file, then delete it after merging.",
+        ]
+        body = ["schema: 1", "", "inference:", "  backend: local-ollama"]
+    else:
+        lines = [
+            "# ReviewSensei setup version: 5",
+            "# One-time import of the retired .github/review-sensei/config.yml,",
+            "# which nothing reads any more. The settings below are this file's",
+            "# policies now; review this diff, then delete the retired file",
+            "# after merging.",
+        ]
+        body = ["schema: 1", "", "inference:", f"  backend: {resolved_backend}"]
+        if model is not None:
+            body.append(f"  model: {_legacy_setup_quoted(model)}")
+        if present_behavior:
+            body.extend(
+                [
+                    "",
+                    "github:",
+                    "  automatic_reviews: "
+                    + _render_value(
+                        True if automatic_reviews is None else automatic_reviews
+                    ),
+                    "  writes: " + _render_value(False if writes is None else writes),
+                    "  reviews: "
+                    + ("advisory" if auto_approve is False else "auto-approve"),
+                    "  mentions: "
+                    + _render_value(True if mentions is None else mentions),
+                    "  learning: "
+                    + (
+                        "pull-requests"
+                        if learning_prs
+                        else "proposals"
+                        if proposals
+                        else "disabled"
+                    ),
+                    "  artifacts: " + ("diagnostics" if artifacts_flag else "none"),
+                ]
+            )
+        if endpoint is not None:
+            body.extend(
+                [
+                    "",
+                    "advanced:",
+                    "  endpoint:",
+                    f"    base_url: {_legacy_setup_quoted(endpoint)}",
+                    "    allow_custom_endpoint: true",
+                ]
+            )
+    lines.extend(f"# NOTE: {note}" for note in bounded_notes)
+    lines.extend(body)
+    return LegacySetupImport(
+        content="\n".join(lines) + "\n",
+        carried=tuple(carried),
+        notes=tuple(notes),
+    )
+
+
 def _reject_retired_provider_environment(environ: Mapping[str, str]) -> None:
     for name, replacement in RETIRED_ENVIRONMENT_SETTINGS.items():
         value = environ.get(name)
@@ -2172,6 +2490,7 @@ __all__ = [
     "InferenceSection",
     "LargeChangeSection",
     "LEARNING_MODES",
+    "LegacySetupImport",
     "MAX_CONFIG_BYTES",
     "ProductConfiguration",
     "Provenance",
@@ -2186,6 +2505,7 @@ __all__ = [
     "customization_directories",
     "default_configuration",
     "documented_backend_names",
+    "import_legacy_setup_configuration",
     "load_configuration",
     "parse_configuration_text",
     "render_configuration",

@@ -112,9 +112,7 @@ class FakeCheckRuns:
 
     def respond(self, request):
         if request.method == "GET":
-            return json_response(
-                {"check_runs": [] if self.run is None else [self.run]}
-            )
+            return json_response({"check_runs": [] if self.run is None else [self.run]})
         body = json.loads(request.data.decode("utf-8"))
         if request.method == "POST":
             self.run = {
@@ -207,9 +205,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
             json_response({"id": 6}, 200),
         ]
     )
-    http, calls = make_http(
-        responses, routes=((checks.matches, checks.respond),)
-    )
+    http, calls = make_http(responses, routes=((checks.matches, checks.respond),))
     outcome = ReviewPublisher(http=http).publish(
         token="token",
         repository="owner/repo",
