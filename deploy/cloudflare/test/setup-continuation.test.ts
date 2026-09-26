@@ -30,6 +30,9 @@ function request(
     unresolved: false,
     attempt: 0,
     failed: false,
+    failureCode: null,
+    failureCount: 0,
+    failedRepository: null,
     ...overrides,
   };
 }
@@ -137,12 +140,50 @@ describe("setup continuation steps", () => {
         repositories: ["acme/two"],
         attempt: 0,
         failed: true,
+        failureCode: "github_request_transient_503",
+        failureCount: 1,
+        failedRepository: "acme/one",
+      }),
+    );
+  });
+
+  it("does not treat an unfamiliar github_app_ message as fatal", async () => {
+    const error = new Error("github_app_custom_debug");
+    const continuation = ops({
+      processRepository: vi.fn(async () => {
+        throw error;
+      }),
+    });
+    await runSetupContinuationStep(request(), continuation);
+    expect(continuation.release).not.toHaveBeenCalled();
+    expect(continuation.schedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositories: ["acme/two"],
+        failed: true,
+        failureCode: "github_app_custom_debug",
+        failedRepository: "acme/one",
+      }),
+    );
+  });
+
+  it("retries a typed transient error and a stable 503 code", async () => {
+    const coded = new Error("github_installation_token_failed_503");
+    const continuation = ops({
+      processRepository: vi.fn(async () => {
+        throw coded;
+      }),
+    });
+    await runSetupContinuationStep(request(), continuation);
+    expect(continuation.schedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositories: ["acme/one", "acme/two"],
+        attempt: 1,
       }),
     );
   });
 
   it("releases the claim on a fatal configuration error", async () => {
-    const error = new Error("PUBLIC_WORKFLOW_TAG must be a movable release channel");
+    const error = new Error("PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag");
     const continuation = ops({
       processRepository: vi.fn(async () => {
         throw error;
@@ -150,17 +191,31 @@ describe("setup continuation steps", () => {
     });
     await runSetupContinuationStep(request(), continuation);
     expect(continuation.report).toHaveBeenCalledWith(error);
-    expect(continuation.release).toHaveBeenCalledOnce();
+    expect(continuation.release).toHaveBeenCalledWith({
+      errorCode: "public_workflow_tag_invalid",
+      failureCount: 1,
+      repository: "acme/one",
+    });
     expect(continuation.schedule).not.toHaveBeenCalled();
   });
 
-  it("releases the claim when the last repository fails after earlier failures", async () => {
+  it("releases the recorded repository when earlier setup failed", async () => {
     const continuation = ops();
     await runSetupContinuationStep(
-      request({ repositories: ["acme/two"], failed: true }),
+      request({
+        repositories: ["acme/two"],
+        failed: true,
+        failureCode: "github_request_rejected_404",
+        failureCount: 1,
+        failedRepository: "acme/one",
+      }),
       continuation,
     );
     expect(continuation.complete).not.toHaveBeenCalled();
-    expect(continuation.release).toHaveBeenCalledOnce();
+    expect(continuation.release).toHaveBeenCalledWith({
+      errorCode: "github_request_rejected_404",
+      failureCount: 1,
+      repository: "acme/one",
+    });
   });
 });

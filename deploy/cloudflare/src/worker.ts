@@ -1,10 +1,8 @@
-import { WorkerEntrypoint } from "cloudflare:workers";
 import type { WorkerEnv } from "./env";
 import { DeliveryLedger } from "./delivery-ledger";
 import { BrokerLedger } from "./broker-ledger";
 import { TokenBroker } from "./token-broker";
 import {
-  GitHubSetupService,
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
   deferInstallationSetup,
@@ -12,11 +10,7 @@ import {
   processDelivery,
   type VerifiedDelivery,
 } from "./github-app";
-import {
-  parseSetupContinuationRequest,
-  runSetupContinuationStep,
-  type SetupContinuationRequest,
-} from "./setup-continuation";
+import type { SetupContinuationRequest } from "./setup-continuation";
 
 const LEDGER_NAME = "reviewsensei-deliveries";
 
@@ -342,17 +336,23 @@ interface LedgerReply {
 
 async function ledgerRequest(
   env: WorkerEnv,
-  action: "claim" | "complete" | "release",
+  action: "claim" | "complete" | "release" | "schedule",
   app: number,
   deliveryId: string,
   digest: string,
+  extra?: Record<string, unknown>,
 ): Promise<LedgerReply> {
   const id = env.DELIVERY_LEDGER.idFromName(LEDGER_NAME);
   const stub = env.DELIVERY_LEDGER.get(id);
   const request = await stub.fetch(`https://ledger/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ app_id: app, delivery_id: deliveryId, digest }),
+    body: JSON.stringify({
+      app_id: app,
+      delivery_id: deliveryId,
+      digest,
+      ...extra,
+    }),
   });
   if (!request.ok) {
     throw new Error("delivery ledger request failed");
@@ -360,11 +360,7 @@ async function ledgerRequest(
   return (await request.json()) as LedgerReply;
 }
 
-async function webhook(
-  request: Request,
-  env: WorkerEnv,
-  ctx?: ExecutionContext,
-): Promise<Response> {
+async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
   const app = appId(env.GITHUB_APP_ID);
   if (
     app === null ||
@@ -422,17 +418,12 @@ async function webhook(
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
     if (delivery !== null && deferInstallationSetup(delivery)) {
-      if (env.SETUP_CONTINUATION === undefined) {
-        throw new Error("setup_continuation_unavailable");
-      }
-      const continued = env.SETUP_CONTINUATION.run(
-        continuationRequest(delivery, digest),
-      );
-      if (ctx) {
-        ctx.waitUntil(continued);
-      } else {
-        await continued;
-      }
+      // The claim above is already durable. Scheduling persists the cursor and
+      // arms the ledger alarm before this 202, so a dropped waitUntil cannot
+      // ack the delivery with no continuation.
+      await ledgerRequest(env, "schedule", app, deliveryId, digest, {
+        continuation: continuationRequest(delivery, digest),
+      });
       return response({ accepted: true }, 202);
     }
     if (delivery !== null) {
@@ -480,97 +471,14 @@ function continuationRequest(
     unresolved: delivery.repositories.length === 0,
     attempt: 0,
     failed: false,
+    failureCode: null,
+    failureCount: 0,
+    failedRepository: null,
   };
-}
-
-function continuationDelivery(
-  input: SetupContinuationRequest,
-  repositories: string[],
-): VerifiedDelivery {
-  return {
-    appId: input.appId,
-    event: input.event,
-    action: input.action,
-    installationId: input.installationId,
-    deliveryId: input.deliveryId,
-    repository: repositories[0] ?? null,
-    repositories,
-    suspended: false,
-    permissions: input.permissions,
-  };
-}
-
-/**
- * One selected repository per Worker invocation.
- *
- * The webhook calls `run`, which schedules `execute` and returns. `execute`
- * reconciles the head repository, then calls `run` again for the remainder.
- * Each call is a service-binding invocation with a fresh Free-plan budget.
- */
-export class SetupContinuation extends WorkerEntrypoint<WorkerEnv> {
-  async run(raw: unknown): Promise<void> {
-    const input = parseSetupContinuationRequest(raw);
-    this.ctx.waitUntil(this.execute(input));
-  }
-
-  private async execute(input: SetupContinuationRequest): Promise<void> {
-    const continuation = this.env.SETUP_CONTINUATION;
-    if (continuation === undefined) {
-      console.error("github_setup_failed", {
-        delivery_id: input.deliveryId,
-        event: input.event,
-        error_code: "setup_continuation_unavailable",
-      });
-      try {
-        await ledgerRequest(this.env, "release", input.appId, input.deliveryId, input.digest);
-      } catch {
-        // The lease expiry remains the recovery path if release also fails.
-      }
-      return;
-    }
-    try {
-      await runSetupContinuationStep(input, {
-        processRepository: async (repository) => {
-          await new GitHubSetupService(this.env).process(
-            continuationDelivery(input, [repository]),
-          );
-        },
-        resolveRepositories: () =>
-          new GitHubSetupService(this.env).selectSetupRepositories(
-            continuationDelivery(input, []),
-          ),
-        schedule: (next) => continuation.run(next),
-        complete: async () => {
-          await ledgerRequest(this.env, "complete", input.appId, input.deliveryId, input.digest);
-        },
-        release: async () => {
-          await ledgerRequest(this.env, "release", input.appId, input.deliveryId, input.digest);
-        },
-        report: (error) => {
-          console.error("github_setup_failed", {
-            delivery_id: input.deliveryId,
-            event: input.event,
-            error_code: setupErrorCode(error),
-          });
-        },
-      });
-    } catch (error) {
-      console.error("github_setup_failed", {
-        delivery_id: input.deliveryId,
-        event: input.event,
-        error_code: setupErrorCode(error),
-      });
-      try {
-        await ledgerRequest(this.env, "release", input.appId, input.deliveryId, input.digest);
-      } catch {
-        // The lease expiry remains the recovery path if release also fails.
-      }
-    }
-  }
 }
 
 const worker = {
-  async fetch(request: Request, env: WorkerEnv, ctx?: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") {
       return response({ ok: true });
@@ -593,7 +501,7 @@ const worker = {
     if (request.method !== "POST") {
       return response({ error: "method_not_allowed" }, 405);
     }
-    return webhook(request, env, ctx);
+    return webhook(request, env);
   },
 };
 

@@ -45,40 +45,46 @@ async function signature(body: Uint8Array): Promise<string> {
   return `sha256=${hex}`;
 }
 
-function ledger() {
+function ledger(scheduleStatus = 200) {
   const actions: string[] = [];
+  const bodies: unknown[] = [];
   const namespace = {
     idFromName: () => "ledger",
     get: () => ({
-      fetch: async (input: Request | string) => {
+      fetch: async (input: Request | string, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.url;
         const action = new URL(url).pathname.replace(/^\//, "");
         actions.push(action);
-        return new Response(JSON.stringify({ state: action === "claim" ? "claimed" : "accepted" }), {
+        const raw = typeof input === "string" ? init?.body : input instanceof Request ? await input.text() : undefined;
+        if (typeof raw === "string" && raw.length > 0) {
+          bodies.push(JSON.parse(raw) as unknown);
+        }
+        if (action === "schedule" && scheduleStatus !== 200) {
+          return new Response(JSON.stringify({ error: "delivery_ledger_unavailable" }), {
+            status: scheduleStatus,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ state: action === "claim" ? "claimed" : "scheduled" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       },
     }),
   };
-  return { actions, namespace };
+  return { actions, bodies, namespace };
 }
 
-async function webhook(
-  repositories: string[],
-  run = vi.fn(async () => undefined),
-  ctx?: ExecutionContext,
-) {
+async function webhook(repositories: string[], scheduleStatus = 200) {
   const bodyText = JSON.stringify(installationPayload(repositories));
   const body = new TextEncoder().encode(bodyText);
-  const book = ledger();
+  const book = ledger(scheduleStatus);
   const env = {
     GITHUB_APP_ID: "12345",
     GITHUB_APP_PRIVATE_KEY: "unused",
     GITHUB_APP_WEBHOOK_SECRET: SECRET,
     PUBLIC_WORKFLOW_TAG: "v5",
     DELIVERY_LEDGER: book.namespace,
-    SETUP_CONTINUATION: { run },
   } as unknown as WorkerEnv;
   const response = await worker.fetch(
     new Request("https://github.reviewsensei.dev/github/webhook", {
@@ -93,9 +99,8 @@ async function webhook(
       body,
     }),
     env,
-    ctx,
   );
-  return { response, run, actions: book.actions };
+  return { response, actions: book.actions, bodies: book.bodies };
 }
 
 beforeEach(() => {
@@ -104,62 +109,51 @@ beforeEach(() => {
 });
 
 describe("multi-repository installation webhooks", () => {
-  it("schedules one continuation for every selected repository and returns 202", async () => {
-    const { response, run, actions } = await webhook(["acme/one", "acme/two"]);
+  it("claims and schedules before accepting a multi-repository install", async () => {
+    const { response, actions, bodies } = await webhook(["acme/one", "acme/two"]);
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ accepted: true });
     expect(processDelivery).not.toHaveBeenCalled();
-    expect(run).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]?.[0]).toMatchObject({
-      installationId: 2468,
-      repositories: ["acme/one", "acme/two"],
-      unresolved: false,
-      attempt: 0,
-      failed: false,
+    expect(actions).toEqual(["claim", "schedule"]);
+    expect(bodies[1]).toMatchObject({
+      continuation: {
+        installationId: 2468,
+        repositories: ["acme/one", "acme/two"],
+        unresolved: false,
+        attempt: 0,
+        failed: false,
+      },
     });
-    expect(actions).toEqual(["claim"]);
+  });
+
+  it("returns 503 and releases the claim when scheduling fails", async () => {
+    const { response, actions } = await webhook(["acme/one", "acme/two"], 503);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "setup_unavailable",
+      error_code: "setup_failed",
+    });
+    expect(processDelivery).not.toHaveBeenCalled();
+    expect(actions).toEqual(["claim", "schedule", "release"]);
   });
 
   it("keeps a single selected repository on the webhook invocation", async () => {
-    const { response, run, actions } = await webhook(["acme/one"]);
+    const { response, actions } = await webhook(["acme/one"]);
     expect(response.status).toBe(202);
-    expect(run).not.toHaveBeenCalled();
     expect(processDelivery).toHaveBeenCalledOnce();
     expect(actions).toEqual(["claim", "complete"]);
   });
 
-  it("acknowledges the webhook before the continuation settles", async () => {
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const run = vi.fn(() => gate);
-    const waits: Promise<unknown>[] = [];
-    const ctx = {
-      waitUntil(promise: Promise<unknown>) {
-        waits.push(promise);
-      },
-      passThroughOnException() {
-        return undefined;
-      },
-    } as ExecutionContext;
-    const { response, actions } = await webhook(["acme/one", "acme/two"], run, ctx);
-    expect(response.status).toBe(202);
-    expect(await response.json()).toEqual({ accepted: true });
-    expect(waits).toHaveLength(1);
-    expect(actions).toEqual(["claim"]);
-    release?.();
-    await waits[0];
-  });
-
-  it("loads an omitted repository list in the continuation", async () => {
-    const { response, run, actions } = await webhook([]);
+  it("loads an omitted repository list from the scheduled continuation", async () => {
+    const { response, actions, bodies } = await webhook([]);
     expect(response.status).toBe(202);
     expect(processDelivery).not.toHaveBeenCalled();
-    expect(run.mock.calls[0]?.[0]).toMatchObject({
-      repositories: [],
-      unresolved: true,
+    expect(bodies[1]).toMatchObject({
+      continuation: {
+        repositories: [],
+        unresolved: true,
+      },
     });
-    expect(actions).toEqual(["claim"]);
+    expect(actions).toEqual(["claim", "schedule"]);
   });
 });

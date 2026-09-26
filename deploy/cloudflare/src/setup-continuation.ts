@@ -1,4 +1,8 @@
-import { repositorySlug } from "./github-app";
+import {
+  GitHubAuthConfigurationError,
+  GitHubSetupTransientError,
+  repositorySlug,
+} from "./github-app";
 
 const MAX_SETUP_REPOSITORIES = 1000;
 const MAX_SETUP_ATTEMPTS = 3;
@@ -20,6 +24,17 @@ export interface SetupContinuationRequest {
   unresolved: boolean;
   attempt: number;
   failed: boolean;
+  /** Stable machine code for the latest terminal repository failure. No prose. */
+  failureCode: string | null;
+  failureCount: number;
+  /** Repository whose setup failed. Null when the failure happened before one was selected. */
+  failedRepository: string | null;
+}
+
+export interface SetupFailureSummary {
+  errorCode: string;
+  failureCount: number;
+  repository: string | null;
 }
 
 export interface SetupContinuationOps {
@@ -27,7 +42,7 @@ export interface SetupContinuationOps {
   resolveRepositories(): Promise<string[]>;
   schedule(next: SetupContinuationRequest): Promise<void>;
   complete(): Promise<void>;
-  release(): Promise<void>;
+  release(summary: SetupFailureSummary): Promise<void>;
   report(error: unknown): void;
 }
 
@@ -115,6 +130,23 @@ export function parseSetupContinuationRequest(value: unknown): SetupContinuation
   if (typeof value.unresolved !== "boolean" || typeof value.failed !== "boolean") {
     throw new SetupContinuationError("setup_continuation_invalid");
   }
+  if (
+    value.failureCode !== null &&
+    (typeof value.failureCode !== "string" || !/^[a-z0-9_]{1,80}$/.test(value.failureCode))
+  ) {
+    throw new SetupContinuationError("setup_continuation_invalid");
+  }
+  if (
+    typeof value.failureCount !== "number" ||
+    !Number.isSafeInteger(value.failureCount) ||
+    value.failureCount < 0 ||
+    value.failureCount > MAX_SETUP_REPOSITORIES
+  ) {
+    throw new SetupContinuationError("setup_continuation_invalid");
+  }
+  if (value.failedRepository !== null && !repositorySlug(value.failedRepository)) {
+    throw new SetupContinuationError("setup_continuation_invalid");
+  }
   const repositories = repositoriesFrom(value.repositories);
   if (value.unresolved && repositories.length > 0) {
     throw new SetupContinuationError("setup_continuation_invalid");
@@ -131,6 +163,9 @@ export function parseSetupContinuationRequest(value: unknown): SetupContinuation
     unresolved: value.unresolved,
     attempt: value.attempt,
     failed: value.failed,
+    failureCode: value.failureCode,
+    failureCount: value.failureCount,
+    failedRepository: value.failedRepository,
   };
 }
 
@@ -138,54 +173,123 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "";
 }
 
-function isFatalSetupError(error: unknown): boolean {
+const EXACT_PROSE_CODES: Readonly<Record<string, string>> = {
+  "GitHub App installation lacks setup permissions": "github_installation_permissions_missing",
+  "PUBLIC_WORKFLOW_TAG must be a valid single-segment git tag": "public_workflow_tag_invalid",
+  "PUBLIC_WORKFLOW_REF must be a non-empty single-line value": "public_workflow_ref_invalid",
+  "PUBLIC_WORKFLOW_SHA must be exactly 40 lowercase hexadecimal characters": "public_workflow_sha_invalid",
+  "public workflow tag unavailable": "public_workflow_tag_unavailable",
+  "GitHub request failed": "github_request_failed",
+  "GitHub request failed temporarily": "github_request_transient",
+};
+
+const FATAL_CODES = new Set([
+  "github_app_key_invalid",
+  "github_app_id_invalid",
+  "github_api_url_invalid",
+  "github_installation_invalid",
+  "github_installation_token_invalid",
+  "github_installation_permissions_invalid",
+  "github_installation_permissions_missing",
+  "github_installation_repositories_invalid",
+  "github_installation_repositories_limit",
+  "github_workflow_tag_invalid",
+  "public_workflow_tag_invalid",
+  "public_workflow_ref_invalid",
+  "public_workflow_sha_invalid",
+  "setup_continuation_invalid",
+  "setup_continuation_unavailable",
+]);
+
+const TRANSIENT_CODES = new Set([
+  "github_installation_repositories_failed",
+  "github_workflow_tag_unavailable",
+  "public_workflow_tag_unavailable",
+]);
+
+const STATUS_CODE = /^(github_request_transient|github_installation_token_failed|github_workflow_tag_unavailable)_(\d{3})$/;
+
+/** Stable code for logs and the delivery outcome. Unknown prose collapses to setup_failed. */
+export function continuationErrorCode(error: unknown): string {
   const message = errorMessage(error);
-  return (
-    message.startsWith("PUBLIC_WORKFLOW_TAG") ||
-    message.startsWith("PUBLIC_WORKFLOW_REF") ||
-    message.startsWith("PUBLIC_WORKFLOW_SHA") ||
-    message.startsWith("github_app_") ||
-    message.startsWith("github_api_url_") ||
-    message.startsWith("github_workflow_tag_invalid") ||
-    message === "github_installation_invalid" ||
-    message === "github_installation_token_failed_401" ||
-    message === "github_installation_token_invalid" ||
-    message.startsWith("github_installation_permissions") ||
-    message === "GitHub App installation lacks setup permissions" ||
-    message === "setup_continuation_invalid" ||
-    message === "setup_continuation_unavailable"
-  );
+  if (/^[a-z0-9_]{1,80}$/.test(message)) {
+    return message;
+  }
+  return EXACT_PROSE_CODES[message] ?? "setup_failed";
 }
 
-function isTransientSetupError(error: unknown): boolean {
-  if (error instanceof Error && error.name === "GitHubSetupTransientError") {
-    return true;
+function statusDisposition(code: string): "transient" | "fatal" | "skip" | null {
+  const match = STATUS_CODE.exec(code);
+  if (!match) {
+    return null;
   }
-  const message = errorMessage(error);
-  return (
-    message === "GitHub request failed temporarily" ||
-    message === "GitHub request failed" ||
-    message.startsWith("github_request_transient") ||
-    /^github_installation_token_failed_5\d\d$/.test(message) ||
-    message === "github_installation_repositories_failed" ||
-    message.startsWith("github_workflow_tag_unavailable") ||
-    message === "public workflow tag unavailable"
-  );
+  const status = Number(match[2]);
+  if (match[1] === "github_installation_token_failed" && status === 401) {
+    return "fatal";
+  }
+  if (status === 429 || status >= 500) {
+    return "transient";
+  }
+  return "skip";
+}
+
+function classifySetupError(error: unknown): "transient" | "fatal" | "skip" {
+  if (error instanceof GitHubSetupTransientError) {
+    return "transient";
+  }
+  if (error instanceof GitHubAuthConfigurationError) {
+    return "fatal";
+  }
+  const code = continuationErrorCode(error);
+  if (FATAL_CODES.has(code)) {
+    return "fatal";
+  }
+  const status = statusDisposition(code);
+  if (status !== null) {
+    return status;
+  }
+  if (TRANSIENT_CODES.has(code)) {
+    return "transient";
+  }
+  return "skip";
 }
 
 function continuationFailure(error: unknown, attempt: number): "retry" | "fatal" | "skip" {
-  if (isFatalSetupError(error)) {
+  const kind = classifySetupError(error);
+  if (kind === "fatal") {
     return "fatal";
   }
-  if (isTransientSetupError(error) && attempt + 1 < MAX_SETUP_ATTEMPTS) {
+  if (kind === "transient" && attempt + 1 < MAX_SETUP_ATTEMPTS) {
     return "retry";
   }
   return "skip";
 }
 
+function failureSummary(input: SetupContinuationRequest): SetupFailureSummary {
+  return {
+    errorCode: input.failureCode ?? "setup_failed",
+    failureCount: input.failureCount,
+    repository: input.failedRepository,
+  };
+}
+
+function withFailure(
+  input: SetupContinuationRequest,
+  error: unknown,
+  repository: string | null,
+): SetupContinuationRequest {
+  return {
+    ...input,
+    failed: true,
+    failureCode: continuationErrorCode(error),
+    failureCount: input.failureCount + 1,
+    failedRepository: repository,
+  };
+}
+
 async function finish(input: SetupContinuationRequest, ops: SetupContinuationOps): Promise<void> {
   if (input.failed) {
-    await ops.release();
+    await ops.release(failureSummary(input));
     return;
   }
   await ops.complete();
@@ -210,13 +314,16 @@ export async function runSetupContinuationStep(
         await ops.schedule({ ...input, attempt: input.attempt + 1 });
         return;
       }
+      const failed = withFailure(input, error, null);
       ops.report(error);
-      await ops.release();
+      await ops.release(failureSummary(failed));
       return;
     }
     if (repositories.length > MAX_SETUP_REPOSITORIES) {
-      ops.report(new Error("github_installation_repositories_limit"));
-      await ops.release();
+      const error = new Error("github_installation_repositories_limit");
+      const failed = withFailure(input, error, null);
+      ops.report(error);
+      await ops.release(failureSummary(failed));
       return;
     }
     if (repositories.length === 0) {
@@ -246,16 +353,16 @@ export async function runSetupContinuationStep(
       await ops.schedule({ ...input, attempt: input.attempt + 1 });
       return;
     }
+    const failed = withFailure(input, error, current);
     ops.report(error);
     if (failure === "fatal") {
-      await ops.release();
+      await ops.release(failureSummary(failed));
       return;
     }
     await ops.schedule({
-      ...input,
+      ...failed,
       repositories: rest,
       attempt: 0,
-      failed: true,
     });
     return;
   }

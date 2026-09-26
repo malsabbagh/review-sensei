@@ -7,8 +7,9 @@
   succeed instead of failing.
 
 - Reconcile GitHub App installs that select multiple repositories one
-  repository per Worker invocation so setup stays within the Workers Free
-  plan CPU and subrequest limits.
+  repository per Durable Object alarm so setup stays within the Workers Free
+  plan CPU and subrequest limits. The webhook claims the delivery and arms
+  that alarm before it returns 202.
 
 ## 0.6.7 - 2026-09-23
 
