@@ -26,7 +26,6 @@ from review_sensei.context import (
     finding_lifecycle_for_comment,
 )
 from review_sensei.convergence import (
-    MAX_COMPLETED_VERIFICATION_ROUNDS,
     ReviewConvergencePolicy,
     admit_review_result,
     derive_blocker_candidate,
@@ -126,12 +125,15 @@ class RelatedPathTests(unittest.TestCase):
         self.assertEqual(related, ("src/helper.py", "src/app.py"))
         self.assertNotIn("docs/b.md", related)
 
-    def test_related_path_overflow_fails_closed(self) -> None:
+    def test_related_path_overflow_truncates_at_the_bound(self) -> None:
         changed = tuple(
             f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 2)
         )
-        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
-            related_paths_for_change(changed)
+        related = related_paths_for_change(changed)
+        expected = tuple(
+            f"src/file-{index}.py" for index in range(1, MAX_RELATED_PATHS + 1)
+        )
+        self.assertEqual(related, expected)
 
 
 class PreviewScopeTests(unittest.TestCase):
@@ -325,79 +327,34 @@ class BaselinePlanTests(unittest.TestCase):
             "model-change",
         )
 
-    def test_raised_verification_allowance_keeps_the_stored_baseline(self) -> None:
-        previous = ReviewConvergencePolicy(
-            mode="merge-focused", max_completed_verification_rounds=2
-        )
+    def test_policy_identity_is_independent_of_completed_rounds(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
         baseline = baseline_from_review(
             _result(_comment()),
             cache_key=_key(),
-            policy=previous,
+            policy=policy,
         )
-        current = ReviewConvergencePolicy(
-            mode="merge-focused", max_completed_verification_rounds=5
+        rebuilt = ReviewConvergencePolicy(
+            mode="merge-focused",
+            enforcement=policy.enforcement,
+            max_failed_attempts=policy.max_failed_attempts,
         )
+        self.assertEqual(rebuilt.digest(), policy.digest())
         self.assertIsNone(
             evaluate_baseline_compatibility(
                 baseline,
                 current_key=_key(head_sha=SHA_C),
-                policy=current,
-            )
-        )
-        other_allowance = ReviewConvergencePolicy(
-            mode="merge-focused", max_completed_verification_rounds=4
-        )
-        other_baseline = baseline_from_review(
-            _result(_comment()),
-            cache_key=_key(),
-            policy=other_allowance,
-        )
-        self.assertIsNone(
-            evaluate_baseline_compatibility(
-                other_baseline,
-                current_key=_key(head_sha=SHA_C),
-                policy=current,
+                policy=rebuilt,
             )
         )
         different_failures = replace(
-            current, max_failed_attempts=current.max_failed_attempts - 1
+            policy, max_failed_attempts=policy.max_failed_attempts - 1
         )
         self.assertEqual(
             evaluate_baseline_compatibility(
                 baseline,
                 current_key=_key(head_sha=SHA_C),
                 policy=different_failures,
-            ),
-            "policy-change",
-        )
-        upper_bound = ReviewConvergencePolicy(
-            mode="merge-focused",
-            max_completed_verification_rounds=MAX_COMPLETED_VERIFICATION_ROUNDS,
-        )
-        self.assertIsNone(
-            evaluate_baseline_compatibility(
-                baseline,
-                current_key=_key(head_sha=SHA_C),
-                policy=upper_bound,
-            )
-        )
-
-    def test_allowance_compatibility_stays_inside_one_mode(self) -> None:
-        legacy = ReviewConvergencePolicy(
-            mode="legacy", max_completed_verification_rounds=2
-        )
-        baseline = baseline_from_review(
-            _result(_comment()),
-            cache_key=_key(),
-            policy=legacy,
-        )
-        self.assertEqual(
-            evaluate_baseline_compatibility(
-                baseline,
-                current_key=_key(head_sha=SHA_C),
-                policy=ReviewConvergencePolicy(
-                    mode="merge-focused", max_completed_verification_rounds=5
-                ),
             ),
             "policy-change",
         )
@@ -1296,7 +1253,9 @@ class BaselineAdmissionTests(unittest.TestCase):
             )
         self.assertEqual(planner.call_args.kwargs["related_paths"], ())
 
-    def test_baseline_admission_related_overflow_fails_closed(self) -> None:
+    def test_baseline_admission_related_overflow_truncates_derived_context(
+        self,
+    ) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         baseline = baseline_from_review(
             _result(_comment()), cache_key=_key(), policy=policy
@@ -1304,15 +1263,32 @@ class BaselineAdmissionTests(unittest.TestCase):
         changed = tuple(
             f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
         )
-        with self.assertRaisesRegex(ReviewInputError, "MAX_RELATED_PATHS"):
-            admit_review_result(
-                _result(_comment()),
-                policy,
-                baseline=baseline,
-                current_key=_key(head_sha=SHA_C),
-                changed_paths=changed,
-                related_paths=None,  # type: ignore[arg-type]
-            )
+        result = admit_review_result(
+            _result(_comment()),
+            policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed,
+            related_paths=None,  # type: ignore[arg-type]
+        )
+        self.assertFalse(result.comments[0].effective_blocking)
+
+    def test_derived_related_overflow_truncates_in_the_verify_scope(self) -> None:
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        changed = tuple(
+            f"src/file-{index}.py" for index in range(MAX_RELATED_PATHS + 1)
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=changed,
+        )
+        self.assertEqual(scope.status, "verify")
+        self.assertEqual(len(scope.related_paths), MAX_RELATED_PATHS)
 
     def test_explicit_candidates_precede_baseline_planning(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

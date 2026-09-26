@@ -30,7 +30,6 @@ from .context import (
 from .convergence import (
     ATTRIBUTIONS,
     LATE_REASONS,
-    MAX_COMPLETED_VERIFICATION_ROUNDS,
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
     ReviewConvergencePolicy,
@@ -546,23 +545,6 @@ def baseline_from_review(
     )
 
 
-def _allowance_only_policy_change(policy: ReviewConvergencePolicy, digest: str) -> bool:
-    """Return whether ``digest`` names ``policy`` with a different allowance.
-
-    ``max_completed_verification_rounds`` is the only policy field allowed to
-    differ between a stored baseline and the current policy, so raising the
-    allowance keeps an existing baseline reusable. Every other identity field
-    still invalidates: a candidate matches only when the mode, the enforcement,
-    and the remaining numeric fields are unchanged.
-    """
-
-    for allowance in range(MAX_COMPLETED_VERIFICATION_ROUNDS + 1):
-        candidate = replace(policy, max_completed_verification_rounds=allowance)
-        if candidate.digest() == digest:
-            return True
-    return False
-
-
 def evaluate_baseline_compatibility(
     baseline: ReviewBaseline,
     *,
@@ -584,8 +566,7 @@ def evaluate_baseline_compatibility(
             else "coverage-incomplete"
         )
     if policy.digest() != baseline.policy_digest:
-        if not _allowance_only_policy_change(policy, baseline.policy_digest):
-            return "policy-change"
+        return "policy-change"
     previous = baseline.cache_key
     if previous.base_sha != current_key.base_sha:
         return "rebase-or-base-change"

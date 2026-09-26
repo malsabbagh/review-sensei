@@ -41,8 +41,7 @@
     "command": "review-sensei evaluate-convergence --observed"
   },
   "approval_events": 0,
-  "cap_created_approval": null,
   "cutover_status": "not_ready",
-  "unmet_criteria": ["the configured round cap was not observed"],
+  "unmet_criteria": ["the observed sequence did not exercise a handoff"],
   "limitations": ["External model and GitHub APIs are mocked."]
 }

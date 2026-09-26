@@ -4,10 +4,7 @@
   "admit": false,
   "count_as_completed_round": false,
   "round_kind": "none",
-  "remaining_initial_reviews": 0,
-  "remaining_verification_rounds": 0,
   "handoff": true,
   "handoff_reason": "round-budget-exhausted",
-  "may_emit_approve": false,
-  "cap_creates_approval": true
+  "may_emit_approve": false
 }

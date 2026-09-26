@@ -1,8 +1,8 @@
 """Offline sequential replay for issue #136 C7 evaluation.
 
-C7 compares the current compatible default (``legacy`` publication) with an
-operator policy on frozen synthetic sequences. It does not change the
-installed default or emit GitHub events. Shadow mode is observation-only.
+C7 replays frozen synthetic sequences against a convergence policy; the
+installed default is ``merge-focused``. It does not change that default or
+emit GitHub events. Shadow mode is observation-only.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from .convergence import (
     DEFAULT_REVIEW_MODE,
+    DIAGNOSTIC_ROUND_CEILING,
     ReviewConvergencePolicy,
     detect_no_progress,
     resolve_review_convergence_policy,
@@ -127,16 +128,15 @@ class SequenceReport:
     """Metrics for one replayed sequence under one policy."""
 
     schema_version: str = PUBLIC_SCHEMA_VERSION
-    mode: str = "legacy"
+    mode: str = DEFAULT_REVIEW_MODE
     steps: tuple[SequenceStepOutcome, ...] = ()
     completed_initial_reviews: int = 0
     completed_verification_rounds: int = 0
     handoffs: int = 0
     no_progress_events: int = 0
-    cap_created_approval: bool = False
     limitations: tuple[str, ...] = (
         "Synthetic sequences are not a claim of zero missed defects.",
-        "Default publication remains legacy until an authorized migration.",
+        "Rounds are uncapped: the report counts completed history, not a remaining allowance.",
     )
 
     def to_dict(self) -> dict[str, object]:
@@ -148,7 +148,6 @@ class SequenceReport:
             "completed_verification_rounds": self.completed_verification_rounds,
             "handoffs": self.handoffs,
             "no_progress_events": self.no_progress_events,
-            "cap_created_approval": self.cap_created_approval,
             "limitations": list(self.limitations),
         }
         validate_public_document(payload, "convergence-sequence-report")
@@ -216,28 +215,30 @@ class ObservedSequenceReport:
     execution_metrics: ObservedExecutionMetrics
     shadow_isolated: bool
     evidence_identity: ObservedEvidenceIdentity
-    # Whole-run APPROVE count, including in-budget rounds. Cap proof is
-    # cap_created_approval False plus zero approvals from the cap event on.
+    # Whole-run APPROVE count across every admitted round.
     approval_events: int | None
-    cap_created_approval: bool | None
     cutover_status: str
     unmet_criteria: tuple[str, ...]
     limitations: tuple[str, ...] = (
         "External model and GitHub APIs are mocked; service, admission, publisher, and finalizer run normally.",
-        "A cap-created approval is unknown until a supplied sequence reaches the relevant round cap.",
+        "Rounds are uncapped, so the harness reports counted history rather than a remaining allowance.",
         "This harness is evidence for deterministic component behavior, not real-world model recall.",
     )
 
     def __post_init__(self) -> None:
+        # Events, baseline events, and approvals scale with the observed
+        # sequence length. Their bound is the diagnostic storage ceiling, the
+        # same one the session counters use, so a legitimate long sequence is
+        # never refused for exceeding a former round-count threshold.
         if (
             not isinstance(self.events, tuple)
-            or not 1 <= len(self.events) <= 32
+            or not 1 <= len(self.events) <= DIAGNOSTIC_ROUND_CEILING
             or any(
                 not isinstance(event, ObservedSequenceEvent) for event in self.events
             )
         ):
             raise ReviewInputError("observed report events are invalid")
-        if not _bounded_count(self.baseline_events, maximum=32):
+        if not _bounded_count(self.baseline_events, maximum=DIAGNOSTIC_ROUND_CEILING):
             raise ReviewInputError("observed report baseline events are invalid")
         if (
             not isinstance(self.command_events, tuple)
@@ -254,12 +255,10 @@ class ObservedSequenceReport:
             raise ReviewInputError("observed report mode is invalid")
         if self.cutover_status not in {"passed", "not_ready"}:
             raise ReviewInputError("observed report cutover status is invalid")
-        if not _bounded_count(self.approval_events, maximum=32, allow_none=True):
-            raise ReviewInputError("observed report approval events are invalid")
-        if self.cap_created_approval is not None and not isinstance(
-            self.cap_created_approval, bool
+        if not _bounded_count(
+            self.approval_events, maximum=DIAGNOSTIC_ROUND_CEILING, allow_none=True
         ):
-            raise ReviewInputError("observed report cap approval is invalid")
+            raise ReviewInputError("observed report approval events are invalid")
         if (
             not isinstance(self.unmet_criteria, tuple)
             or len(self.unmet_criteria) > 16
@@ -283,10 +282,8 @@ class ObservedSequenceReport:
                 or len(item.encode("utf-8")) > 256
             ):
                 raise ReviewInputError("observed report limitations are invalid")
-        if self.cutover_status == "passed" and (
-            self.cap_created_approval is not False or self.unmet_criteria
-        ):
-            raise ReviewInputError("passed observed cutover requires an exercised cap")
+        if self.cutover_status == "passed" and self.unmet_criteria:
+            raise ReviewInputError("passed observed cutover requires no unmet criteria")
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -300,7 +297,6 @@ class ObservedSequenceReport:
             "shadow_isolated": self.shadow_isolated,
             "evidence_identity": self.evidence_identity.to_dict(),
             "approval_events": self.approval_events,
-            "cap_created_approval": self.cap_created_approval,
             "cutover_status": self.cutover_status,
             "unmet_criteria": list(self.unmet_criteria),
             "limitations": list(self.limitations),
@@ -371,9 +367,13 @@ class ObservedExecutionMetrics:
     failed_attempts: int
 
     def __post_init__(self) -> None:
-        if not _bounded_count(self.completed_rounds, maximum=32):
+        # Completed rounds and handoffs are loaded from the durable ledger, so
+        # they carry its storage ceiling rather than a former round-count
+        # threshold. The provider-call and failed-attempt bounds stay live
+        # per-invocation and policy limits.
+        if not _bounded_count(self.completed_rounds, maximum=DIAGNOSTIC_ROUND_CEILING):
             raise ReviewInputError("observed completed rounds are invalid")
-        if not _bounded_count(self.handoffs, maximum=32):
+        if not _bounded_count(self.handoffs, maximum=DIAGNOSTIC_ROUND_CEILING):
             raise ReviewInputError("observed handoffs are invalid")
         if not _bounded_count(self.provider_calls, maximum=512):
             raise ReviewInputError("observed provider calls are invalid")
@@ -515,7 +515,6 @@ def replay_review_sequence(
         ),
         handoffs=handoffs,
         no_progress_events=no_progress_events,
-        cap_created_approval=False,
     )
 
 
@@ -536,9 +535,9 @@ def compare_sequence_policies(
 ) -> dict[str, object]:
     """Compare the compatible default with a proposed operator policy.
 
-    Observation-only. Neither report publishes GitHub events, and
-    ``cap_created_approval`` stays false on both arms. Each factory call
-    must return a fresh in-memory ledger; a repeated instance fails closed.
+    Observation-only. Neither report publishes GitHub events. Each factory
+    call must return a fresh in-memory ledger; a repeated instance fails
+    closed.
     """
 
     current_policy = current or resolve_review_convergence_policy()
@@ -571,9 +570,6 @@ def compare_sequence_policies(
         "publication_default": DEFAULT_REVIEW_MODE,
         "current": current_report.to_dict(),
         "proposed": proposed_report.to_dict(),
-        "cap_created_approval": bool(
-            current_report.cap_created_approval or proposed_report.cap_created_approval
-        ),
     }
 
 

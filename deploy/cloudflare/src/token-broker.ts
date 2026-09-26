@@ -55,7 +55,7 @@ const RECOGNIZED_REENROLL = new RegExp(
 );
 const RECOGNIZED_VERIFY = new RegExp(`^verify${COMMAND_WHITESPACE}*$`, "i");
 const RECOGNIZED_CONTINUE = new RegExp(
-  `^review${COMMAND_WHITESPACE_RUN}continue(?:${COMMAND_WHITESPACE_RUN}--rounds${COMMAND_WHITESPACE_RUN}(?:0|1))?${COMMAND_WHITESPACE}*$`,
+  `^review${COMMAND_WHITESPACE_RUN}continue${COMMAND_WHITESPACE}*$`,
   "i",
 );
 

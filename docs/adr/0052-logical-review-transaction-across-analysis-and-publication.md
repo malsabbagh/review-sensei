@@ -2,10 +2,17 @@
 
 Status: Proposed
 Date: 2026-09-19
+Last amended: 2026-09-26
 GitHub Issue: #146
 Pull Request: not configured
 Owners/Reviewers: Maintainers
 Approved by: not applicable
+
+Status note (2026-09-26): the one-use continuation grants this record lists as
+persisted state are retained as inert history only
+([ADR 0056](0056-remove-pr-wide-review-count-caps.md), epic #181 C). The
+identity-bound analysis checkpoint, publication phase, and publication-only
+recovery this record describes are unchanged.
 
 ## Context
 

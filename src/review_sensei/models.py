@@ -95,7 +95,7 @@ _TRANSACTION_PROVIDER_KEYS = frozenset(
 _TRANSACTION_STAGE_KEYS = frozenset(
     {"name", "outputs", "categories", "provider_profile"}
 )
-_TRANSACTION_ORCHESTRATION_KEYS = frozenset({"enabled", "continue_rounds"})
+_TRANSACTION_ORCHESTRATION_KEYS = frozenset({"enabled"})
 _TRANSACTION_OPENROUTER_POLICY_KEYS = frozenset(
     {
         "schema_version",
@@ -115,8 +115,6 @@ _TRANSACTION_POLICY_KEYS = frozenset(
         "schema_version",
         "mode",
         "enforcement",
-        "max_completed_initial_reviews",
-        "max_completed_verification_rounds",
         "max_failed_attempts",
         "automatic_github_review_events",
         "inline_advisory_threads",
@@ -283,15 +281,6 @@ def _validate_configuration_context(value: Mapping[str, object]) -> None:
         raise ReviewInputError("review transaction orchestration is invalid")
     if not isinstance(orchestration.get("enabled"), bool):
         raise ReviewInputError("review transaction orchestration.enabled is invalid")
-    continue_rounds = orchestration.get("continue_rounds")
-    if (
-        isinstance(continue_rounds, bool)
-        or not isinstance(continue_rounds, int)
-        or continue_rounds < 0
-    ):
-        raise ReviewInputError(
-            "review transaction orchestration.continue_rounds is invalid"
-        )
     publication_mode = value.get("publication_mode")
     if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
         raise ReviewInputError("review transaction publication_mode is invalid")
@@ -325,7 +314,6 @@ def build_transaction_configuration_context(
     category_policy: Sequence[str],
     publication_mode: str,
     orchestration_enabled: bool,
-    continue_rounds: int,
 ) -> dict[str, object]:
     """Closed configuration identity shared by analysis and publication."""
 
@@ -334,10 +322,7 @@ def build_transaction_configuration_context(
         "model": model,
         "stages": [dict(stage) for stage in stages],
         "category_policy": sorted(category_policy),
-        "orchestration": {
-            "enabled": orchestration_enabled,
-            "continue_rounds": continue_rounds,
-        },
+        "orchestration": {"enabled": orchestration_enabled},
         "publication_mode": publication_mode,
     }
     _validate_configuration_context(context)
@@ -357,11 +342,7 @@ def _validate_policy_context(value: Mapping[str, object]) -> None:
         raise ReviewInputError("review transaction policy mode is invalid")
     if value.get("enforcement") not in _TRANSACTION_POLICY_ENFORCEMENTS:
         raise ReviewInputError("review transaction policy enforcement is invalid")
-    for label, minimum, maximum in (
-        ("max_completed_initial_reviews", 1, 8),
-        ("max_completed_verification_rounds", 0, 8),
-        ("max_failed_attempts", 1, 32),
-    ):
+    for label, minimum, maximum in (("max_failed_attempts", 1, 32),):
         number = value.get(label)
         if (
             isinstance(number, bool)

@@ -135,12 +135,11 @@ class SequenceReplayTests(unittest.TestCase):
         self.assertEqual(report.completed_initial_reviews, 1)
         self.assertEqual(report.completed_verification_rounds, 1)
         self.assertEqual(report.handoffs, 0)
-        self.assertFalse(report.cap_created_approval)
         payload = report.to_dict()
         self.assertEqual(payload["mode"], "merge-focused")
         self.assertIn("not a claim of zero missed defects", payload["limitations"][0])
 
-    def test_regression_is_detected_and_cap_does_not_approve(self):
+    def test_regression_is_detected_and_a_handoff_cannot_approve(self):
         report = replay_review_sequence(
             (
                 SequenceStep(
@@ -160,22 +159,19 @@ class SequenceReplayTests(unittest.TestCase):
                 ),
                 SequenceStep(
                     head_sha="d" * 40,
-                    blocking_identities=("defect-f",),
-                    independently_approval_eligible=False,
-                    label="at-cap",
+                    blocking_identities=("defect-e",),
+                    independently_approval_eligible=True,
+                    label="repeat",
                 ),
             ),
-            ReviewConvergencePolicy(
-                mode="merge-focused", max_completed_verification_rounds=2
-            ),
+            _policy(),
         )
         self.assertTrue(report.steps[1].admit)
         self.assertEqual(report.steps[1].round_kind, "verification")
         self.assertFalse(report.steps[3].admit)
         self.assertTrue(report.steps[3].handoff)
-        self.assertEqual(report.steps[3].handoff_reason, "round-budget-exhausted")
+        self.assertEqual(report.steps[3].handoff_reason, "no-progress")
         self.assertFalse(report.steps[3].may_emit_approve)
-        self.assertFalse(report.cap_created_approval)
 
     def test_aba_oscillation_is_no_progress(self):
         report = replay_review_sequence(
@@ -202,9 +198,8 @@ class SequenceReplayTests(unittest.TestCase):
         self.assertFalse(report.steps[2].admit)
         self.assertEqual(report.steps[2].handoff_reason, "no-progress")
         self.assertEqual(report.no_progress_events, 1)
-        self.assertFalse(report.cap_created_approval)
 
-    def test_comparison_uses_merge_focused_default_and_never_mints_cap_approval(self):
+    def test_comparison_uses_merge_focused_default(self):
         steps = (
             SequenceStep(
                 head_sha="a" * 40,
@@ -222,9 +217,9 @@ class SequenceReplayTests(unittest.TestCase):
         self.assertEqual(payload["publication_default"], "merge-focused")
         self.assertEqual(payload["current"]["mode"], "merge-focused")
         self.assertEqual(payload["proposed"]["mode"], "merge-focused")
-        self.assertFalse(payload["cap_created_approval"])
-        self.assertFalse(payload["current"]["cap_created_approval"])
-        self.assertFalse(payload["proposed"]["cap_created_approval"])
+        self.assertNotIn("cap_created_approval", payload)
+        self.assertNotIn("cap_created_approval", payload["current"])
+        self.assertNotIn("cap_created_approval", payload["proposed"])
 
 
 class ObservedSequenceTests(unittest.TestCase):
@@ -263,17 +258,16 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(report.execution_metrics.completed_rounds, 2)
         self.assertEqual(report.execution_metrics.provider_calls, 2)
         self.assertTrue(report.shadow_isolated)
-        self.assertIsNone(report.cap_created_approval)
         self.assertEqual(report.cutover_status, "not_ready")
-        self.assertIn(
-            "the configured round cap was not observed with zero new approval events",
+        self.assertEqual(
             report.unmet_criteria,
+            ("installed source, package, and workflow identities are unavailable",),
         )
         self.assertEqual(
             report.to_dict()["events"][0]["publication_status"], "published"
         )
 
-    def test_observed_harness_stops_inference_at_the_round_cap(self):
+    def test_observed_harness_keeps_inferring_beyond_the_old_round_cap(self):
         report = run_observed_review_sequence(
             (
                 SequenceStep(
@@ -284,11 +278,9 @@ class ObservedSequenceTests(unittest.TestCase):
                 ),
                 SequenceStep(head_sha="b" * 40, label="verification-fixed"),
                 SequenceStep(head_sha="c" * 40, label="clean-repeat"),
-                SequenceStep(head_sha="d" * 40, label="over-cap"),
+                SequenceStep(head_sha="d" * 40, label="fourth-round"),
             ),
-            ReviewConvergencePolicy(
-                mode="merge-focused", max_completed_verification_rounds=2
-            ),
+            _policy(),
         )
         self.assertEqual(
             [
@@ -299,28 +291,21 @@ class ObservedSequenceTests(unittest.TestCase):
                 ("published", 1),
                 ("published", 1),
                 # An empty admitted blocker set is progress, not a repeated
-                # blocker set, so a second clean round still publishes.
+                # blocker set, so a later clean round still publishes.
                 ("published", 1),
-                ("handoff", 0),
+                ("published", 1),
             ],
         )
-        self.assertEqual(report.execution_metrics.completed_rounds, 3)
-        self.assertEqual(report.execution_metrics.provider_calls, 3)
-        # Both in-budget clean rounds approve. The over-cap handoff adds none.
+        self.assertEqual(report.execution_metrics.completed_rounds, 4)
+        self.assertEqual(report.execution_metrics.provider_calls, 4)
         self.assertEqual(
-            [event.approval_events for event in report.events], [0, 1, 1, 0]
+            [event.approval_events for event in report.events], [0, 1, 1, 1]
         )
-        self.assertEqual(report.approval_events, 2)
-        self.assertEqual(report.events[-1].approval_events, 0)
-        self.assertEqual(report.events[-1].handoff_reason, "round-budget-exhausted")
-        self.assertFalse(report.cap_created_approval)
-        self.assertNotIn(
-            "the configured round cap was not observed with zero new approval events",
+        self.assertEqual(report.approval_events, 3)
+        self.assertIsNone(report.events[-1].handoff_reason)
+        self.assertEqual(
             report.unmet_criteria,
-        )
-        self.assertNotIn(
-            "an over-cap request did not prove zero new inference",
-            report.unmet_criteria,
+            ("installed source, package, and workflow identities are unavailable",),
         )
 
     def test_observed_harness_compares_material_labels_to_fixture_output(self):
@@ -372,10 +357,7 @@ class ObservedSequenceTests(unittest.TestCase):
                     label="contradiction",
                 ),
             ),
-            ReviewConvergencePolicy(
-                mode="merge-focused",
-                max_completed_verification_rounds=4,
-            ),
+            _policy(),
         )
         metrics = report.finding_metrics
         self.assertEqual(metrics.duplicate_findings, 0)
@@ -526,7 +508,6 @@ class ObservedSequenceTests(unittest.TestCase):
             category_policy=categories,
             publication_mode=policy.mode,
             orchestration_enabled=False,
-            continue_rounds=0,
         )
         self.assertEqual(context, production)
         self.assertEqual(
@@ -593,7 +574,6 @@ class ObservedSequenceTests(unittest.TestCase):
                 shadow_isolated=False,
                 evidence_identity=report_identity(),
                 approval_events=0,
-                cap_created_approval=None,
                 cutover_status="maybe",
                 unmet_criteria=("not ready",),
             )
@@ -670,7 +650,6 @@ class ObservedSequenceTests(unittest.TestCase):
                 shadow_isolated=False,
                 evidence_identity=report_identity(),
                 approval_events=0,
-                cap_created_approval=None,
                 cutover_status="not_ready",
                 unmet_criteria=("not ready",),
             )
@@ -709,7 +688,6 @@ class ObservedSequenceTests(unittest.TestCase):
                 shadow_isolated=False,
                 evidence_identity=report_identity(),
                 approval_events=0,
-                cap_created_approval=None,
                 cutover_status="not_ready",
                 unmet_criteria=("not ready",),
                 limitations=(),
@@ -726,18 +704,6 @@ class ObservedSequenceTests(unittest.TestCase):
             approval_events=0,
         )
         cases = {
-            "cap_created_approval": (
-                None,
-                "the configured round cap was not observed with zero new approval events",
-            ),
-            "completed_rounds": (
-                0,
-                "the configured initial and verification round budget was not fully exercised",
-            ),
-            "events": (
-                (published,),
-                "an over-cap request did not prove zero new inference",
-            ),
             "shadow_isolated": (
                 False,
                 "shadow comparison isolation was not observed",
@@ -774,21 +740,6 @@ class ObservedSequenceTests(unittest.TestCase):
             )
             for event in base["events"]
         )
-        cases_with_events = {
-            "no fresh job loaded a durable completed baseline": no_baseline,
-            "no successful application publication was observed": tuple(
-                ObservedSequenceEvent(
-                    label=event.label,
-                    provider_calls=event.provider_calls,
-                    baseline_loaded=event.baseline_loaded,
-                    publication_status="handoff",
-                    handoff_reason=event.handoff_reason or "round-budget-exhausted",
-                    approval_events=0,
-                )
-                for event in base["events"]
-            ),
-            "an unjustified material blocker was observed": None,
-        }
         for field, (value, message) in cases.items():
             kwargs = dict(base)
             kwargs[field] = value
@@ -797,9 +748,17 @@ class ObservedSequenceTests(unittest.TestCase):
             "no fresh job loaded a durable completed baseline",
             observed_cutover_gaps(**{**base, "events": no_baseline}),
         )
-        handoffs = cases_with_events[
-            "no successful application publication was observed"
-        ]
+        handoffs = tuple(
+            ObservedSequenceEvent(
+                label=event.label,
+                provider_calls=event.provider_calls,
+                baseline_loaded=event.baseline_loaded,
+                publication_status="handoff",
+                handoff_reason=event.handoff_reason or "no-progress",
+                approval_events=0,
+            )
+            for event in base["events"]
+        )
         self.assertIn(
             "no successful application publication was observed",
             observed_cutover_gaps(**{**base, "events": handoffs}),
@@ -810,30 +769,10 @@ class ObservedSequenceTests(unittest.TestCase):
                 **{**base, "observed_material_finding_ids": {"material-a", "extra"}}
             ),
         )
-        followed = base["events"] + (
-            ObservedSequenceEvent(
-                label="after-cap",
-                provider_calls=1,
-                baseline_loaded=True,
-                publication_status="published",
-            ),
-        )
+        followed = base["events"] + (published,)
         self.assertEqual(
             observed_cutover_gaps(**{**base, "events": followed}),
             (),
-        )
-        approved_after_cap = base["events"] + (
-            ObservedSequenceEvent(
-                label="after-cap-approval",
-                provider_calls=1,
-                baseline_loaded=True,
-                publication_status="published",
-                approval_events=1,
-            ),
-        )
-        self.assertIn(
-            "an over-cap request did not prove zero new inference",
-            observed_cutover_gaps(**{**base, "events": approved_after_cap}),
         )
 
     def test_repeated_material_label_keeps_distinct_precision(self):
@@ -856,8 +795,8 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(report.finding_metrics.matched_material_findings, 1)
         self.assertEqual(report.finding_metrics.blocker_precision, 1.0)
 
-    def test_passed_cutover_requires_an_exercised_cap(self):
-        with self.assertRaisesRegex(ReviewInputError, "exercised cap"):
+    def test_passed_cutover_requires_no_unmet_criteria(self):
+        with self.assertRaisesRegex(ReviewInputError, "unmet criteria"):
             ObservedSequenceReport(
                 mode="merge-focused",
                 events=passing_cutover_inputs()["events"],
@@ -868,16 +807,22 @@ class ObservedSequenceTests(unittest.TestCase):
                 shadow_isolated=True,
                 evidence_identity=report_identity(),
                 approval_events=0,
-                cap_created_approval=None,
                 cutover_status="passed",
-                unmet_criteria=(),
+                unmet_criteria=("installed identities are unavailable",),
             )
 
-    def test_execution_metrics_reject_too_many_handoffs(self):
+    def test_execution_metrics_accept_handoffs_past_the_retired_bound(self):
+        metrics = ObservedExecutionMetrics(
+            completed_rounds=0,
+            handoffs=33,
+            provider_calls=0,
+            failed_attempts=0,
+        )
+        self.assertEqual(metrics.to_dict()["handoffs"], 33)
         with self.assertRaisesRegex(ReviewInputError, "handoffs"):
             ObservedExecutionMetrics(
                 completed_rounds=0,
-                handoffs=33,
+                handoffs=1_000_001,
                 provider_calls=0,
                 failed_attempts=0,
             )
@@ -956,26 +901,15 @@ def passing_cutover_inputs() -> dict[str, object]:
             approval_events=1,
         ),
         ObservedSequenceEvent(
-            label="repeat",
+            label="later-round",
             provider_calls=1,
             baseline_loaded=True,
             publication_status="published",
             approval_events=1,
         ),
-        ObservedSequenceEvent(
-            label="over-cap",
-            provider_calls=0,
-            baseline_loaded=True,
-            publication_status="handoff",
-            handoff_reason="round-budget-exhausted",
-        ),
     )
     return {
         "events": events,
-        "cap_created_approval": False,
-        "completed_rounds": 3,
-        "required_rounds": 3,
-        "provider_calls": 3,
         "shadow_isolated": True,
         "command_events": ("pause:applied", "continue:applied"),
         "expected_material_finding_ids": {"material-a"},
@@ -1040,6 +974,7 @@ class ShadowObservationTests(unittest.TestCase):
             RoundSessionState(
                 completed_initial_reviews=1,
                 completed_verification_rounds=5,
+                failed_attempts=6,
                 latest_head_reviewed=True,
                 coverage_complete=True,
             ),
@@ -1048,6 +983,7 @@ class ShadowObservationTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertFalse(decision.admit)
         self.assertTrue(decision.handoff)
+        self.assertEqual(decision.handoff_reason, "failed-attempt-budget-exhausted")
         self.assertFalse(decision.may_emit_approve)
 
     def test_doctor_and_plan_display_shadow_without_changing_publication(self):
@@ -1089,6 +1025,8 @@ class ShadowObservationTests(unittest.TestCase):
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
                 completed_verification_rounds=5,
+                failed_attempts=6,
+                failed_attempts_head_sha=HEAD,
             )
             ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
             reviewer = RecordingReviewer()
@@ -1132,7 +1070,9 @@ class ShadowObservationTests(unittest.TestCase):
         self.assertEqual(result.shadow["mode"], "merge-focused")
         self.assertFalse(result.shadow["admit"])
         self.assertTrue(result.shadow["handoff"])
-        self.assertEqual(result.shadow["handoff_reason"], "round-budget-exhausted")
+        self.assertEqual(
+            result.shadow["handoff_reason"], "failed-attempt-budget-exhausted"
+        )
 
 
 class EvaluateConvergenceCliTests(unittest.TestCase):
@@ -1292,7 +1232,7 @@ class EvaluateConvergenceCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["publication_default"], "merge-focused")
-        self.assertFalse(payload["cap_created_approval"])
+        self.assertNotIn("cap_created_approval", payload)
         self.assertEqual(payload["proposed"]["mode"], "merge-focused")
         self.assertEqual(payload["current"]["mode"], "merge-focused")
 

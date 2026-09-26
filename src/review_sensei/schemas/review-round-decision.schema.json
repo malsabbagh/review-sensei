@@ -10,12 +10,9 @@
     "admit",
     "count_as_completed_round",
     "round_kind",
-    "remaining_initial_reviews",
-    "remaining_verification_rounds",
     "handoff",
     "handoff_reason",
-    "may_emit_approve",
-    "cap_creates_approval"
+    "may_emit_approve"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -29,21 +26,10 @@
       "type": "string",
       "enum": ["initial", "verification", "none"]
     },
-    "remaining_initial_reviews": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 8
-    },
-    "remaining_verification_rounds": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 8
-    },
     "handoff": {"type": "boolean"},
     "handoff_reason": {
       "type": ["string", "null"],
       "enum": [
-        "round-budget-exhausted",
         "failed-attempt-budget-exhausted",
         "no-progress",
         "incomplete-coverage",
@@ -52,7 +38,6 @@
         null
       ]
     },
-    "may_emit_approve": {"type": "boolean"},
-    "cap_creates_approval": {"type": "boolean", "const": false}
+    "may_emit_approve": {"type": "boolean"}
   }
 }
