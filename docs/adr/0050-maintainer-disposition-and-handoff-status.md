@@ -2,11 +2,22 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-20
+Last amended: 2026-09-26
 GitHub Issue: #136
 Pull Request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
+
+Status note (2026-09-26): rounds are uncapped, so
+`@sensei review continue --rounds N` no longer exists and no command grants a
+review allowance; the retired spelling is rejected rather than treated as a
+plain continue ([ADR 0056](0056-remove-pr-wide-review-count-caps.md), epic
+#181 C). `@sensei review continue` now only clears an operator pause, and a
+session whose old count allowance was exhausted is admitted on the next
+eligible trigger. Pause, reenroll, verification, and disposition commands and
+the non-passing handoff status described below are unchanged, except that the
+one-use continuation grants below are retained as inert history rather than
+consumed.
 
 ## Context
 

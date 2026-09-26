@@ -142,7 +142,6 @@ def observed_publication_configuration(
         category_policy=category_policy,
         publication_mode=policy.mode,
         orchestration_enabled=False,
-        continue_rounds=0,
     )
 
 
@@ -423,10 +422,6 @@ def _shadow_is_isolated(
 def observed_cutover_gaps(
     *,
     events: Sequence[ObservedSequenceEvent],
-    cap_created_approval: bool | None,
-    completed_rounds: int,
-    required_rounds: int,
-    provider_calls: int,
     shadow_isolated: bool,
     command_events: Sequence[str],
     expected_material_finding_ids: set[str],
@@ -441,35 +436,6 @@ def observed_cutover_gaps(
     """Return the F6 cutover messages for one observed run."""
 
     gaps: list[str] = []
-    if cap_created_approval is not False:
-        gaps.append(
-            "the configured round cap was not observed with zero new approval events"
-        )
-    if completed_rounds < required_rounds or provider_calls < required_rounds:
-        gaps.append(
-            "the configured initial and verification round budget was not fully exercised"
-        )
-    cap_index = next(
-        (
-            index
-            for index, event in reversed(list(enumerate(events)))
-            if event.handoff_reason == "round-budget-exhausted"
-        ),
-        None,
-    )
-    cap_event = None if cap_index is None else events[cap_index]
-    approvals_from_cap = (
-        0
-        if cap_index is None
-        else sum(event.approval_events for event in events[cap_index:])
-    )
-    if (
-        cap_event is None
-        or cap_event.publication_status != "handoff"
-        or cap_event.provider_calls != 0
-        or approvals_from_cap != 0
-    ):
-        gaps.append("an over-cap request did not prove zero new inference")
     if not any(event.baseline_loaded for event in events[1:]):
         gaps.append("no fresh job loaded a durable completed baseline")
     if not any(event.publication_status == "published" for event in events):
@@ -812,7 +778,7 @@ def run_observed_review_sequence(
             repository_id=136,
             pull_request=136,
             head_sha=steps[-1].head_sha,
-            body="@sensei review continue --rounds 1",
+            body="@sensei review continue",
             actor_login="maintainer",
             actor_type="User",
             association="OWNER",
@@ -821,24 +787,8 @@ def run_observed_review_sequence(
         command_events.append(
             f"{continued.action}:{'applied' if continued.applied else 'ignored'}"
         )
-    cap_step = next(
-        (
-            event
-            for event in reversed(events)
-            if event.handoff_reason == "round-budget-exhausted"
-        ),
-        None,
-    )
-    cap_created_approval = None if cap_step is None else cap_step.approval_events > 0
-    required_rounds = (
-        policy.max_completed_initial_reviews + policy.max_completed_verification_rounds
-    )
     cutover_unmet = observed_cutover_gaps(
         events=events,
-        cap_created_approval=cap_created_approval,
-        completed_rounds=completed_rounds,
-        required_rounds=required_rounds,
-        provider_calls=provider_calls,
         shadow_isolated=shadow_isolated,
         command_events=command_events,
         expected_material_finding_ids=expected_material_finding_ids,
@@ -889,7 +839,6 @@ def run_observed_review_sequence(
         shadow_isolated=shadow_isolated,
         evidence_identity=report_identity,
         approval_events=github.approval_events,
-        cap_created_approval=cap_created_approval,
         cutover_status="passed" if not cutover_unmet else "not_ready",
         unmet_criteria=tuple(cutover_unmet),
     )

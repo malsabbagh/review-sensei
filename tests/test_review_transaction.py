@@ -82,7 +82,7 @@ CONFIGURATION = {
     "model": "fixture-model",
     "stages": [],
     "category_policy": [],
-    "orchestration": {"enabled": False, "continue_rounds": 0},
+    "orchestration": {"enabled": False},
     "publication_mode": "merge-focused",
 }
 CONFIGURATION_DIGEST = ReviewTransaction.compute_configuration_digest(CONFIGURATION)

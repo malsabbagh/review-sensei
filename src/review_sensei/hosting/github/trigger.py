@@ -24,7 +24,7 @@ _SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
 # added here without a dispatcher would parse and then be ignored.
 _MAINTAINER_COMMAND = re.compile(
     r"(?:"
-    r"review\s+(?:status|pause|continue(?:\s+--rounds\s+(?:0|1))?|reenroll)"
+    r"review\s+(?:status|pause|continue|reenroll)"
     r"|verify"
     r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
     r"\s+--reason\s+(?P<reason>\S.*)"

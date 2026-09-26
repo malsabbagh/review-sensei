@@ -307,12 +307,12 @@ than weakening managed-file recognition, and configure behavior in
 a placeholder secret, and never creates the customer-owned provider secrets.
 
 Every hosted review requires a trusted session ledger for admission
-and round enforcement: it runs through the reusable workflow,
+and duplicate suppression: it runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes
 reviews without any additional ledger provisioning. The analysis job and the
 publication job of one run resolve the same broker-attested comment ledger, so
-rounds, baselines, and grants recorded by one job are visible to the next
+rounds, baselines, and dispositions recorded by one job are visible to the next
 instead of living on a runner filesystem no later job can read; the first job
 of a fresh installation enrolls the marker when the broker reports no prior
 session. The ledger requirement is

@@ -167,6 +167,10 @@ def _related_paths(path: str, changed: tuple[str, ...]) -> tuple[str, ...]:
 def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
     """Return bounded same-directory siblings among the changed paths.
 
+    Overflow truncates at ``MAX_RELATED_PATHS`` in changed-path order, matching
+    the chunk helper's sibling heuristic: this is derived context, so a large
+    change set narrows it instead of failing the review.
+
     Issue #136 C4 reuses this directory relationship as cross-file impact
     when a caller has not supplied symbol-aware related paths from #40.
     """
@@ -184,9 +188,11 @@ def related_paths_for_change(changed_paths: Sequence[str]) -> tuple[str, ...]:
                 continue
             candidate_parent = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
             if candidate_parent == parent and candidate not in related:
-                if len(related) >= MAX_RELATED_PATHS:
-                    raise ReviewInputError("related paths exceed MAX_RELATED_PATHS")
                 related.append(candidate)
+                if len(related) >= MAX_RELATED_PATHS:
+                    break
+        if len(related) >= MAX_RELATED_PATHS:
+            break
     return tuple(related)
 
 

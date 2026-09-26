@@ -89,7 +89,9 @@ class PolicyContractTests(unittest.TestCase):
         document = policy.to_dict()
         self.assertEqual(document["mode"], "merge-focused")
         self.assertEqual(document["enforcement"], "publication")
-        self.assertEqual(document["max_completed_verification_rounds"], 5)
+        self.assertEqual(document["max_failed_attempts"], 6)
+        self.assertNotIn("max_completed_verification_rounds", document)
+        self.assertNotIn("max_completed_initial_reviews", document)
         self.assertTrue(document["automatic_github_review_events"])
         self.assertFalse(document["inline_advisory_threads"])
         self.assertEqual(document["policy_digest"], policy.digest())
@@ -133,7 +135,7 @@ class PolicyContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "integer"):
             ReviewConvergencePolicy(max_failed_attempts=True)  # type: ignore[arg-type]
         with self.assertRaisesRegex(ReviewInputError, "out of range"):
-            ReviewConvergencePolicy(max_completed_verification_rounds=9)
+            ReviewConvergencePolicy(max_failed_attempts=41)
 
 
 class BlockerAdmissionDecisionTableTests(unittest.TestCase):
@@ -461,7 +463,6 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         self.assertTrue(decision.admit)
         self.assertFalse(decision.handoff)
         self.assertTrue(decision.may_emit_approve)
-        self.assertFalse(decision.cap_creates_approval)
 
     def test_decision_table_for_round_budget_and_handoff(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -485,9 +486,9 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 False,
             ),
             (
-                "second verification is still admitted",
+                "sixth verification is still admitted",
                 RoundSessionState(
-                    completed_initial_reviews=1, completed_verification_rounds=1
+                    completed_initial_reviews=1, completed_verification_rounds=5
                 ),
                 True,
                 "verification",
@@ -496,60 +497,46 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 False,
             ),
             (
-                "cap hands off without minting approval",
+                "twentieth verification is still admitted",
                 RoundSessionState(
                     completed_initial_reviews=1,
-                    completed_verification_rounds=5,
-                    coverage_complete=True,
-                    latest_head_reviewed=True,
-                ),
-                False,
-                "none",
-                True,
-                "round-budget-exhausted",
-                False,
-            ),
-            (
-                "eligible last-round result may approve",
-                RoundSessionState(
-                    completed_initial_reviews=1,
-                    completed_verification_rounds=5,
+                    completed_verification_rounds=19,
                     independently_approval_eligible=True,
                     coverage_complete=True,
                     latest_head_reviewed=True,
                 ),
-                False,
-                "none",
                 True,
-                "round-budget-exhausted",
+                "verification",
+                False,
+                None,
                 True,
             ),
             (
-                "incomplete coverage at cap cannot approve",
+                "incomplete coverage cannot approve",
                 RoundSessionState(
                     completed_initial_reviews=1,
                     completed_verification_rounds=5,
                     independently_approval_eligible=True,
                     latest_head_reviewed=True,
                 ),
-                False,
-                "none",
                 True,
-                "incomplete-coverage",
+                "verification",
+                False,
+                None,
                 False,
             ),
             (
-                "later unreviewed head stays unverified",
+                "unreviewed head cannot approve",
                 RoundSessionState(
                     completed_initial_reviews=1,
                     completed_verification_rounds=5,
                     independently_approval_eligible=True,
                     coverage_complete=True,
                 ),
-                False,
-                "none",
                 True,
-                "unreviewed-head",
+                "verification",
+                False,
+                None,
                 False,
             ),
             (
@@ -674,42 +661,51 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 self.assertEqual(decision.handoff, handoff)
                 self.assertEqual(decision.handoff_reason, reason)
                 self.assertEqual(decision.may_emit_approve, may_approve)
-                self.assertFalse(decision.cap_creates_approval)
                 self.assertEqual(decision.count_as_completed_round, admit)
                 validate_public_document(decision.to_dict(), "review-round-decision")
-        last_round = evaluate_round_admission(
+        long_sequence = evaluate_round_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
-                completed_verification_rounds=5,
+                completed_verification_rounds=200,
                 independently_approval_eligible=True,
                 coverage_complete=True,
                 latest_head_reviewed=True,
             ),
             policy,
         )
-        self.assertTrue(last_round.handoff)
-        self.assertEqual(last_round.handoff_reason, "round-budget-exhausted")
-        self.assertTrue(last_round.may_emit_approve)
-        self.assertFalse(last_round.cap_creates_approval)
+        self.assertTrue(long_sequence.admit)
+        self.assertEqual(long_sequence.round_kind, "verification")
+        self.assertFalse(long_sequence.handoff)
+        self.assertTrue(long_sequence.may_emit_approve)
+        self.assertNotIn("remaining_verification_rounds", long_sequence.to_dict())
+        self.assertNotIn("cap_creates_approval", long_sequence.to_dict())
 
-    def test_continuation_admits_one_extra_verification_round(self):
+    def test_late_rounds_are_admitted_without_a_grant(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
-        exhausted = RoundSessionState(
-            completed_initial_reviews=1,
-            completed_verification_rounds=5,
-            coverage_complete=True,
-            latest_head_reviewed=True,
-        )
-        refused = evaluate_round_admission(exhausted, policy)
-        self.assertFalse(refused.admit)
-        continued = evaluate_round_admission(exhausted, policy, continuation_rounds=1)
-        self.assertTrue(continued.admit)
-        self.assertEqual(continued.round_kind, "verification")
-        self.assertTrue(continued.count_as_completed_round)
-        with self.assertRaisesRegex(ReviewInputError, "continuation_rounds"):
-            evaluate_round_admission(exhausted, policy, continuation_rounds=2)
+        for completed in (5, 8, 20, 200):
+            with self.subTest(completed_verification_rounds=completed):
+                decision = evaluate_round_admission(
+                    RoundSessionState(
+                        completed_initial_reviews=1,
+                        completed_verification_rounds=completed,
+                        coverage_complete=True,
+                        latest_head_reviewed=True,
+                    ),
+                    policy,
+                )
+                self.assertTrue(decision.admit)
+                self.assertEqual(decision.round_kind, "verification")
+                self.assertTrue(decision.count_as_completed_round)
+                self.assertFalse(decision.handoff)
+                self.assertIsNone(decision.handoff_reason)
+        with self.assertRaises(TypeError):
+            evaluate_round_admission(
+                RoundSessionState(),
+                policy,
+                continuation_rounds=1,  # type: ignore[call-arg]
+            )
 
-    def test_continuation_does_not_admit_an_unreviewed_head(self):
+    def test_unreviewed_head_still_admits_but_cannot_approve(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         decision = evaluate_round_admission(
             RoundSessionState(
@@ -718,12 +714,12 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 latest_head_reviewed=False,
             ),
             policy,
-            continuation_rounds=1,
         )
-        self.assertFalse(decision.admit)
-        self.assertEqual(decision.handoff_reason, "unreviewed-head")
+        self.assertTrue(decision.admit)
+        self.assertFalse(decision.handoff)
+        self.assertFalse(decision.may_emit_approve)
 
-    def test_continuation_does_not_admit_incomplete_coverage(self):
+    def test_incomplete_coverage_still_admits_but_cannot_approve(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         decision = evaluate_round_admission(
             RoundSessionState(
@@ -734,10 +730,9 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 latest_head_reviewed=True,
             ),
             policy,
-            continuation_rounds=1,
         )
-        self.assertFalse(decision.admit)
-        self.assertEqual(decision.handoff_reason, "incomplete-coverage")
+        self.assertTrue(decision.admit)
+        self.assertFalse(decision.handoff)
         self.assertFalse(decision.may_emit_approve)
 
     def test_detect_no_progress_repeats_and_oscillation(self):
@@ -767,28 +762,13 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "blocking identity"):
             detect_no_progress(current_blocking=("a", 1))  # type: ignore[arg-type]
 
-    def test_round_invariants_reject_cap_created_approval(self):
-        with self.assertRaisesRegex(ReviewInputError, "must not create approval"):
-            RoundAdmissionDecision(
-                mode="merge-focused",
-                admit=False,
-                count_as_completed_round=False,
-                round_kind="none",
-                remaining_initial_reviews=0,
-                remaining_verification_rounds=0,
-                handoff=True,
-                handoff_reason="round-budget-exhausted",
-                may_emit_approve=False,
-                cap_creates_approval=True,
-            )
+    def test_round_invariants_reject_incoherent_decisions(self):
         with self.assertRaisesRegex(ReviewInputError, "round kind"):
             RoundAdmissionDecision(
                 mode="merge-focused",
                 admit=True,
                 count_as_completed_round=True,
                 round_kind="none",
-                remaining_initial_reviews=1,
-                remaining_verification_rounds=2,
                 handoff=False,
                 handoff_reason=None,
                 may_emit_approve=False,
@@ -799,8 +779,16 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 admit=False,
                 count_as_completed_round=True,
                 round_kind="none",
-                remaining_initial_reviews=0,
-                remaining_verification_rounds=0,
+                handoff=True,
+                handoff_reason="no-progress",
+                may_emit_approve=False,
+            )
+        with self.assertRaisesRegex(ReviewInputError, "handoff_reason"):
+            RoundAdmissionDecision(
+                mode="merge-focused",
+                admit=False,
+                count_as_completed_round=False,
+                round_kind="none",
                 handoff=True,
                 handoff_reason="round-budget-exhausted",
                 may_emit_approve=False,

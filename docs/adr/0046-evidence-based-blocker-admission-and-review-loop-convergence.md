@@ -2,11 +2,19 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-19
+Last amended: 2026-09-26
 GitHub Issue: #136
 Pull Request: [#138](https://github.com/malsabbagh/review-sensei/pull/138)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
+
+Status note (2026-09-26): the round-count portion of this decision — the
+initial-review enrollment count, the pilot's completed-round budgets, and the
+per-checkout caps described below — was removed by
+[ADR 0056](0056-remove-pr-wide-review-count-caps.md) (epic #181 C). Rounds are
+uncapped; the counters remain as diagnostic history, and the per-head
+failed-attempt retry bound remains. Blocker admission, severity/evidence
+requirements, baseline-aware scope, and approval eligibility are unchanged.
 
 ## Context
 

@@ -1,9 +1,15 @@
 """Deterministic review-convergence policy and pure admission evaluators.
 
 Issue #136 C1 defines a versioned trusted-configuration contract for review
-modes, blocker admission, round counting, and human handoff.  These helpers
+modes, blocker admission, round admission, and human handoff.  These helpers
 compute decisions from structured facts.  They do not parse free-text or
 trust a model ``blocking`` boolean as authority outside ``legacy``.
+
+Rounds are not capped.  A changed head or another authorized round is always
+admitted while there is legitimate work, and the completed-round counters are
+diagnostic history rather than an allowance.  The one bounded budget left is
+the per-invocation failed-attempt budget, which stops transport or structural
+retries of the same head instead of permanently locking a pull request.
 
 C2 sits ``evaluate_blocker_admission`` between candidate findings and
 publication.  ``legacy`` keeps ADR 0032/0035 events.  Operator modes apply
@@ -38,12 +44,13 @@ LEGACY_REVIEW_MODE = "legacy"
 REVIEW_MODES = frozenset({"legacy", "advisory", "merge-focused", "strict"})
 OPERATOR_REVIEW_MODES = frozenset({"advisory", "merge-focused", "strict"})
 ENFORCEMENT_MODES = frozenset({"display-only", "publication"})
-DEFAULT_MAX_COMPLETED_INITIAL_REVIEWS = 1
-DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS = 5
 DEFAULT_MAX_FAILED_ATTEMPTS = 6
-MAX_COMPLETED_INITIAL_REVIEWS = 8
-MAX_COMPLETED_VERIFICATION_ROUNDS = 8
 MAX_FAILED_ATTEMPTS = 32
+# Completed-round counters are durable history rendered for diagnostics and
+# never veto a round, so this is a storage sanity ceiling rather than a review
+# allowance.  A long-lived pull request may legitimately exceed it and keep
+# being reviewed.
+DIAGNOSTIC_ROUND_CEILING = 1_000_000
 MATERIAL_SEVERITIES = frozenset({"high", "critical"})
 ATTRIBUTIONS = frozenset(
     {
@@ -117,7 +124,6 @@ ADMISSION_REASONS = frozenset(
 )
 HANDOFF_REASONS = frozenset(
     {
-        "round-budget-exhausted",
         "failed-attempt-budget-exhausted",
         "no-progress",
         "incomplete-coverage",
@@ -125,7 +131,6 @@ HANDOFF_REASONS = frozenset(
         "paused",
     }
 )
-MAX_CONTINUATION_ROUNDS = 1
 ROUND_KINDS = frozenset({"initial", "verification", "none"})
 
 
@@ -230,7 +235,6 @@ def resolve_shadow_review_mode(explicit: str | None = None) -> str | None:
 def observe_shadow_admission(
     state: RoundSessionState,
     *,
-    continuation_rounds: int = 0,
     explicit: str | None = None,
 ) -> RoundAdmissionDecision | None:
     """Evaluate an operator policy without mutating publication or the ledger.
@@ -245,7 +249,6 @@ def observe_shadow_admission(
     return evaluate_round_admission(
         state,
         resolve_review_convergence_policy(mode=mode),
-        continuation_rounds=continuation_rounds,
     )
 
 
@@ -276,8 +279,6 @@ class ReviewConvergencePolicy:
 
     mode: str = DEFAULT_REVIEW_MODE
     enforcement: str = "display-only"
-    max_completed_initial_reviews: int = DEFAULT_MAX_COMPLETED_INITIAL_REVIEWS
-    max_completed_verification_rounds: int = DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS
     max_failed_attempts: int = DEFAULT_MAX_FAILED_ATTEMPTS
 
     def __post_init__(self) -> None:
@@ -285,18 +286,6 @@ class ReviewConvergencePolicy:
         _token(self.enforcement, allowed=ENFORCEMENT_MODES, label="enforcement")
         if self.mode in OPERATOR_REVIEW_MODES and self.enforcement != "publication":
             object.__setattr__(self, "enforcement", "publication")
-        _require_bounded_int(
-            self.max_completed_initial_reviews,
-            label="max_completed_initial_reviews",
-            minimum=1,
-            maximum=MAX_COMPLETED_INITIAL_REVIEWS,
-        )
-        _require_bounded_int(
-            self.max_completed_verification_rounds,
-            label="max_completed_verification_rounds",
-            minimum=0,
-            maximum=MAX_COMPLETED_VERIFICATION_ROUNDS,
-        )
         _require_bounded_int(
             self.max_failed_attempts,
             label="max_failed_attempts",
@@ -336,8 +325,6 @@ class ReviewConvergencePolicy:
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "mode": self.mode,
             "enforcement": self.enforcement,
-            "max_completed_initial_reviews": self.max_completed_initial_reviews,
-            "max_completed_verification_rounds": self.max_completed_verification_rounds,
             "max_failed_attempts": self.max_failed_attempts,
             "automatic_github_review_events": self.automatic_github_review_events,
             "inline_advisory_threads": self.inline_advisory_threads,
@@ -358,9 +345,7 @@ class ReviewConvergencePolicy:
     def doctor_detail(self) -> str:
         return (
             f"mode={self.mode} enforcement={self.enforcement} "
-            f"compatibility={self.compatibility} "
-            f"initial={self.max_completed_initial_reviews} "
-            f"verification={self.max_completed_verification_rounds} "
+            f"compatibility={self.compatibility} rounds=uncapped "
             f"failed_attempts={self.max_failed_attempts}"
         )
 
@@ -1050,7 +1035,13 @@ def admit_review_result(
 
 @dataclass(frozen=True)
 class RoundSessionState:
-    """PR-wide counters and flags for round admission.  No raw source."""
+    """PR-wide counters and flags for round admission.  No raw source.
+
+    The completed-round counters are diagnostic history: a long-lived pull
+    request may accumulate any number of reviewed heads, and no count refuses
+    the next one.  Only ``failed_attempts`` bounds work, and it is scoped to
+    one head by the caller.
+    """
 
     completed_initial_reviews: int = 0
     completed_verification_rounds: int = 0
@@ -1068,14 +1059,19 @@ class RoundSessionState:
         for label in (
             "completed_initial_reviews",
             "completed_verification_rounds",
-            "failed_attempts",
         ):
             _require_bounded_int(
                 getattr(self, label),
                 label=label,
                 minimum=0,
-                maximum=MAX_FAILED_ATTEMPTS,
+                maximum=DIAGNOSTIC_ROUND_CEILING,
             )
+        _require_bounded_int(
+            self.failed_attempts,
+            label="failed_attempts",
+            minimum=0,
+            maximum=MAX_FAILED_ATTEMPTS,
+        )
         for label in (
             "same_head_duplicate",
             "publication_recovery",
@@ -1097,12 +1093,9 @@ class RoundAdmissionDecision:
     admit: bool
     count_as_completed_round: bool
     round_kind: str
-    remaining_initial_reviews: int
-    remaining_verification_rounds: int
     handoff: bool
     handoff_reason: str | None
     may_emit_approve: bool
-    cap_creates_approval: bool = False
 
     def __post_init__(self) -> None:
         normalize_review_mode(self.mode)
@@ -1111,27 +1104,12 @@ class RoundAdmissionDecision:
             "count_as_completed_round",
             "handoff",
             "may_emit_approve",
-            "cap_creates_approval",
         ):
             _require_bool(getattr(self, label), label=label)
         _token(self.round_kind, allowed=ROUND_KINDS, label="round_kind")
-        _require_bounded_int(
-            self.remaining_initial_reviews,
-            label="remaining_initial_reviews",
-            minimum=0,
-            maximum=MAX_COMPLETED_INITIAL_REVIEWS,
-        )
-        _require_bounded_int(
-            self.remaining_verification_rounds,
-            label="remaining_verification_rounds",
-            minimum=0,
-            maximum=MAX_COMPLETED_VERIFICATION_ROUNDS,
-        )
         _optional_token(
             self.handoff_reason, allowed=HANDOFF_REASONS, label="handoff_reason"
         )
-        if self.cap_creates_approval:
-            raise ReviewInputError("round cap must not create approval eligibility")
         if self.admit and self.round_kind == "none":
             raise ReviewInputError("admitted rounds must name a round kind")
         if not self.admit and self.count_as_completed_round:
@@ -1144,19 +1122,12 @@ class RoundAdmissionDecision:
             "admit": self.admit,
             "count_as_completed_round": self.count_as_completed_round,
             "round_kind": self.round_kind,
-            "remaining_initial_reviews": self.remaining_initial_reviews,
-            "remaining_verification_rounds": self.remaining_verification_rounds,
             "handoff": self.handoff,
             "handoff_reason": self.handoff_reason,
             "may_emit_approve": self.may_emit_approve,
-            "cap_creates_approval": False,
         }
         validate_public_document(value, "review-round-decision")
         return value
-
-
-def _remaining(used: int, budget: int) -> int:
-    return max(0, budget - used)
 
 
 def detect_no_progress(
@@ -1189,33 +1160,22 @@ def detect_no_progress(
 def evaluate_round_admission(
     state: RoundSessionState,
     policy: ReviewConvergencePolicy,
-    *,
-    continuation_rounds: int = 0,
 ) -> RoundAdmissionDecision:
     """Admit or hand off a logical review/verification round.
 
     C5 host enforcement must not infer or publish a new automated review when
-    ``admit`` is false. The cap never sets ``may_emit_approve``; that bit is
-    true only when independent eligibility flags already pass.
+    ``admit`` is false.  Rounds are uncapped: while legitimate work remains,
+    a changed head or another authorized invocation is admitted, and the
+    completed-round counters never refuse it.  Only an operator pause, a
+    no-progress verdict, or the per-invocation failed-attempt budget hands
+    off.  A handoff never sets ``may_emit_approve``; that bit is true only
+    when independent eligibility flags already pass.
     """
 
     if not isinstance(state, RoundSessionState):
         raise ReviewInputError("round session state is invalid")
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
-    continuation = _require_bounded_int(
-        continuation_rounds,
-        label="continuation_rounds",
-        minimum=0,
-        maximum=MAX_CONTINUATION_ROUNDS,
-    )
-
-    remaining_initial = _remaining(
-        state.completed_initial_reviews, policy.max_completed_initial_reviews
-    )
-    remaining_verification = _remaining(
-        state.completed_verification_rounds, policy.max_completed_verification_rounds
-    )
     independently_eligible = (
         state.independently_approval_eligible
         and state.coverage_complete
@@ -1236,12 +1196,9 @@ def evaluate_round_admission(
             admit=admit,
             count_as_completed_round=count,
             round_kind=kind,
-            remaining_initial_reviews=remaining_initial,
-            remaining_verification_rounds=remaining_verification,
             handoff=handoff,
             handoff_reason=reason,
             may_emit_approve=may_approve and independently_eligible,
-            cap_creates_approval=False,
         )
 
     if policy.mode == "legacy":
@@ -1299,57 +1256,15 @@ def evaluate_round_admission(
             may_approve=False,
         )
 
-    if remaining_initial > 0:
-        return decision(
-            admit=True,
-            count=True,
-            kind="initial",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
-    if remaining_verification > 0:
-        return decision(
-            admit=True,
-            count=True,
-            kind="verification",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
-    if not state.latest_head_reviewed:
-        return decision(
-            admit=False,
-            count=False,
-            kind="none",
-            handoff=True,
-            reason="unreviewed-head",
-            may_approve=False,
-        )
-    if not state.coverage_complete:
-        return decision(
-            admit=False,
-            count=False,
-            kind="none",
-            handoff=True,
-            reason="incomplete-coverage",
-            may_approve=False,
-        )
-    if continuation == 1:
-        return decision(
-            admit=True,
-            count=True,
-            kind="verification",
-            handoff=False,
-            reason=None,
-            may_approve=independently_eligible,
-        )
+    # Uncapped admission: a first review, a changed head, or another
+    # authorized round runs while legitimate work remains.  The counters
+    # choose the slot this round occupies; they never refuse it.
     return decision(
-        admit=False,
-        count=False,
-        kind="none",
-        handoff=True,
-        reason="round-budget-exhausted",
+        admit=True,
+        count=True,
+        kind="initial" if state.completed_initial_reviews == 0 else "verification",
+        handoff=False,
+        reason=None,
         may_approve=independently_eligible,
     )
 
@@ -1363,8 +1278,6 @@ def policy_from_mapping(value: Mapping[str, object]) -> ReviewConvergencePolicy:
         "schema_version",
         "mode",
         "enforcement",
-        "max_completed_initial_reviews",
-        "max_completed_verification_rounds",
         "max_failed_attempts",
         "automatic_github_review_events",
         "inline_advisory_threads",
@@ -1383,23 +1296,6 @@ def policy_from_mapping(value: Mapping[str, object]) -> ReviewConvergencePolicy:
             value.get("enforcement", "display-only"),
             allowed=ENFORCEMENT_MODES,
             label="enforcement",
-        ),
-        max_completed_initial_reviews=_require_bounded_int(
-            value.get(
-                "max_completed_initial_reviews", DEFAULT_MAX_COMPLETED_INITIAL_REVIEWS
-            ),
-            label="max_completed_initial_reviews",
-            minimum=1,
-            maximum=MAX_COMPLETED_INITIAL_REVIEWS,
-        ),
-        max_completed_verification_rounds=_require_bounded_int(
-            value.get(
-                "max_completed_verification_rounds",
-                DEFAULT_MAX_COMPLETED_VERIFICATION_ROUNDS,
-            ),
-            label="max_completed_verification_rounds",
-            minimum=0,
-            maximum=MAX_COMPLETED_VERIFICATION_ROUNDS,
         ),
         max_failed_attempts=_require_bounded_int(
             value.get("max_failed_attempts", DEFAULT_MAX_FAILED_ATTEMPTS),
