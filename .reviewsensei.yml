@@ -1,0 +1,22 @@
+# ReviewSensei setup version: 5
+# One-time import of the retired .github/review-sensei/config.yml,
+# which nothing reads any more. The settings below are this file's
+# policies now; review this diff, then delete the retired file
+# after merging.
+# NOTE: 'local_model' is not imported; the selected backend uses inference.model
+# NOTE: 'setup_version' was retired; release/installer identity; the configuration version is 'schema'
+# NOTE: 'review_mode' was retired; one evidence-focused pipeline is the only engine; integration policy is github.reviews
+# NOTE: 'version' was retired; release/installer identity; the configuration version is 'schema'
+schema: 1
+
+inference:
+  backend: cloud-ollama
+  model: deepseek-v4.1-flash:cloud
+
+github:
+  automatic_reviews: true
+  writes: true
+  reviews: auto-approve
+  mentions: true
+  learning: disabled
+  artifacts: none
