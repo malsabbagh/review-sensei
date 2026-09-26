@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- When a pull request has used its automatic review budget, post a comment
-  with the maintainer continue and rescan commands and let the review job
-  succeed instead of failing.
+- When a pull request has used its automatic review budget, post one author
+  comment through the `issue_reply` capability and let that job succeed. If
+  the comment cannot be posted, the job still fails. Other maintainer
+  handoffs keep the failing `action_required` check.
 
 ## 0.6.7 - 2026-09-23
 

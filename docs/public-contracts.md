@@ -249,6 +249,10 @@ These imports are public and stable within a major version:
 `RunOutcome.to_dict()` produces a JSON-compatible document that validates
 against `run-outcome.schema.json`; `run_outcome_exit_code` maps every
 `FAILURE_RUN_STATUSES` value, including `action_required`, to exit code 1.
+A delivered `round-budget-exhausted` author notice is the exception: that
+diagnostic still reports `action_required`, and the CLI returns 0 only after
+the GitHub ledger posts the comment with an `issue_reply` capability. If the
+notice cannot be posted, the exit stays 1.
 `ReviewConvergencePolicy.to_dict()`,
 `BlockerAdmissionDecision.to_dict()`, and `RoundAdmissionDecision.to_dict()`
 validate against the review-convergence schemas. `SessionRecord.to_dict()`

@@ -1471,6 +1471,7 @@ def resolve_hosted_session_ledger(
         http,
         token=session_token,
         app_slug=app_slug,
+        reply_broker=broker,
     )
     identity = SessionIdentity(
         repository=repository,

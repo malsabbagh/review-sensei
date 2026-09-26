@@ -2863,24 +2863,37 @@ def main(argv: list[str] | None = None) -> int:
                     diagnostic=diagnostic,
                     provider_calls=0,
                 )
-                # A spent review budget is an instruction to the author, not a
-                # failed check. Other handoffs still fail closed.
-                budget_notice = diagnostic == "round-budget-exhausted"
-                if budget_notice and identity is not None and ledger is not None:
+                # A spent review budget is an instruction to the author. The
+                # job succeeds only after that comment is delivered. Every
+                # other handoff, and a budget handoff whose notice could not
+                # be posted, still fails closed.
+                from .disposition import SPENT_BUDGET_DIAGNOSTIC
+
+                budget_notice = diagnostic == SPENT_BUDGET_DIAGNOSTIC
+                notice_delivered = False
+                notice_error: ReviewSenseiError | None = None
+                if budget_notice and ledger is not None:
                     publish_notice = getattr(ledger, "publish_handoff_notice", None)
                     if callable(publish_notice):
-                        publish_notice(
-                            identity,
-                            diagnostic=diagnostic,
-                            head_sha=head_sha,
-                        )
+                        try:
+                            publish_notice(
+                                identity,
+                                diagnostic=diagnostic,
+                                head_sha=head_sha,
+                            )
+                        except ReviewSenseiError as exc:
+                            notice_error = exc
+                        else:
+                            notice_delivered = True
                 emit_host_outcome(
                     outcome,
                     output_path=args.outcome,
-                    annotate=not budget_notice,
+                    annotate=not notice_delivered,
                 )
                 print(outcome.status)
-                if budget_notice:
+                if notice_error is not None:
+                    print(f"review-sensei: {notice_error}", file=sys.stderr)
+                if notice_delivered:
                     return 0
                 return run_outcome_exit_code(outcome.status)
         provider, stage_providers = bind_stage_providers(

@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-20
+Last amended: 2026-09-25
 GitHub Issue: #136
 Pull Request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 Owners/Reviewers: Maintainers
@@ -53,7 +53,8 @@ Legacy C3 documents without the field still load (digest compatibility)
 and default to not paused. The next mutate rehashes with the new field.
 
 C5 `handoff` publication now projects to run outcome `action_required`,
-which is a failing CLI/check status. `skipped_policy` remains for
+which is a failing CLI/check status, except for the delivered
+spent-budget notice in the amendment below. `skipped_policy` remains for
 disabled writes, forks, and other non-handoff skips. With GitHub writes
 disabled, `GitHubApplication.apply_maintainer_command` returns
 `writes_disabled` for mutating commands without exchanging a broker capability.
@@ -199,6 +200,23 @@ to `legacy` or omitting the ledger. Unresolved findings are not discarded.
 - Retire the inline trigger fallback once every supported caller resolves
   the packaged trigger module path, so the command grammar has one
   implementation instead of four byte-locked copies.
+
+## Amendment 2026-09-25: spent-budget author notice
+
+A `round-budget-exhausted` handoff still emits `action_required`. The analysis
+CLI returns exit 0 only after the GitHub session ledger delivers one author
+comment. That comment is an `issue_reply` capability write, separate from the
+`review_session` token that mutates the session document. Discovery is bounded.
+A repeated run skips the post only when an App-authored comment already ends
+with the notice marker, so a quoted copy cannot suppress it. If the ledger
+cannot exchange the capability or post the comment, the CLI keeps the failing
+exit and still writes the outcome. Other `action_required` diagnostics stay
+failing. The reusable workflow skips review publication and the spent-budget
+artifact only when `outcome_diagnostic` is `round-budget-exhausted`.
+
+The comment tells the author to post `@sensei review continue --rounds 1` and
+then `@sensei re-scan`. The second line is the existing review trigger, not a
+new maintainer command.
 
 ## Links
 

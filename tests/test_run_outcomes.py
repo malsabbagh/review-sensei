@@ -355,6 +355,16 @@ class RunOutcomeWiringTests(unittest.TestCase):
             emit_host_outcome(RunOutcome("action_required", diagnostic="paused"))
         self.assertIn("ReviewSensei maintainer attention required", stderr.getvalue())
 
+    def test_annotation_suppression_does_not_stick_for_the_next_outcome(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            emit_host_outcome(
+                RunOutcome("action_required", diagnostic="round-budget-exhausted"),
+                annotate=False,
+            )
+            self.assertNotIn("::error", stderr.getvalue())
+            emit_host_outcome(RunOutcome("action_required", diagnostic="paused"))
+        self.assertIn("ReviewSensei maintainer attention required", stderr.getvalue())
+
     def test_durable_baseline_recovery_diagnostic_is_a_public_contract(self):
         diagnostic = "durable_baseline_recovery_required"
         self.assertIn(diagnostic, PUBLIC_DIAGNOSTICS)
