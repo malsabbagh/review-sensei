@@ -65,6 +65,7 @@ Process: `docs/process/adr-process.md`
 | [0054](0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6 | Real internal seams, bounded fixture edges, explicit unknown metrics |
 | [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
 | [0056](0056-remove-pr-wide-review-count-caps.md) | Proposed | Remove the PR-wide review count cap | #181 C | Rounds are uncapped; only live causes refuse; counters are diagnostic history |
+| [0056](0056-host-fact-placement-and-honest-approval-presentation.md) | Proposed | Host-fact placement and honest approval presentation | #181 D | Conversation resolution is host authority; approval only from an eligible admitted artifact |
 
 ## Policy
 

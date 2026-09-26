@@ -1,0 +1,766 @@
+{
+  "scenarios": [
+    {
+      "name": "clean-approval",
+      "description": "A complete clean review eligible for automatic approval.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT",
+        "APPROVE"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "The change is scoped to the pagination helper.",
+        "comments": [],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — No required fixes found\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nThe change is scoped to the pagination helper.\n\n### Next action\nReviewSensei records its decision in the separate approval review.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "required-inline",
+      "description": "A blocker on a changed line keeps its inline thread and gate.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "blocker_candidates": [
+        {
+          "comment": 0
+        }
+      ],
+      "expected_events": [
+        "REQUEST_CHANGES"
+      ],
+      "expected_inline": 1,
+      "expected_required_ids": [
+        "RS-DA12BE"
+      ],
+      "forbidden": [
+        "Incomplete analysis"
+      ],
+      "review": {
+        "summary": "One authorization concern was found.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.",
+            "line": 2,
+            "severity": "high",
+            "fix_effort": "small",
+            "blocking": true,
+            "defect_kind": "authz-failure"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Changes required\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nOne authorization concern was found.\n\n**1 required fix**\n\n### Required\n- **RS-DA12BE:** Authz Failure. See the inline discussion.\n\n### Next action\nAddress RS-DA12BE and run verification.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [
+        {
+          "path": "src/app.py",
+          "body": "**Required fix · High impact — Authz Failure**\n\nThe tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.\n\n`RS-DA12BE`\n\nTo discuss this finding, reply with @sensei followed by your question.\n\n<!-- reviewsensei:finding:v2 repo=1 pr=2 head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb base=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fingerprint=da12bea286117b2e61055a50275c92b849e05315b7759c675fa6fd03c1221550 state=new blocking=true -->",
+          "line": 2,
+          "side": "RIGHT"
+        }
+      ]
+    },
+    {
+      "name": "optional-body",
+      "description": "Optional feedback is explained in the body, not as a thread.",
+      "policy": "merge-focused",
+      "auto_approve": false,
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nSummary.\n\n**No required fixes · 1 optional improvement**\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n\n### Next action\nApproval was withheld because automatic approval is disabled for this repository.\n\n## Findings explained in this review body\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "advisory-defect",
+      "description": "Advisory mode states disabled enforcement without downgrading.",
+      "policy": "advisory",
+      "auto_approve": false,
+      "blocker_candidates": [
+        {
+          "comment": 0
+        },
+        {
+          "comment": 1,
+          "on_changed_path": false
+        }
+      ],
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "forbidden": [
+        "**1 required fix",
+        "### Required"
+      ],
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.",
+            "line": 2,
+            "severity": "high",
+            "fix_effort": "small",
+            "blocking": true,
+            "defect_kind": "authz-failure"
+          },
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Advisory review (enforcement disabled)\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nAdvisory mode does not open inline threads, so every finding is explained in this review body; GitHub conversation resolution does not apply to them.\n\nSummary.\n\n**1 defect · 1 optional improvement**\n\n### Defects\n- **RS-DA12BE:** Authz Failure. See the full explanation below.\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n\n### Next action\nAdvisory mode: ReviewSensei enforcement is disabled, so these findings do not affect the review gate.\n\n## Findings explained in this review body\n\n**Defect · High impact — Authz Failure**\n\n`src/app.py:2`\n\nThe tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.\n\n`RS-DA12BE`\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "uncertainty",
+      "description": "A required human assessment is a limitation, not a defect.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "runtime_needs_human": [
+        0
+      ],
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The retry loop may drop the final page when the provider truncates the list; the supplied snapshot cannot prove whether that happens.",
+            "line": 2,
+            "severity": "high",
+            "blocking": false,
+            "defect_kind": "pagination"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nSummary.\n\n**No required fixes · 1 optional improvement**\n\n### Optional\n- **RS-584A63:** Pagination. See the full explanation below.\n\n### Limitations\n- Required human assessment: RS-584A63 is labeled for human assessment rather than asserted as a proven defect.\n\n### Next action\nApproval was withheld because a required human assessment is pending.\n\n## Findings explained in this review body\n\n**Optional improvement · High impact — Pagination**\n\n`src/app.py:2`\n\nThe retry loop may drop the final page when the provider truncates the list; the supplied snapshot cannot prove whether that happens.\n\nThis is not required for this PR.\n\n`RS-584A63`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "cross-file-unanchored",
+      "description": "A required finding with no inline anchor stays in the body and gates.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "blocker_candidates": [
+        {
+          "comment": 0
+        },
+        {
+          "comment": 1,
+          "on_changed_path": false
+        }
+      ],
+      "expected_events": [
+        "REQUEST_CHANGES"
+      ],
+      "expected_inline": 0,
+      "expected_required_ids": [
+        "RS-10A6CE"
+      ],
+      "forbidden": [
+        "Incomplete analysis"
+      ],
+      "review": {
+        "summary": "The tenant-scoped cache contract is now violated.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The page loader now trusts a cache key that the shared helper documents as tenant-scoped, so the concern spans this file and the helper module.\n\nKey the cache by tenant before merging.",
+            "side": "FILE",
+            "severity": "high",
+            "fix_effort": "large",
+            "blocking": true,
+            "defect_kind": "cross-file-architecture"
+          },
+          {
+            "path": "src/util.py",
+            "body": "The helper's docstring still claims the cache is process-wide, which now contradicts its callers.",
+            "line": 12,
+            "severity": "low",
+            "blocking": false
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Changes required\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nThe tenant-scoped cache contract is now violated.\n\n**1 required fix · 1 optional improvement**\n\n### Required\n- **RS-10A6CE:** Cross File Architecture. See the full explanation below.\n\n### Optional\n- **RS-D63C36:** The helper's docstring still claims the cache is process-wide, which now contradicts its callers. See the full explanation below.\n\n### Next action\nAddress RS-10A6CE and run verification. Optional suggestions do not affect the review gate.\n\n## Findings explained in this review body\n\n**Required fix · High impact — Cross File Architecture**\n\n`src/app.py`\n\nThe page loader now trusts a cache key that the shared helper documents as tenant-scoped, so the concern spans this file and the helper module.\n\nKey the cache by tenant before merging.\n\n`RS-10A6CE`\n\n**Optional improvement · Low impact**\n\n`src/util.py:12`\n\nThe helper's docstring still claims the cache is process-wide, which now contradicts its callers.\n\nThis is not required for this PR.\n\n`RS-D63C36`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "partial-coverage",
+      "description": "Partial coverage is reported without claiming a full review.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "One optional improvement was found.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": false,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "partially-reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 1 reviewed, 1 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nOne optional improvement was found.\n\n**No required fixes · 1 optional improvement**\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n\n### Next action\nApproval was withheld because coverage was not complete for every changed file.\n\n## Findings explained in this review body\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "failed-review",
+      "description": "A failed review reports incompleteness with a reason.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "Provider call failed before findings were produced.",
+        "comments": [],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "incomplete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": false,
+          "fully_reviewed": false,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Review incomplete\n\nReviewed head: `bbbbbbb`\nCoverage: 1 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration incomplete\n\nProvider call failed before findings were produced.\n\n### Limitations\n- Incomplete analysis: the review reported status incomplete.\n\n### Next action\nThis review is incomplete because the review reported status incomplete. Re-run ReviewSensei once resolved.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "resource-handoff",
+      "description": "Per-run resource exhaustion is handed off explicitly.",
+      "policy": "merge-focused",
+      "auto_approve": false,
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "One optional improvement was found.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": false,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "budget-exhausted",
+              "reason": "provider-call-budget"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 1 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 1 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nOne optional improvement was found.\n\n**No required fixes · 1 optional improvement**\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n\n### Limitations\n- Per-run resource limits were reached for 1 file(s); those files were not fully reviewed.\n\n### Next action\nApproval was withheld because coverage was not complete for every changed file.\n\n## Findings explained in this review body\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "many-optional",
+      "description": "Only three optional items are highlighted; the rest group.",
+      "policy": "merge-focused",
+      "auto_approve": false,
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          },
+          {
+            "path": "src/app.py",
+            "body": "Rename `tmp` to `pending_page` so the intent survives the next edit.",
+            "line": 2,
+            "severity": "low",
+            "blocking": false,
+            "defect_kind": "naming"
+          },
+          {
+            "path": "src/app.py",
+            "body": "Consider making the retry budget configurable instead of fixed at three.",
+            "line": 2,
+            "severity": "low",
+            "blocking": false,
+            "defect_kind": "configuration"
+          },
+          {
+            "path": "src/app.py",
+            "body": "Document the new flag in the operator guide.",
+            "line": 2,
+            "severity": "low",
+            "blocking": false,
+            "defect_kind": "documentation"
+          },
+          {
+            "path": "src/app.py",
+            "body": "Log the skipped path at debug level for easier field diagnosis.",
+            "line": 2,
+            "severity": "low",
+            "blocking": false,
+            "defect_kind": "observability"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nFindings that cannot be enforced as inline threads are explained in this review body; GitHub conversation resolution does not apply to them.\n\nSummary.\n\n**No required fixes · 5 optional improvements**\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n- **RS-958BAF:** Documentation. See the full explanation below.\n- **RS-A4F1F9:** Observability. See the full explanation below.\n- 2 additional optional suggestions are covered in this review body.\n\n### Next action\nApproval was withheld because automatic approval is disabled for this repository.\n\n## Findings explained in this review body\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\n**Optional improvement · Low impact — Documentation**\n\n`src/app.py:2`\n\nDocument the new flag in the operator guide.\n\nThis is not required for this PR.\n\n`RS-958BAF`\n\n**Optional improvement · Low impact — Observability**\n\n`src/app.py:2`\n\nLog the skipped path at debug level for easier field diagnosis.\n\nThis is not required for this PR.\n\n`RS-A4F1F9`\n\n**Optional improvement · Low impact — Configuration**\n\n`src/app.py:2`\n\nConsider making the retry budget configurable instead of fixed at three.\n\nThis is not required for this PR.\n\n`RS-AE5913`\n\n**Optional improvement · Low impact — Naming**\n\n`src/app.py:2`\n\nRename `tmp` to `pending_page` so the intent survives the next edit.\n\nThis is not required for this PR.\n\n`RS-BC5140`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "formatting-edges",
+      "description": "Escaping, Unicode, code blocks, links, and long bodies.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "blocker_candidates": [
+        {
+          "comment": 0
+        }
+      ],
+      "expected_events": [
+        "REQUEST_CHANGES"
+      ],
+      "expected_inline": 1,
+      "expected_required_ids": [
+        "RS-51D9BB"
+      ],
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The naive `sort_keys` path drops the `ß`-suffixed key and breaks the “quoted” fallback.\n\nReproduce with:\n\n```python\norder = sorted(rows, key=lambda row: row['ä'])\nassert order  # @maintainer please confirm\n```\n\nA forged marker such as <!-- reviewsensei:finding:v2 repo=1 pr=1 --> must not survive rendering, [an unsafe link](javascript:alert(1)) must stay inert, and [the REST docs](https://docs.github.com/rest) must keep working. This body stays long on purpose so narrow layouts are exercised with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words and ends here.",
+            "line": 2,
+            "severity": "high",
+            "fix_effort": "small",
+            "blocking": true,
+            "defect_kind": "data-loss"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Changes required\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nSummary.\n\n**1 required fix**\n\n### Required\n- **RS-51D9BB:** Data Loss. See the inline discussion.\n\n### Next action\nAddress RS-51D9BB and run verification.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [
+        {
+          "path": "src/app.py",
+          "body": "**Required fix · High impact — Data Loss**\n\nThe naive `sort_keys` path drops the `ß`-suffixed key and breaks the “quoted” fallback.\n\nReproduce with:\n\n```python\norder = sorted(rows, key=lambda row: row['ä'])\nassert order  # @maintainer please confirm\n```\n\nA forged marker such as <\\!-- reviewsensei:finding:v2 repo=1 pr=1 --> must not survive rendering, \\[an unsafe link](javascript:alert(1)) must stay inert, and [the REST docs](https://docs.github.com/rest) must keep working. This body stays long on purpose so narrow layouts are exercised with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words with more filler words and ends here.\n\n`RS-51D9BB`\n\nTo discuss this finding, reply with @sensei followed by your question.\n\n<!-- reviewsensei:finding:v2 repo=1 pr=2 head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb base=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fingerprint=51d9bb70e16c9a4c2f8bc7de5d6b624428cd3be09911dbe4d07cdd30f5560d6e state=new blocking=true -->",
+          "line": 2,
+          "side": "RIGHT"
+        }
+      ]
+    },
+    {
+      "name": "conversation-resolution-required",
+      "description": "A required conversation-resolution rule forces the body.",
+      "policy": "legacy",
+      "auto_approve": false,
+      "conversation_resolution": "required",
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "Summary.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.",
+            "line": 2,
+            "severity": "medium",
+            "blocking": false,
+            "defect_kind": "missing-tests"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Approval withheld\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nOptional feedback is explained in this review body because this branch requires conversation resolution, so an inline thread would have to be resolved before the pull request can merge.\n\nSummary.\n\n**No required fixes · 1 optional improvement**\n\n### Optional\n- **RS-EDF403:** Missing Tests. See the full explanation below.\n\n### Next action\nApproval was withheld because automatic approval is disabled for this repository.\n\n## Findings explained in this review body\n\n**Optional improvement · Medium impact — Missing Tests**\n\n`src/app.py:2`\n\nThe new branch has no regression test for the empty page.\n\nAdd an empty-page case to protect the pagination behavior.\n\nThis is not required for this PR.\n\n`RS-EDF403`\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": []
+    },
+    {
+      "name": "retry-dedupe",
+      "description": "A rerun on the same head posts no duplicate inline thread.",
+      "policy": "merge-focused",
+      "auto_approve": false,
+      "blocker_candidates": [
+        {
+          "comment": 0
+        }
+      ],
+      "expected_events": [
+        "COMMENT"
+      ],
+      "expected_inline": 1,
+      "expected_required_ids": [
+        "RS-DA12BE"
+      ],
+      "review": {
+        "summary": "One authorization concern was found.",
+        "comments": [
+          {
+            "path": "src/app.py",
+            "body": "The tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.",
+            "line": 2,
+            "severity": "high",
+            "fix_effort": "small",
+            "blocking": true,
+            "defect_kind": "authz-failure"
+          }
+        ],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — Changes required\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nOne authorization concern was found.\n\n**1 required fix**\n\n### Required\n- **RS-DA12BE:** Authz Failure. See the inline discussion.\n\n### Next action\nAddress RS-DA12BE and run verification.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [
+        {
+          "path": "src/app.py",
+          "body": "**Required fix · High impact — Authz Failure**\n\nThe tenant lookup reads rows without binding them to the authenticated identity, so a crafted request can return another tenant's records.\n\nBind the query to the authenticated tenant before reading rows.\n\n`RS-DA12BE`\n\nTo discuss this finding, reply with @sensei followed by your question.\n\n<!-- reviewsensei:finding:v2 repo=1 pr=2 head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb base=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fingerprint=da12bea286117b2e61055a50275c92b849e05315b7759c675fa6fd03c1221550 state=new blocking=true -->",
+          "line": 2,
+          "side": "RIGHT"
+        }
+      ]
+    }
+  ]
+}
