@@ -65,7 +65,7 @@ pass: stages — packaged default stages selected
 pass: categories — packaged default categories selected
 pass: context — no supplemental context configured
 pass: symbol-context — opt-in trusted-base symbol context is disabled by default
-pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei cannot read or change branch protection), the App needs Checks: write, and GitHub never runs required checks on App-authored pull requests
+pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei requests no Administration permission and never changes branch protection), the App needs Checks: write, and GitHub never runs required checks on App-authored pull requests
 unknown: network — not checked (offline mode)
 ```
 
@@ -414,8 +414,9 @@ or `github.reviews: advisory` (no ReviewSensei merge gate and no approval) in
 `.reviewsensei.yml` to select another policy instead. Enforcement is
 one stable `ReviewSensei` check run bound to the reviewed head and to the App
 that produced it; mark it required in branch protection (an administrator
-action - ReviewSensei never reads or changes branch protection, and `doctor`
-reports the check identity and producing App) for it to gate merges. The
+action - ReviewSensei requests no Administration permission and never changes
+branch protection, and `doctor` reports the check identity and producing App)
+for it to gate merges. The
 conclusion is `success` for a complete review with no required fixes, `failure`
 when required fixes remain, `action_required` for a partial, incomplete, or
 unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run that
@@ -560,6 +561,108 @@ Package publication, public channel movement, App permission acceptance,
 Worker deployment, production settings changes, and paid live inference remain
 explicit operator operations. No upgrade, rollback, or cleanup step in this
 guide performs any of them.
+
+## Reconciling a prior gate state
+
+Releases before this change published blocking findings as a `REQUEST_CHANGES`
+review (ADR 0035, superseded by
+[ADR 0057](adr/0057-one-check-run-as-the-single-merge-authority.md)). GitHub
+keeps that change request as the pull request's review decision until the
+reviewer approves or the review is dismissed, and a later `COMMENT` review does
+not clear it. The request is not bound to the head it reviewed either: it
+outlives the execution that created it, can sit behind a newer head, and
+competes with the App's own approval. Current releases
+publish every review as `COMMENT` and enforce through the one head-bound
+`ReviewSensei` check, so an installation upgraded from an earlier release can
+carry two kinds of obsolete host state:
+
+- App-authored change requests left by the previous release on pull requests
+  that are still open; and
+- a required-check rule for a check name the installation no longer publishes.
+
+Both are reconciled by an authorized operator with the operator's own
+credentials. ReviewSensei does not reconcile, dismiss, or re-require anything
+for you.
+
+### The App requests no dismissal or administration permission
+
+The broker issues exactly the capabilities in the
+[capability table](github-app-auth.md#issue-64-worker-capability-broker), and
+none of them is a review-dismissal or branch-protection capability; the product
+never calls GitHub's review-dismissal endpoint. Nothing in this section requires
+granting the App dismissal, `Administration`, or branch-protection permission,
+and the App's installation token is never used for the dismissal below: an
+operator with repository write access performs it with the operator's own
+credentials. Maintaining branch protection is a separate repository
+administrator action that the App also does not request.
+
+### Clearing obsolete App-authored change requests
+
+Dismissal here is bounded to the App's own stale review. Never dismiss a human
+review, and never dismiss every change request on a pull request: the App login
+is the producer `doctor` reports (`reviewsensei[bot]` in this setup), and only a
+review authored by that login is part of this reconciliation.
+
+List the open pull requests whose review decision is still changes-requested:
+
+```bash
+gh pr list --state open --limit 200 --json number,reviewDecision --jq '.[] | select(.reviewDecision == "CHANGES_REQUESTED") | .number'
+```
+
+For each pull request, list its change-request reviews with their authors, and
+keep only the rows whose author is the App login:
+
+```bash
+gh api "repos/OWNER/REPO/pulls/NUMBER/reviews" --paginate --jq '.[] | select(.state == "CHANGES_REQUESTED") | "\(.id) \(.user.login)"'
+```
+
+Dismiss exactly that review, by its id:
+
+```bash
+gh api --method POST "repos/OWNER/REPO/pulls/NUMBER/reviews/REVIEW_ID/dismissals" -f message="Obsolete change request: the head-bound ReviewSensei check is the merge authority (ADR 0057)."
+```
+
+A dismissal clears the obsolete review decision only. The review, its inline
+threads, its findings, and its dispositions stay, no human review is touched,
+and the change request does not come back, because the current release never
+emits `REQUEST_CHANGES`: later reviews on that pull request are `COMMENT` and
+the `ReviewSensei` check carries enforcement. Human approval requirements are
+unaffected; branch protection still applies exactly as configured.
+
+### Reconciling required-check state
+
+YAML cannot make a check required and ReviewSensei never changes the
+requirement: an administrator marks the check in branch protection or a
+ruleset, and `doctor` reports the identity to require. Read back what is
+currently required before changing anything:
+
+```bash
+gh api "repos/OWNER/REPO/branches/BRANCH/protection" --jq '.required_status_checks.contexts[]'
+```
+
+```bash
+gh api "repos/OWNER/REPO/rules/branches/BRANCH" --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'
+```
+
+A `404` from either read means that surface carries no rule for the branch.
+
+Reconcile the rule when the installation no longer publishes a required check,
+because a required check that is never reported leaves every pull request
+waiting on it:
+
+- With `github.writes: false` nothing is published, so a required
+  `ReviewSensei` never appears; restore writes, or remove the requirement.
+- A rollback to a release that does not publish the check has the same effect;
+  keep the release that publishes it, or remove the requirement before rolling
+  back.
+- `github.reviews: advisory` still publishes the check, and the `neutral`
+  conclusion it writes satisfies a required check; advisory mode is the
+  explicit choice to keep the requirement while removing enforcement.
+
+Remove or re-add the requirement in the branch protection rule or ruleset that
+`doctor`'s identity points at. An installation that never marked
+`ReviewSensei` required has nothing to reconcile here: the check is
+informative, and no merge waits on it.
 
 ## Setup-v5 and tag-based reusable workflow
 

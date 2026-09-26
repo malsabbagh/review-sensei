@@ -178,6 +178,7 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `review_publish` | `pull_requests: write` |
 | `review_status` | `pull_requests: read` |
 | `check_publish` | `checks: write` |
+| `review_session` | `pull_requests: write` |
 | `inline_reply` | `pull_requests: write` |
 | `issue_reply` | `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |
@@ -193,7 +194,11 @@ reports `check_permission` rather than implying enforcement. Because a required
 check is matched to its producing App, an administrator who makes
 `ReviewSensei` required selects it by this App's slug; YAML alone cannot make a
 check required, and GitHub does not run required checks on App-authored pull
-requests, so those are reported as `app_authored` instead of gated.
+requests, so those are reported as `app_authored` instead of gated. The
+`review_session` capability (the durable session ledger, ADR 0050) asks for no
+permission beyond `pull_requests: write`; no capability here is a
+review-dismissal or branch-protection capability, and the App requests no
+`Administration` permission.
 
 Automatic approval is the `github.reviews: auto-approve` default and may be
 disabled with `github.reviews: blocking` (publish and enforce, never approve)
