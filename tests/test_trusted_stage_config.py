@@ -20,6 +20,11 @@ from review_sensei.stages import MAX_STAGE_FILE_BYTES
 from review_sensei.validation import ReviewLimits
 from review_sensei.workflow import prepare_diff
 
+try:
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
+except ModuleNotFoundError:
+    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github" / "workflows" / "review-sensei-run.yml"
 REPO_CALLER = ROOT / ".github" / "workflows" / "review-sensei-review.yml"
@@ -284,7 +289,7 @@ class InactiveLensDocumentationTests(unittest.TestCase):
         self.assertIn("pull-request head", text.lower())
 
 
-class TrustedStageIntegrationTests(unittest.TestCase):
+class TrustedStageIntegrationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_workflow_reads_no_stage_or_category_path_configuration(self):
         text = RUNNER.read_text(encoding="utf-8")
         # Stage and category documents come from the conventional directories

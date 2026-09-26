@@ -20,6 +20,11 @@ from review_sensei.cli import _parser, main, resolve_review_inference
 from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 
+try:
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
+except ModuleNotFoundError:
+    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "standalone-smoke"
 BLOCKING_DIFF = FIXTURES / "blocking-review.patch"
@@ -104,7 +109,9 @@ class LocalReviewHarness:
         ]
 
 
-class LocalReviewContractTests(LocalReviewHarness, unittest.TestCase):
+class LocalReviewContractTests(
+    IsolatedWorkingDirectoryMixin, LocalReviewHarness, unittest.TestCase
+):
     def test_default_output_is_readable_terminal_text(self):
         status, stdout, stderr = self.run_review(
             *self.base_arguments(self.blocking_response())
@@ -264,7 +271,9 @@ class LocalReviewContractTests(LocalReviewHarness, unittest.TestCase):
         self.assertIn("reason=invalid-input", stderr)
 
 
-class LocalSessionTests(LocalReviewHarness, unittest.TestCase):
+class LocalSessionTests(
+    IsolatedWorkingDirectoryMixin, LocalReviewHarness, unittest.TestCase
+):
     def test_local_session_records_state_under_the_platform_default(self):
         state_root = self.root / "state"
         environment = clean_host_environment(self.root / "home")
