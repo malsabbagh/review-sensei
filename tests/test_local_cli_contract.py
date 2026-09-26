@@ -162,7 +162,10 @@ class LocalReviewContractTests(
                 "--format",
                 "markdown",
             ],
-            cwd=ROOT,
+            # Like every other local contract case, this runs outside the
+            # checkout's own configuration root so the repository's dogfood
+            # .reviewsensei.yml cannot decide the invocation.
+            cwd=Path.cwd(),
             env=environment,
             capture_output=True,
             check=False,
