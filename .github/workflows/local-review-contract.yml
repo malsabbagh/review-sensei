@@ -1,0 +1,47 @@
+# Manual-only lane for the default review exit contract.
+#
+# The hosted review lanes select `--exit-semantics operational` so their 0/1
+# launcher behavior is preserved, which means no hosted review lane exercises
+# the default three-tier review exit contract (0 clean, 1 required fixes, 2
+# could not complete) against an installed distribution. This lane installs
+# the package from the selected ref and runs the standalone smoke, whose cases
+# assert those documented exits, the output formats, the clean-host local
+# review, and the operational contract.
+#
+# This workflow is NOT a required CI gate and MUST NOT run on pull_request.
+# The hosted engine itself is the reusable review-sensei-run.yml workflow,
+# which callers pin by tag; dispatching it here would run every review job, so
+# the lane stays a sibling instead of a job inside it.
+name: Local review contract
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-review-contract:
+    name: Documented local review contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the selected ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the local CLI
+        run: python -m pip install --disable-pip-version-check .
+
+      - name: Run the documented local review contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/standalone_smoke.py \
+            --executable "$(command -v review-sensei)" \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json

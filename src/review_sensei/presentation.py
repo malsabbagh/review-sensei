@@ -9,11 +9,15 @@ and escaping path.
 
 from __future__ import annotations
 
+import json
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from .models import ReviewComment, ReviewInputError
+from .models import ReviewComment, ReviewInputError, ReviewResult
+
+RENDER_FORMATS = ("text", "markdown", "json")
 
 REQUIRED_FINDING = "required"
 OPTIONAL_FINDING = "optional"
@@ -74,6 +78,61 @@ def escape_markdown_label(value: str) -> str:
     # label from ever changing the surrounding Markdown line structure.
     escaped = _MARKDOWN_LABEL_CHARS.sub(r"\\\1", value)
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
+
+
+# Inline Markdown constructs reshape or hide content regardless of position:
+# raw HTML tags and comments, code spans and fences, links and images, and the
+# escape character itself.
+_MARKDOWN_INLINE_CHARS = re.compile(r"([\\`<>\[\]])")
+
+# Block markers only reshape the document when they open a line (after at most
+# three spaces, per CommonMark): headings, blockquotes, tables, lists, and
+# thematic or setext lines.
+_MARKDOWN_BLOCK_MARKER = re.compile(
+    r"(?m)^( {0,3})([#>|]|[-+=*_]+\s|[-=*+_]{3,}$|\d{1,9}[.)]\s)"
+)
+
+
+def escape_markdown_text(value: str) -> str:
+    """Escape untrusted text so it cannot reshape a rendered Markdown document.
+
+    The Markdown format is a document sink: provider text that opens a fence,
+    an HTML comment, or a heading would restructure (or hide parts of) the
+    review wherever the document is rendered.  Every inline construct and
+    every line-opening block marker is backslash-escaped, mirroring the
+    terminal renderer's neutralization.  Line feeds are the format's own line
+    structure and stay; the rendered text keeps its plain characters, only the
+    Markdown meaning is removed.
+    """
+
+    escaped = _MARKDOWN_INLINE_CHARS.sub(r"\\\1", value)
+    return _MARKDOWN_BLOCK_MARKER.sub(r"\1\\\2", escaped)
+
+
+# The control, format, and surrogate categories the repository already rejects
+# in paths, configuration, and workflow values.  Provider output is bounded but
+# not restricted to printable text, so the terminal renderer neutralizes them
+# at the sink instead of rejecting a legitimate review.
+_TERMINAL_UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Cs"))
+
+
+def escape_terminal_text(value: str) -> str:
+    """Neutralize terminal control characters in untrusted review text.
+
+    The text format is written to a terminal, where a provider-supplied escape
+    sequence could move the cursor, recolor the session, or rewrite lines that
+    were already printed.  Line feeds and tabs are the format's own line
+    structure and stay; every other control, format, or surrogate character is
+    rendered as its hexadecimal code point so the text stays readable and inert.
+    """
+
+    return "".join(
+        character
+        if character in "\n\t"
+        or unicodedata.category(character) not in _TERMINAL_UNSAFE_CATEGORIES
+        else f"\\x{ord(character):02x}"
+        for character in value
+    )
 
 
 def finding_identifier(fingerprint: str, *, hex_digits: int = _FINDING_ID_HEX) -> str:
@@ -568,6 +627,113 @@ def render_review_summary(view: ReviewSummaryView) -> str:
     return "\n".join(lines)
 
 
+def _finding_groups(
+    result: ReviewResult,
+) -> tuple[tuple[str, tuple[ReviewComment, ...]], ...]:
+    required = tuple(comment for comment in result.comments if comment.blocks_approval)
+    optional = tuple(
+        comment for comment in result.comments if not comment.blocks_approval
+    )
+    return (("Required fixes", required), ("Optional findings", optional))
+
+
+def _finding_location(comment: ReviewComment) -> str:
+    if comment.side == "FILE" or comment.line is None:
+        return comment.path
+    return f"{comment.path}:{comment.line}"
+
+
+def _finding_labels(comment: ReviewComment) -> str:
+    labels = ["required fix" if comment.blocks_approval else "optional"]
+    if comment.severity is not None:
+        labels.append(f"severity: {comment.severity.lower()}")
+    if comment.category is not None:
+        labels.append(f"lens: {humanize_lens(comment.category)}")
+    if comment.fix_effort is not None:
+        labels.append(f"effort: {comment.fix_effort.lower()}")
+    if comment.needs_human:
+        labels.append("needs human")
+    return " ".join(f"[{label}]" for label in labels)
+
+
+def render_review_text(result: ReviewResult) -> str:
+    """Render one validated review result as readable terminal text.
+
+    Provider-supplied text reaches a terminal here, so every external string is
+    neutralized with :func:`escape_terminal_text` before it is printed.
+    """
+
+    groups = _finding_groups(result)
+    lines = [
+        f"ReviewSensei review: {result.review_status}",
+        f"provider: {escape_terminal_text(result.provider)}",
+    ]
+    if result.model:
+        lines.append(f"model: {escape_terminal_text(result.model)}")
+    if result.coverage_mode != "full":
+        lines.append(f"coverage: {result.coverage_mode}")
+    for title, group in groups:
+        lines.append(f"{title.lower()}: {len(group)}")
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(escape_terminal_text(result.summary))
+    index = 0
+    for title, group in groups:
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"{title}:")
+        for comment in group:
+            index += 1
+            lines.append("")
+            lines.append(f"{index}) {_finding_location(comment)}")
+            labels = _finding_labels(comment)
+            if labels:
+                lines.append(f"   {labels}")
+            lines.append("")
+            lines.append(escape_terminal_text(comment.body))
+    return "\n".join(lines) + "\n"
+
+
+def render_review_markdown(result: ReviewResult) -> str:
+    """Render one validated review result as readable Markdown.
+
+    Provider text passes through :func:`escape_markdown_text` at this sink, so
+    a provider can neither restructure the document nor hide parts of it; the
+    structured finding views reach the published sinks through their own
+    neutralizing renderers.
+    """
+
+    parts = [escape_markdown_text(result.summary)]
+    for title, group in _finding_groups(result):
+        if not group:
+            continue
+        parts.append("")
+        parts.append(f"### {title}")
+        for comment in group:
+            parts.append("")
+            parts.append(f"**{escape_markdown_label(_finding_location(comment))}**")
+            labels = _finding_labels(comment)
+            if labels:
+                parts.extend(["", labels])
+            parts.extend(["", escape_markdown_text(comment.body)])
+    return "\n".join(parts) + "\n"
+
+
+def render_review(result: ReviewResult, *, output_format: str) -> str:
+    """Render one validated review result in the requested explicit format."""
+
+    if output_format == "text":
+        return render_review_text(result)
+    if output_format == "markdown":
+        return render_review_markdown(result)
+    if output_format == "json":
+        # The versioned ``review-result`` v1 document, unchanged from the
+        # historical single-format output.
+        return json.dumps(result.to_dict(), indent=2) + "\n"
+    raise ReviewInputError(f"unsupported review output format: {output_format}")
+
+
 __all__ = [
     "ADVISORY_STATE",
     "CHANGES_REQUIRED_STATE",
@@ -576,6 +742,7 @@ __all__ = [
     "INCOMPLETE_STATE",
     "NO_REQUIRED_FIXES_STATE",
     "OPTIONAL_FINDING",
+    "RENDER_FORMATS",
     "REQUIRED_FINDING",
     "ReviewSummaryView",
     "WITHHELD_STATE",
@@ -583,12 +750,17 @@ __all__ = [
     "build_finding_view",
     "build_review_summary_view",
     "escape_markdown_label",
+    "escape_markdown_text",
+    "escape_terminal_text",
     "finding_identifier",
     "humanize_lens",
     "order_findings",
     "render_body_findings",
     "render_finding",
     "render_finding_reference",
+    "render_review",
+    "render_review_markdown",
     "render_review_summary",
+    "render_review_text",
     "sanitize_finding_markdown",
 ]

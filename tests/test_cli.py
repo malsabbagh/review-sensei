@@ -2,9 +2,10 @@ import importlib.metadata
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from review_sensei.cli import (
     _parser,
     _plan_parser,
     main,
+    resolve_review_inference,
 )
 from review_sensei.errors import ReviewInputError
 
@@ -559,22 +561,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(FakeApplication.instance.call["head_sha"], "a" * 40)
 
-    def test_provider_mode_selects_mode_specific_defaults(self):
+    def test_retired_provider_mode_does_not_select_a_review_backend(self):
         with patch.dict(
             "os.environ",
             {"REVIEWSENSEI_PROVIDER_MODE": "cloud", "OLLAMA_API_KEY": "secret"},
             clear=True,
         ):
-            cloud = _parser().parse_args([])
-        self.assertEqual(cloud.base_url, "https://ollama.com/api")
-        self.assertEqual(cloud.model, "deepseek-v4.1-flash:cloud")
+            argv = ["--diff", "review.patch"]
+            args = _parser().parse_args(argv)
+            settings, api_key = resolve_review_inference(args, argv)
+        self.assertEqual(settings.name, "ollama")
+        self.assertEqual(settings.base_url, "http://127.0.0.1:11434/api")
+        self.assertEqual(settings.model, "qwen3.5:4b")
+        self.assertIsNone(api_key)
 
         with patch.dict(
-            "os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "local"}, clear=True
+            "os.environ",
+            {"REVIEWSENSEI_PROVIDER_MODE": "local", "OLLAMA_API_KEY": "secret"},
+            clear=True,
         ):
-            local = _parser().parse_args([])
-        self.assertEqual(local.base_url, "http://127.0.0.1:11434/api")
-        self.assertEqual(local.model, "qwen3.5:4b")
+            argv = ["--diff", "review.patch", "--provider", "cloud-ollama"]
+            args = _parser().parse_args(argv)
+            settings, api_key = resolve_review_inference(args, argv)
+        self.assertEqual(settings.name, "ollama")
+        self.assertEqual(settings.base_url, "https://ollama.com/api")
+        self.assertEqual(settings.model, "deepseek-v4.1-flash:cloud")
+        self.assertEqual(api_key, "secret")
 
     def test_provider_defaults_follow_openai_compatible_adapter(self):
         args = _parser().parse_args(["--provider", "openai-compatible"])
@@ -607,22 +619,59 @@ class CliTests(unittest.TestCase):
                         "openai-compatible",
                     ]
                 )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
+        self.assertIn("reason=invalid-input", stderr.getvalue())
         self.assertIn(
             "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
         )
 
-    def test_openai_timeout_prefers_reviewsensei_environment_variable(self):
+    def test_operational_semantics_classify_spellings_after_a_parse_error(self):
+        for spelling in (
+            ["--exit-semantics", "operational"],
+            ["--exit-semantics=operational"],
+            ["--exit-seman", "operational"],
+        ):
+            with self.subTest(spelling=spelling):
+                with patch.dict(
+                    "os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True
+                ):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                "review.patch",
+                                "--provider",
+                                "openai-compatible",
+                                *spelling,
+                            ]
+                        )
+                error_text = stderr.getvalue()
+            self.assertEqual(status, 1)
+            self.assertNotIn("reason=invalid-input", error_text)
+            self.assertIn(
+                "OPENAI_TIMEOUT_SECONDS must be a positive number", error_text
+            )
+
+    def test_review_timeout_ignores_the_retired_provider_environment(self):
         with patch.dict(
             "os.environ",
             {
+                "OPENAI_API_KEY": "openai-secret",
                 "REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS": "45",
                 "OPENAI_TIMEOUT_SECONDS": "9",
             },
             clear=True,
         ):
-            args = _parser().parse_args(["--provider", "openai-compatible"])
-        self.assertEqual(args.timeout_seconds, 45.0)
+            argv = ["--diff", "review.patch", "--provider", "openai-compatible"]
+            args = _parser().parse_args(argv)
+            settings, _ = resolve_review_inference(args, argv)
+            self.assertEqual(settings.timeout_seconds, 900.0)
+
+            explicit = [*argv, "--timeout-seconds", "45"]
+            args = _parser().parse_args(explicit)
+            settings, _ = resolve_review_inference(args, explicit)
+        self.assertEqual(settings.timeout_seconds, 45.0)
 
     def test_github_reply_rejects_invalid_openai_timeout_environment_value(self):
         with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
@@ -699,7 +748,7 @@ class CliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("OPENAI_API_KEY is unavailable", stderr.getvalue())
 
     def test_profile_rejects_allow_custom_endpoint(self):
@@ -716,7 +765,7 @@ class CliTests(unittest.TestCase):
                     "--allow-custom-endpoint",
                 ]
             )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--allow-custom-endpoint cannot be combined with --profile",
             stderr.getvalue(),
@@ -737,7 +786,7 @@ class CliTests(unittest.TestCase):
                     "OLLAMA_API_KEY",
                 ]
             )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--api-key-env OLLAMA_API_KEY does not match profile 'fast-triage' "
             "(requires OPENAI_API_KEY)",
@@ -759,7 +808,7 @@ class CliTests(unittest.TestCase):
                     "OLLAMA_API_KEY",
                 ]
             )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--api-key-env cannot be combined with profile 'local-private'",
             stderr.getvalue(),
@@ -842,6 +891,40 @@ class CliTests(unittest.TestCase):
             "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
         )
 
+    def test_profile_supplies_its_provider_without_an_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        # A bare --profile is a complete invocation: the preset selects its own
+        # provider, so --provider is only needed to assert agreement with it.
+        self.assertEqual(created[0].name, "openai-compatible")
+        self.assertEqual(created[0].profile, "fast-triage")
+        self.assertEqual(created[0].api_key, "openai-secret")
+
     def test_profile_fast_triage_omits_conflicting_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
@@ -878,7 +961,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(created[0].timeout_seconds)
         self.assertEqual(created[0].api_key, "openai-secret")
 
-    def test_profile_requires_matching_explicit_provider(self):
+    def test_profile_rejects_a_mismatching_explicit_provider(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             status = main(
@@ -887,10 +970,13 @@ class CliTests(unittest.TestCase):
                     "review.patch",
                     "--profile",
                     "fast-triage",
+                    "--provider",
+                    "local-ollama",
                 ]
             )
-        self.assertEqual(status, 1)
-        self.assertIn("requires --provider openai-compatible", stderr.getvalue())
+        self.assertEqual(status, 2)
+        self.assertIn("does not match profile", stderr.getvalue())
+        self.assertIn("requires openai-compatible", stderr.getvalue())
 
     def test_profile_deep_verification_uses_profile_api_key_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -944,7 +1030,7 @@ class CliTests(unittest.TestCase):
                     "response.json",
                 ]
             )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("fixture cannot be combined with --profile", stderr.getvalue())
 
     def test_openai_compatible_explicit_flags_override_environment(self):
@@ -1007,7 +1093,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "model"))
         self.assertFalse(hasattr(args, "api_key_env"))
 
-    def test_openai_provider_rejects_non_allowlisted_environment_endpoint(self):
+    def test_openai_provider_ignores_the_retired_environment_endpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
             diff_path.write_text(DIFF, encoding="utf-8")
@@ -1029,20 +1115,36 @@ class CliTests(unittest.TestCase):
                 with patch(
                     "review_sensei.cli.default_registry", return_value=Registry()
                 ):
-                    stderr = io.StringIO()
-                    with redirect_stderr(stderr):
-                        status = main(
-                            [
-                                "--diff",
-                                str(diff_path),
-                                "--provider",
-                                "openai-compatible",
-                                "--no-learning-proposals",
-                            ]
-                        )
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--provider",
+                            "openai-compatible",
+                            "--no-learning-proposals",
+                        ]
+                    )
 
-        self.assertEqual(status, 1)
-        self.assertEqual(created, [])
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].base_url, "https://api.openai.com/v1")
+
+    def test_openai_provider_rejects_a_non_allowlisted_explicit_endpoint(self):
+        stderr = io.StringIO()
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True),
+            redirect_stderr(stderr),
+        ):
+            status = main(
+                [
+                    "--diff",
+                    "review.patch",
+                    "--provider",
+                    "openai-compatible",
+                    "--base-url",
+                    "https://attacker.example/v1",
+                ]
+            )
+        self.assertEqual(status, 2)
         self.assertIn("not allowlisted", stderr.getvalue())
 
     def test_openai_provider_accepts_explicit_custom_endpoint_opt_in(self):
@@ -1057,12 +1159,7 @@ class CliTests(unittest.TestCase):
                     return FakeProvider()
 
             with patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_API_KEY": "openai-secret",
-                    "OPENAI_BASE_URL": "https://llm.internal/v1",
-                },
-                clear=True,
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
             ):
                 with patch(
                     "review_sensei.cli.default_registry", return_value=Registry()
@@ -1073,6 +1170,8 @@ class CliTests(unittest.TestCase):
                             str(diff_path),
                             "--provider",
                             "openai-compatible",
+                            "--base-url",
+                            "https://llm.internal/v1",
                             "--allow-custom-endpoint",
                             "--no-learning-proposals",
                         ]
@@ -1517,7 +1616,7 @@ class CliTests(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             status = main([])
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--diff is required", stderr.getvalue())
 
     def test_parser_accepts_category_and_stage_directories(self):
@@ -1591,11 +1690,11 @@ class CliTests(unittest.TestCase):
                     "--fixture-response",
                     "response.json",
                     "--provider",
-                    "ollama",
+                    "local-ollama",
                 ]
             )
 
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--fixture-response is only valid with --provider fixture",
             stderr.getvalue(),
@@ -1606,10 +1705,77 @@ class CliTests(unittest.TestCase):
         with redirect_stderr(stderr):
             status = main(["--diff", "review.patch", "--provider", "fixture"])
 
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--provider fixture requires --fixture-response", stderr.getvalue()
         )
+
+    def test_retired_provider_variables_warn_without_moving_the_backend(self):
+        argv = ["--diff", "review.patch"]
+        stderr = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "REVIEWSENSEI_PROVIDER_MODE": "cloud",
+                    "OLLAMA_MODEL": "qwen3.5:4b",
+                    "OLLAMA_BASE_URL": "https://ollama.com/api",
+                },
+                clear=True,
+            ),
+            redirect_stderr(stderr),
+        ):
+            settings, api_key = resolve_review_inference(
+                _parser().parse_args(argv), argv
+            )
+
+        # The historical provider-mode aliasing must not select a backend, and
+        # the caller must be told instead of being silently redirected.
+        self.assertEqual(settings.base_url, "http://127.0.0.1:11434/api")
+        self.assertIsNone(api_key)
+        self.assertIn(
+            "REVIEWSENSEI_PROVIDER_MODE has no effect on a review", stderr.getvalue()
+        )
+        self.assertIn("OLLAMA_MODEL has no effect on a review", stderr.getvalue())
+        self.assertIn("OLLAMA_BASE_URL has no effect on a review", stderr.getvalue())
+
+    def test_review_inference_stays_quiet_without_retired_variables(self):
+        argv = ["--diff", "review.patch"]
+        stderr = io.StringIO()
+        with (
+            patch.dict("os.environ", {"HOME": str(Path.home())}, clear=True),
+            redirect_stderr(stderr),
+        ):
+            resolve_review_inference(_parser().parse_args(argv), argv)
+
+        self.assertNotIn("warning:", stderr.getvalue())
+
+    def test_empty_inference_options_fail_closed(self):
+        # An explicitly passed empty value must not fall back to a resolved
+        # default: the caller asked for something the review cannot honor.
+        for option in ("--provider", "--model", "--base-url", "--api-key-env"):
+            with self.subTest(option=option):
+                argv = ["--diff", "review.patch", option, ""]
+                with self.assertRaisesRegex(
+                    ReviewInputError, f"{option} requires a non-empty value"
+                ):
+                    resolve_review_inference(_parser().parse_args(argv), argv)
+
+    def test_profile_invocations_reject_empty_options_too(self):
+        for option in ("--provider", "--base-url"):
+            with self.subTest(option=option):
+                argv = [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                    option,
+                    "",
+                ]
+                with self.assertRaisesRegex(
+                    ReviewInputError, f"{option} requires a non-empty value"
+                ):
+                    resolve_review_inference(_parser().parse_args(argv), argv)
 
     def test_fixture_cli_does_not_lookup_api_key_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1866,7 +2032,7 @@ class CliTests(unittest.TestCase):
                     {
                         "name": "Architecture review",
                         "category_ids": ["architecture"],
-                        "outputs": ["summary"],
+                        "outputs": ["summary", "comments"],
                         "prompt_template": (
                             "{review_categories}\n{review_context}\n{diff}"
                         ),
@@ -1932,6 +2098,8 @@ class CliTests(unittest.TestCase):
                         str(diff_path),
                         "--learning-root",
                         str(root),
+                        "--format",
+                        "json",
                         "--output",
                         str(output_path),
                     ]
@@ -1968,6 +2136,8 @@ class CliTests(unittest.TestCase):
                         "a" * 40,
                         "--head-sha",
                         "b" * 40,
+                        "--format",
+                        "json",
                         "--output",
                         str(output_path),
                     ]
@@ -2002,7 +2172,7 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--base-sha", stderr.getvalue())
 
     def test_cli_symbol_context_rejects_malformed_base_sha(self):
@@ -2026,7 +2196,7 @@ class CliTests(unittest.TestCase):
                             ]
                         )
 
-                self.assertEqual(status, 1)
+                self.assertEqual(status, 2)
                 message = stderr.getvalue()
                 self.assertIn("context snapshot revision must be a commit SHA", message)
                 # The sanitized boundary names the offending input without a
@@ -2065,7 +2235,7 @@ class CliTests(unittest.TestCase):
                                 ]
                             )
 
-                self.assertEqual(status, 1)
+                self.assertEqual(status, 2)
                 message = stderr.getvalue()
                 self.assertIn("untrusted_head_sha must be a commit SHA", message)
                 self.assertNotIn("Traceback", message)
@@ -2097,6 +2267,8 @@ class CliTests(unittest.TestCase):
                         "A" * 40,
                         "--head-sha",
                         "B" * 40,
+                        "--format",
+                        "json",
                         "--output",
                         str(output_path),
                     ]
@@ -2132,7 +2304,7 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "source context allowed path pattern is invalid", stderr.getvalue()
         )
@@ -2149,7 +2321,7 @@ class CliTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--categories-dir requires --stages-dir", stderr.getvalue())
 
     def test_cli_rejects_oversized_diff_before_provider_creation(self):
@@ -2167,7 +2339,7 @@ class CliTests(unittest.TestCase):
             with patch("review_sensei.cli.default_registry", return_value=Registry()):
                 with redirect_stderr(stderr):
                     status = main(["--diff", str(path)])
-            self.assertEqual(status, 1)
+            self.assertEqual(status, 2)
             self.assertEqual(created, [])
             self.assertNotIn("x" * 20, stderr.getvalue())
 
@@ -2695,7 +2867,7 @@ class PromotionCliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "environment variable OPENROUTER_API_KEY is unavailable",
             stderr.getvalue(),
@@ -2721,14 +2893,20 @@ class PromotionCliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("openrouter endpoint is not allowlisted", stderr.getvalue())
 
-    def test_openrouter_rejects_non_allowlisted_openrouter_base_url_env(self):
+    def test_openrouter_ignores_the_retired_environment_base_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
             diff_path.write_text(DIFF, encoding="utf-8")
-            stderr = io.StringIO()
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
             with patch.dict(
                 "os.environ",
                 {
@@ -2737,7 +2915,9 @@ class PromotionCliTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                with redirect_stderr(stderr):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
                     status = main(
                         [
                             "--diff",
@@ -2747,8 +2927,8 @@ class PromotionCliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
-        self.assertEqual(status, 1)
-        self.assertIn("openrouter endpoint is not allowlisted", stderr.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(created[0].base_url, "https://openrouter.ai/api/v1")
 
     def test_openrouter_upstream_provider_selects_routing_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2784,7 +2964,7 @@ class PromotionCliTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(created[0].openrouter_policy.upstream_provider, "openai")
 
-    def test_openrouter_timeout_prefers_reviewsensei_env(self):
+    def test_review_timeout_ignores_the_retired_openrouter_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
             diff_path.write_text(DIFF, encoding="utf-8")
@@ -2800,7 +2980,7 @@ class PromotionCliTests(unittest.TestCase):
                 {
                     "OPENROUTER_API_KEY": "router-secret",
                     "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS": "300",
-                    "OPENROUTER_TIMEOUT_SECONDS": "120",
+                    "OPENROUTER_TIMEOUT_SECONDS": "300",
                 },
                 clear=True,
             ):
@@ -2816,8 +2996,21 @@ class PromotionCliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
+                    self.assertEqual(status, 0)
+                    self.assertEqual(created[0].timeout_seconds, 120.0)
+
+                    explicit = [
+                        "--diff",
+                        str(diff_path),
+                        "--provider",
+                        "openrouter",
+                        "--timeout-seconds",
+                        "300",
+                        "--no-learning-proposals",
+                    ]
+                    status = main(explicit)
         self.assertEqual(status, 0)
-        self.assertEqual(created[0].timeout_seconds, 300.0)
+        self.assertEqual(created[1].timeout_seconds, 300.0)
 
     def test_openrouter_api_key_env_override(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2890,20 +3083,6 @@ class PromotionCliTests(unittest.TestCase):
             "anthropic",
         )
 
-    def test_openrouter_profile_rejects_mismatched_provider(self):
-        stderr = io.StringIO()
-        with redirect_stderr(stderr):
-            status = main(
-                [
-                    "--diff",
-                    "review.patch",
-                    "--profile",
-                    "openrouter-sonnet",
-                ]
-            )
-        self.assertEqual(status, 1)
-        self.assertIn("requires --provider openrouter", stderr.getvalue())
-
     def test_openrouter_profile_rejects_mismatched_explicit_provider(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
@@ -2917,7 +3096,7 @@ class PromotionCliTests(unittest.TestCase):
                     "ollama",
                 ]
             )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("does not match profile", stderr.getvalue())
 
     def test_openrouter_profile_requires_unqualified_opt_in(self):
@@ -2940,7 +3119,7 @@ class PromotionCliTests(unittest.TestCase):
                             "--no-learning-proposals",
                         ]
                     )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("is unqualified", stderr.getvalue())
 
     def test_promotion_cli_does_not_accept_live_model_flags(self):
@@ -2970,6 +3149,7 @@ class HostedPublicationCliTests(unittest.TestCase):
 
     class FakeApplication:
         instances: list = []
+        publication_status = "published"
 
         def __init__(self, **kwargs):
             del kwargs
@@ -2978,9 +3158,9 @@ class HostedPublicationCliTests(unittest.TestCase):
 
         def publish_review(self, **kwargs):
             self.calls.append(kwargs)
-            return SimpleNamespace(status="published")
+            return SimpleNamespace(status=self.__class__.publication_status)
 
-    def _publish(self, root: Path, extra: list[str]) -> int:
+    def _publish(self, root: Path, extra: list[str], application=None) -> int:
         result_path = root / "result.json"
         diff_path = root / "diff.patch"
         result_path.write_text(
@@ -3005,7 +3185,7 @@ class HostedPublicationCliTests(unittest.TestCase):
             ReviewPublisher=lambda **kwargs: object(),
             LearningPRPublisher=lambda **kwargs: object(),
             ConversationPublisher=lambda **kwargs: object(),
-            GitHubApplication=self.FakeApplication,
+            GitHubApplication=application or self.FakeApplication,
         ):
             return main(
                 [
@@ -3180,6 +3360,56 @@ class HostedPublicationCliTests(unittest.TestCase):
             [],
         )
 
+    def test_maintainer_handoff_annotates_the_actions_run(self):
+        class HandoffApplication(self.FakeApplication):
+            publication_status = "handoff"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = root / "summary.md"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_STEP_SUMMARY": str(summary),
+                        "GITHUB_OUTPUT": str(root / "output.txt"),
+                    },
+                    clear=False,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = self._publish(root, [], application=HandoffApplication)
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(status, 1)
+        self.assertIn("handoff", stdout.getvalue())
+        self.assertIn(
+            "::error title=ReviewSensei maintainer attention required::",
+            stderr.getvalue(),
+        )
+        self.assertIn("action_required", summary_text)
+
+    def test_maintainer_handoff_stays_unannotated_off_the_host(self):
+        class HandoffApplication(self.FakeApplication):
+            publication_status = "handoff"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_ACTIONS": ""}, clear=False),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                status = self._publish(root, [], application=HandoffApplication)
+
+        self.assertEqual(status, 1)
+        self.assertNotIn("::error", stderr.getvalue())
+
 
 class HostedSessionLedgerFlagTests(unittest.TestCase):
     """Analysis-side hosted flags cannot be mixed with local invocation."""
@@ -3217,12 +3447,12 @@ class HostedSessionLedgerFlagTests(unittest.TestCase):
         status, stderr = self._run(
             ["--session-ledger", "ledger", "--oidc-token", "token"]
         )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--oidc-token requires --github-session-ledger", stderr)
 
     def test_rejects_a_hosted_ledger_without_a_transaction(self):
         status, stderr = self._run(["--github-session-ledger", "--repository-id", "1"])
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn(
             "--github-session-ledger requires an identity-bound transaction", stderr
         )
@@ -3237,12 +3467,12 @@ class HostedSessionLedgerFlagTests(unittest.TestCase):
                 "configuration.json",
             ]
         )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--transaction requires a session ledger", stderr)
 
     def test_rejects_a_hosted_transaction_without_a_repository_id(self):
         status, stderr = self._run(["--transaction", "--github-session-ledger"])
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 2)
         self.assertIn("--transaction requires a session ledger", stderr)
 
 

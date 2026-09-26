@@ -969,6 +969,10 @@ jobs:
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider cloud-ollama --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url "$OLLAMA_BASE_URL" --model "$OLLAMA_MODEL" \
@@ -1507,9 +1511,13 @@ jobs:
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider openrouter --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --provider openrouter --model "$MODEL" \
+            --model "$MODEL" \
             --output review.json --outcome outcome.json
 
       - name: Confirm live pull-request head is still current
@@ -2028,6 +2036,10 @@ jobs:
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
+          # The canonical backend is selected explicitly, the versioned JSON
+          # review document is the selected format, and the host keeps the
+          # operational 0/1 launcher exit contract.
+          review_args+=(--provider local-ollama --format json --exit-semantics operational)
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --base-url http://127.0.0.1:11434/api --model "$OLLAMA_MODEL" \
