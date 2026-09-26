@@ -1,6 +1,6 @@
 import unittest
 
-from review_sensei.models import ReviewComment
+from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.presentation import (
     ADVISORY_STATE,
     CHANGES_REQUIRED_STATE,
@@ -14,7 +14,9 @@ from review_sensei.presentation import (
     finding_identifier,
     render_finding,
     render_finding_reference,
+    render_review_markdown,
     render_review_summary,
+    render_review_text,
     sanitize_finding_markdown,
 )
 
@@ -396,6 +398,88 @@ class SummaryRenderingTests(unittest.TestCase):
                 head_sha="1" * 40,
                 optional=tuple(self._optional(f"RS-{index:03d}") for index in range(4)),
             )
+
+
+class ReviewTextRenderingTests(unittest.TestCase):
+    def test_text_output_neutralizes_terminal_escape_sequences(self):
+        result = ReviewResult(
+            summary="Terminal says \x1b[31mred\x1b[0m.",
+            provider="fixture",
+            review_status="complete",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="First line.\nsecond \x07line",
+                ),
+            ),
+        )
+
+        rendered = render_review_text(result)
+
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\x07", rendered)
+        self.assertIn(r"Terminal says \x1b[31mred\x1b[0m.", rendered)
+        self.assertIn(r"second \x07line", rendered)
+        # The format's own line structure survives: multi-line text keeps its
+        # line feeds, so escaping never rewrites the layout of a review.
+        self.assertIn("First line.\nsecond", rendered)
+
+    def test_text_output_neutralizes_provider_and_model_identity(self):
+        result = ReviewResult(
+            summary="Looks fine.",
+            provider="fixture\x1b",
+            model="qwen\r[2J",
+            review_status="complete",
+            comments=(),
+        )
+
+        rendered = render_review_text(result)
+
+        self.assertIn(r"provider: fixture\x1b", rendered)
+        self.assertIn(r"model: qwen\x0d[2J", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\r", rendered)
+
+
+class ReviewMarkdownRenderingTests(unittest.TestCase):
+    def test_markdown_output_neutralizes_document_injection(self):
+        result = ReviewResult(
+            summary="# Not a heading\n<!-- hidden -->",
+            provider="fixture",
+            review_status="complete",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body=(
+                        "````\n![img](https://example.com/x)\n<script>alert(1)</script>"
+                    ),
+                ),
+            ),
+        )
+
+        rendered = render_review_markdown(result)
+
+        self.assertNotIn("\n# Not a heading", rendered)
+        self.assertIn(r"\# Not a heading", rendered)
+        self.assertIn(r"\<!-- hidden --\>", rendered)
+        self.assertIn(r"\`\`\`\`", rendered)
+        self.assertIn(r"!\[img\](https://example.com/x)", rendered)
+        self.assertIn(r"\<script\>alert(1)\</script\>", rendered)
+
+    def test_markdown_output_keeps_plain_text_and_line_structure(self):
+        result = ReviewResult(
+            summary="Two lines.\nSecond line.",
+            provider="fixture",
+            review_status="complete",
+            comments=(ReviewComment(path="src/app.py", line=2, body="plain body"),),
+        )
+
+        rendered = render_review_markdown(result)
+
+        self.assertIn("Two lines.\nSecond line.", rendered)
+        self.assertIn("plain body", rendered)
 
 
 if __name__ == "__main__":

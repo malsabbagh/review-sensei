@@ -10,6 +10,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 from .baseline import (
     admission_context_document,
@@ -18,7 +19,10 @@ from .baseline import (
     plan_verification_scope,
 )
 from .configuration import (
+    BACKEND_DEFAULTS,
+    IGNORED_PROVIDER_ENVIRONMENT_SETTINGS,
     documented_backend_names,
+    internal_backend_names,
     load_configuration,
     resolve_inference,
 )
@@ -495,13 +499,29 @@ def _provider_settings_from_args(
     )
 
 
-_CANONICAL_BACKEND_ADAPTERS: Mapping[str, str] = {
-    "local-ollama": "ollama",
-    "cloud-ollama": "ollama",
-    "openrouter": "openrouter",
-    "openai-compatible": "openai-compatible",
-    "fixture": "fixture",
-}
+def _canonical_backend_adapters() -> Mapping[str, str]:
+    """Return the provider adapter for every packaged canonical backend.
+
+    The backend names come from the packaged configuration table, so a
+    backend added there cannot be forgotten here without failing loudly.
+    """
+
+    adapters = {
+        "local-ollama": "ollama",
+        "cloud-ollama": "ollama",
+        "openrouter": "openrouter",
+        "openai-compatible": "openai-compatible",
+        "fixture": "fixture",
+    }
+    missing = sorted(set(BACKEND_DEFAULTS) - set(adapters))
+    if missing:
+        raise ReviewSenseiError(
+            "canonical backends lack a provider adapter mapping: " + ", ".join(missing)
+        )
+    return {backend: adapters[backend] for backend in BACKEND_DEFAULTS}
+
+
+_CANONICAL_BACKEND_ADAPTERS: Mapping[str, str] = _canonical_backend_adapters()
 # The canonical resolver owns backend, model, endpoint, and credential
 # selection.  Only the two documented overrides and the credential variables
 # participate, so a retired provider-mode or provider-specific model chain has
@@ -519,6 +539,24 @@ def _review_environ() -> dict[str, str]:
     return {
         name: os.environ[name] for name in _REVIEW_ENVIRON_KEYS if name in os.environ
     }
+
+
+def _warn_ignored_provider_environment() -> None:
+    """Report retired provider variables a shell or workflow still exports.
+
+    The resolver ignores them, so an upgraded caller would otherwise infer a
+    different backend, model, endpoint, or timeout than it asked for.  The
+    warning names the supported replacement instead of failing the review,
+    because installed workflows still export provider-mode variables.
+    """
+
+    for name, replacement in IGNORED_PROVIDER_ENVIRONMENT_SETTINGS.items():
+        if os.environ.get(name, "").strip():
+            print(
+                f"review-sensei: warning: {name} has no effect on a review; "
+                f"{replacement}",
+                file=sys.stderr,
+            )
 
 
 def _explicit_cli_value(
@@ -554,6 +592,19 @@ def resolve_review_inference(
     """
 
     explicit = getattr(args, "_explicit_cli_options", None)
+    _warn_ignored_provider_environment()
+    cli_provider = _explicit_cli_value(args, argv, "provider")
+    cli_model = _explicit_cli_value(args, argv, "model")
+    cli_base_url = _explicit_cli_value(args, argv, "base-url")
+    cli_api_key_env = _explicit_cli_value(args, argv, "api-key-env")
+    for option, value in (
+        ("--provider", cli_provider),
+        ("--model", cli_model),
+        ("--base-url", cli_base_url),
+        ("--api-key-env", cli_api_key_env),
+    ):
+        if isinstance(value, str) and not value.strip():
+            raise ReviewInputError(f"{option} requires a non-empty value")
     if getattr(args, "profile", None):
         profile = get_provider_profile(str(args.profile))
         adapter = _adapter_for_provider(getattr(args, "provider", None))
@@ -575,8 +626,6 @@ def resolve_review_inference(
             ),
             api_key,
         )
-    cli_provider = _explicit_cli_value(args, argv, "provider")
-    cli_model = _explicit_cli_value(args, argv, "model")
     configuration = load_configuration(getattr(args, "config", None))
     resolved = resolve_inference(
         configuration,
@@ -586,11 +635,9 @@ def resolve_review_inference(
     )
     args.provider = _CANONICAL_BACKEND_ADAPTERS[resolved.backend]
     args.model = cli_model if isinstance(cli_model, str) else resolved.model
-    cli_base_url = _explicit_cli_value(args, argv, "base-url")
     args.base_url = (
         cli_base_url if isinstance(cli_base_url, str) else None
     ) or resolved.base_url
-    cli_api_key_env = _explicit_cli_value(args, argv, "api-key-env")
     args.api_key_env = (
         cli_api_key_env if isinstance(cli_api_key_env, str) else None
     ) or resolved.credential_env
@@ -664,29 +711,75 @@ def _review_exit_status(
     return code
 
 
-def _operational_exit_semantics(argv: list[str]) -> bool:
-    """Detect the operational contract when the flags could not be parsed."""
+class _SemanticsScanError(Exception):
+    """Internal: the quiet scanner below rejected the invocation."""
 
-    for index, token in enumerate(argv):
-        if token == "--exit-semantics":
-            return index + 1 < len(argv) and argv[index + 1] == "operational"
-        if token.startswith("--exit-semantics="):
-            return token.split("=", 1)[1] == "operational"
-    return False
+
+class _QuietArgumentParser(argparse.ArgumentParser):
+    """Argument parser that reports failures without writing to stderr."""
+
+    def error(self, message: str) -> NoReturn:
+        raise _SemanticsScanError(message)
+
+
+def _operational_exit_semantics(argv: list[str]) -> bool:
+    """Detect the operational contract when the flags could not be parsed.
+
+    A dedicated scanner resolves the option the same way the review parser
+    would, so abbreviations and ``--exit-semantics=operational`` spellings
+    stay classified even when the review invocation itself was rejected.
+    """
+
+    scanner = _QuietArgumentParser(add_help=False)
+    scanner.add_argument("--exit-semantics", choices=("review", "operational"))
+    try:
+        namespace, _ = scanner.parse_known_args(argv)
+    except _SemanticsScanError:
+        return False
+    return namespace.exit_semantics == "operational"
 
 
 def _local_session_repository() -> str:
-    """Return the local session identity for the current working copy."""
+    """Return the local session identity for the current working copy.
 
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", Path.cwd().name).strip("-._")
+    The identity follows the working copy root's directory name, so renaming
+    or moving that directory starts a new durable session.  Inside a Git
+    checkout the root is the directory that holds ``.git``, which keeps one
+    identity when the CLI is invoked from a subdirectory.
+    """
+
+    root = Path.cwd()
+    for candidate in (root, *root.parents):
+        if (candidate / ".git").exists():
+            root = candidate
+            break
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", root.name).strip("-._")
     return f"local/{(slug or 'workspace')[:90]}"
 
 
+_LOCAL_REVISION = re.compile(r"^[a-f0-9]{40}$")
+
+
 def _local_change_revision(label: str, content: str) -> str:
-    """Return a content-derived 40-character revision for a local change."""
+    """Return the derived 40-character revision for one local change.
+
+    The value is a truncated SHA-256 over the label and content, not a Git
+    object id.  The transaction gate, the durable session ledger, and the
+    context snapshots all validate identity as 40 lowercase hexadecimal
+    characters, so the derived shape is deliberate and validated here: a
+    future change to the derivation fails at its source instead of surfacing
+    as a misleading commit-SHA error from the transaction gate.
+    """
 
     payload = (label + "\0" + content).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:40]
+    # Not a Git object id; the 40-hex shape is the ledger's identity contract.
+    revision = hashlib.sha256(payload).hexdigest()[:40]
+    if _LOCAL_REVISION.fullmatch(revision) is None:
+        raise ReviewInputError(
+            "the derived local session revision is not a 40-character "
+            "lowercase hexadecimal identity"
+        )
+    return revision
 
 
 def _prepare_local_session(
@@ -867,9 +960,10 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Canonical inference backend: "
-            f"{', '.join(documented_backend_names())}, or 'fixture' for a "
-            "repository test seam. Defaults to inference.backend, the "
-            "REVIEWSENSEI_PROVIDER override, or 'local-ollama'"
+            f"{', '.join(documented_backend_names())}, or "
+            f"{', '.join(internal_backend_names())} for a repository test "
+            "seam. Defaults to inference.backend, the REVIEWSENSEI_PROVIDER "
+            "override, or 'local-ollama'"
         ),
     )
     parser.add_argument("--base-url", default=None)
@@ -1095,9 +1189,10 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Local directory for the issue #136 durable session ledger; "
-            "defaults to the --local-session state directory when that flag "
-            "is set. Operator modes reserve before inference and refuse "
-            "unadmitted rounds."
+            "defaults to the platform per-user state directory when "
+            "--local-session is set, otherwise a session ledger must be "
+            "supplied explicitly. Operator modes reserve before inference "
+            "and refuse unadmitted rounds."
         ),
     )
     parser.add_argument(

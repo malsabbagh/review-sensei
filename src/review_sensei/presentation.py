@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -77,6 +78,61 @@ def escape_markdown_label(value: str) -> str:
     # label from ever changing the surrounding Markdown line structure.
     escaped = _MARKDOWN_LABEL_CHARS.sub(r"\\\1", value)
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
+
+
+# Inline Markdown constructs reshape or hide content regardless of position:
+# raw HTML tags and comments, code spans and fences, links and images, and the
+# escape character itself.
+_MARKDOWN_INLINE_CHARS = re.compile(r"([\\`<>\[\]])")
+
+# Block markers only reshape the document when they open a line (after at most
+# three spaces, per CommonMark): headings, blockquotes, tables, lists, and
+# thematic or setext lines.
+_MARKDOWN_BLOCK_MARKER = re.compile(
+    r"(?m)^( {0,3})([#>|]|[-+=*_]+\s|[-=*+_]{3,}$|\d{1,9}[.)]\s)"
+)
+
+
+def escape_markdown_text(value: str) -> str:
+    """Escape untrusted text so it cannot reshape a rendered Markdown document.
+
+    The Markdown format is a document sink: provider text that opens a fence,
+    an HTML comment, or a heading would restructure (or hide parts of) the
+    review wherever the document is rendered.  Every inline construct and
+    every line-opening block marker is backslash-escaped, mirroring the
+    terminal renderer's neutralization.  Line feeds are the format's own line
+    structure and stay; the rendered text keeps its plain characters, only the
+    Markdown meaning is removed.
+    """
+
+    escaped = _MARKDOWN_INLINE_CHARS.sub(r"\\\1", value)
+    return _MARKDOWN_BLOCK_MARKER.sub(r"\1\\\2", escaped)
+
+
+# The control, format, and surrogate categories the repository already rejects
+# in paths, configuration, and workflow values.  Provider output is bounded but
+# not restricted to printable text, so the terminal renderer neutralizes them
+# at the sink instead of rejecting a legitimate review.
+_TERMINAL_UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Cs"))
+
+
+def escape_terminal_text(value: str) -> str:
+    """Neutralize terminal control characters in untrusted review text.
+
+    The text format is written to a terminal, where a provider-supplied escape
+    sequence could move the cursor, recolor the session, or rewrite lines that
+    were already printed.  Line feeds and tabs are the format's own line
+    structure and stay; every other control, format, or surrogate character is
+    rendered as its hexadecimal code point so the text stays readable and inert.
+    """
+
+    return "".join(
+        character
+        if character in "\n\t"
+        or unicodedata.category(character) not in _TERMINAL_UNSAFE_CATEGORIES
+        else f"\\x{ord(character):02x}"
+        for character in value
+    )
 
 
 def finding_identifier(fingerprint: str, *, hex_digits: int = _FINDING_ID_HEX) -> str:
@@ -601,22 +657,26 @@ def _finding_labels(comment: ReviewComment) -> str:
 
 
 def render_review_text(result: ReviewResult) -> str:
-    """Render one validated review result as readable terminal text."""
+    """Render one validated review result as readable terminal text.
+
+    Provider-supplied text reaches a terminal here, so every external string is
+    neutralized with :func:`escape_terminal_text` before it is printed.
+    """
 
     groups = _finding_groups(result)
     lines = [
         f"ReviewSensei review: {result.review_status}",
-        f"provider: {result.provider}",
+        f"provider: {escape_terminal_text(result.provider)}",
     ]
     if result.model:
-        lines.append(f"model: {result.model}")
+        lines.append(f"model: {escape_terminal_text(result.model)}")
     if result.coverage_mode != "full":
         lines.append(f"coverage: {result.coverage_mode}")
     for title, group in groups:
         lines.append(f"{title.lower()}: {len(group)}")
     lines.append("")
     lines.append("Summary:")
-    lines.append(result.summary)
+    lines.append(escape_terminal_text(result.summary))
     index = 0
     for title, group in groups:
         if not group:
@@ -631,14 +691,20 @@ def render_review_text(result: ReviewResult) -> str:
             if labels:
                 lines.append(f"   {labels}")
             lines.append("")
-            lines.append(comment.body)
+            lines.append(escape_terminal_text(comment.body))
     return "\n".join(lines) + "\n"
 
 
 def render_review_markdown(result: ReviewResult) -> str:
-    """Render one validated review result as readable Markdown."""
+    """Render one validated review result as readable Markdown.
 
-    parts = [result.summary]
+    Provider text passes through :func:`escape_markdown_text` at this sink, so
+    a provider can neither restructure the document nor hide parts of it; the
+    structured finding views reach the published sinks through their own
+    neutralizing renderers.
+    """
+
+    parts = [escape_markdown_text(result.summary)]
     for title, group in _finding_groups(result):
         if not group:
             continue
@@ -650,7 +716,7 @@ def render_review_markdown(result: ReviewResult) -> str:
             labels = _finding_labels(comment)
             if labels:
                 parts.extend(["", labels])
-            parts.extend(["", sanitize_finding_markdown(comment.body)])
+            parts.extend(["", escape_markdown_text(comment.body)])
     return "\n".join(parts) + "\n"
 
 
@@ -684,6 +750,8 @@ __all__ = [
     "build_finding_view",
     "build_review_summary_view",
     "escape_markdown_label",
+    "escape_markdown_text",
+    "escape_terminal_text",
     "finding_identifier",
     "humanize_lens",
     "order_findings",

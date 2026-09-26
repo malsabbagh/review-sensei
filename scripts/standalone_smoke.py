@@ -32,14 +32,59 @@ _CLEAN_HOST_PREFIXES = (
 )
 
 
-def clean_host_environment() -> dict[str, str]:
-    """Return an environment with no hosted identity or provider defaults."""
+# State directories are replaced rather than inherited: the cases must run as
+# a workstation session, not as the hosted runner's user.  Locale, loader, and
+# PATH variables are kept because they describe the machine, not the session.
+_CLEAN_HOST_OVERRIDDEN = (
+    "HOME",
+    "PWD",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERNAME",
+    "USERPROFILE",
+)
 
-    return {
+
+# Hosted-run annotations are gated on GitHub Actions identity; a clean-host
+# case that printed one would still pass output parity, so every clean-host
+# case asserts its stderr stays free of them.
+_CLEAN_HOST_STDERR_EXCLUDES = ("::error",)
+
+
+def clean_host_environment(root: Path) -> dict[str, str]:
+    """Return a deterministic workstation-like environment sandboxed in ``root``.
+
+    Hosted identity and provider defaults are dropped, and the per-user state
+    directories point at a synthetic home and temporary directory instead of
+    the caller's, so the smoke cases prove the documented local contract on a
+    host that shares nothing with the runner (or the developer) that ran them.
+    """
+
+    home = root / "home"
+    temporary = root / "tmp"
+    home.mkdir(parents=True, exist_ok=True)
+    temporary.mkdir(parents=True, exist_ok=True)
+    environment = {
         name: value
         for name, value in os.environ.items()
-        if name != "CI" and not name.startswith(_CLEAN_HOST_PREFIXES)
+        if name != "CI"
+        and not name.startswith(_CLEAN_HOST_PREFIXES)
+        and name not in _CLEAN_HOST_OVERRIDDEN
     }
+    environment.update(
+        {
+            "HOME": str(home),
+            "TMPDIR": str(temporary),
+            "TEMP": str(temporary),
+            "TMP": str(temporary),
+            "USER": "review-sensei-smoke",
+            "USERNAME": "review-sensei-smoke",
+            "USERPROFILE": str(home),
+        }
+    )
+    return environment
 
 
 def smoke_fixture_root() -> Path:
@@ -109,6 +154,7 @@ def compare_case(
     output_path: Path | None = None,
     shared_env: dict[str, str] | None = None,
     expected_returncode: int | None = None,
+    stderr_excludes: Sequence[str] | None = None,
 ) -> dict[str, object]:
     if output_path is not None and (output_path.exists() or output_path.is_symlink()):
         raise SmokeError(f"smoke output path already exists for {label}")
@@ -141,6 +187,12 @@ def compare_case(
                     f"{name} {label} exit {completed.returncode} does not match "
                     f"the documented exit {expected_returncode}"
                 )
+    for name, text in (("standalone", native_err), ("direct", direct_err)):
+        for excluded in stderr_excludes or ():
+            if excluded in text:
+                raise SmokeError(
+                    f"{name} {label} stderr unexpectedly contains {excluded!r}"
+                )
     if output_path is not None:
         # A review that completed with or without required fixes writes its
         # document; only an incomplete review (exit 2) leaves none behind.
@@ -169,12 +221,15 @@ def _local_review_cases(
     python_executable: str,
     repository: Path,
 ) -> list[dict[str, object]]:
-    """Exercise the documented local review contract on a clean host.
+    """Exercise the documented local review contract on a synthetic clean host.
 
     Every case runs with no GitHub Actions identity, OIDC token endpoint,
-    broker, or hosted pull-request metadata.  The blocking fixture keeps one
-    required fix, so the review exit contract is observable: 1 while the fix
-    remains, and the operational contract's 0 for the same completed run.
+    broker, or hosted pull-request metadata, and with its own home and
+    temporary directories instead of the caller's.  The blocking fixture keeps
+    one required fix, so the review exit contract is observable: 1 while the
+    fix remains, and the operational contract's 0 for the same completed run.
+    No case may print a hosted ``::error`` annotation: the annotation is gated
+    on Actions identity, which this host deliberately lacks.
     """
 
     fixture_root = smoke_fixture_root()
@@ -182,7 +237,8 @@ def _local_review_cases(
     fixture_response = fixture_root / "blocking-review.json"
     if not diff.is_file() or not fixture_response.is_file():
         raise SmokeError("local review smoke fixtures are unavailable")
-    clean_env = clean_host_environment()
+    host_sandbox = Path(tempfile.mkdtemp(prefix="review-sensei-smoke-host-"))
+    clean_env = clean_host_environment(host_sandbox)
     base = [
         "--provider",
         "fixture",
@@ -198,58 +254,64 @@ def _local_review_cases(
         ("local-review-json", [*base, "--format", "json"], 1),
         ("local-review-operational", [*base, "--exit-semantics", "operational"], 0),
     ]
-    results = [
-        compare_case(
-            label,
-            arguments,
-            executable=executable,
-            python_executable=python_executable,
-            repository=repository,
-            shared_env=clean_env,
-            expected_returncode=returncode,
-        )
-        for label, arguments, returncode in cases
-    ]
-    results.append(
-        compare_case(
-            "local-provider-model-override",
-            [
-                "--provider",
-                "local-ollama",
-                "--model",
-                "not-a-local-model:cloud",
-                "--diff",
-                str(diff),
-            ],
-            executable=executable,
-            python_executable=python_executable,
-            repository=repository,
-            shared_env=clean_env,
-            expected_returncode=2,
-        )
-    )
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".review-sensei-smoke-", suffix=".md", dir=repository
-    )
-    os.close(descriptor)
-    output_path = Path(temporary_name)
-    output_path.unlink()
     try:
-        results.append(
+        results = [
             compare_case(
-                "local-review-output-file",
-                [*base, "--format", "markdown", "--output", output_path.name],
+                label,
+                arguments,
                 executable=executable,
                 python_executable=python_executable,
                 repository=repository,
                 shared_env=clean_env,
-                output_path=output_path,
-                expected_returncode=1,
+                expected_returncode=returncode,
+                stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
+            )
+            for label, arguments, returncode in cases
+        ]
+        results.append(
+            compare_case(
+                "local-provider-model-override",
+                [
+                    "--provider",
+                    "local-ollama",
+                    "--model",
+                    "not-a-local-model:cloud",
+                    "--diff",
+                    str(diff),
+                ],
+                executable=executable,
+                python_executable=python_executable,
+                repository=repository,
+                shared_env=clean_env,
+                expected_returncode=2,
+                stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
             )
         )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".review-sensei-smoke-", suffix=".md", dir=repository
+        )
+        os.close(descriptor)
+        output_path = Path(temporary_name)
+        output_path.unlink()
+        try:
+            results.append(
+                compare_case(
+                    "local-review-output-file",
+                    [*base, "--format", "markdown", "--output", output_path.name],
+                    executable=executable,
+                    python_executable=python_executable,
+                    repository=repository,
+                    shared_env=clean_env,
+                    output_path=output_path,
+                    expected_returncode=1,
+                    stderr_excludes=_CLEAN_HOST_STDERR_EXCLUDES,
+                )
+            )
+        finally:
+            output_path.unlink(missing_ok=True)
+        return results
     finally:
-        output_path.unlink(missing_ok=True)
-    return results
+        shutil.rmtree(host_sandbox, ignore_errors=True)
 
 
 def run_smoke(

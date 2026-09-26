@@ -182,12 +182,28 @@ slug must match the selected backend shape (Ollama slugs for local/cloud,
 `vendor/model` slugs for OpenRouter); a cross-backend value fails closed before
 any provider call.
 
+Backend selection differs between the two surfaces: the local CLI reads
+`REVIEWSENSEI_PROVIDER` (or `--provider`), while an installed GitHub workflow
+selects its backend with the single `REVIEWSENSEI_PROVIDER_MODE` variable
+documented below. `REVIEWSENSEI_MODEL` and `REVIEWSENSEI_REVIEW_MODE` are read
+by both.
+
 Endpoint, timeout, and credential selection come from the command line flags
 (`--base-url`, `--allow-custom-endpoint`, `--timeout-seconds`, `--api-key-env`)
 or the selected backend's documented defaults; no other environment variable
 moves a review's endpoint or timeout. A backend that requires no credential
 never receives one implicitly: an exported cloud key does not travel to a local
 endpoint unless `--api-key-env` names it.
+
+A review that finds a retired provider variable still exported prints one
+`review-sensei: warning:` line on stderr naming its replacement, so an upgraded
+script or installed workflow is never silently redirected. The warned names are
+`REVIEWSENSEI_PROVIDER_MODE`, `OLLAMA_MODEL`, `REVIEWSENSEI_LOCAL_MODEL`,
+`REVIEWSENSEI_CLOUD_MODEL`, `OPENROUTER_MODEL`, `OLLAMA_BASE_URL`,
+`OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, `OLLAMA_TIMEOUT_SECONDS`,
+`OPENAI_TIMEOUT_SECONDS`, `REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS`,
+`OPENROUTER_TIMEOUT_SECONDS`, and `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS`.
+The review still runs with the canonical resolution above.
 
 Optional GitHub App-identity publication uses `GITHUB_APP_PRIVATE_KEY` by
 default through `EnvPrivateKeySource`. The App id is passed when constructing
@@ -196,10 +212,12 @@ registration and secrets guidance.
 
 Optional CLI `--profile` selects a named preset (`local-private`,
 `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`)
-without changing the configuration file. Installed GitHub workflows never pass
-`--profile`. `fast-triage` is an explicit CLI/OpenAI path and requires
-`OPENAI_API_KEY`; it is not enabled by the reusable workflow. Hosted OpenRouter
-accepts only the published allowlist in
+without changing the configuration file. A preset is a complete selection:
+`--provider`, `--model`, `--base-url`, `--api-key-env`, and `--timeout-seconds`
+are optional, and a value that disagrees with the preset fails closed. Installed
+GitHub workflows never pass `--profile`. `fast-triage` is an explicit CLI/OpenAI
+path and requires `OPENAI_API_KEY`; it is not enabled by the reusable workflow.
+Hosted OpenRouter accepts only the published allowlist in
 `provider_config.HOSTED_OPENROUTER_DEFAULTS` (default
 `deepseek/deepseek-v4.1-flash`, plus `anthropic/claude-3.5-sonnet` and
 `openai/gpt-4o-mini`).

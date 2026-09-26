@@ -494,6 +494,31 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(len(report), 9)
             self.assertEqual(sentinel.read_bytes(), b"keep me")
 
+    def test_clean_host_cases_reject_hosted_annotations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp)
+            executable = repository / "review-sensei"
+            executable.write_bytes(b"native")
+            executable.chmod(0o755)
+
+            def fake_run(command, cwd, env):
+                return subprocess.CompletedProcess(
+                    command, 0, "ok\n", "::error title=ReviewSensei::handoff\n"
+                )
+
+            with patch.object(SMOKE, "_run", side_effect=fake_run):
+                with self.assertRaises(SMOKE.SmokeError) as raised:
+                    SMOKE.compare_case(
+                        "annotated",
+                        ["--version"],
+                        executable=executable,
+                        python_executable="python",
+                        repository=repository,
+                        shared_env={},
+                        stderr_excludes=SMOKE._CLEAN_HOST_STDERR_EXCLUDES,
+                    )
+            self.assertIn("::error", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

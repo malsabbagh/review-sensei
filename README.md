@@ -154,7 +154,8 @@ review-sensei \
 
 The default output is readable terminal text. `--format markdown` and
 `--format json` are explicit, and only the selected format is written to
-stdout or `--output` while progress and errors stay on stderr. The JSON format
+stdout or `--output` while warnings, diagnostics, and the final status and
+reason lines stay on stderr. The JSON format
 is the validated `review-result` document containing `summary`, `comments`,
 `provider`, `model`, and `learning_proposals`; learning proposals are not
 stored or used automatically.

@@ -2,9 +2,10 @@ import importlib.metadata
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -629,6 +630,34 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
         )
 
+    def test_operational_semantics_classify_spellings_after_a_parse_error(self):
+        for spelling in (
+            ["--exit-semantics", "operational"],
+            ["--exit-semantics=operational"],
+            ["--exit-seman", "operational"],
+        ):
+            with self.subTest(spelling=spelling):
+                with patch.dict(
+                    "os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True
+                ):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        status = main(
+                            [
+                                "--diff",
+                                "review.patch",
+                                "--provider",
+                                "openai-compatible",
+                                *spelling,
+                            ]
+                        )
+                error_text = stderr.getvalue()
+            self.assertEqual(status, 1)
+            self.assertNotIn("reason=invalid-input", error_text)
+            self.assertIn(
+                "OPENAI_TIMEOUT_SECONDS must be a positive number", error_text
+            )
+
     def test_review_timeout_ignores_the_retired_provider_environment(self):
         with patch.dict(
             "os.environ",
@@ -866,6 +895,40 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertIn(
             "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
         )
+
+    def test_profile_supplies_its_provider_without_an_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diff_path = Path(temp_dir) / "review.patch"
+            diff_path.write_text(DIFF, encoding="utf-8")
+            created = []
+
+            class Registry:
+                def create(self, settings):
+                    created.append(settings)
+                    return FakeProvider()
+
+            with patch.dict(
+                "os.environ", {"OPENAI_API_KEY": "openai-secret"}, clear=True
+            ):
+                with patch(
+                    "review_sensei.cli.default_registry", return_value=Registry()
+                ):
+                    status = main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--profile",
+                            "fast-triage",
+                            "--no-learning-proposals",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        # A bare --profile is a complete invocation: the preset selects its own
+        # provider, so --provider is only needed to assert agreement with it.
+        self.assertEqual(created[0].name, "openai-compatible")
+        self.assertEqual(created[0].profile, "fast-triage")
+        self.assertEqual(created[0].api_key, "openai-secret")
 
     def test_profile_fast_triage_omits_conflicting_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1651,6 +1714,73 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertIn(
             "--provider fixture requires --fixture-response", stderr.getvalue()
         )
+
+    def test_retired_provider_variables_warn_without_moving_the_backend(self):
+        argv = ["--diff", "review.patch"]
+        stderr = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "REVIEWSENSEI_PROVIDER_MODE": "cloud",
+                    "OLLAMA_MODEL": "qwen3.5:4b",
+                    "OLLAMA_BASE_URL": "https://ollama.com/api",
+                },
+                clear=True,
+            ),
+            redirect_stderr(stderr),
+        ):
+            settings, api_key = resolve_review_inference(
+                _parser().parse_args(argv), argv
+            )
+
+        # The historical provider-mode aliasing must not select a backend, and
+        # the caller must be told instead of being silently redirected.
+        self.assertEqual(settings.base_url, "http://127.0.0.1:11434/api")
+        self.assertIsNone(api_key)
+        self.assertIn(
+            "REVIEWSENSEI_PROVIDER_MODE has no effect on a review", stderr.getvalue()
+        )
+        self.assertIn("OLLAMA_MODEL has no effect on a review", stderr.getvalue())
+        self.assertIn("OLLAMA_BASE_URL has no effect on a review", stderr.getvalue())
+
+    def test_review_inference_stays_quiet_without_retired_variables(self):
+        argv = ["--diff", "review.patch"]
+        stderr = io.StringIO()
+        with (
+            patch.dict("os.environ", {"HOME": str(Path.home())}, clear=True),
+            redirect_stderr(stderr),
+        ):
+            resolve_review_inference(_parser().parse_args(argv), argv)
+
+        self.assertNotIn("warning:", stderr.getvalue())
+
+    def test_empty_inference_options_fail_closed(self):
+        # An explicitly passed empty value must not fall back to a resolved
+        # default: the caller asked for something the review cannot honor.
+        for option in ("--provider", "--model", "--base-url", "--api-key-env"):
+            with self.subTest(option=option):
+                argv = ["--diff", "review.patch", option, ""]
+                with self.assertRaisesRegex(
+                    ReviewInputError, f"{option} requires a non-empty value"
+                ):
+                    resolve_review_inference(_parser().parse_args(argv), argv)
+
+    def test_profile_invocations_reject_empty_options_too(self):
+        for option in ("--provider", "--base-url"):
+            with self.subTest(option=option):
+                argv = [
+                    "--diff",
+                    "review.patch",
+                    "--profile",
+                    "fast-triage",
+                    option,
+                    "",
+                ]
+                with self.assertRaisesRegex(
+                    ReviewInputError, f"{option} requires a non-empty value"
+                ):
+                    resolve_review_inference(_parser().parse_args(argv), argv)
 
     def test_fixture_cli_does_not_lookup_api_key_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3024,6 +3154,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
 
     class FakeApplication:
         instances: list = []
+        publication_status = "published"
 
         def __init__(self, **kwargs):
             del kwargs
@@ -3032,9 +3163,9 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
 
         def publish_review(self, **kwargs):
             self.calls.append(kwargs)
-            return SimpleNamespace(status="published")
+            return SimpleNamespace(status=self.__class__.publication_status)
 
-    def _publish(self, root: Path, extra: list[str]) -> int:
+    def _publish(self, root: Path, extra: list[str], application=None) -> int:
         result_path = root / "result.json"
         diff_path = root / "diff.patch"
         result_path.write_text(
@@ -3059,7 +3190,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
             ReviewPublisher=lambda **kwargs: object(),
             LearningPRPublisher=lambda **kwargs: object(),
             ConversationPublisher=lambda **kwargs: object(),
-            GitHubApplication=self.FakeApplication,
+            GitHubApplication=application or self.FakeApplication,
         ):
             return main(
                 [
@@ -3233,6 +3364,56 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
             ],
             [],
         )
+
+    def test_maintainer_handoff_annotates_the_actions_run(self):
+        class HandoffApplication(self.FakeApplication):
+            publication_status = "handoff"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = root / "summary.md"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_ACTIONS": "true",
+                        "GITHUB_STEP_SUMMARY": str(summary),
+                        "GITHUB_OUTPUT": str(root / "output.txt"),
+                    },
+                    clear=False,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = self._publish(root, [], application=HandoffApplication)
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(status, 1)
+        self.assertIn("handoff", stdout.getvalue())
+        self.assertIn(
+            "::error title=ReviewSensei maintainer attention required::",
+            stderr.getvalue(),
+        )
+        self.assertIn("action_required", summary_text)
+
+    def test_maintainer_handoff_stays_unannotated_off_the_host(self):
+        class HandoffApplication(self.FakeApplication):
+            publication_status = "handoff"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_ACTIONS": ""}, clear=False),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                status = self._publish(root, [], application=HandoffApplication)
+
+        self.assertEqual(status, 1)
+        self.assertNotIn("::error", stderr.getvalue())
 
 
 class HostedSessionLedgerFlagTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
