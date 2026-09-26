@@ -32,9 +32,7 @@ from review_sensei.hosting.github.trigger import (
 ROOT = Path(__file__).resolve().parents[1]
 REPO_CALLER = ROOT / ".github" / "workflows" / "review-sensei-review.yml"
 EXAMPLE_CALLER = ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
-INLINE_RESOLVER_START = (
-    'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY" <<\'PY\'\n'
-)
+INLINE_RESOLVER_START = 'python - "$pull_json" "$EVENT_NAME" "$COMMENT_BODY" <<\'PY\'\n'
 INLINE_RESOLVER_END = "\n          PY\n"
 
 
@@ -55,8 +53,6 @@ def _resolution(**overrides: str) -> TriggerResolution:
         "base_ref": "main",
         "base_sha": "a" * 40,
         "pull_request_number": "7",
-        "pull_request_title": "Add provider profiles",
-        "enable_review": "false",
     }
     values.update(overrides)
     return TriggerResolution(**values)
@@ -229,7 +225,6 @@ class GitHubTriggerTests(unittest.TestCase):
     def test_maintainer_commands_route_to_the_command_operation(self):
         resolution = resolve_issue_comment("@sensei review pause", _pull())
         self.assertEqual(resolution.operation, "command")
-        self.assertEqual(resolution.enable_review, "false")
 
     def test_every_parser_accepted_command_routes_to_the_command_operation(self):
         # The prefilter is deliberately narrower work than the parser, so the
@@ -325,17 +320,17 @@ class GitHubTriggerTests(unittest.TestCase):
         pull = _pull()
         pull["head"] = {"sha": "b" * 40, "ref": "feature/../main"}
         with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
-            resolve_pull_request_event(pull, auto_review="true")
+            resolve_pull_request_event(pull)
         pull = _pull()
         pull["head"] = {"sha": "b" * 40, "ref": "feature/trailing/"}
         with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
-            resolve_pull_request_event(pull, auto_review="true")
+            resolve_pull_request_event(pull)
 
     def test_resolve_rejects_unsafe_git_refs(self):
         pull = _pull()
         pull["head"] = {"sha": "b" * 40, "ref": "feature/$(whoami)"}
         with self.assertRaisesRegex(ValueError, "identity metadata is invalid"):
-            resolve_pull_request_event(pull, auto_review="true")
+            resolve_pull_request_event(pull)
 
     def test_resolve_issue_comment_rescan_routes_to_review(self):
         resolution = resolve_issue_comment(
@@ -343,7 +338,6 @@ class GitHubTriggerTests(unittest.TestCase):
             _pull(head_sha="016017b" + ("0" * 33)),
         )
         self.assertEqual(resolution.operation, "review")
-        self.assertEqual(resolution.enable_review, "true")
         self.assertEqual(resolution.head_sha, "016017b" + ("0" * 33))
 
     def test_resolve_issue_comment_mention_routes_to_reply(self):
@@ -352,24 +346,18 @@ class GitHubTriggerTests(unittest.TestCase):
             _pull(),
         )
         self.assertEqual(resolution.operation, "reply")
-        self.assertEqual(resolution.enable_review, "false")
         self.assertEqual(resolution.head_sha, "b" * 40)
 
     def test_resolve_pull_request_event(self):
-        resolution = resolve_pull_request_event(_pull(), auto_review="true")
+        resolution = resolve_pull_request_event(_pull())
         self.assertEqual(resolution.operation, "review")
-        self.assertEqual(resolution.enable_review, "true")
         self.assertEqual(resolution.pull_request_number, "7")
-
-    def test_resolve_pull_request_event_normalizes_enable_review(self):
-        resolution = resolve_pull_request_event(_pull(), auto_review="TRUE")
-        self.assertEqual(resolution.enable_review, "false")
 
     def test_resolve_requires_pull_request_number(self):
         pull = _pull()
         pull["number"] = 0
         with self.assertRaisesRegex(ValueError, "pull request number is invalid"):
-            resolve_pull_request_event(pull, auto_review="true")
+            resolve_pull_request_event(pull)
 
     def test_resolve_review_comment_event(self):
         resolution = resolve_review_comment_event("@sensei fixed?", _pull())
@@ -377,57 +365,26 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertEqual(resolution.head_sha, "b" * 40)
         self.assertEqual(resolution.pull_request_number, "7")
 
-    def test_resolve_issue_comment_collapses_multiline_title(self):
-        pull = _pull()
-        pull["title"] = "Add provider\nprofiles"
-        resolution = resolve_issue_comment("@sensei what changed?", pull)
-        self.assertEqual(resolution.pull_request_title, "Add provider profiles")
-
-    def test_resolve_issue_comment_collapses_unicode_line_separator_title(self):
-        pull = _pull()
-        pull["title"] = "Add provider\u2028profiles"
-        resolution = resolve_issue_comment("@sensei what changed?", pull)
-        self.assertEqual(resolution.pull_request_title, "Add provider profiles")
-
-    def test_write_github_output_uses_heredoc_for_title(self):
+    def test_write_github_output_writes_only_invocation_fields(self):
+        # The resolver states invocation data and nothing else: no title, no
+        # policy flags. A caller that is not the ReviewSensei repository cannot
+        # describe a pull request's title here, and the reusable workflow reads
+        # the authoritative title from its own authenticated preflight.
         resolution = _resolution()
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "github-output"
             with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
                 write_github_output(resolution)
             text = output.read_text(encoding="utf-8")
-        self.assertIn("operation=reply\n", text)
-        self.assertIn("pull_request_number=7\n", text)
-        self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE\n", text)
-        self.assertIn("Add provider profiles\nRS_PULL_REQUEST_TITLE\n", text)
-        self.assertNotIn("pull_request_title=Add provider profiles\n", text)
-
-    def test_write_github_output_rotates_title_delimiter(self):
-        resolution = _resolution(pull_request_title="RS_PULL_REQUEST_TITLE in title")
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "github-output"
-            with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
-                write_github_output(resolution)
-            text = output.read_text(encoding="utf-8")
-        self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE_EOF\n", text)
-        self.assertIn(
-            "RS_PULL_REQUEST_TITLE in title\nRS_PULL_REQUEST_TITLE_EOF\n", text
+        self.assertEqual(
+            text,
+            "operation=reply\n"
+            f"head_sha={'b' * 40}\n"
+            "head_ref=feature/providers\n"
+            "base_ref=main\n"
+            f"base_sha={'a' * 40}\n"
+            "pull_request_number=7\n",
         )
-
-    def test_write_github_output_escapes_newline_title(self):
-        resolution = _resolution(
-            operation="review",
-            pull_request_title="Add provider\nprofiles",
-            enable_review="true",
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "github-output"
-            with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
-                write_github_output(resolution)
-            text = output.read_text(encoding="utf-8")
-        self.assertIn("pull_request_title<<RS_PULL_REQUEST_TITLE\n", text)
-        self.assertIn("Add provider\nprofiles\nRS_PULL_REQUEST_TITLE\n", text)
-        self.assertNotIn("pull_request_title=Add provider\n", text)
 
     def test_write_github_output_requires_github_output(self):
         resolution = _resolution()
@@ -643,30 +600,29 @@ class InlineCallerResolverTests(unittest.TestCase):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
         pull = _pull(head_sha="016017b" + ("0" * 33))
         cases = (
-            ("issue_comment", "@sensei please re-scan commit 016017b", "false"),
-            ("issue_comment", "@sensei what changed?", "false"),
-            ("issue_comment", "@sensei review status", "false"),
-            ("issue_comment", "@sensei review pause", "false"),
-            ("issue_comment", "@sensei review reenroll", "false"),
-            ("issue_comment", "@sensei Review Reenroll", "false"),
-            ("issue_comment", "@sensei review continue --rounds 0", "false"),
-            ("issue_comment", "@sensei verify", "false"),
+            ("issue_comment", "@sensei please re-scan commit 016017b"),
+            ("issue_comment", "@sensei what changed?"),
+            ("issue_comment", "@sensei review status"),
+            ("issue_comment", "@sensei review pause"),
+            ("issue_comment", "@sensei review reenroll"),
+            ("issue_comment", "@sensei Review Reenroll"),
+            ("issue_comment", "@sensei review continue --rounds 0"),
+            ("issue_comment", "@sensei verify"),
             (
                 "issue_comment",
                 "@sensei dismiss abcd1234abcd1234 --reason accepted",
-                "false",
             ),
-            ("issue_comment", "@sensei review continue --rounds 2", "false"),
-            ("issue_comment", "@sensei review reenroll trailing", "false"),
-            ("pull_request", "", "true"),
-            ("pull_request_review_comment", "@sensei fixed?", "false"),
-            ("workflow_dispatch", "", "false"),
+            ("issue_comment", "@sensei review continue --rounds 2"),
+            ("issue_comment", "@sensei review reenroll trailing"),
+            ("pull_request", ""),
+            ("pull_request_review_comment", "@sensei fixed?"),
+            ("workflow_dispatch", ""),
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             pull_path = root / "pull.json"
             pull_path.write_text(json.dumps(pull), encoding="utf-8")
-            for event, body, auto_review in cases:
+            for event, body in cases:
                 with self.subTest(event=event, body=body):
                     module_output = root / f"{event}-module.out"
                     inline_output = root / f"{event}-inline.out"
@@ -681,8 +637,6 @@ class InlineCallerResolverTests(unittest.TestCase):
                                 body,
                                 "--pull-json",
                                 str(pull_path),
-                                "--auto-review",
-                                auto_review,
                             ]
                         )
                     self.assertEqual(status, 0)
@@ -691,7 +645,6 @@ class InlineCallerResolverTests(unittest.TestCase):
                             sys.executable,
                             "-",
                             str(pull_path),
-                            auto_review,
                             event,
                             body,
                         ],
@@ -708,14 +661,17 @@ class InlineCallerResolverTests(unittest.TestCase):
                     )
 
     def test_generated_caller_routes_reenroll_to_the_command_operation(self):
-        # The generated caller's inline resolver decides the operation its
-        # job guard selects on, so drive it with a reenroll body rather than
-        # inferring the value from the prefilter's grammar. reenroll retires
-        # durable state, which is why the routing deserves its own pin.
+        # The generated caller's inline resolver decides the operation the
+        # reusable workflow consumes, so drive it with a reenroll body rather
+        # than inferring the value from the prefilter's grammar. reenroll
+        # retires durable state, which is why the routing deserves its own pin.
+        # Whether the operation is authorized is policy: the reusable workflow
+        # reads github.writes from the configuration, so the caller states the
+        # operation and nothing about eligibility.
         caller = _tagged_workflow("v5")
         script = inline_resolver_script(caller)
         self.assertIn(
-            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n",
+            "      operation: ${{ needs.resolve-trigger.outputs.operation }}\n",
             caller,
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -728,7 +684,6 @@ class InlineCallerResolverTests(unittest.TestCase):
                     sys.executable,
                     "-",
                     str(pull_path),
-                    "false",
                     "issue_comment",
                     "@sensei review reenroll",
                 ],
@@ -741,7 +696,6 @@ class InlineCallerResolverTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             emitted = output_path.read_text(encoding="utf-8")
         self.assertIn("operation=command\n", emitted)
-        self.assertIn("enable_review=false\n", emitted)
 
 
 if __name__ == "__main__":

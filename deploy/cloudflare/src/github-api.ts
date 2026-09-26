@@ -17,17 +17,17 @@ const RETURNED_CONTENTS_READ_PERMISSION = "read";
 // Permission names GitHub may return on an installation token. The App never
 // requests `checks`: ADR 0022/0006 register it without Checks, and no broker
 // capability asks for one, so a returned `checks` grant must keep failing the
-// permission-shape check rather than being silently accepted.
+// permission-shape check rather than being silently accepted. The retired
+// `variables` permission (payload spelling `actions_variables`) is the same
+// kind of exclusion: setup no longer provisions repository variables, nothing
+// requests it, and a returned grant must fail closed instead of being
+// recognized.
 const KNOWN_PERMISSION_NAMES = new Set([
   "contents",
   "metadata",
   "pull_requests",
-  "variables",
   "workflows",
 ]);
-const PERMISSION_NAME_ALIASES: Readonly<Record<string, string>> = {
-  actions_variables: "variables",
-};
 
 export interface JsonObject {
   [key: string]: unknown;
@@ -74,13 +74,10 @@ function canonicalPermissionName(value: string): string | null {
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(normalized)) {
     return null;
   }
-  // GitHub's API uses `actions_variables` in some payloads while the
-  // permission map has historically used `variables`. Accept either spelling
-  // alone, but reject responses containing both aliases as ambiguous. Every
-  // other name must be an explicitly supported canonical permission so a
-  // future GitHub permission cannot silently normalize into this boundary.
-  const canonical = PERMISSION_NAME_ALIASES[normalized] ?? normalized;
-  return KNOWN_PERMISSION_NAMES.has(canonical) ? canonical : null;
+  // Every name must be an explicitly supported canonical permission, so a
+  // retired or future GitHub permission cannot silently normalize into this
+  // boundary.
+  return KNOWN_PERMISSION_NAMES.has(normalized) ? normalized : null;
 }
 
 /**
@@ -830,9 +827,7 @@ export class GitHubApi {
       for (const [key, value] of Object.entries(rawPermissions)) {
         if (typeof value === "string") {
           const normalizedKey = key.trim().toLowerCase().replaceAll("-", "_");
-          const canonicalKey =
-            normalizedKey === "actions_variables" ? "variables" : normalizedKey;
-          normalized[canonicalKey] = value.trim().toLowerCase();
+          normalized[normalizedKey] = value.trim().toLowerCase();
         }
       }
     }

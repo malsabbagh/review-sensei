@@ -8,7 +8,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from review_sensei.configuration import parse_configuration_text
 from review_sensei.errors import ReviewInputError
+from review_sensei.hosted import hosted_plan_outputs, plan_hosted_execution
+from review_sensei.hosting.github.setup import _tagged_workflow
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
@@ -49,9 +52,9 @@ def _run_block_containing(text: str, marker: str) -> str:
 
 
 def _install_fallback_region(block: str) -> str:
-    """Return the tagged-SHA fallback body of one PyPI-fallback install step."""
+    """Return the tagged-release fallback body of one PyPI-fallback install step."""
 
-    start = block.index('source_dir="$RUNNER_TEMP/review-sensei-workflow-source"')
+    start = block.index('expected_version="${REVIEW_SENSEI_VERSION#v}"')
     end = block.index('"$python_bin" -m pip install', start)
     return block[start:end]
 
@@ -116,22 +119,16 @@ def _reusable_group_templates() -> tuple[str, str]:
         for line in _reusable_workflow_text().splitlines()
         if line.strip().startswith("group:")
     ]
-    if len(groups) != 5:
+    if len(groups) != 4:
         raise AssertionError(
-            f"expected 5 concurrency group templates, found {len(groups)}"
+            f"expected 4 concurrency group templates, found {len(groups)}"
         )
-    (
-        workflow_group,
-        command_group,
-        cloud_provider,
-        openrouter_provider,
-        local_provider,
-    ) = groups
+    workflow_group, command_group, hosted_provider, local_provider = groups
     if command_group != "reviewsensei-command-${{ github.run_id }}":
         raise AssertionError("command group must be isolated by host run identity")
-    if cloud_provider != openrouter_provider or cloud_provider != local_provider:
+    if hosted_provider != local_provider:
         raise AssertionError("provider group templates diverged across jobs")
-    return workflow_group, cloud_provider
+    return workflow_group, hosted_provider
 
 
 def _gha_truthy(value: object) -> bool:
@@ -392,40 +389,37 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
         self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", text)
-        self.assertNotIn(
-            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
-        )
+        self.assertIn("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}", text)
         self.assertIn("id-token: write", text)
-        self.assertIn("github.event.pull_request.draft != true", text)
+        # The caller is an invocation-only bridge: every policy decision
+        # (drafts, writes, automatic reviews, mentions) belongs to the reusable
+        # workflow, so the caller reads no repository variables at all.
+        self.assertNotIn("vars.", text)
+        self.assertNotIn("github.event.pull_request.draft", text)
+        self.assertIn("types: [opened, reopened, synchronize, ready_for_review]", text)
         for block in run_blocks:
             self.assertNotIn("${{ inputs.", block)
+        # The dispatch "operation" choice is declared for manual-dispatch
+        # parity with the released caller; the resolver output is what the
+        # reusable workflow consumes.
+        self.assertIn("      operation:\n", text)
+        self.assertNotIn("inputs.operation", text)
         for input_name in (
-            "review_sensei_version",
-            "base_ref",
-            "head_ref",
-            "head_repository",
             "pull_request_number",
-            "head_sha",
+            "head_repository",
+            "source_kind",
+            "source_comment_id",
+            "source_updated_at",
+            "root_comment_id",
         ):
             with self.subTest(input_name=input_name):
                 self.assertIn(f"inputs.{input_name}", text)
-        self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
-        self.assertIn("REVIEWSENSEI_AUTO_APPROVE", text)
         self.assertEqual(text.count("review-sensei-run.yml@" + "v5"), 1)
-        self.assertIn(
-            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
-        )
         self.assertIn("resolve-trigger:", text)
-        self.assertIn(
-            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
-            text,
-        )
+        self.assertIn("operation: ${{ needs.resolve-trigger.outputs.operation }}", text)
         self.assertIn('rescan = re.compile(r"\\bre[\\s-]?scan\\b"', text)
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
-    def test_generated_review_workflow_can_authorize_opt_in_replies(self):
+    def test_generated_review_workflow_routes_comments_read_only(self):
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
@@ -433,8 +427,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-review.yml"
         )
         text = workflow.read_text(encoding="utf-8")
-        self.assertIn("pull-requests: write", text)
-        self.assertIn("issues: write", text)
+        # The caller grants no write scope: the broker authorizes every
+        # publication, so a widened caller permission can never publish.
+        self.assertIn("pull-requests: read", text)
+        self.assertIn("issues: read", text)
+        self.assertNotIn("pull-requests: write", text)
+        self.assertNotIn("issues: write", text)
         self.assertIn("github.event.issue.pull_request", text)
         self.assertIn("github.event.comment.author_association == 'OWNER'", text)
         self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
@@ -448,15 +446,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
             text,
         )
-        self.assertIn("github.event.pull_request.draft != true", text)
-        self.assertEqual(text.count("github.event.pull_request.draft != true"), 2)
         self.assertIn("persist-credentials: false", text)
         self.assertIn(
             "ref: ${{ github.event.repository.default_branch }}",
             text,
         )
         self.assertIn(
-            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}",
+            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}",
             text,
         )
         self.assertIn("github.event.comment.pull_request_url", text)
@@ -473,15 +469,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' ||",
             text,
         )
-        self.assertNotIn("PYTHONPATH=src python src/", text)
-        self.assertIn(
-            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
-            text,
-        )
         self.assertIn("contains(github.event.comment.body, '@sensei')", text)
-        self.assertIn("while delimiter in title:", text)
         self.assertIn(
-            'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY"',
+            'python - "$pull_json" "$EVENT_NAME" "$COMMENT_BODY"',
             text,
         )
         self.assertIn('event_name == "pull_request_review_comment"', text)
@@ -495,36 +485,46 @@ class ActionPinPolicyTests(unittest.TestCase):
             "trusted trigger resolver is missing from the default branch", text
         )
 
-    def test_command_branch_rechecks_the_author_before_admitting_the_operation(self):
-        """operation=command must not be the branch's only admission check.
+    def test_comment_arms_recheck_the_author_without_policy_branches(self):
+        """Comment events must pass the mention, association, and bot checks.
 
-        The resolver's job condition already requires the mention, an
-        OWNER/MEMBER/COLLABORATOR association, and a non-bot author, but the
-        command branch is a separate job: re-applying the same three checks
-        there keeps a future edit to the resolver's condition from widening the
-        branch, so an over-accepted body from an unauthorized author can never
-        satisfy it.
+        The resolver job condition is the caller's only policy expression: both
+        comment arms require the @sensei mention, an OWNER/MEMBER/COLLABORATOR
+        association, and a non-bot author, and the invocation job re-applies
+        none of them because it has no condition of its own beyond its
+        dependency. A future edit cannot widen the caller without either
+        widening the resolver's event-shape guard or adding a policy branch
+        that this contract forbids.
         """
 
         root = Path(__file__).resolve().parents[1]
         arm = (
-            "      ((github.event_name == 'issue_comment' &&\n"
+            "      (github.event_name == 'issue_comment' &&\n"
             "      github.event.action == 'created' &&\n"
             "      github.event.issue.pull_request &&\n"
             "      contains(github.event.comment.body, '@sensei') &&\n"
             "      (github.event.comment.author_association == 'OWNER' ||\n"
             "      github.event.comment.author_association == 'MEMBER' ||\n"
             "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
-            "      github.event.comment.user.type != 'Bot' &&\n"
-            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
-            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n"
+            "      github.event.comment.user.type != 'Bot') ||\n"
+        )
+        invocation = (
+            "  review-or-reply:\n"
+            "    # A skipped dependency skips this job, so the event guard above is the\n"
+            "    # only guard: the reusable workflow decides eligibility, authorization,\n"
+            "    # and whether anything is published.\n"
+            "    needs: resolve-trigger\n"
         )
         for relative in (
             ".github/workflows/review-sensei-review.yml",
             "examples/github-actions/review-sensei-review.yml",
         ):
             with self.subTest(relative=relative):
-                self.assertIn(arm, (root / relative).read_text(encoding="utf-8"))
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn(arm, text)
+                self.assertEqual(text.count(arm), 1)
+                self.assertIn(invocation, text)
+                self.assertNotIn("vars.", text)
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (
@@ -610,218 +610,151 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("malformed SARIF fixture must fail the findings gate", proof)
         self.assertEqual(proof.count("failed=1"), 3)
 
-    def test_reusable_workflow_supports_review_and_reply_in_both_provider_modes(self):
-        workflow = (
-            Path(__file__).resolve().parents[1]
-            / ".github"
-            / "workflows"
-            / "review-sensei-run.yml"
+    def test_reusable_workflow_runs_the_plan_it_resolves(self):
+        text = _reusable_workflow_text()
+        # Exactly two optional Actions overrides, mapped into the package
+        # resolver once, in the read-only bootstrap plan step.
+        self.assertEqual(
+            text.count("REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}"), 1
         )
-        text = workflow.read_text(encoding="utf-8")
-        self.assertIn("provider_mode:", text)
-        self.assertIn("enable_auto_approve:", text)
+        self.assertEqual(
+            text.count("REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}"), 1
+        )
+        self.assertEqual(text.count("host-plan"), 1)
         self.assertIn(
-            "enable_auto_approve:\n        required: false\n        default: 'true'",
+            '"$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" host-plan \\',
             text,
         )
-        self.assertIn("AUTO_APPROVE", text)
-        self.assertIn("--enable-auto-approve", text)
-        self.assertIn("--no-auto-approve", text)
+        self.assertIn('--github-output "$GITHUB_OUTPUT"', text)
+
+        # Backend, endpoint, model, credential, and policy are plan outputs.
+        # None of them is an input, a variable chain, or an Actions default.
+        self.assertIn("needs.bootstrap.outputs.runner_kind == 'hosted'", text)
+        self.assertIn("needs.bootstrap.outputs.runner_kind == 'local'", text)
+        self.assertEqual(text.count("needs.bootstrap.outputs.writes == 'true'"), 4)
         self.assertIn(
-            "needs.validate-provider-mode.outputs.active_provider == 'cloud'",
+            "inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true'",
             text,
         )
         self.assertIn(
-            "needs.validate-provider-mode.outputs.active_provider == 'local'",
+            "(inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true')",
             text,
         )
-        self.assertIn(
-            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'",
-            text,
+        self.assertEqual(
+            text.count('--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL"'),
+            2,
         )
-        self.assertIn("resolved_provider_mode=cloud-ollama", text)
-        self.assertIn("resolved_provider_mode=local-ollama", text)
-        self.assertIn(
-            'echo "normalized_provider_mode=$resolved_provider_mode"',
-            text,
-        )
-        self.assertIn("OPENROUTER_API_KEY is required for OpenRouter mode", text)
-        self.assertIn("--provider openrouter --model", text)
-        self.assertIn("provider_profile is unused", text)
-        self.assertIn("allow_unqualified_profile is unused", text)
-        self.assertIn("validate-provider-mode:", text)
+        self.assertEqual(text.count("--format json --exit-semantics operational"), 2)
+        self.assertNotIn("inputs.provider", text)
+        self.assertNotIn("inputs.model", text)
+        for retired in (
+            "provider_mode",
+            "provider_profile",
+            "allow_unqualified_profile",
+            "review_sensei_version",
+            "stages_dir",
+            "categories_dir",
+            "upload_artifacts",
+            "enable_review",
+            "enable_auto_approve",
+            "enable_github_writes",
+            "enable_mention_replies",
+            "enable_learning_proposals",
+            "enable_learning_prs",
+            "secrets: inherit",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, text)
+
+        # github.reviews and github.learning travel to the package as explicit
+        # invocation flags instead of being re-derived from a variable.
+        self.assertIn('if [[ "$REVIEWS" == "auto-approve" ]]; then', text)
+        self.assertIn("auto_approve_args+=(--enable-auto-approve)", text)
+        self.assertIn("auto_approve_args+=(--no-auto-approve)", text)
+        self.assertIn("publish_args+=(--enable-auto-approve)", text)
+        self.assertIn("publish_args+=(--no-auto-approve)", text)
+        self.assertIn('if [[ "$LEARNING" == "disabled" ]]; then', text)
+        self.assertIn("review_args+=(--no-learning-proposals)", text)
+        self.assertIn('if [[ "$LEARNING" == "pull-requests" ]]; then', text)
+        self.assertIn("publish_args+=(--enable-learning-prs)", text)
+        self.assertIn('if [[ "$ARTIFACTS" == "diagnostics" ]]; then', text)
+        self.assertIn("review_args+=(--recovery-artifact recovery-artifact.json)", text)
+
         self.assertIn(
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
             text,
         )
-        self.assertEqual(text.count("needs: validate-provider-mode"), 2)
-        self.assertIn('case "$PROVIDER_MODE" in', text)
-        self.assertIn(
-            '""|local|local-ollama|cloud|cloud-ollama|openrouter) ;;',
-            text,
-        )
-        self.assertEqual(text.count("github reply \\\n"), 3)
-        self.assertEqual(text.count("github review \\\n"), 3)
-        self.assertEqual(text.count("--outcome outcome.json"), 3)
-        self.assertEqual(text.count("--outcome publication-outcome.json"), 3)
-        self.assertEqual(text.count("recovery-artifact.json"), 6)
-        self.assertEqual(text.count("Publish or promote"), 3)
-        self.assertNotIn("after AI resolution", text)
-        # Only the three publish steps carry the approval boolean: reply
-        # finalization re-reads the persisted eligibility of the review
-        # published for this head instead of trusting a caller flag.
+        self.assertEqual(text.count("github reply \\\n"), 2)
+        self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertEqual(text.count("--outcome outcome.json"), 2)
+        self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
+        self.assertEqual(text.count("recovery-artifact.json"), 4)
+        self.assertEqual(text.count("Publish or promote"), 2)
+        self.assertEqual(text.count("reply_exit=$?"), 2)
+        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
         self.assertEqual(
-            sum(
-                1
-                for line in text.splitlines()
-                if line.strip() == "AUTO_APPROVE: ${{ inputs.enable_auto_approve }}"
-            ),
-            3,
+            text.count("mention reply command failed (exit $reply_exit)"), 2
         )
-        self.assertNotIn("auto_approve_args", text)
-        self.assertEqual(text.count("reply_exit=$?"), 3)
-        self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 3)
-        self.assertEqual(
-            text.count("mention reply command failed (exit $reply_exit)"), 3
-        )
-        self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 3)
-        self.assertEqual(text.count("Verify mention reply completed"), 3)
-        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 3)
-        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 3)
-        self.assertIn("runs-on: ubuntu-latest", text)
-        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", text)
+        self.assertEqual(text.count('if [[ "$reply_exit" -ne 0 ]]; then'), 2)
+        self.assertEqual(text.count("Verify mention reply completed"), 2)
+        self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
+        self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
+        self.assertEqual(text.count("runs-on: ubuntu-latest"), 4)
+        self.assertEqual(text.count("runs-on: [self-hosted, linux, x64, ollama]"), 1)
 
-    def test_generated_caller_and_reusable_workflow_openrouter_routing_contract(
-        self,
-    ):
-        from review_sensei.hosting.github.setup import SETUP_VARIABLES, SetupPlanBuilder
-
-        repo_root = Path(__file__).resolve().parents[1]
-        reusable = (
-            repo_root / ".github" / "workflows" / "review-sensei-run.yml"
-        ).read_text(encoding="utf-8")
-        caller_template = (
-            repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
-        ).read_text(encoding="utf-8")
-        setup_plan = SetupPlanBuilder().build("owner/repo")
-        generated_caller = next(
-            file.content
-            for file in setup_plan.files
-            if file.path == ".github/workflows/review-sensei-review.yml"
-        )
-        self.assertEqual(generated_caller, caller_template)
-        self.assertIn(
-            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
-            generated_caller,
-        )
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", generated_caller)
-        self.assertNotIn("provider_profile:", generated_caller)
-        self.assertIn(("REVIEWSENSEI_MODEL", ""), SETUP_VARIABLES)
-        self.assertNotIn(("REVIEWSENSEI_PROVIDER_PROFILE", ""), SETUP_VARIABLES)
-        setup_body = SetupPlanBuilder().build("owner/repo").body
-        self.assertIn("REVIEWSENSEI_PROVIDER_PROFILE", setup_body)
-        self.assertIn("delete that deprecated repository variable", setup_body)
-        self.assertIn("provider_profile:", reusable)
-        self.assertIn("provider_profile is unused", reusable)
-
-        openrouter_gate = (
-            "needs.validate-provider-mode.outputs.active_provider == 'openrouter'"
-        )
-        cloud_fallback_gate = (
-            "needs.validate-provider-mode.outputs.active_provider == 'cloud'"
-        )
-        local_fallback_gate = (
-            "needs.validate-provider-mode.outputs.active_provider == 'local'"
-        )
-        self.assertIn(openrouter_gate, reusable)
-        self.assertIn(cloud_fallback_gate, reusable)
-        self.assertIn(local_fallback_gate, reusable)
-
-        self.assertIn("repository id must be a positive decimal integer", reusable)
-        openrouter_job = _job_section(reusable, "openrouter")
-        self.assertRegex(
-            openrouter_job,
-            r"- name: Prepare bounded trusted-base diff\n        if: inputs\.operation == 'review'",
-        )
-        self.assertIn(
-            "ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}",
-            openrouter_job,
-        )
-        review_step = _step_block(openrouter_job, "Run OpenRouter-provider review")
-        # The review lane selects its canonical backend explicitly, passes the
-        # validated model, and takes the versioned JSON document under the
-        # operational launcher contract.
-        self.assertIn("--provider openrouter", review_step)
-        self.assertIn('--model "$MODEL"', review_step)
-        self.assertIn("--format json", review_step)
-        self.assertIn("--exit-semantics operational", review_step)
-        self.assertIn("VALIDATED_MODEL=", review_step)
-        self.assertIn(
-            "resolved hosted OpenRouter model does not match workflow env",
-            review_step,
-        )
-        self.assertIn('review-sensei" resolve-hosted-openrouter both', review_step)
-        self.assertNotIn("openrouter model vendor is not allowlisted", review_step)
-        self.assertNotIn("OPENROUTER_MODEL:", review_step)
-        reply_step = _step_block(
-            openrouter_job, "Generate and publish OpenRouter mention reply"
-        )
-        self.assertIn("--provider openrouter --model", reply_step)
-        self.assertIn("VALIDATED_MODEL=", reply_step)
-        self.assertIn(
-            "resolved hosted OpenRouter model does not match workflow env",
-            reply_step,
-        )
-        self.assertIn('review-sensei" resolve-hosted-openrouter both', reply_step)
-        self.assertNotIn("OPENROUTER_MODEL:", reply_step)
-        publish_step = _step_block(
-            openrouter_job, "Publish or promote validated review through the broker"
-        )
-        self.assertIn(
-            "BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}",
-            publish_step,
-        )
-        self.assertIn('--repository-id "$REPOSITORY_ID"', publish_step)
-        self.assertIn('--base-branch "$BASE_REF"', publish_step)
+    def test_reusable_workflow_has_no_profile_or_custom_url_surface(self):
+        text = _reusable_workflow_text()
+        # A caller cannot name a provider profile, a custom endpoint, or an
+        # upstream provider: the trusted policy commit and the packaged
+        # defaults are the only sources for routing.
+        self.assertNotIn("provider_profile", text)
+        self.assertNotIn("allow_unqualified_profile", text)
+        self.assertNotIn("allow_custom_endpoint", text)
+        self.assertNotIn("OPENROUTER_UPSTREAM_PROVIDER", text)
+        self.assertNotIn("resolve-hosted-openrouter", text)
+        self.assertNotIn("validate_resolved_hosted_job_model", text)
+        self.assertNotIn("--base-url http", text)
+        self.assertNotIn("--model qwen", text)
+        self.assertNotIn("--model deepseek", text)
+        # OpenRouter keeps its credential where the adapter needs it, and no
+        # provider credential is ever forwarded to the Worker.
+        self.assertIn("OPENROUTER_API_KEY:", text)
+        self.assertIn("OPENAI_API_KEY:", text)
 
     def test_reusable_workflow_review_lanes_pin_the_versioned_json_artifact(self):
-        # The provider lane selects its canonical backend and writes the
-        # versioned JSON document under the operational launcher contract; the
-        # publish step consumes that same path.  A future edit of the format
-        # value would silently change the artifact contract for callers of the
-        # tag-pinned reusable workflow, so the full tuple is pinned here.
+        # The provider lane selects its canonical backend from the resolved
+        # plan and writes the versioned JSON document under the operational
+        # launcher contract; the publish step consumes that same path.  A
+        # future edit of the format value would silently change the artifact
+        # contract for callers of the tag-pinned reusable workflow, so the
+        # full tuple is pinned here.
         reusable = _reusable_workflow_text()
         lanes = (
             (
-                "cloud",
-                "Run cloud-provider review",
+                "hosted",
+                "Run hosted review",
                 "Publish or promote validated review through the broker",
-                "--provider cloud-ollama",
-            ),
-            (
-                "openrouter",
-                "Run OpenRouter-provider review",
-                "Publish or promote validated review through the broker",
-                "--provider openrouter",
             ),
             (
                 "local",
-                "Prepare and run trusted local review",
-                "Publish or promote trusted local review and learnings",
-                "--provider local-ollama",
+                "Run local review",
+                "Publish or promote validated local review and learnings",
             ),
         )
-        for job_id, review_step_name, publish_step_name, provider_flag in lanes:
+        for job_id, review_step_name, publish_step_name in lanes:
             with self.subTest(job=job_id):
                 job = _job_section(reusable, job_id)
                 review_step = _step_block(job, review_step_name)
-                self.assertIn(provider_flag, review_step)
+                self.assertIn(
+                    '--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL"',
+                    review_step,
+                )
                 self.assertIn("--format json", review_step)
                 self.assertIn("--exit-semantics operational", review_step)
                 self.assertIn("--output review.json", review_step)
                 publish_step = _step_block(job, publish_step_name)
                 self.assertIn("--result review.json", publish_step)
-                upload_step = _step_block(job, "Upload opt-in review artifact")
+                upload_step = _step_block(job, "Upload diagnostics artifact")
                 self.assertIn("\n            review.json\n", upload_step)
 
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
@@ -836,7 +769,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         reply_blocks = [
             block.strip() for block in workflow.split('reply_status="$(grep -E')[1:]
         ]
-        self.assertEqual(len(reply_blocks), 3)
+        self.assertEqual(len(reply_blocks), 2)
         first = reply_blocks[0].split('" | tail -n 1 || true)"')[0]
         for block in reply_blocks[1:]:
             other = block.split('" | tail -n 1 || true)"')[0]
@@ -852,13 +785,10 @@ class ActionPinPolicyTests(unittest.TestCase):
             "      issues: read\n"
             "      id-token: write\n"
         )
-        for job_id in ("cloud", "openrouter", "local"):
+        for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
-            # Provider review, publication admission, publication, and the
-            # mention reply each carry the pull request env; the retired
-            # budget-admission step was the fifth.
             self.assertEqual(job.count(pull_request_env), 4)
-        for job_id in ("cloud", "openrouter", "local"):
+        for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
             reply_name = next(
@@ -883,9 +813,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertNotIn("review-sensei github review", reply)
         self.assertNotIn("- name: Finalize", workflow)
         self.assertNotIn("- name: Promote", workflow)
+        # Each provider job publishes through exactly one promotion step.
         self.assertEqual(
             workflow.count("Publish or promote validated review through the broker"),
-            2,
+            1,
+        )
+        self.assertEqual(
+            workflow.count("Publish or promote validated local review and learnings"),
+            1,
         )
 
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
@@ -898,9 +833,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
-            3,
+            2,
         )
-        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 3)
+        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
         self.assertIn(
             "github.event.pull_request.number || github.run_id",
             text,
@@ -929,8 +864,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         Workflow-level concurrency cannot consume the validated PR output, so
         pull-request events use their host PR number there. The provider jobs
         additionally join manual reviews by the authoritative preflight
-        number. Both provider jobs must use the same expression: provider mode
-        is an execution detail, not a concurrency partition.
+        number. Both provider jobs must use the same expression: the planned
+        runner kind is an execution detail, not a concurrency partition.
         """
 
         workflow = (
@@ -945,9 +880,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 5)
+        self.assertEqual(len(group_lines), 4)
 
-        top_level, command, cloud, openrouter, local = group_lines
+        top_level, command, hosted, local = group_lines
         self.assertEqual(command, "group: reviewsensei-command-${{ github.run_id }}")
         review_selector = "inputs.operation == 'review'"
         reply_selector = "inputs.operation == 'review' && ("
@@ -968,43 +903,27 @@ class ActionPinPolicyTests(unittest.TestCase):
             "'review' && (needs.authoritative-preflight.outputs.pull_request_number || "
             "github.event.pull_request.number || github.run_id) || github.run_id }}"
         )
-        # OpenRouter intentionally shares the provider review slot with cloud/local.
-        self.assertEqual(cloud, expected_provider_group)
-        self.assertEqual(openrouter, expected_provider_group)
+        # The hosted and local jobs intentionally share the provider review slot.
+        self.assertEqual(hosted, expected_provider_group)
         self.assertEqual(local, expected_provider_group)
-        cloud_job = _job_section(text, "cloud")
-        openrouter_job = _job_section(text, "openrouter")
+        hosted_job = _job_section(text, "hosted")
         local_job = _job_section(text, "local")
         cancel_expr = "cancel-in-progress: ${{ inputs.operation == 'review' }}"
-        self.assertEqual(
-            [
-                line.strip()
-                for line in cloud_job.splitlines()
-                if "cancel-in-progress:" in line
-            ],
-            [cancel_expr],
-        )
-        self.assertEqual(
-            [
-                line.strip()
-                for line in openrouter_job.splitlines()
-                if "cancel-in-progress:" in line
-            ],
-            [cancel_expr],
-        )
-        self.assertEqual(
-            [
-                line.strip()
-                for line in local_job.splitlines()
-                if "cancel-in-progress:" in line
-            ],
-            [cancel_expr],
-        )
-        self.assertNotIn("-cloud-", cloud)
-        self.assertNotIn("-openrouter-", openrouter)
-        self.assertNotIn("-local-", local)
+        for job in (hosted_job, local_job):
+            self.assertEqual(
+                [
+                    line.strip()
+                    for line in job.splitlines()
+                    if "cancel-in-progress:" in line
+                ],
+                [cancel_expr],
+            )
+        self.assertNotIn("runner_kind", hosted)
+        self.assertNotIn("runner_kind", local)
+        self.assertNotIn("bootstrap", hosted)
+        self.assertNotIn("bootstrap", local)
         self.assertIn(
-            "OpenRouter shares the provider review group with cloud/local",
+            "The hosted and local jobs share this review group",
             text,
         )
 
@@ -1022,7 +941,6 @@ class ActionPinPolicyTests(unittest.TestCase):
                 "cancel-in-progress: false",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
             ],
         )
 
@@ -1036,7 +954,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-run.yml"
         )
         text = workflow.read_text(encoding="utf-8")
-        self.assertIn("if: needs.validate-provider-mode.result == 'success'", text)
+        self.assertIn("if: needs.bootstrap.outputs.writes == 'true'", text)
         self.assertIn(
             "base_sha: ${{ steps.fetch-pr.outputs.base_sha }}",
             text,
@@ -1057,32 +975,27 @@ class ActionPinPolicyTests(unittest.TestCase):
             "authoritative pull-request title output could not be decoded",
             text,
         )
-        # Provider jobs are selected only for an enabled operation. A reply
-        # event cannot accidentally run the review CLI or consume a provider
-        # runner when mention replies are disabled.
-        expected_gate = (
-            "(inputs.operation == 'review' && inputs.enable_review == 'true') || "
-            "(inputs.operation == 'reply' && inputs.enable_github_writes == 'true' "
-            "&& inputs.enable_mention_replies == 'true')"
+        # A policy that does not authorize writes performs no host operation at
+        # all: the preflight is skipped before any API request. A review or
+        # reply then runs only when its operation is still selected by the
+        # plan's github policy.
+        gate = (
+            "((inputs.operation == 'review' && (inputs.mode == 'manual' || "
+            "needs.bootstrap.outputs.automatic_reviews == 'true')) ||\n"
+            "      (inputs.operation == 'reply' && "
+            "needs.bootstrap.outputs.mentions == 'true'))"
         )
-        self.assertEqual(text.count(expected_gate), 3)
-        # One gated provider-review step per provider job. The retired
-        # budget-admission step carried this same gate, so the count is exactly
-        # the number of provider jobs.
-        self.assertEqual(
-            text.count(
-                "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
-            ),
-            3,
-        )
-        self.assertEqual(
-            text.count(
-                "if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'"
-            ),
-            3,
-        )
+        self.assertEqual(text.count(gate), 2)
+        # Each provider job gates its review, reply, and diff-preparation steps
+        # on the operation the caller requested.
+        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 3)
+        self.assertEqual(text.count("if: inputs.operation == 'reply'\n"), 2)
+        # Command operations are never selected by the plan's review policy:
+        # maintainer commands keep their own authorization.
         command = _job_section(text, "command")
         self.assertIn("inputs.operation == 'command'", command)
+        self.assertIn("needs.bootstrap.outputs.writes == 'true'", command)
+        self.assertNotIn("automatic_reviews", command)
         self.assertIn("reviewsensei-command-${{ github.run_id }}", command)
         self.assertIn(
             '--github-session-ledger --oidc-token "$oidc_token" --allow-write',
@@ -1096,19 +1009,17 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("issues: write", command)
         self.assertNotIn("pull-requests: write", command)
         self.assertIn("id-token: write", command)
-        validator = _job_section(text, "validate-provider-mode")
-        # The command branch is reached for every command operation: gating it
-        # on enable_github_writes leaves the command inputs unchecked when the
-        # consuming job is skipped.
-        self.assertNotIn(
-            'elif [[ "$OPERATION" == command && "$ENABLE_GITHUB_WRITES" == true ]]',
-            validator,
-        )
-        self.assertIn('elif [[ "$OPERATION" == command ]]; then', validator)
+        validator = _job_section(text, "bootstrap")
+        # The command branch is reached for every command operation, whether or
+        # not the selected policy authorizes writes, so a caller cannot route
+        # command payloads through the workflow while the consuming job is
+        # skipped.
+        self.assertNotIn("ENABLE_GITHUB_WRITES", validator)
+        self.assertIn("command)", validator)
         self.assertIn(
             "command operations require an authorized human maintainer", validator
         )
-        self.assertIn("command operations require enable_github_writes", validator)
+        self.assertNotIn("command operations require enable_github_writes", validator)
         self.assertIn(
             'comment_body_bytes="$(printf \'%s\' "$COMMENT_BODY" | LC_ALL=C wc -c)"',
             validator,
@@ -1124,9 +1035,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("default: User\n", text)
         # A stale or fabricated head SHA must fail the live-PR preflight before
         # the mutation is attempted.
-        self.assertIn("&& needs.authoritative-preflight.result == 'success'", command)
+        self.assertIn("needs: [bootstrap, authoritative-preflight]", command)
         preflight = _job_section(text, "authoritative-preflight")
         self.assertIn('"$OPERATION" != "command"', preflight)
+        self.assertIn("needs: bootstrap", preflight)
 
     def test_hosted_review_invocations_supply_the_broker_attested_session_ledger(
         self,
@@ -1153,12 +1065,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             sites,
             {
-                ("cloud", "Publish or promote validated review through the broker"),
-                (
-                    "openrouter",
-                    "Publish or promote validated review through the broker",
-                ),
-                ("local", "Publish or promote trusted local review and learnings"),
+                ("hosted", "Publish or promote validated review through the broker"),
+                ("local", "Publish or promote validated local review and learnings"),
             },
         )
 
@@ -1200,9 +1108,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             sites,
             {
-                ("cloud", "Run cloud-provider review"),
-                ("openrouter", "Run OpenRouter-provider review"),
-                ("local", "Prepare and run trusted local review"),
+                ("hosted", "Run hosted review"),
+                ("local", "Run local review"),
             },
         )
 
@@ -1228,56 +1135,49 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             sites,
             {
-                ("cloud", "Publish or promote validated review through the broker"),
-                (
-                    "openrouter",
-                    "Publish or promote validated review through the broker",
-                ),
-                ("local", "Publish or promote trusted local review and learnings"),
+                ("hosted", "Publish or promote validated review through the broker"),
+                ("local", "Publish or promote validated local review and learnings"),
             },
         )
 
-    def test_hosted_review_invocations_pin_the_review_mode_explicitly(self):
-        # The repository variable reaches the workflow only as the
-        # `review_mode` input, so every hosted invocation that resolves a
-        # review mode for review or publication passes it explicitly instead
-        # of depending on ambient resolution. The step must also map the env
-        # var: a run referencing $REVIEW_MODE without it expands to an empty
-        # string (an explicit empty mode, not an omitted one).
+    def test_reusable_workflow_owns_no_policy_markdown_or_budget_logic(self):
+        # The workflow owns events, runners, jobs, concurrency, permissions,
+        # secret injection, and installation. The engine owns model defaults,
+        # review-mode resolution, budget arithmetic, blocker classification,
+        # Markdown assembly, and approval eligibility — so no CLI invocation
+        # passes a review-mode, stage, or category override and no budget job
+        # or ceiling is admitted. The engine's `reviews` decision is still
+        # mapped to the flag that states it; that translation is not a policy
+        # decision the workflow makes.
         text = _reusable_workflow_text()
-        sites: set[tuple[str, str]] = set()
-        for job_id in _job_ids(text):
-            job = _job_section(text, job_id)
-            for name in _named_steps(job):
-                step = _step_block(job, name)
-                invocations = [
-                    run
-                    for run in _run_blocks(step)
-                    if "github review \\" in run or "--outcome outcome.json" in run
-                ]
-                if not invocations:
-                    continue
-                sites.add((job_id, name))
-                self.assertIn("REVIEW_MODE: ${{ inputs.review_mode }}", step)
-                for run in invocations:
-                    self.assertIn('--review-mode "$REVIEW_MODE"', run)
-        # Pin the exact (job, step) invocation sites, so a new hosted review or
-        # publication path fails here by name instead of silently resolving
-        # its mode from the environment.
-        self.assertEqual(
-            sites,
-            {
-                ("cloud", "Run cloud-provider review"),
-                ("cloud", "Publish or promote validated review through the broker"),
-                ("openrouter", "Run OpenRouter-provider review"),
-                (
-                    "openrouter",
-                    "Publish or promote validated review through the broker",
-                ),
-                ("local", "Prepare and run trusted local review"),
-                ("local", "Publish or promote trusted local review and learnings"),
-            },
-        )
+        for flag in ("--review-mode", "--stages-dir", "--categories-dir"):
+            self.assertNotIn(flag, text)
+        for token in (
+            "inputs.review_mode",
+            "budget-admission",
+            "budget_admission",
+            "max_rounds",
+            "remaining_rounds",
+            "--enable-replenish",
+        ):
+            self.assertNotIn(token, text)
+        # The retired-variable report names the old path settings; nothing
+        # executable may still read them.
+        for run in _run_blocks(text):
+            self.assertNotIn("STAGES_DIR", run)
+            self.assertNotIn("CATEGORIES_DIR", run)
+        for token in ("STAGES_DIR", "CATEGORIES_DIR"):
+            for line in text.splitlines():
+                if token in line:
+                    self.assertIn(
+                        f"REVIEWSENSEI_{token}: ${{{{ vars.REVIEWSENSEI_{token} }}}}",
+                        line,
+                    )
+        self.assertIn("--format json --exit-semantics operational", text)
+        # The one remaining behavior translation reads the plan's resolved
+        # `reviews` value; nothing here re-derives a default from the event.
+        self.assertNotIn("merge-focused", text)
+        self.assertNotIn("advisory", text)
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
         root = Path(__file__).resolve().parents[1]
@@ -1309,75 +1209,154 @@ class ActionPinPolicyTests(unittest.TestCase):
                 model="deepseek/deepseek-v4.1-flash",
             )
 
-    def test_provider_jobs_gate_on_normalized_provider_mode(self):
+    def test_provider_jobs_run_the_planned_runner_kind(self):
+        # The plan's runner requirement selects the job, and only one provider
+        # job can run for one plan. No input and no repository variable picks
+        # the runner: a repository cannot promote its own pull request onto the
+        # hosted path or pin an unapproved backend.
         workflow_text = _reusable_workflow_text()
-        for job_name in ("cloud", "local", "openrouter"):
-            job = _job_section(workflow_text, job_name)
-            self.assertIn(
-                "needs.validate-provider-mode.outputs.normalized_provider_mode",
-                job,
-            )
-        cloud_if = (
-            _job_section(workflow_text, "cloud").split("if:", 1)[1].split("\n", 1)[0]
-        )
-        self.assertNotIn("inputs.provider_mode == 'cloud'", cloud_if)
+        hosted = _job_section(workflow_text, "hosted")
+        local = _job_section(workflow_text, "local")
+        self.assertIn("needs.bootstrap.outputs.runner_kind == 'hosted'", hosted)
+        self.assertIn("needs.bootstrap.outputs.runner_kind == 'local'", local)
+        self.assertIn("runs-on: ubuntu-latest", hosted)
+        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", local)
+        self.assertNotIn("inputs.provider_mode", workflow_text)
+        self.assertNotIn("inputs.provider", workflow_text)
+        # Each job re-checks the plan it was selected by, so a mismatch fails
+        # closed instead of running a backend on the wrong runner.
+        self.assertIn("hosted job received a non-hosted plan", hosted)
+        self.assertIn("local job received a non-local plan", local)
 
-    def test_provider_jobs_use_backend_specific_model_fallbacks(self):
+    def test_workflow_hard_codes_no_model_endpoint_or_provider_defaults(self):
+        # Model defaults, endpoints, and upstream routing are package
+        # decisions. The workflow carries no fallback chain, no backend
+        # default, and no provider-specific endpoint; it passes the exact plan
+        # through and nothing else.
         workflow_text = _reusable_workflow_text()
-        shared_prefix = (
-            "needs.validate-provider-mode.outputs.normalized_model || "
-            "vars.REVIEWSENSEI_MODEL || "
-        )
-        cloud_model = (
-            shared_prefix
-            + "vars.REVIEWSENSEI_CLOUD_MODEL || 'deepseek-v4.1-flash:cloud'"
-        )
-        local_model = shared_prefix + "vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b'"
-        self.assertGreaterEqual(
-            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {cloud_model} }}}}"), 2
-        )
-        self.assertGreaterEqual(
-            workflow_text.count(f"OLLAMA_MODEL: ${{{{ {local_model} }}}}"), 2
-        )
-        self.assertGreaterEqual(
-            workflow_text.count(
-                "HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}"
-            ),
-            6,
-        )
-
-    def test_provider_jobs_validate_resolved_hosted_job_model(self):
-        workflow_text = _reusable_workflow_text()
-        self.assertGreaterEqual(
-            workflow_text.count("validate_resolved_hosted_job_model"), 4
-        )
-        self.assertGreaterEqual(
-            workflow_text.count('review-sensei" resolve-hosted-openrouter both'),
-            2,
-        )
+        for token in (
+            "OLLAMA_MODEL",
+            "OLLAMA_BASE_URL",
+            "HOSTED_REVIEWSENSEI_MODEL",
+            "BACKEND_DEFAULT",
+            "REVIEWSENSEI_UPSTREAM_PROVIDER",
+            "deepseek",
+            "qwen3.5",
+            "ollama.com",
+            "11434",
+            "openrouter.ai",
+            "localhost",
+        ):
+            self.assertNotIn(token, workflow_text)
         self.assertIn(
-            "resolved hosted model does not match workflow env",
+            '--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL"',
             workflow_text,
         )
-        self.assertNotIn(
-            "resolved OpenRouter model does not match workflow env",
-            workflow_text,
-        )
+        # The retired model/backend variables may only be named by the
+        # retired-variable report; nothing executable reads them.
+        for token in ("REVIEWSENSEI_PROVIDER_MODE", "REVIEWSENSEI_CLOUD_MODEL"):
+            for line in workflow_text.splitlines():
+                if token in line:
+                    self.assertIn(
+                        f"{token}: ${{{{ vars.{token} }}}}",
+                        line,
+                    )
 
-    def test_validate_provider_mode_job_validates_model_input(self):
+    def test_provider_jobs_scope_exactly_the_named_credential(self):
+        # Only the three allowlisted key variables are declared, all optional,
+        # and exactly the plan's named credential is materialized — and only
+        # when the plan says the selected backend requires one. A backend that
+        # requires no credential receives nothing, and a credential's presence
+        # never authorizes writes or inference.
         workflow_text = _reusable_workflow_text()
-        job = _job_section(workflow_text, "validate-provider-mode")
-        self.assertNotIn("actions/checkout@", job)
-        self.assertIn("permissions: {}", job)
-        self.assertIn("normalized_provider_mode:", job)
-        self.assertIn("normalized_model:", job)
-        self.assertIn("active_provider:", job)
-        self.assertIn("PROVIDER_MODE: ${{ inputs.provider_mode }}", job)
-        self.assertIn("MODEL: ${{ inputs.model }}", job)
-        self.assertNotIn("Install ReviewSensei and validate hosted model", job)
-        self.assertNotIn("review-sensei-venv", job)
-        self.assertNotIn("setup-python@", job)
-        self.assertNotIn("validate_hosted_workflow_model", job)
+        declaration = workflow_text.split("secrets:", 1)[1].split("concurrency:", 1)[0]
+        self.assertNotIn("inherit:", declaration)
+        self.assertEqual(
+            re.findall(r"^      ([A-Z][A-Z0-9_]*):$", declaration, re.M),
+            ["OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+        )
+        for name in ("OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+            self.assertIn(f"{name}:\n", workflow_text)
+            # Declared once and scoped by each provider job's one credential
+            # step; no other path can read a secret.
+            self.assertEqual(workflow_text.count(f"secrets.{name}"), 2)
+        declaration = _reusable_workflow_text().split("secrets:", 1)[1]
+        self.assertEqual(declaration.count("required: false"), 3)
+        self.assertEqual(
+            workflow_text.count("Scope the selected backend credential"), 2
+        )
+        self.assertEqual(workflow_text.count('--api-key-env "$CREDENTIAL_ENV"'), 4)
+        self.assertIn("no credential never receives one implicitly", workflow_text)
+
+    def test_bootstrap_job_is_read_only_and_resolves_one_plan(self):
+        # The bootstrap phase resolves hosted policy and the runner requirement
+        # from a trusted release of the package over a read-only checkout of
+        # the trusted policy commit. It installs nothing from the pull request
+        # and executes no repository script; its single plan is the one every
+        # provider job consumes.
+        workflow_text = _reusable_workflow_text()
+        job = _job_section(workflow_text, "bootstrap")
+        self.assertIn("permissions:\n      contents: read", job)
+        self.assertNotIn("secrets.", job)
+        self.assertNotIn("id-token", job)
+        self.assertNotIn("actions/upload-artifact@", job)
+        self.assertIn("path: trusted-policy", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", job)
+        self.assertNotIn("github.event.pull_request.head", job)
+        # Exactly the two optional Actions overrides are mapped, once, and only
+        # in the plan step. The retired-variable report names old variables but
+        # reads none of them as configuration.
+        plan_step = _step_block(job, "Resolve the hosted plan")
+        self.assertEqual(plan_step.count("${{ vars.REVIEWSENSEI_"), 2)
+        self.assertIn(
+            "REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}", plan_step
+        )
+        self.assertIn("REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}", plan_step)
+        self.assertIn("working-directory: trusted-policy", plan_step)
+        self.assertIn("id: plan", plan_step)
+        self.assertIn("host-plan", plan_step)
+        self.assertIn('--github-output "$GITHUB_OUTPUT"', plan_step)
+        report_step = _step_block(job, "Report retired repository variables")
+        self.assertNotIn(">>", report_step)
+        self.assertNotIn("GITHUB_OUTPUT", report_step)
+        self.assertIn("retired_environment_remedies", report_step)
+        # The bootstrap plan channel mirrors the package's plan contract
+        # exactly, so a new plan output cannot appear here without the package
+        # changing too.
+
+        plan_outputs = {
+            name
+            for name, _ in hosted_plan_outputs(
+                plan_hosted_execution(
+                    parse_configuration_text("schema: 1\n", root=Path("/tmp")),
+                    environ={},
+                )
+            )
+        }
+        declared = set(re.findall(r"^      ([a-z_]+): \$\{\{ steps\.plan", job, re.M))
+        self.assertEqual(declared, plan_outputs)
+        identity = set(
+            re.findall(
+                r"^      ([a-z_]+): \$\{\{ steps\.(?:release-identity|policy)",
+                job,
+                re.M,
+            )
+        )
+        self.assertEqual(
+            identity, {"package_version", "workflow_commit", "policy_commit"}
+        )
+        # Every output a provider job consumes is one bootstrap declared.
+        consumed = {
+            match
+            for match in re.findall(
+                r"needs\.bootstrap\.outputs\.([a-z_]+)", workflow_text
+            )
+        }
+        self.assertLessEqual(consumed, declared | identity)
+        self.assertIn("git init --bare", job)
+        self.assertIn("importlib.metadata.version", job)
+        self.assertIn("pip check", job)
 
     def test_dogfood_caller_matches_generated_setup_template(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -1388,21 +1367,32 @@ class ActionPinPolicyTests(unittest.TestCase):
             repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
         self.assertEqual(example, dogfood)
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", dogfood)
-        self.assertIn("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE", dogfood)
+        self.assertEqual(dogfood, _tagged_workflow("v5"))
+        self.assertIn(
+            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+            dogfood,
+        )
 
-    def test_validate_provider_mode_rejects_consecutive_and_trailing_hyphens(self):
+    def test_bootstrap_validator_refuses_unknown_operations_and_unsafe_refs(self):
         root = Path(__file__).resolve().parents[1]
         workflow_text = (
             root / ".github" / "workflows" / "review-sensei-run.yml"
         ).read_text(encoding="utf-8")
         block = _run_block_containing(
-            workflow_text, "ReviewSensei provider mode is unsupported"
+            workflow_text, "operation must be review, reply, or command"
         )
+        self.assertIn('case "$OPERATION" in', block)
+        self.assertIn("review|reply|command", block)
+        self.assertIn("automatic|manual", block)
         self.assertIn('"$BASE_REF" == *--*', block)
         self.assertIn('"$BASE_REF" == *-', block)
         self.assertIn('"$HEAD_REF" == *--*', block)
         self.assertIn('"$HEAD_REF" == *-', block)
+        self.assertIn('"$HEAD_REF" == -*', block)
+        # The provider-mode input no longer exists: the validator rejects
+        # unknown operations instead of normalizing a mode.
+        self.assertNotIn("provider_mode", workflow_text)
+        self.assertNotIn("PROVIDER_MODE", block)
 
     def test_local_provider_validation_uses_the_same_safe_ref_rules(self):
         root = Path(__file__).resolve().parents[1]
@@ -1410,18 +1400,22 @@ class ActionPinPolicyTests(unittest.TestCase):
             root / ".github" / "workflows" / "review-sensei-run.yml"
         ).read_text(encoding="utf-8")
         block = _run_block_containing(
-            workflow_text, "local job received an invalid provider mode"
+            workflow_text, "local job received a non-local plan"
         )
         block = block.split("python - <<'PY'\n", 1)[1]
         block = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", block, maxsplit=1)[0])
         environment = {
             "MODE": "manual",
             "OPERATION": "reply",
-            "PROVIDER_MODE": "local",
+            "RUNNER_KIND": "local",
+            "BACKEND": "local-ollama",
+            "MODEL": "qwen3.5:4b",
+            "BASE_URL": "http://127.0.0.1:11434",
+            "CREDENTIAL_ENV": "OLLAMA_API_KEY",
+            "CREDENTIAL_REQUIRED": "false",
             "REPOSITORY": "owner/repo",
             "HEAD_REF": "",
             "HEAD_REPOSITORY": "",
-            "REVIEW_SENSEI_VERSION": "0.1.1",
             "BASE_SHA": "",
             "HEAD_SHA": "",
         }
@@ -1435,6 +1429,21 @@ class ActionPinPolicyTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertNotEqual(result.returncode, 0)
+        for mismatch in ("hosted", "", "local "):
+            with self.subTest(runner_kind=mismatch):
+                result = subprocess.run(
+                    ["python3", "-c", block],
+                    env={
+                        **os.environ,
+                        **environment,
+                        "BASE_REF": "main",
+                        "RUNNER_KIND": mismatch,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
         valid = subprocess.run(
             ["python3", "-c", block],
             env={**os.environ, **environment, "BASE_REF": "main-feature"},
@@ -1443,6 +1452,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(valid.returncode, 0, valid.stderr)
+        # Both provider jobs share one validator body: only the plan check may
+        # differ, so a ref rule tightened for one runner cannot drift.
+        hosted = _run_block_containing(
+            workflow_text, "hosted job received a non-hosted plan"
+        )
+        hosted = hosted.split("python - <<'PY'\n", 1)[1]
+        hosted = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", hosted, maxsplit=1)[0])
+        self.assertEqual(hosted.replace("hosted", "local"), block)
 
     def test_authoritative_preflight_caps_pull_request_title_bytes(self):
         root = Path(__file__).resolve().parents[1]
@@ -1517,28 +1534,40 @@ class ActionPinPolicyTests(unittest.TestCase):
             4,
         )
         self.assertNotIn("Install ReviewSensei and validate hosted model", text)
+        # The release identity is resolved once, from the workflow commit the
+        # run actually executes, and every install step consumes that one
+        # identity instead of re-deriving it.
         self.assertEqual(
-            text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"),
-            4,
+            text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"), 1
         )
         self.assertEqual(
-            text.count(
-                '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
-            ),
-            4,
+            text.count("REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}"), 1
         )
+        release = _run_block_containing(text, "must run from a public git tag")
+        self.assertIn("@refs/tags/[A-Za-z0-9]", release)
+        self.assertIn("git init --bare", release)
+        self.assertIn("fetch --depth=1", release)
+        self.assertIn('cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA"', release)
+        self.assertIn('if [[ "$object_type" == "tag" ]]; then', release)
+        self.assertIn('rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"', release)
+        self.assertIn('elif [[ "$object_type" == "commit" ]]; then', release)
         self.assertIn(
-            '"review-sensei==$expected_version"',
-            text,
+            "The ReviewSensei workflow SHA is not a commit or an annotated tag.",
+            release,
         )
+        self.assertIn('show "$workflow_commit:pyproject.toml"', release)
+        self.assertIn("does not declare an exact released version", release)
+        self.assertIn('echo "package_version=$package_version"', release)
+        self.assertIn("refusing the GitHub fallback", text)
         self.assertIn("No matching distribution found for review-sensei==", text)
         self.assertIn(
             "Could not find a version that satisfies the requirement review-sensei==",
             text,
         )
-        self.assertIn("refusing the GitHub fallback", text)
-        self.assertIn("must run from a public git tag", text)
-        self.assertIn("@refs/tags/[A-Za-z0-9]", text)
+        self.assertIn(
+            '"review-sensei==$expected_version"',
+            text,
+        )
         self.assertNotIn("dogfood_ref", text)
         self.assertNotIn("refs/pull/", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
@@ -1547,11 +1576,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn('importlib.metadata.version("review-sensei")', text)
         self.assertIn('"$python_bin" -m pip check', text)
+        # No install path may fall back to a branch, a pull-request ref, or
+        # `latest`: the exact released version is the only pin.
         self.assertNotIn("review-sensei.git@main", text)
+        self.assertNotIn("pip install --upgrade review-sensei", text)
         install_blocks = [
             block
             for block in _run_blocks(text)
-            if "REVIEW_SENSEI_WORKFLOW_REF" in block
+            if "REVIEW_SENSEI_WORKFLOW_COMMIT" in block
         ]
         self.assertEqual(len(install_blocks), 4)
         for block in install_blocks:
@@ -1559,25 +1591,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertLess(
                     block.index('"review-sensei==$expected_version"'),
                     block.index(
-                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"'
+                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"'
                     ),
                 )
-        # The tagged-SHA fallback is one behavior shared by four install steps,
-        # so assert its shape once and assert the four copies stay identical
-        # instead of counting marker strings anywhere in the file.
+        # The tagged-commit fallback is one behavior shared by four install
+        # steps, so assert its shape once and assert the four copies stay
+        # identical instead of counting marker strings anywhere in the file.
         regions = [_install_fallback_region(block) for block in install_blocks]
         self.assertEqual(len(set(regions)), 1)
         region = regions[0]
-        self.assertIn("fetch --depth=1", region)
-        self.assertIn('cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA"', region)
-        self.assertIn('if [[ "$object_type" == "tag" ]]; then', region)
+        # Both identity inputs are re-validated by every install step, so a
+        # malformed plan output can never reach pip.
+        self.assertIn('expected_version="${REVIEW_SENSEI_VERSION#v}"', region)
         self.assertIn(
-            'rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"',
+            'if [[ ! "$expected_version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
             region,
         )
-        self.assertIn('elif [[ "$object_type" != "commit" ]]; then', region)
         self.assertIn(
-            "The ReviewSensei workflow SHA is not a commit or an annotated tag.",
+            'if [[ ! "$REVIEW_SENSEI_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then',
             region,
         )
 
@@ -1747,41 +1778,40 @@ class ActionPinPolicyTests(unittest.TestCase):
 
 
 class ReusablePublishGuardTests(unittest.TestCase):
-    def test_cloud_and_local_publish_require_success_and_reject_cancelled_stale_runs(
+    def test_provider_jobs_publish_only_a_current_head_after_a_successful_review(
         self,
     ):
         text = _reusable_workflow_text()
-        admission_if = (
-            "if: success() && !cancelled() && inputs.operation == 'review' "
-            "&& inputs.enable_github_writes == 'true'"
-        )
-        handoff_guard = (
-            " && steps.provider-review.outputs.outcome_status != 'action_required'"
-        )
+        admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
         publish_if = (
-            admission_if
-            + handoff_guard
-            + " && steps.publish-admission.outputs.status == 'current'"
+            admission_if + " && steps.publish-admission.outputs.status == 'current'"
         )
         upload_if = (
-            "if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'"
-            + handoff_guard
+            "if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
+            " == 'diagnostics' && steps.provider-review.outcome == 'success'"
         )
         confirm_name = "Confirm live pull-request head is still current"
-        upload_name = "Upload opt-in review artifact"
-        self.assertEqual(text.count(confirm_name), 3)
-        self.assertEqual(text.count(publish_if), 3)
-        self.assertEqual(text.count(upload_if), 3)
-        self.assertEqual(text.count("id: publish-admission"), 3)
-        self.assertNotIn(
-            "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
-            text,
-        )
+        upload_name = "Upload diagnostics artifact"
+        self.assertEqual(text.count(confirm_name), 2)
+        self.assertEqual(text.count(publish_if), 2)
+        self.assertEqual(text.count(upload_if), 2)
+        self.assertEqual(text.count("id: publish-admission"), 2)
+        # No budget admission and no handoff-status plumbing exists: the engine
+        # exits non-zero on a non-publishable outcome, so the publish and
+        # artifact steps are skipped by their own success guards.
+        for token in (
+            "budget-admission",
+            "outcome_status",
+            "inputs.enable_github_writes",
+            "inputs.enable_review",
+            "inputs.enable_mention_replies",
+            "inputs.upload_artifacts",
+        ):
+            self.assertNotIn(token, text)
 
         for job_id, publish_name in (
-            ("cloud", "Publish or promote validated review through the broker"),
-            ("openrouter", "Publish or promote validated review through the broker"),
-            ("local", "Publish or promote trusted local review and learnings"),
+            ("hosted", "Publish or promote validated review through the broker"),
+            ("local", "Publish or promote validated local review and learnings"),
         ):
             with self.subTest(job=job_id):
                 job = _job_section(text, job_id)
@@ -1790,7 +1820,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertEqual(names[publish_index - 1], confirm_name)
                 revalidate = _step_block(job, confirm_name)
                 publish = _step_block(job, publish_name)
-                self.assertIn(admission_if + handoff_guard, revalidate)
+                self.assertIn(admission_if, revalidate)
                 self.assertNotIn("steps.publish-admission.outputs.status", revalidate)
                 self.assertIn(publish_if, publish)
                 self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)
@@ -1818,30 +1848,29 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 upload = _step_block(job, upload_name)
                 self.assertIn(upload_if, upload)
                 self.assertIn("if-no-files-found: error", upload)
+                self.assertIn("retention-days: 7", upload)
 
-        cloud_confirm = _step_block(_job_section(text, "cloud"), confirm_name)
+        hosted_confirm = _step_block(_job_section(text, "hosted"), confirm_name)
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
-        self.assertEqual(cloud_confirm, local_confirm)
+        self.assertEqual(hosted_confirm, local_confirm)
 
-    def test_review_starts_without_a_spent_budget_precheck(self):
+    def test_provider_jobs_hold_no_credential_and_no_write_scope_by_default(self):
+        # Publication is a broker exchange: provider jobs read the repository
+        # and mint an identity token, but never receive a write-scoped token.
+        # The credential they can materialize is the plan's single named one.
         text = _reusable_workflow_text()
-        self.assertNotIn("def automatic_budget_spent", text)
-        self.assertNotIn("budget-admission", text)
-        self.assertNotIn("budget_admission", text)
-        self.assertNotIn("automatic review budget", text)
-
-        for job_id, review_name in (
-            ("cloud", "Run cloud-provider review"),
-            ("openrouter", "Run OpenRouter-provider review"),
-            ("local", "Prepare and run trusted local review"),
-        ):
+        for job_id in ("hosted", "local"):
             with self.subTest(job=job_id):
-                review = _step_block(_job_section(text, job_id), review_name)
-                self.assertIn(
-                    "if: inputs.operation == 'review' && inputs.enable_review == 'true'",
-                    review,
-                )
-                self.assertNotIn("spent", review)
+                job = _job_section(text, job_id)
+                self.assertNotIn("contents: write", job)
+                self.assertNotIn("pull-requests: write", job)
+                self.assertNotIn("issues: write", job)
+                self.assertIn("id-token: write", job)
+                self.assertIn("contents: read", job)
+                credential = _step_block(job, "Scope the selected backend credential")
+                self.assertIn("no credential never receives one implicitly", credential)
+                self.assertIn('"$CREDENTIAL_ENV" "$credential_value"', credential)
+                self.assertNotIn("--allow-write", credential)
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
@@ -1881,11 +1910,13 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             for line in text.splitlines()
             if line.strip().startswith("group:")
         ]
-        self.assertEqual(len(group_lines), 5)
+        self.assertEqual(len(group_lines), 4)
         command_group = group_lines.pop(1)
         self.assertEqual(
             command_group, "group: reviewsensei-command-${{ github.run_id }}"
         )
+        provider_lines = [line for line in group_lines if "provider" in line]
+        self.assertEqual(len(provider_lines), 2)
         for line in group_lines:
             self.assertIn("github.repository", line)
             self.assertIn("inputs.operation == 'review'", line)
@@ -1893,14 +1924,20 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             self.assertNotIn("inputs.head_sha", line)
             self.assertNotIn("github.sha", line)
             self.assertNotIn("github.event.pull_request.head.sha", line)
+        # The provider group is not partitioned by runner kind or backend: a
+        # newer review cancels an older one for the same pull request wherever
+        # it ran.
+        for line in provider_lines:
+            self.assertNotIn("runner_kind", line)
+            self.assertNotIn("backend", line)
+            self.assertNotIn("needs.bootstrap", line)
 
-        top_level, cloud, openrouter, local = group_lines
+        top_level, hosted, local = group_lines
         self.assertIn("github.event.pull_request.number || github.run_id", top_level)
         self.assertIn(
-            "needs.authoritative-preflight.outputs.pull_request_number", cloud
+            "needs.authoritative-preflight.outputs.pull_request_number", hosted
         )
-        self.assertEqual(cloud, openrouter)
-        self.assertEqual(cloud, local)
+        self.assertEqual(hosted, local)
 
     def test_manual_and_automatic_reviews_share_the_provider_latest_wins_group(self):
         automatic = _hosted_provider_group(
@@ -2015,7 +2052,6 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
                 "cancel-in-progress: false",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
                 "cancel-in-progress: ${{ inputs.operation == 'review' }}",
             ],

@@ -1395,6 +1395,37 @@ def _doctor_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _host_plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei host-plan",
+        description=(
+            "Resolve the trusted hosted backend, runner requirement, and GitHub "
+            "policy without provider or GitHub calls."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "Configuration file to resolve; defaults to .reviewsensei.yml when "
+            "present, then packaged defaults."
+        ),
+    )
+    parser.add_argument("--provider", help="Backend override (inference.backend)")
+    parser.add_argument("--model", help="Model override (inference.model)")
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        help=(
+            "Write the plan as Actions environment-file lines to this path. "
+            "The workflow passes its own $GITHUB_OUTPUT file; the command never "
+            "reads that variable itself."
+        ),
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
 def _plan_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="review-sensei plan",
@@ -2471,6 +2502,30 @@ def _run_doctor_command(arguments: list[str]) -> int:
         return 2
 
 
+def _run_host_plan_command(arguments: list[str]) -> int:
+    args = _host_plan_parser().parse_args(arguments)
+    try:
+        from .hosted import (
+            hosted_plan_outputs,
+            load_and_plan_hosted,
+            render_hosted_plan,
+            write_github_outputs,
+        )
+
+        plan = load_and_plan_hosted(
+            args.config,
+            cli_provider=args.provider,
+            cli_model=args.model,
+        )
+        if args.github_output is not None:
+            write_github_outputs(args.github_output, hosted_plan_outputs(plan))
+        sys.stdout.write(render_hosted_plan(plan, as_json=args.as_json))
+        return 0
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+
+
 def _run_plan_command(arguments: list[str]) -> int:
     args = _plan_parser().parse_args(arguments)
     try:
@@ -2892,6 +2947,7 @@ def _run_config_command(arguments: list[str]) -> int:
 _OFFLINE_COMMANDS = {
     "doctor": _run_doctor_command,
     "plan": _run_plan_command,
+    "host-plan": _run_host_plan_command,
     "learnings": _run_learnings_command,
     "evaluate-convergence": _run_evaluate_convergence_command,
 }
