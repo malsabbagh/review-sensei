@@ -1314,6 +1314,8 @@ def _run_promotion(argv: list[str]) -> int:
 
 
 def _github_parser() -> argparse.ArgumentParser:
+    from .configuration import REVIEW_POLICIES
+
     parser = argparse.ArgumentParser(
         prog="review-sensei github",
         description="Run GitHub publication seams with write opt-ins.",
@@ -1387,7 +1389,19 @@ def _github_parser() -> argparse.ArgumentParser:
         "--no-auto-approve",
         dest="enable_auto_approve",
         action="store_false",
-        help="Publish COMMENT rather than APPROVE after review checks.",
+        help=(
+            "Enforce required fixes through the ReviewSensei check without "
+            "emitting an approval, unless --reviews-policy says otherwise."
+        ),
+    )
+    review.add_argument(
+        "--reviews-policy",
+        choices=list(REVIEW_POLICIES),
+        default=None,
+        help=(
+            "Canonical github.reviews mode: auto-approve (default), blocking, "
+            "or advisory. Takes precedence over the approval boolean."
+        ),
     )
     review.add_argument(
         "--enable-learning-prs",
@@ -1537,19 +1551,6 @@ def _github_parser() -> argparse.ArgumentParser:
         "--enable-reply",
         action="store_true",
         help="Enable mention reply publication for this invocation.",
-    )
-    reply.add_argument(
-        "--enable-auto-approve",
-        dest="enable_auto_approve",
-        action="store_true",
-        default=True,
-        help="Finalize approval after an AI-resolved blocking finding (the default).",
-    )
-    reply.add_argument(
-        "--no-auto-approve",
-        dest="enable_auto_approve",
-        action="store_false",
-        help="Resolve the thread without emitting an automatic approval.",
     )
     return parser
 
@@ -1821,6 +1822,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     options=GitHubWriteOptions(
                         github_writes=True,
                         auto_review=args.enable_review,
+                        auto_approve=args.enable_auto_approve,
+                        reviews_policy=getattr(args, "reviews_policy", None),
                     ),
                     oidc_token=args.oidc_token,
                     repository=args.repository,
@@ -1920,6 +1923,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     github_writes=True,
                     auto_review=args.enable_review,
                     auto_approve=args.enable_auto_approve,
+                    reviews_policy=getattr(args, "reviews_policy", None),
                     github_session_ledger=getattr(args, "github_session_ledger", False),
                 ),
                 oidc_token=args.oidc_token,
@@ -2010,7 +2014,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             options=GitHubWriteOptions(
                 github_writes=True,
                 mention_replies=True,
-                auto_approve=args.enable_auto_approve,
             ),
             oidc_token=args.oidc_token,
             read_token=read_token,
@@ -2038,7 +2041,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         options=GitHubWriteOptions(
             github_writes=True,
             mention_replies=args.enable_reply,
-            auto_approve=args.enable_auto_approve,
         ),
         oidc_token=args.oidc_token,
         repository=args.repository,

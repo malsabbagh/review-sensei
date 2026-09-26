@@ -259,7 +259,12 @@ class GitHubApplicationTests(unittest.TestCase):
             head_sha="a" * 40,
             base_branch="main",
             base_sha="a" * 40,
-            result=None,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
             diff="diff",
             app_slug="review-sensei[bot]",
         )
@@ -291,16 +296,20 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(review.status, "published")
         self.assertEqual(learning.status, "created")
         self.assertEqual(reply.status, "replied")
+        # The review gate and the review itself are separate authorities, so
+        # publishing a review exchanges both narrow capabilities.
         self.assertEqual(
             [capability for _, capability in self.broker.exchanges],
-            ["review_publish", "learning_write", "issue_reply"],
+            ["review_publish", "check_publish", "learning_write", "issue_reply"],
         )
         self.assertEqual(self.broker.requested, 1)
         self.assertEqual(self.reviewer.calls[0]["token"], "capability-review_publish")
+        self.assertEqual(
+            self.reviewer.calls[0]["check_token"], "capability-check_publish"
+        )
         self.assertTrue(self.reviewer.calls[0]["auto_approve"])
         self.assertEqual(self.learner.calls[0]["token"], "capability-learning_write")
         self.assertEqual(self.replier.calls[0]["token"], "capability-issue_reply")
-        self.assertTrue(self.replier.calls[0]["auto_approve"])
 
     def test_publish_review_forwards_blocker_candidates(self):
         options = GitHubWriteOptions(auto_review=True, github_writes=True)

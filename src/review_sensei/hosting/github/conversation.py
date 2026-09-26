@@ -1027,7 +1027,6 @@ class ConversationPublisher:
         app_slug: str,
         root_comment_id: int,
         source_kind: str = "inline",
-        auto_approve: bool = True,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
@@ -1134,7 +1133,6 @@ class ConversationPublisher:
                     root_comment_id=resolved_root,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    auto_approve=auto_approve,
                     root_is_blocking_finding=root_is_blocking_finding,
                 )
                 return ReplyResult(
@@ -1218,7 +1216,6 @@ class ConversationPublisher:
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
                         app_slug=app_slug,
-                        auto_approve=auto_approve,
                         root_is_blocking_finding=root_is_blocking_finding,
                     )
                     return ReplyResult(
@@ -1245,7 +1242,6 @@ class ConversationPublisher:
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
                         app_slug=app_slug,
-                        auto_approve=auto_approve,
                         root_is_blocking_finding=root_is_blocking_finding,
                     )
                     return ReplyResult(
@@ -1278,9 +1274,18 @@ class ConversationPublisher:
         root_comment_id: int | None,
         head_sha: str,
         app_slug: str,
-        auto_approve: bool,
         root_is_blocking_finding: bool,
     ) -> None:
+        """Resolve one thread and re-run the exact-head approval decision.
+
+        The resolution itself proves nothing: the approval decision is made from
+        the eligibility document the publication persisted for this exact head,
+        so a resolved thread, a moved head, or an absent document withholds
+        instead of approving on a caller's word. A missing document is not an
+        error: the reply has already been published, and the remaining required
+        fixes stay visible in the review and its threads.
+        """
+
         self._resolve_review_thread(
             token=token,
             repository=repository,
@@ -1291,13 +1296,22 @@ class ConversationPublisher:
         if not root_is_blocking_finding:
             return
         try:
+            eligibility = self.finalizer.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if eligibility is None:
+                return
             self.finalizer.finalize(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
-                enabled=auto_approve,
+                eligibility=eligibility,
             )
         except (GitHubHTTPTransientError, GitHubPublicationTransientError) as exc:
             raise GitHubConversationTransientError(

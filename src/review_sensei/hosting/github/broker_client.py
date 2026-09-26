@@ -132,6 +132,7 @@ class BrokerClient:
             if capability not in {
                 "review_publish",
                 "review_status",
+                "check_publish",
                 "inline_reply",
                 "issue_reply",
                 "learning_write",

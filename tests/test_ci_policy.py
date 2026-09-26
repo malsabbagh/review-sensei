@@ -667,7 +667,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("recovery-artifact.json"), 6)
         self.assertEqual(text.count("Publish or promote"), 3)
         self.assertNotIn("after AI resolution", text)
-        self.assertIn("auto_approve_args", text)
+        # Only the three publish steps carry the approval boolean: reply
+        # finalization re-reads the persisted eligibility of the review
+        # published for this head instead of trusting a caller flag.
+        self.assertEqual(
+            sum(
+                1
+                for line in text.splitlines()
+                if line.strip() == "AUTO_APPROVE: ${{ inputs.enable_auto_approve }}"
+            ),
+            3,
+        )
+        self.assertNotIn("auto_approve_args", text)
         self.assertEqual(text.count("reply_exit=$?"), 3)
         self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 3)
         self.assertEqual(
@@ -808,10 +819,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             )
             reply = _step_block(job, reply_name)
             self.assertIn("GITHUB_TOKEN: ${{ github.token }}", reply)
-            self.assertIn("AUTO_APPROVE: ${{ inputs.enable_auto_approve }}", reply)
-            self.assertIn("auto_approve_args=()", reply)
-            self.assertIn("auto_approve_args+=(--enable-auto-approve)", reply)
-            self.assertIn('"${auto_approve_args[@]}"', reply)
+            # Approval finalization inside `github reply` re-reads the
+            # persisted eligibility of the review published for this head, so
+            # the reply step never carries a caller-supplied approval boolean.
+            self.assertNotIn("AUTO_APPROVE", reply)
+            self.assertNotIn("auto_approve_args", reply)
+            self.assertNotIn("--enable-auto-approve", reply)
+            self.assertNotIn("--no-auto-approve", reply)
             self.assertIn("github reply \\", reply)
             self.assertIn("reply_exit=$?", reply)
             self.assertIn("grep -E '^(replied_and_resolved|", reply)

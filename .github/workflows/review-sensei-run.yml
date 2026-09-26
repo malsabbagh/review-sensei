@@ -1079,7 +1079,6 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
           BACKEND_MODEL: ${{ vars.REVIEWSENSEI_CLOUD_MODEL }}
@@ -1119,12 +1118,6 @@ jobs:
               raise SystemExit(1)
           PY
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            auto_approve_args+=(--no-auto-approve)
-          fi
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url "$OLLAMA_BASE_URL" \
@@ -1132,7 +1125,7 @@ jobs:
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+            --allow-write --enable-reply > "$reply_output"
           reply_exit=$?
           set -e
           reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
@@ -1602,8 +1595,9 @@ jobs:
 
       - name: Generate and publish OpenRouter mention reply
         id: reply
-        # Approval finalization is inside `github reply --enable-auto-approve`,
-        # matching cloud/local. There is no separate YAML finalizer step.
+        # Approval finalization is inside `github reply`, matching cloud/local:
+        # it re-reads the persisted eligibility of the review published for
+        # this head. There is no separate YAML finalizer step.
         if: inputs.operation == 'reply' && inputs.enable_github_writes == 'true' && inputs.enable_mention_replies == 'true'
         env:
           MODE: ${{ inputs.mode }}
@@ -1616,7 +1610,6 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALLER_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model }}
           HOSTED_REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
@@ -1661,12 +1654,6 @@ jobs:
           fi
           export MODEL OPENROUTER_UPSTREAM_PROVIDER
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            auto_approve_args+=(--no-auto-approve)
-          fi
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider openrouter --model "$MODEL" \
@@ -1674,7 +1661,7 @@ jobs:
             --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+            --allow-write --enable-reply > "$reply_output"
           reply_exit=$?
           set -e
           reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"
@@ -2143,7 +2130,6 @@ jobs:
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
           OLLAMA_MODEL: ${{ needs.validate-provider-mode.outputs.normalized_model || vars.REVIEWSENSEI_MODEL || vars.REVIEWSENSEI_LOCAL_MODEL || 'qwen3.5:4b' }}
-          AUTO_APPROVE: ${{ inputs.enable_auto_approve }}
         run: |
           "$RUNNER_TEMP/review-sensei-venv/bin/python" - <<'PY'
           import os
@@ -2174,12 +2160,6 @@ jobs:
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:11434/api/tags >/dev/null
           ollama show "$OLLAMA_MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$AUTO_APPROVE" == "true" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          elif [[ "$AUTO_APPROVE" == "false" ]]; then
-            auto_approve_args+=(--no-auto-approve)
-          fi
           set +e
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
             --generate --provider ollama --base-url http://127.0.0.1:11434/api \
@@ -2187,7 +2167,7 @@ jobs:
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}" > "$reply_output"
+            --allow-write --enable-reply > "$reply_output"
           reply_exit=$?
           set -e
           reply_status="$(grep -E '^(replied_and_resolved|already_replied_and_resolved|replied|already_replied|skipped_source_gone|skipped_no_mention|skipped_unauthorized|skipped_edited_source|skipped_pr_state|skipped_stale_head|skipped_fork)$' "$reply_output" | tail -n 1 || true)"

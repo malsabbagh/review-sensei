@@ -41,14 +41,23 @@ from ...session import (
     should_skip_automation,
 )
 from ...verifier import CandidateFinding, PublishableReview
-from .approval import has_blocking_findings, has_human_adjudication_findings
+from .approval import (
+    has_blocking_findings,
+    has_human_adjudication_findings,
+    qualification_state_for_publication,
+)
 from .broker_client import BrokerClient
+from .checks import REVIEW_POLICY_MODES
 from .conversation import (
     ConversationPublisher,
     PreparedConversation,
     ReplyResult,
 )
-from .errors import GitHubPublicationError
+from .errors import (
+    GitHubBrokerClientError,
+    GitHubHTTPTransientError,
+    GitHubPublicationError,
+)
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher, LearningPRResult
 from .publication import (
@@ -60,15 +69,31 @@ from .publication import (
 
 @dataclass(frozen=True)
 class GitHubWriteOptions:
-    """GitHub publication switches with default-on approval safety gates."""
+    """GitHub publication switches with default-on approval safety gates.
+
+    ``reviews_policy`` is the canonical ``github.reviews`` mode. It is
+    ``None`` for callers that only have the legacy approval boolean, which then
+    selects the compatible mode: approving eligible reviews, or enforcing
+    required fixes through the check gate without approving.
+    """
 
     auto_review: bool = False
     auto_approve: bool = True
+    reviews_policy: str | None = None
     github_writes: bool = False
     learning_prs: bool = False
     mention_replies: bool = False
     upload_artifacts: bool = False
     github_session_ledger: bool = False
+
+    def review_policy(self) -> str:
+        """Return the effective review policy mode for this invocation."""
+
+        if self.reviews_policy is None:
+            return "auto-approve" if self.auto_approve else "blocking"
+        if self.reviews_policy not in REVIEW_POLICY_MODES:
+            raise GitHubPublicationError("review policy mode is invalid")
+        return self.reviews_policy
 
 
 class GitHubApplication:
@@ -733,6 +758,7 @@ class GitHubApplication:
                 if prepared_publishable is not None and not publisher_has_prepare
                 else result
             )
+            review_policy = options.review_policy()
             publisher_arguments: dict[str, Any] = {
                 "token": token,
                 "repository": repository,
@@ -744,7 +770,19 @@ class GitHubApplication:
                 "result": publisher_result,
                 "diff": diff,
                 "app_slug": app_slug,
-                "auto_approve": options.auto_approve,
+                # The policy mode is the single approval authority: the legacy
+                # boolean is resolved into it, so a caller cannot ask for
+                # approval while the mode withholds it or the reverse.
+                "auto_approve": review_policy == "auto-approve",
+                "reviews_policy": review_policy,
+                "check_token": self._check_capability_token(exchange_input),
+                "qualification": qualification_state_for_publication(
+                    provider=result.provider,
+                    model=result.model,
+                    provider_identity=_provider_identity_from_context(
+                        configuration_context
+                    ),
+                ),
                 "candidates": candidates,
                 "snapshot": snapshot,
                 "snapshot_sha256": snapshot_sha256,
@@ -1080,6 +1118,20 @@ class GitHubApplication:
         )
         return result
 
+    def _check_capability_token(self, exchange_input: str) -> str | None:
+        """Request Checks: write for the merge gate, degrading to no gate.
+
+        The gate is a separate authority from review publication, so a broker
+        that does not grant it must not suppress the review itself. A missing
+        token withholds approval instead: the run then reports that the gate
+        was not published rather than implying enforcement it did not have.
+        """
+
+        try:
+            return self.broker.exchange(exchange_input, capability="check_publish")
+        except (GitHubBrokerClientError, GitHubHTTPTransientError):
+            return None
+
     def _session_ledger_for_token(
         self,
         token: str,
@@ -1189,10 +1241,12 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "operator-mode recovery cannot re-admit a serialized result"
             )
-        token = self.broker.exchange(
-            oidc_token or self.broker.request_oidc_token(),
-            capability="review_publish",
-        )
+        exchange_input = oidc_token or self.broker.request_oidc_token()
+        token = self.broker.exchange(exchange_input, capability="review_publish")
+        review_policy = options.review_policy()
+        # A recovery publishes through the same gate as the run it replaces, so
+        # the check conclusion always describes the review that is standing for
+        # this head rather than whichever attempt happened to finish last.
         return self.reviewer.publish(
             token=token,
             repository=repository,
@@ -1204,7 +1258,13 @@ class GitHubApplication:
             result=result,
             diff=diff,
             app_slug=app_slug,
-            auto_approve=options.auto_approve,
+            auto_approve=review_policy == "auto-approve",
+            reviews_policy=review_policy,
+            check_token=self._check_capability_token(exchange_input),
+            qualification=qualification_state_for_publication(
+                provider=result.provider,
+                model=result.model,
+            ),
             convergence_policy=convergence_policy,
         )
 
@@ -1309,7 +1369,6 @@ class GitHubApplication:
             app_slug=app_slug,
             root_comment_id=root_comment_id,
             source_kind=source_kind,
-            auto_approve=options.auto_approve,
         )
 
     def generate_and_publish_reply(
@@ -1374,7 +1433,6 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
-                auto_approve=options.auto_approve,
             )
         finally:
             self.replier.remove_processing_reaction(
@@ -1384,6 +1442,22 @@ class GitHubApplication:
                 source_kind=prepared.source_kind,
                 reaction_id=reaction.reaction_id,
             )
+
+
+def _provider_identity_from_context(
+    configuration_context: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Return the trusted provider document bound to a configuration context.
+
+    Publication only trusts provider details that the analyzed run itself
+    recorded, so an approval decision can never rest on ambient environment
+    that merely happened to be set when the review was published.
+    """
+
+    if not isinstance(configuration_context, Mapping):
+        return None
+    provider = configuration_context.get("provider")
+    return provider if isinstance(provider, Mapping) else None
 
 
 def _open_broker_session(

@@ -214,7 +214,7 @@ class CutoverDefaultTests(unittest.TestCase):
         self.assertIn("blocking=true", writes[0]["comments"][0]["body"])
         self.assertEqual(len(calls), expected_calls)
 
-    def test_default_policy_admitted_blocker_forces_request_changes(self):
+    def test_default_policy_publishes_an_admitted_blocker_as_a_comment(self):
         comment = ReviewComment(
             path="src/app.py",
             line=2,
@@ -246,7 +246,9 @@ class CutoverDefaultTests(unittest.TestCase):
             for method, url, body in calls
             if method == "POST" and url.endswith("/pulls/2/reviews")
         ]
-        self.assertEqual([body["event"] for body in writes], ["REQUEST_CHANGES"])
+        # The stable check is the only imposed merge gate (ADR 0056), so an
+        # admitted blocker stays an inline finding on the comment review.
+        self.assertEqual([body["event"] for body in writes], ["COMMENT"])
         self.assertEqual(len(writes[0]["comments"]), 1)
         self.assertIn("blocking=true", writes[0]["comments"][0]["body"])
 

@@ -2355,12 +2355,14 @@ diff --git a/src/helper.py b/src/helper.py
 class _Broker:
     def __init__(self):
         self.exchanges = 0
+        self.capabilities: list[str | None] = []
 
     def request_oidc_token(self):
         return "oidc"
 
     def exchange(self, token, *, capability=None):
         self.exchanges += 1
+        self.capabilities.append(capability)
         return "capability"
 
 
@@ -2647,7 +2649,10 @@ class PublicationTransactionTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(reviewer.calls, 1)
-        self.assertEqual(broker.exchanges, 1)
+        # A checkpoint reuse still exchanges exactly the two review
+        # capabilities -- the review itself and its gate -- and nothing for a
+        # new reservation or a provider inference.
+        self.assertEqual(broker.capabilities, ["review_publish", "check_publish"])
         record = ledger.load(IDENTITY).record
         self.assertEqual(record.completed_initial_reviews, 1)
         self.assertEqual(record.transaction.phase, "publication_succeeded")
@@ -3000,7 +3005,7 @@ class PublicationTransactionTests(unittest.TestCase):
             )
 
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(broker.exchanges, 1)
+        self.assertEqual(broker.capabilities, ["review_publish", "check_publish"])
         self.assertEqual(reviewer.calls, 1)
         self.assertEqual(
             local_ledger.load(IDENTITY).record.transaction.phase,

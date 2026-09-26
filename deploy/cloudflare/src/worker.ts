@@ -93,6 +93,7 @@ export function setupErrorCode(error: unknown): string {
 
 const BROKER_CAPABILITIES = new Set([
   "review_publish",
+  "check_publish",
   "review_session",
   "review_status",
   "inline_reply",

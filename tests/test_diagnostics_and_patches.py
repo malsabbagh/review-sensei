@@ -19,6 +19,7 @@ from review_sensei.diagnostics import (
     run_doctor,
 )
 from review_sensei.errors import ReviewInputError
+from review_sensei.hosting.github.checks import REVIEW_CHECK_NAME
 from review_sensei.patches import (
     MAX_PATCH_FILES,
     MAX_PATCH_METADATA_BYTES,
@@ -47,6 +48,18 @@ class DiagnosticsTests(unittest.TestCase):
                 for check in report["checks"]
             )
         )
+
+    def test_doctor_reports_the_expected_check_identity_and_producer(self):
+        report = run_doctor()
+        gate = next(
+            check for check in report["checks"] if check["name"] == "review-gate"
+        )
+        # The gate check states the identity an administrator requires and the
+        # producer it must be bound to; doctor never claims enforcement itself.
+        self.assertEqual(gate["status"], "pass")
+        self.assertIn(REVIEW_CHECK_NAME, gate["detail"])
+        self.assertIn("administrator", gate["detail"])
+        self.assertIn("required", gate["detail"])
 
     def test_plan_never_enables_writes_or_provider_calls(self):
         report = build_plan(diff=DIFF, repository="owner/repo", pull_request=3)

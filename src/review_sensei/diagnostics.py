@@ -817,6 +817,25 @@ def run_doctor(
             "opt-in trusted-base symbol context is disabled by default",
         )
     )
+    from .hosting.github.checks import REVIEW_CHECK_NAME, required_check_identity
+    from .hosting.github.setup import SETUP_APP_LOGIN
+
+    gate_identity = required_check_identity(app_slug=SETUP_APP_LOGIN)
+    checks.append(
+        DiagnosticCheck(
+            "review-gate",
+            "pass",
+            (
+                "the merge gate is the check "
+                f"{gate_identity['name']!r} produced by App "
+                f"{gate_identity['producer']!r}; "
+                f"{REVIEW_CHECK_NAME!r} must be marked required by a repository "
+                "administrator (ReviewSensei cannot read or change branch "
+                "protection), the App needs Checks: write, and GitHub never "
+                "runs required checks on App-authored pull requests"
+            ),
+        )
+    )
     manifest_path = compatibility_manifest
     if manifest_path is None:
         configured_manifest = os.getenv(
