@@ -90,7 +90,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0032`](../adr/0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | Durable blocking markers and a shared finalizer ignore unresolved non-blocking findings and converge after review publication or blocking-thread resolution |
 | [`0030`](../adr/0030-gate-app-approvals-on-resolved-review-threads-and-exact-head-review-safety.md) | Superseded | Gate App approvals on resolved review threads and exact-head review safety | Bounded GraphQL thread sweep; clean reruns can promote same-head comments |
 | [`0034`](../adr/0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | Typed `resolve` decision, exact-head/App-root GraphQL guards, and deterministic approval finalization after a blocking resolution |
-| [`0035`](../adr/0035-request-changes-for-blocking-findings.md) | Proposed | Request changes for unresolved blocking findings | Blocking findings emit `REQUEST_CHANGES`; a later same-head `APPROVE` wins only after those roots resolve |
+| [`0035`](../adr/0035-request-changes-for-blocking-findings.md) | Superseded | Request changes for unresolved blocking findings | Superseded by ADR 0057; the head-bound `ReviewSensei` check run is the single enforcement authority |
 | [`0036`](../adr/0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | Advisory stale/conflict signals; feedback is not trusted review context |
 | [`0037`](../adr/0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40; Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [`0040`](../adr/0040-community-managed-enterprise-boundary.md) | Proposed | Community / Managed / Enterprise product boundary | #89; MIT Community source preserved; official ops distinct from copyright; future commercial layer separate |
@@ -105,6 +105,7 @@ transport calls; future GitHub publishers consume only validated
 | [`0051`](../adr/0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 C7; default stays `legacy` at that slice, superseded by 0055 |
 | [`0052`](../adr/0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 F1; one reservation, one checkpoint, retryable publication phases |
 | [`0055`](../adr/0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7; migration and release-readback remain explicit operator gates |
+| [`0057`](../adr/0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority | #181 F; reviews stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
 Ownership, trademark, and licensing inventory:
 [`docs/ownership-and-licensing.md`](../ownership-and-licensing.md),

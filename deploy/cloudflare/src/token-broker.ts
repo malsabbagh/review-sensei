@@ -13,10 +13,15 @@ const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
   review_publish: { "pull_requests": "write" },
+  // The merge gate is a check run, so enforcing github.reviews: blocking (or
+  // the default auto-approve mode) needs Checks: write. It is a separate
+  // capability from review publication so a broker that has not been granted
+  // it still publishes reviews and withholds approval instead.
+  check_publish: { checks: "write" },
   // Session authority is separate from publication authority, but it asks for
   // no extra GitHub permission: the durable session is an issue comment, so
   // pull-request write is sufficient. ADR 0022/0006 register the App without
-  // Checks: write, and this broker never requests it.
+  // Checks: write, and only the check_publish capability above requests it.
   review_session: { "pull_requests": "write" },
   review_status: { "pull_requests": "read" },
   inline_reply: { "pull_requests": "write" },

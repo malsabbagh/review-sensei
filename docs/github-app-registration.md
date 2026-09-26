@@ -56,6 +56,7 @@ Request only the permissions needed by the features you deploy:
 | Permission | Access | Why |
 | --- | --- | --- |
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
+| `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Without it, reviews are still published and approval is withheld with the `check_permission` diagnostic |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
@@ -64,7 +65,16 @@ Setup provisions no repository variables, so `Variables` is not requested and
 is not needed: setup and capability token requests never name the retired
 scope, and a token response that still reports it fails closed.
 
-Do not request organization administration, secrets, checks, or
+`Checks: write` belongs to the App that publishes the review, because a check
+run is owned by its producing App and a required check is matched to that
+producer. An administrator who makes `ReviewSensei` a required check selects it
+by the App's slug, so do not register a second App for checks. Note that GitHub
+does not run required checks on pull requests authored by the App itself, so an
+App-authored pull request can never be gated by its own check; ReviewSensei
+withholds approval for those pull requests and reports `app_authored` instead of
+pretending the gate applies.
+
+Do not request organization administration, secrets, or
 unrelated repository permissions, including `Issues: write`, unless a separate
 design explicitly requires them. ReviewSensei does not reply on ordinary
 issues. GitHub documents the permission model in

@@ -49,11 +49,24 @@ def placement_responses(*, required=False):
     return [json_response([]), json_response({"message": "Not Found"}, 404)]
 
 
-def make_http(responses):
+def make_http(responses, routes=()):
+    """Build a fake transport from a positional queue and optional routes.
+
+    ``routes`` holds ``(matches, respond)`` pairs consulted before the queue,
+    where ``matches`` receives the request and returns whether the route owns
+    it and ``respond`` returns that route's response. A route lets a test answer
+    URL-shaped infrastructure (such as the check-run gate) without threading its
+    responses through every ordered list it drives.
+    """
+
     calls = []
+    route_handlers = tuple(routes)
 
     def opener(request, timeout):
         calls.append((request.method, request.full_url, request.data))
+        for matches, respond in route_handlers:
+            if matches(request):
+                return respond(request)
         if isinstance(responses, list):
             response = responses.pop(0)
         else:

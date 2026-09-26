@@ -1056,21 +1056,14 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
         run: |
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$REVIEWS" == "auto-approve" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          else
-            auto_approve_args+=(--no-auto-approve)
-          fi
           reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
             --model "$MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}")
+            --allow-write --enable-reply)
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
@@ -1494,25 +1487,18 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           ROOT_COMMENT_ID: ${{ inputs.root_comment_id }}
           SOURCE_KIND: ${{ inputs.source_kind }}
-          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
         run: |
           # The same local prerequisite check the review path uses, so a reply
           # never reaches an unreachable server or a missing model.
           curl --fail --silent --show-error --max-time 10 "$BASE_URL/tags" >/dev/null
           ollama show "$MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
-          auto_approve_args=()
-          if [[ "$REVIEWS" == "auto-approve" ]]; then
-            auto_approve_args+=(--enable-auto-approve)
-          else
-            auto_approve_args+=(--no-auto-approve)
-          fi
           reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
             --model "$MODEL" --repository "$REPOSITORY" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
-            --allow-write --enable-reply "${auto_approve_args[@]}")
+            --allow-write --enable-reply)
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi

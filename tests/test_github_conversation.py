@@ -10,6 +10,7 @@ from review_sensei.hosting.github import (
     GitHubConversationTransientError,
     GitHubPublicationError,
 )
+from review_sensei.hosting.github.approval import approval_eligibility_from_result
 from review_sensei.hosting.github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
     MAX_CONTEXT_DIFF_BYTES,
@@ -20,7 +21,8 @@ from review_sensei.hosting.github.conversation import (
     has_standalone_sensei_mention,
     reply_marker,
 )
-from review_sensei.models import ConversationReply
+from review_sensei.hosting.github.publication import approval_eligibility_marker
+from review_sensei.models import ConversationReply, ReviewResult
 
 try:
     from fake_github_http import FakeHTTPResponse, json_response, make_http
@@ -49,6 +51,38 @@ def pr_payload(head_sha, *, fork=False, state="open", draft=False):
             "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
         },
     }
+
+
+def head_reviews(head_sha, *, app_slug="review-sensei[bot]", check_published=True):
+    """Return the review list a publication left behind for one exact head.
+
+    The list carries the persisted, hidden eligibility document a delayed
+    finalization reads back, so a reply-driven resolution can approve only from
+    evidence this App actually published for this head.
+    """
+
+    eligibility = approval_eligibility_from_result(
+        ReviewResult(
+            summary="Summary.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+        ),
+        head_sha=head_sha,
+        enabled=True,
+        app_authored=False,
+        qualification="not-required",
+        check_published=check_published,
+    )
+    return [
+        {
+            "id": 13,
+            "commit_id": head_sha,
+            "state": "COMMENTED",
+            "body": ("Review summary.\n\n" + approval_eligibility_marker(eligibility)),
+            "user": {"login": app_slug, "type": "Bot"},
+        }
+    ]
 
 
 class ConversationPublisherTests(unittest.TestCase):
@@ -1165,6 +1199,7 @@ class ConversationPublisherTests(unittest.TestCase):
                     }
                 }
             ),
+            json_response(head_reviews(head)),
             json_response(pr_payload(head)),
             json_response(
                 {
@@ -1172,7 +1207,7 @@ class ConversationPublisherTests(unittest.TestCase):
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
-                                    "nodes": [{"isResolved": True}],
+                                    "nodes": [],
                                     "pageInfo": {
                                         "hasNextPage": False,
                                         "endCursor": None,
@@ -1184,7 +1219,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 }
             ),
             json_response(pr_payload(head)),
-            json_response([]),
+            json_response(head_reviews(head)),
             json_response({"id": 13}, 200),
         ]
         http, calls = make_http(responses)
@@ -1204,6 +1239,9 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "replied_and_resolved")
         self.assertTrue(outcome.resolved)
         self.assertEqual(outcome.comment_id, 12)
+        # The resolution runs in a different process from the review that
+        # produced the evidence, so the delayed finalization re-reads the
+        # persisted eligibility document for the exact head before approving.
         self.assertEqual(
             [call[0] for call in calls],
             [
@@ -1217,21 +1255,68 @@ class ConversationPublisherTests(unittest.TestCase):
                 "GET",
                 "POST",
                 "GET",
+                "GET",
                 "POST",
                 "GET",
                 "GET",
                 "POST",
             ],
         )
+        self.assertEqual(
+            [
+                call[1]
+                .split("https://api.github.test", 1)[-1]
+                .rsplit("/repos/owner/repo", 1)[-1]
+                .split("?")[0]
+                for call in calls
+            ],
+            [
+                "/pulls/comments/11",
+                "/pulls/comments/10",
+                "/pulls/1/comments",
+                "/pulls/1",
+                "/pulls/1/comments/10/replies",
+                "/pulls/1",
+                "/graphql",
+                "/pulls/1",
+                "/graphql",
+                "/pulls/1/reviews",
+                "/pulls/1",
+                "/graphql",
+                "/pulls/1",
+                "/pulls/1/reviews",
+                "/pulls/1/reviews",
+            ],
+        )
         mutation = json.loads(calls[8][2].decode("utf-8"))
         self.assertEqual(mutation["operationName"], "ResolveReviewThread")
         self.assertEqual(mutation["variables"], {"input": {"threadId": "PRRT_thread"}})
+        scan = json.loads(calls[11][2].decode("utf-8"))
+        self.assertEqual(scan["operationName"], "ReviewThreads")
         approval = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(approval["event"], "APPROVE")
+        self.assertEqual(approval["commit_id"], head)
         self.assertNotIn("comments", approval)
 
     def test_ai_resolution_wraps_finalizer_publication_errors(self):
+        head = "b" * 40
+
         class FailingFinalizer:
+            def load_eligibility(self, **_kwargs):
+                return approval_eligibility_from_result(
+                    ReviewResult(
+                        summary="Summary.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    head_sha=head,
+                    enabled=True,
+                    app_authored=False,
+                    qualification="not-required",
+                    check_published=True,
+                )
+
             def finalize(self, **_kwargs):
                 raise GitHubPublicationError("finalization rejected")
 
@@ -1245,9 +1330,8 @@ class ConversationPublisherTests(unittest.TestCase):
                 repository="owner/repo",
                 pull_request=1,
                 root_comment_id=10,
-                head_sha="b" * 40,
+                head_sha=head,
                 app_slug="review-sensei[bot]",
-                auto_approve=True,
                 root_is_blocking_finding=True,
             )
 

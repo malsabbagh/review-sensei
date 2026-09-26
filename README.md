@@ -640,21 +640,33 @@ item only when the transport reports an oversized response. The 512 KiB
 transport ceiling remains unchanged. Fork pull requests fail closed before
 provider or broker access.
 
-When automatic review and GitHub writes are enabled, automatic approval applies
-by default; `github.reviews: blocking` or `github.reviews: advisory` in
-`.reviewsensei.yml` selects a non-approving policy instead.
-ReviewSensei publishes blocking findings as `REQUEST_CHANGES` and non-blocking
-findings as `COMMENT`, then invokes one shared, idempotent approval finalizer.
-It emits `APPROVE` for an eligible exact head when no unresolved ReviewSensei
-root is classified blocking. A later execution on the same commit still
-requests changes if blocking comments appear after an approval, and it
-approves after an earlier change request only once those blocking roots are
-resolved. Unresolved non-blocking ReviewSensei findings and human threads do
-not withhold approval. An unclassified ReviewSensei root, malformed or
-incomplete thread data, or a draft/closed/fork/stale/App-authored PR fails
-closed. The finalizer runs after review publication and after the AI resolves a
-blocking ReviewSensei thread; `@sensei` replies themselves remain ordinary
-comments. Existing approval markers prevent duplicate approvals.
+When automatic review and GitHub writes are enabled, automatic approval is on by
+default; `github.reviews: blocking` (publish and enforce, never automatically
+approve) or `github.reviews: advisory` (no ReviewSensei merge gate and no
+approval) in `.reviewsensei.yml` selects another policy.
+ReviewSensei publishes one exact-head `COMMENT` review with its summary and
+valid inline findings, and enforces through one stable `ReviewSensei` check run
+bound to that head and to the App that produced it: `success` for a complete
+review with no required fixes, `failure` when required fixes remain, and
+`action_required` for a partial, incomplete, or unpublished review. An earlier
+conclusion on the same head is superseded by a pending `in_progress` write, so
+a finished review cannot stand in for one that is still running. No persistent
+`REQUEST_CHANGES` is emitted as a second gate. A repository administrator must
+mark `ReviewSensei` required for it to gate merges; `review-sensei doctor`
+reports the check identity and producing App, and nothing reads or changes
+branch protection.
+
+The same mode also runs one shared, idempotent approval finalizer. It emits
+`APPROVE` for an eligible exact head whose review is complete and qualified and
+whose bounded thread sweep finds no unresolved blocking ReviewSensei root.
+Unresolved non-blocking ReviewSensei findings and human threads do not withhold
+approval. An unclassified ReviewSensei root, malformed or incomplete thread
+data, an unverified configuration, or a draft/closed/fork/stale/App-authored PR
+fails closed or reports why approval was withheld. The finalizer runs after
+review publication and after the AI resolves a blocking ReviewSensei thread;
+`@sensei` replies themselves remain ordinary comments. Existing approval markers
+prevent duplicate approvals, and ReviewSensei never calls a merge endpoint or
+enables auto-merge.
 
 The approval policy is deliberately conservative: explicit blocking metadata,
 or an unclassified canonical `critical`/`high` severity, blocks approval.
