@@ -150,22 +150,27 @@ checking out or executing head code. The installed package exposes this through
 `review-sensei prepare-diff`, so consumer repositories that do not contain Code
 Sensei source can still run the reviewed workflow.
 
-The workflow boundary defaults to local Ollama at
-`http://127.0.0.1:11434/api` with no API key and the `qwen3.5:4b` model. The
-example therefore runs on a
-maintainer-controlled self-hosted Linux runner labelled `ollama`; the runner
-must have Ollama and the selected model provisioned before dispatch. The
-workflow binds checkout to `github.event.repository.default_branch` and
-rejects a dispatch `base_ref` that differs from that trusted branch. Cloud
-provider egress is explicit opt-in only: an operator must set the repository
-variable `REVIEWSENSEI_PROVIDER_MODE=cloud`, which uses the fixed Ollama Cloud
-endpoint and the `deepseek-v4.1-flash:cloud` model by default, and requires
-`OLLAMA_API_KEY`. The workflow does not accept an arbitrary provider URL input,
-so a dispatch-supplied URL cannot redirect the provider credential. The example
-workflow first installs the exact requested `review-sensei==X.Y.Z` package from
-PyPI into a separate `RUNNER_TEMP` virtual environment. When that exact
-distribution is unavailable, it installs the same version from the executing
-workflow commit SHA in the public GitHub repository; other PyPI failures remain fatal. The
+The generated caller is a read-only bootstrap: it grants `contents: read`,
+`pull-requests: read`, `issues: read`, and `id-token: write`, routes only on
+event shape, and calls the public reusable workflow at the configured tag with
+the event context. Every product decision — provider backend, model, endpoint,
+credential reference, runner requirement, and the GitHub policy switches —
+comes from the trusted configuration commit resolved by the reusable workflow,
+never from the caller. The reusable workflow resolves one plan from the
+package, then runs the backend on the runner kind that plan requires: cloud
+backends on GitHub-hosted compute, local backends on the operator's
+self-hosted runner (labelled `ollama` in the example), which must have Ollama
+and the selected model provisioned before dispatch. Provider egress is explicit
+opt-in through the canonical `inference.backend` field (or the optional
+`REVIEWSENSEI_PROVIDER` Actions variable); the local backend uses
+`http://127.0.0.1:11434/api` with no API key, cloud backends use their fixed
+allowlisted endpoints and require the matching repository secret. The workflow
+does not accept an arbitrary provider URL input, so a dispatch-supplied URL
+cannot redirect the provider credential. The workflow installs the exact
+requested `review-sensei==X.Y.Z` package from PyPI into a separate
+`RUNNER_TEMP` virtual environment. When that exact distribution is
+unavailable, it installs the same version from the executing workflow commit
+SHA in the public GitHub repository; other PyPI failures remain fatal. The
 install step verifies the package metadata and dependency set before review.
 
 ## GitHub App setup migration boundary
@@ -179,10 +184,13 @@ generated files, partial current setups, byte-exact managed v3 workflows, and
 managed v4 workflows following another valid public tag produce a reviewable
 migration PR; all current files are a no-op. A custom, malformed,
 or future-version file produces a no-write result so repository-owned workflow
-content is not overwritten. The migration branch is rebuilt from the current
-default branch and changes only
-generated paths, preserving learnings, variables, secrets, and unrelated
-repository files. See ADR 0021.
+content is not overwritten. The migration branch is created once per base and
+tag (`review-sensei/setup-v5-<base12>-<tag>`), is reusable only when its parent
+is the named base SHA, its author is the ReviewSensei App, its content is
+exactly current, and its comparison changes generated paths only, and is never
+force-moved; it changes no path outside the generated set, preserving
+learnings, secrets, existing variables, and unrelated repository files. See ADR
+0021.
 
 Public JSON documents are versioned under `src/review_sensei/schemas/` with v1
 `$id` values. The `review_sensei.schemas` module and
@@ -466,8 +474,10 @@ verifies webhook signatures, deduplicates deliveries, and opens a reviewable
 setup pull request per newly selected repository. The setup service never
 includes secrets, private keys, installation tokens, raw webhook bodies,
 authorization headers, or GitHub API bodies in generated files or PR bodies. It
-creates missing visible provider-mode/model repository variables without
-overwriting operator values; `OLLAMA_API_KEY` remains a user-managed secret.
+creates the generated files and no repository variables at all; the only two
+product overrides are the optional `REVIEWSENSEI_PROVIDER` and
+`REVIEWSENSEI_MODEL` Actions variables, and `OLLAMA_API_KEY` remains a
+user-managed secret.
 The generated manual cleanup workflow can open a PR deleting the setup files,
 but the App cannot do that automatically after uninstall because its token is
 revoked.

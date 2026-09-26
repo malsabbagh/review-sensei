@@ -437,7 +437,6 @@ class TriggerCommandTests(unittest.TestCase):
     def test_issue_comment_routes_maintainer_command(self):
         resolution = resolve_issue_comment("@sensei review pause", _pull())
         self.assertEqual(resolution.operation, "command")
-        self.assertEqual(resolution.enable_review, "false")
 
     def test_issue_comment_routes_finding_command_and_plain_text_to_reply(self):
         finding = resolve_issue_comment(
