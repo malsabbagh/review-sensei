@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 
@@ -62,6 +63,32 @@ def escape_markdown_label(value: str) -> str:
 
 def _escape_markdown_label(value: str) -> str:
     return escape_markdown_label(value)
+
+
+# The control, format, and surrogate categories the repository already rejects
+# in paths, configuration, and workflow values.  Provider output is bounded but
+# not restricted to printable text, so the terminal renderer neutralizes them
+# at the sink instead of rejecting a legitimate review.
+_TERMINAL_UNSAFE_CATEGORIES = frozenset(("Cc", "Cf", "Cs"))
+
+
+def escape_terminal_text(value: str) -> str:
+    """Neutralize terminal control characters in untrusted review text.
+
+    The text format is written to a terminal, where a provider-supplied escape
+    sequence could move the cursor, recolor the session, or rewrite lines that
+    were already printed.  Line feeds and tabs are the format's own line
+    structure and stay; every other control, format, or surrogate character is
+    rendered as its hexadecimal code point so the text stays readable and inert.
+    """
+
+    return "".join(
+        character
+        if character in "\n\t"
+        or unicodedata.category(character) not in _TERMINAL_UNSAFE_CATEGORIES
+        else f"\\x{ord(character):02x}"
+        for character in value
+    )
 
 
 def _metadata_icon(icons: dict[str, str], value: str) -> str:
@@ -217,22 +244,26 @@ def _finding_labels(comment: ReviewComment) -> str:
 
 
 def render_review_text(result: ReviewResult) -> str:
-    """Render one validated review result as readable terminal text."""
+    """Render one validated review result as readable terminal text.
+
+    Provider-supplied text reaches a terminal here, so every external string is
+    neutralized with :func:`escape_terminal_text` before it is printed.
+    """
 
     groups = _finding_groups(result)
     lines = [
         f"ReviewSensei review: {result.review_status}",
-        f"provider: {result.provider}",
+        f"provider: {escape_terminal_text(result.provider)}",
     ]
     if result.model:
-        lines.append(f"model: {result.model}")
+        lines.append(f"model: {escape_terminal_text(result.model)}")
     if result.coverage_mode != "full":
         lines.append(f"coverage: {result.coverage_mode}")
     for title, group in groups:
         lines.append(f"{title.lower()}: {len(group)}")
     lines.append("")
     lines.append("Summary:")
-    lines.append(result.summary)
+    lines.append(escape_terminal_text(result.summary))
     index = 0
     for title, group in groups:
         if not group:
@@ -247,7 +278,7 @@ def render_review_text(result: ReviewResult) -> str:
             if labels:
                 lines.append(f"   {labels}")
             lines.append("")
-            lines.append(comment.body)
+            lines.append(escape_terminal_text(comment.body))
     return "\n".join(lines) + "\n"
 
 
@@ -285,6 +316,7 @@ def render_review(result: ReviewResult, *, output_format: str) -> str:
 __all__ = [
     "RENDER_FORMATS",
     "escape_markdown_label",
+    "escape_terminal_text",
     "format_review_comment",
     "format_review_summary",
     "humanize_lens",

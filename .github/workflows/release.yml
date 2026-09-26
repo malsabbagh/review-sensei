@@ -206,6 +206,11 @@ jobs:
             --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
           python scripts/validate_npm_package.py dist/npm --expected-version "${GITHUB_REF_NAME#v}"
           python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - name: Install standalone smoke oracle
+        # The oracle runs the checkout source's `python -m review_sensei`; this
+        # job validates the packaged launcher, so the installed distribution is
+        # only the comparison baseline.
+        run: python -m pip install --disable-pip-version-check .
       - name: Run native smoke harness where the runner can execute it
         shell: bash
         run: |

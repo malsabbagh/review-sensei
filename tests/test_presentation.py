@@ -1,10 +1,11 @@
 import unittest
 
-from review_sensei.models import ReviewComment
+from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.presentation import (
     format_review_comment,
     format_review_summary,
     humanize_lens,
+    render_review_text,
 )
 
 
@@ -147,6 +148,48 @@ class ReviewPresentationTests(unittest.TestCase):
         summary = "Summary with **existing** formatting.\n"
         comments = (ReviewComment(path="src/app.py", line=2, body="finding"),)
         self.assertEqual(format_review_summary(summary, comments), summary)
+
+
+class ReviewTextRenderingTests(unittest.TestCase):
+    def test_text_output_neutralizes_terminal_escape_sequences(self):
+        result = ReviewResult(
+            summary="Terminal says \x1b[31mred\x1b[0m.",
+            provider="fixture",
+            review_status="complete",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="First line.\nsecond \x07line",
+                ),
+            ),
+        )
+
+        rendered = render_review_text(result)
+
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\x07", rendered)
+        self.assertIn(r"Terminal says \x1b[31mred\x1b[0m.", rendered)
+        self.assertIn(r"second \x07line", rendered)
+        # The format's own line structure survives: multi-line text keeps its
+        # line feeds, so escaping never rewrites the layout of a review.
+        self.assertIn("First line.\nsecond", rendered)
+
+    def test_text_output_neutralizes_provider_and_model_identity(self):
+        result = ReviewResult(
+            summary="Looks fine.",
+            provider="fixture\x1b",
+            model="qwen\r[2J",
+            review_status="complete",
+            comments=(),
+        )
+
+        rendered = render_review_text(result)
+
+        self.assertIn(r"provider: fixture\x1b", rendered)
+        self.assertIn(r"model: qwen\x0d[2J", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\r", rendered)
 
 
 if __name__ == "__main__":

@@ -144,6 +144,16 @@ moves a review's endpoint or timeout. A backend that requires no credential
 never receives one implicitly: an exported cloud key does not travel to a local
 endpoint unless `--api-key-env` names it.
 
+A review that finds a retired provider variable still exported prints one
+`review-sensei: warning:` line on stderr naming its replacement, so an upgraded
+script or installed workflow is never silently redirected. The warned names are
+`REVIEWSENSEI_PROVIDER_MODE`, `OLLAMA_MODEL`, `REVIEWSENSEI_LOCAL_MODEL`,
+`REVIEWSENSEI_CLOUD_MODEL`, `OPENROUTER_MODEL`, `OLLAMA_BASE_URL`,
+`OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, `OLLAMA_TIMEOUT_SECONDS`,
+`OPENAI_TIMEOUT_SECONDS`, `REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS`,
+`OPENROUTER_TIMEOUT_SECONDS`, and `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS`.
+The review still runs with the canonical resolution above.
+
 Optional GitHub App-identity publication uses `GITHUB_APP_PRIVATE_KEY` by
 default through `EnvPrivateKeySource`. The App id is passed when constructing
 `GitHubAppAuth`. See [`docs/github-app-auth.md`](github-app-auth.md) for
@@ -156,10 +166,12 @@ default model is `deepseek-v4.1-flash:cloud`.
 
 Optional CLI `--profile` selects a named preset (`local-private`,
 `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`)
-without changing these workflow defaults. Installed GitHub workflows continue to
-use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
-an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
-the reusable workflow.
+without changing these workflow defaults. A preset is a complete selection:
+`--provider`, `--model`, `--base-url`, `--api-key-env`, and `--timeout-seconds`
+are optional, and a value that disagrees with the preset fails closed. Installed
+GitHub workflows continue to use `REVIEWSENSEI_PROVIDER_MODE` and do not pass
+`--profile`. `fast-triage` is an explicit CLI/OpenAI path and requires
+`OPENAI_API_KEY`; it is not enabled by the reusable workflow.
 
 Installed GitHub workflows select the backend with one variable and one shared
 model:

@@ -73,7 +73,10 @@ Exit codes:
 | `review` | `2` | The review could not complete, the input was invalid, or an operator must intervene |
 
 `review` exits `1` and `2` print one `review-sensei: reason=<token>` line on
-stderr; the selected `--format` never changes the exit. Hosts and launchers that
+stderr; the selected `--format` never changes the exit. Exit `2` includes
+`already_published`: a repeated `--local-session` review of an unchanged change
+serves its persisted round instead of paying for a second inference call, so it
+reports that reason and writes no new document. Hosts and launchers that
 select a lane from the historical 0/1 contract pass `--exit-semantics
 operational`: it exits `1` only for the failure statuses
 (`provider_failed`, `budget_exhausted`, `publication_failed`,

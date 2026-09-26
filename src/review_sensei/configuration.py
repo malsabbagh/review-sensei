@@ -163,6 +163,40 @@ RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS: Mapping[str, str] = {
         "set advanced.routing.upstream_provider in .reviewsensei.yml"
     ),
 }
+# Provider variables the canonical review resolver deliberately does not
+# consult: a review resolves its backend, model, endpoint, and timeout from the
+# command line, the two documented overrides, the configuration file, and the
+# packaged defaults only.  Installed workflows and older local scripts still
+# export these names, so a review warns when one is present instead of silently
+# resolving a different inference configuration than the caller declared.
+IGNORED_PROVIDER_ENVIRONMENT_SETTINGS: Mapping[str, str] = {
+    "REVIEWSENSEI_PROVIDER_MODE": (
+        "select inference.backend ('local-ollama' or 'cloud-ollama') or set "
+        "REVIEWSENSEI_PROVIDER"
+    ),
+    "OLLAMA_MODEL": "pass --model or set inference.model",
+    "REVIEWSENSEI_LOCAL_MODEL": "pass --model or set inference.model",
+    "REVIEWSENSEI_CLOUD_MODEL": "pass --model or set inference.model",
+    "OPENROUTER_MODEL": "pass --model or set inference.model",
+    "OLLAMA_BASE_URL": "pass --base-url or set advanced.endpoint.base_url",
+    "OPENAI_BASE_URL": "pass --base-url or set advanced.endpoint.base_url",
+    "OPENROUTER_BASE_URL": "pass --base-url or set advanced.endpoint.base_url",
+    "OLLAMA_TIMEOUT_SECONDS": (
+        "pass --timeout-seconds or set advanced.resources.timeout_seconds"
+    ),
+    "OPENAI_TIMEOUT_SECONDS": (
+        "pass --timeout-seconds or set advanced.resources.timeout_seconds"
+    ),
+    "REVIEWSENSEI_OPENAI_TIMEOUT_SECONDS": (
+        "pass --timeout-seconds or set advanced.resources.timeout_seconds"
+    ),
+    "OPENROUTER_TIMEOUT_SECONDS": (
+        "pass --timeout-seconds or set advanced.resources.timeout_seconds"
+    ),
+    "REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS": (
+        "pass --timeout-seconds or set advanced.resources.timeout_seconds"
+    ),
+}
 
 
 class ConfigurationError(ReviewInputError):
@@ -258,6 +292,14 @@ def documented_backend_names() -> tuple[str, ...]:
 
     return tuple(
         name for name, defaults in BACKEND_DEFAULTS.items() if not defaults.internal
+    )
+
+
+def internal_backend_names() -> tuple[str, ...]:
+    """Return the canonical backend names reserved for repository test seams."""
+
+    return tuple(
+        name for name, defaults in BACKEND_DEFAULTS.items() if defaults.internal
     )
 
 
