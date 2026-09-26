@@ -4,6 +4,7 @@ import {
   SetupContinuationError,
   parseSetupContinuationRequest,
   runSetupContinuationStep,
+  setupRetryDelayMs,
   type SetupContinuationOps,
   type SetupContinuationRequest,
 } from "../src/setup-continuation";
@@ -122,6 +123,7 @@ describe("setup continuation steps", () => {
         repositories: ["acme/one", "acme/two"],
         attempt: 1,
       }),
+      setupRetryDelayMs(0),
     );
     expect(continuation.release).not.toHaveBeenCalled();
   });
@@ -160,7 +162,7 @@ describe("setup continuation steps", () => {
       expect.objectContaining({
         repositories: ["acme/two"],
         failed: true,
-        failureCode: "github_app_custom_debug",
+        failureCode: "setup_failed",
         failedRepository: "acme/one",
       }),
     );
@@ -179,6 +181,7 @@ describe("setup continuation steps", () => {
         repositories: ["acme/one", "acme/two"],
         attempt: 1,
       }),
+      setupRetryDelayMs(0),
     );
   });
 
@@ -217,5 +220,46 @@ describe("setup continuation steps", () => {
       failureCount: 1,
       repository: "acme/one",
     });
+  });
+
+  it("releases a recorded failure when no repositories remain", async () => {
+    const continuation = ops();
+    await runSetupContinuationStep(
+      request({
+        repositories: [],
+        failed: true,
+        failureCode: "github_request_rejected_404",
+        failureCount: 1,
+        failedRepository: "acme/one",
+      }),
+      continuation,
+    );
+    expect(continuation.complete).not.toHaveBeenCalled();
+    expect(continuation.resolveRepositories).not.toHaveBeenCalled();
+    expect(continuation.release).toHaveBeenCalledWith({
+      errorCode: "github_request_rejected_404",
+      failureCount: 1,
+      repository: "acme/one",
+    });
+  });
+
+  it("retries an omitted repository list after a bounded delay", async () => {
+    const continuation = ops({
+      resolveRepositories: vi.fn(async () => {
+        throw new GitHubSetupTransientError("github_request_transient_503");
+      }),
+    });
+    await runSetupContinuationStep(
+      request({ repositories: [], unresolved: true }),
+      continuation,
+    );
+    expect(continuation.schedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositories: [],
+        unresolved: true,
+        attempt: 1,
+      }),
+      setupRetryDelayMs(0),
+    );
   });
 });

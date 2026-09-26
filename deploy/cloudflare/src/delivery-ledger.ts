@@ -3,6 +3,7 @@ import type { WorkerEnv } from "./env";
 import { advanceStoredContinuation } from "./setup-alarm";
 import {
   parseSetupContinuationRequest,
+  recordedErrorCode,
   type SetupContinuationRequest,
   type SetupFailureSummary,
 } from "./setup-continuation";
@@ -64,7 +65,7 @@ function validRequest(data: LedgerRequest): data is LedgerRequest & {
 }
 
 const MAX_CONTINUATION_BYTES = 64 * 1024;
-const ERROR_CODE_PATTERN = /^[a-z0-9_]{1,80}$/;
+const MAX_RETRY_DELAY_MS = 5_000;
 
 interface ContinuationRow {
   app_id: number;
@@ -108,9 +109,18 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
         digest TEXT NOT NULL,
         cursor TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
+        not_before INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (app_id, delivery_id)
       )
     `);
+    const columns = [
+      ...this.sql.exec("PRAGMA table_info(setup_continuations)"),
+    ] as unknown as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "not_before")) {
+      this.sql.exec(
+        "ALTER TABLE setup_continuations ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0",
+      );
+    }
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS setup_outcomes (
         app_id INTEGER NOT NULL,
@@ -129,6 +139,24 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
    * throws, and the cursor stays put until that step finishes.
    */
   async alarm(): Promise<void> {
+    // Arm even when this invocation returns before a step, including a cursor
+    // inserted while GitHub work is in flight and a retry that is not due yet.
+    // A thrown step leaves the cursor unchanged and skips this arm so the
+    // runtime retry is the only wake.
+    let scheduleNext = true;
+    try {
+      await this.advanceOneContinuation();
+    } catch (error) {
+      scheduleNext = false;
+      throw error;
+    } finally {
+      if (scheduleNext) {
+        await this.armIfPending();
+      }
+    }
+  }
+
+  private async advanceOneContinuation(): Promise<void> {
     const row = this.oldestContinuation();
     if (!row) {
       return;
@@ -137,18 +165,34 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     try {
       input = parseSetupContinuationRequest(JSON.parse(row.cursor) as unknown);
     } catch {
+      const summary = {
+        errorCode: "setup_continuation_invalid",
+        failureCount: 1,
+        repository: null,
+      };
+      this.recordOutcome(row.app_id, row.delivery_id, summary);
       this.deleteContinuation(row.app_id, row.delivery_id);
       this.release({
         app_id: row.app_id,
         delivery_id: row.delivery_id,
         digest: row.digest,
       });
-      await this.armIfPending();
+      console.error("github_setup_incomplete", {
+        delivery_id: row.delivery_id,
+        error_code: summary.errorCode,
+        failure_count: summary.failureCount,
+      });
       return;
     }
     const advance = await advanceStoredContinuation(this.env, input);
     if (advance.kind === "continue") {
-      this.saveContinuation(row.app_id, row.delivery_id, row.digest, advance.next);
+      this.saveContinuation(
+        row.app_id,
+        row.delivery_id,
+        row.digest,
+        advance.next,
+        advance.delayMs,
+      );
       this.refreshLease(row.app_id, row.delivery_id, row.digest);
     } else if (advance.kind === "complete") {
       this.complete({
@@ -167,11 +211,10 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
       this.deleteContinuation(row.app_id, row.delivery_id);
       console.error("github_setup_incomplete", {
         delivery_id: row.delivery_id,
-        error_code: advance.summary.errorCode,
+        error_code: recordedErrorCode(advance.summary.errorCode),
         failure_count: advance.summary.failureCount,
       });
     }
-    await this.armIfPending();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -371,6 +414,13 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     if (!accepted) {
       return json({ error: "delivery_conflict" }, 409);
     }
+    // Requests do not interleave until the next await. Re-read the cursor
+    // first so a release that already removed it does not wake an empty queue.
+    // A release during setAlarm itself can only produce that empty wake.
+    if (!this.ownsContinuation(data.app_id, data.delivery_id)) {
+      await this.armIfPending();
+      return json({ state: "scheduled" });
+    }
     try {
       await this.ctx.storage.setAlarm(Date.now());
     } catch {
@@ -385,15 +435,20 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     deliveryId: string,
     digest: string,
     cursor: SetupContinuationRequest,
+    delayMs = 0,
   ): void {
     const now = Date.now();
+    const delay = Number.isSafeInteger(delayMs) && delayMs > 0
+      ? Math.min(delayMs, MAX_RETRY_DELAY_MS)
+      : 0;
     this.sql.exec(
-      "INSERT OR REPLACE INTO setup_continuations (app_id, delivery_id, digest, cursor, updated_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO setup_continuations (app_id, delivery_id, digest, cursor, updated_at, not_before) VALUES (?, ?, ?, ?, ?, ?)",
       appId,
       deliveryId,
       digest,
       JSON.stringify(cursor),
       now,
+      now + delay,
     );
   }
 
@@ -408,10 +463,22 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
   private oldestContinuation(): ContinuationRow | null {
     const rows = [
       ...this.sql.exec(
-        "SELECT app_id, delivery_id, digest, cursor, updated_at FROM setup_continuations ORDER BY updated_at LIMIT 1",
+        "SELECT app_id, delivery_id, digest, cursor, updated_at FROM setup_continuations WHERE not_before <= ? ORDER BY updated_at LIMIT 1",
+        Date.now(),
       ),
     ] as unknown as ContinuationRow[];
     return rows[0] ?? null;
+  }
+
+  private ownsContinuation(appId: number, deliveryId: string): boolean {
+    const rows = [
+      ...this.sql.exec(
+        "SELECT app_id FROM setup_continuations WHERE app_id = ? AND delivery_id = ? LIMIT 1",
+        appId,
+        deliveryId,
+      ),
+    ] as unknown as Array<{ app_id: number }>;
+    return rows.length > 0;
   }
 
   private refreshLease(appId: number, deliveryId: string, digest: string): void {
@@ -431,9 +498,7 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     deliveryId: string,
     summary: SetupFailureSummary,
   ): void {
-    const errorCode = ERROR_CODE_PATTERN.test(summary.errorCode)
-      ? summary.errorCode
-      : "setup_failed";
+    const errorCode = recordedErrorCode(summary.errorCode);
     const repository =
       typeof summary.repository === "string" && summary.repository.length > 0
         ? summary.repository
@@ -450,11 +515,23 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
   }
 
   private async armIfPending(): Promise<void> {
-    const rows = [
-      ...this.sql.exec("SELECT app_id FROM setup_continuations LIMIT 1"),
+    const now = Date.now();
+    const ready = [
+      ...this.sql.exec(
+        "SELECT app_id FROM setup_continuations WHERE not_before <= ? LIMIT 1",
+        now,
+      ),
     ] as unknown as Array<{ app_id: number }>;
-    if (rows.length > 0) {
-      await this.ctx.storage.setAlarm(Date.now());
+    if (ready.length > 0) {
+      await this.ctx.storage.setAlarm(now);
+      return;
+    }
+    const waiting = [
+      ...this.sql.exec("SELECT MIN(not_before) AS not_before FROM setup_continuations"),
+    ] as unknown as Array<{ not_before: number | null }>;
+    const notBefore = waiting[0]?.not_before;
+    if (typeof notBefore === "number") {
+      await this.ctx.storage.setAlarm(notBefore);
     }
   }
 }

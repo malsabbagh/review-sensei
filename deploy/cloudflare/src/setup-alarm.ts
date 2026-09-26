@@ -8,7 +8,7 @@ import {
 } from "./setup-continuation";
 
 export type ContinuationAdvance =
-  | { kind: "continue"; next: SetupContinuationRequest }
+  | { kind: "continue"; next: SetupContinuationRequest; delayMs: number }
   | { kind: "complete" }
   | { kind: "release"; summary: SetupFailureSummary };
 
@@ -52,8 +52,8 @@ export async function advanceStoredContinuation(
     },
     resolveRepositories: () =>
       new GitHubSetupService(env).selectSetupRepositories(continuationDelivery(input, [])),
-    schedule: async (next) => {
-      advance = { kind: "continue", next };
+    schedule: async (next, delayMs = 0) => {
+      advance = { kind: "continue", next, delayMs };
     },
     complete: async () => {
       advance = { kind: "complete" };

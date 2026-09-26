@@ -9,7 +9,8 @@
 - Reconcile GitHub App installs that select multiple repositories one
   repository per Durable Object alarm so setup stays within the Workers Free
   plan CPU and subrequest limits. The webhook claims the delivery and arms
-  that alarm before it returns 202.
+  that alarm before it returns 202. Transient GitHub failures wait one second,
+  then five seconds, before the next attempt.
 
 ## 0.6.7 - 2026-09-23
 

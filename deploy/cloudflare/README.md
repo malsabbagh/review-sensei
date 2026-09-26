@@ -166,10 +166,11 @@ webhook invocation exceeds those limits and GitHub records a 503. The webhook
 claims the delivery, stores a bounded continuation cursor, arms the ledger
 alarm, and only then returns 202. Each alarm reconciles one repository and
 arms the next. The lease is refreshed on each step. Transient GitHub failures
-retry that repository. A fatal configuration error, or a repository that still
-fails after retries, releases the claim and retains an outcome record with the
-stable error code, failure count, and repository slug for the one-hour
-retention window. Logs record the error code and failure count only.
+retry that repository after one second, then five seconds. A fatal configuration
+error, or a repository that still fails after retries, releases the claim and
+retains an outcome record with the stable error code, failure count, and
+repository slug for the one-hour retention window. Logs record the error code
+and failure count only.
 
 When setup permissions are available, the Worker also creates the missing
 repository variables `REVIEWSENSEI_PROVIDER_MODE=local`,

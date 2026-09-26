@@ -24,6 +24,7 @@ interface CursorRow {
   digest: string;
   cursor: string;
   updated_at: number;
+  not_before: number;
 }
 
 interface OutcomeRow {
@@ -42,8 +43,16 @@ class MemorySql {
 
   exec<T = Record<string, unknown>>(query: string, ...args: unknown[]): Iterable<T> {
     const normalized = query.replaceAll(/\s+/g, " ").trim();
-    if (normalized.startsWith("CREATE TABLE") || normalized.startsWith("DELETE FROM deliveries WHERE state = 'accepted'") || normalized.startsWith("DELETE FROM setup_outcomes")) {
+    if (
+      normalized.startsWith("CREATE TABLE") ||
+      normalized.startsWith("DELETE FROM deliveries WHERE state = 'accepted'") ||
+      normalized.startsWith("DELETE FROM setup_outcomes") ||
+      normalized.startsWith("ALTER TABLE")
+    ) {
       return [] as T[];
+    }
+    if (normalized.startsWith("PRAGMA table_info(setup_continuations)")) {
+      return [{ name: "not_before" }] as T[];
     }
     if (normalized.startsWith("SELECT app_id, delivery_id, digest, state, lease_until, updated_at FROM deliveries")) {
       return this.deliveries.filter(
@@ -77,6 +86,7 @@ class MemorySql {
         digest: args[2] as string,
         cursor: args[3] as string,
         updated_at: args[4] as number,
+        not_before: args[5] as number,
       };
       const index = this.cursors.findIndex(
         (row) => row.app_id === next.app_id && row.delivery_id === next.delivery_id,
@@ -89,7 +99,32 @@ class MemorySql {
       return [] as T[];
     }
     if (normalized.startsWith("SELECT app_id, delivery_id, digest, cursor, updated_at FROM setup_continuations")) {
-      return [...this.cursors].sort((left, right) => left.updated_at - right.updated_at).slice(0, 1) as T[];
+      const now = args[0] as number;
+      return [...this.cursors]
+        .filter((row) => row.not_before <= now)
+        .sort((left, right) => left.updated_at - right.updated_at)
+        .slice(0, 1) as T[];
+    }
+    if (normalized.startsWith("SELECT app_id FROM setup_continuations WHERE app_id = ?")) {
+      return this.cursors
+        .filter((row) => row.app_id === args[0] && row.delivery_id === args[1])
+        .slice(0, 1)
+        .map((row) => ({ app_id: row.app_id })) as T[];
+    }
+    if (normalized.startsWith("SELECT app_id FROM setup_continuations WHERE not_before")) {
+      const now = args[0] as number;
+      return this.cursors
+        .filter((row) => row.not_before <= now)
+        .slice(0, 1)
+        .map((row) => ({ app_id: row.app_id })) as T[];
+    }
+    if (normalized.startsWith("SELECT MIN(not_before)")) {
+      if (this.cursors.length === 0) {
+        return [{ not_before: null }] as T[];
+      }
+      return [{
+        not_before: Math.min(...this.cursors.map((row) => row.not_before)),
+      }] as T[];
     }
     if (normalized.startsWith("UPDATE deliveries SET lease_until")) {
       const row = this.deliveries.find(
@@ -280,5 +315,67 @@ describe("delivery continuation alarm", () => {
         repository: "acme/one",
       }),
     ]);
+  });
+
+  it("waits out the retry delay before the same continuation is due again", async () => {
+    const { ledger, sql, alarms } = harness();
+    await post(ledger, "claim", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+    });
+    await post(ledger, "schedule", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+      continuation: continuation(),
+    });
+    const before = Date.now();
+    advanceStoredContinuation.mockResolvedValue({
+      kind: "continue",
+      next: continuation({ attempt: 1 }),
+      delayMs: 1000,
+    });
+
+    await ledger.alarm();
+
+    expect(sql.cursors[0]?.not_before).toBeGreaterThanOrEqual(before + 1000);
+    expect(alarms.at(-1)).toBe(sql.cursors[0]?.not_before);
+  });
+
+  it("records an outcome when the stored cursor cannot be parsed", async () => {
+    const { ledger, sql } = harness();
+    await post(ledger, "claim", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+    });
+    sql.cursors.push({
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+      cursor: "{",
+      updated_at: Date.now(),
+      not_before: 0,
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await ledger.alarm();
+
+    expect(sql.cursors).toEqual([]);
+    expect(sql.deliveries).toEqual([]);
+    expect(sql.outcomes).toEqual([
+      expect.objectContaining({
+        error_code: "setup_continuation_invalid",
+        failure_count: 1,
+        repository: null,
+      }),
+    ]);
+    expect(error).toHaveBeenCalledWith("github_setup_incomplete", {
+      delivery_id: "delivery-1",
+      error_code: "setup_continuation_invalid",
+      failure_count: 1,
+    });
+    error.mockRestore();
   });
 });

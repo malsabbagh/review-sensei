@@ -355,9 +355,16 @@ async function ledgerRequest(
     }),
   });
   if (!request.ok) {
-    throw new Error("delivery ledger request failed");
+    throw new LedgerRequestError(request.status);
   }
   return (await request.json()) as LedgerReply;
+}
+
+class LedgerRequestError extends Error {
+  constructor(readonly status: number) {
+    super(status === 409 ? "delivery_conflict" : "delivery ledger request failed");
+    this.name = "LedgerRequestError";
+  }
 }
 
 async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
@@ -439,6 +446,19 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
         // The lease expiry remains the recovery path if completion fails.
       }
       return response({ accepted: false }, 202);
+    }
+    if (error instanceof LedgerRequestError && error.status === 409) {
+      try {
+        await ledgerRequest(env, "release", app, deliveryId, digest);
+      } catch {
+        // The lease expiry remains the recovery path if release also fails.
+      }
+      console.error("github_setup_failed", {
+        delivery_id: deliveryId,
+        event,
+        error_code: "delivery_conflict",
+      });
+      return response({ error: "delivery_conflict", error_code: "delivery_conflict" }, 409, true);
     }
     try {
       await ledgerRequest(env, "release", app, deliveryId, digest);

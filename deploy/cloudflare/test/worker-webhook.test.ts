@@ -137,6 +137,17 @@ describe("multi-repository installation webhooks", () => {
     expect(actions).toEqual(["claim", "schedule", "release"]);
   });
 
+  it("returns 409 and releases the claim when scheduling conflicts", async () => {
+    const { response, actions } = await webhook(["acme/one", "acme/two"], 409);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "delivery_conflict",
+      error_code: "delivery_conflict",
+    });
+    expect(processDelivery).not.toHaveBeenCalled();
+    expect(actions).toEqual(["claim", "schedule", "release"]);
+  });
+
   it("keeps a single selected repository on the webhook invocation", async () => {
     const { response, actions } = await webhook(["acme/one"]);
     expect(response.status).toBe(202);

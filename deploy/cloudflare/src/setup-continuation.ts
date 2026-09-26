@@ -40,7 +40,7 @@ export interface SetupFailureSummary {
 export interface SetupContinuationOps {
   processRepository(repository: string): Promise<void>;
   resolveRepositories(): Promise<string[]>;
-  schedule(next: SetupContinuationRequest): Promise<void>;
+  schedule(next: SetupContinuationRequest, delayMs?: number): Promise<void>;
   complete(): Promise<void>;
   release(summary: SetupFailureSummary): Promise<void>;
   report(error: unknown): void;
@@ -207,13 +207,45 @@ const TRANSIENT_CODES = new Set([
   "public_workflow_tag_unavailable",
 ]);
 
-const STATUS_CODE = /^(github_request_transient|github_installation_token_failed|github_workflow_tag_unavailable)_(\d{3})$/;
+const STATUS_CODE = /^(github_request_transient|github_request_rejected|github_installation_token_failed|github_workflow_tag_unavailable)_(\d{3})$/;
+
+/** Static setup codes safe to store and log. Anything else collapses to setup_failed. */
+const RECORDED_EXACT_CODES = new Set([
+  ...FATAL_CODES,
+  ...TRANSIENT_CODES,
+  "github_request_failed",
+  "github_request_transient",
+  "github_repository_invalid",
+  "github_response_invalid",
+  "github_response_too_large",
+  "github_installation_repository_invalid",
+  "setup_failed",
+]);
+
+const SETUP_RETRY_DELAYS_MS = [1_000, 5_000] as const;
+
+/**
+ * Wait before repeating a transient step. The GitHub client only surfaces the
+ * status code, so this stays a short bounded delay: 1s, then 5s.
+ */
+export function setupRetryDelayMs(attempt: number): number {
+  const index = Math.max(0, Math.min(attempt, SETUP_RETRY_DELAYS_MS.length - 1));
+  return SETUP_RETRY_DELAYS_MS[index] ?? SETUP_RETRY_DELAYS_MS[1];
+}
+
+/** Keep outcome rows and logs on the allowlist. Unknown tokens become setup_failed. */
+export function recordedErrorCode(code: string): string {
+  if (RECORDED_EXACT_CODES.has(code) || STATUS_CODE.test(code)) {
+    return code;
+  }
+  return "setup_failed";
+}
 
 /** Stable code for logs and the delivery outcome. Unknown prose collapses to setup_failed. */
 export function continuationErrorCode(error: unknown): string {
   const message = errorMessage(error);
   if (/^[a-z0-9_]{1,80}$/.test(message)) {
-    return message;
+    return recordedErrorCode(message);
   }
   return EXACT_PROSE_CODES[message] ?? "setup_failed";
 }
@@ -288,6 +320,9 @@ function withFailure(
 }
 
 async function finish(input: SetupContinuationRequest, ops: SetupContinuationOps): Promise<void> {
+  // An earlier skip stays the terminal outcome after later repositories
+  // succeed. failedRepository names that skipped repository, and the delivery
+  // is released rather than completed.
   if (input.failed) {
     await ops.release(failureSummary(input));
     return;
@@ -311,7 +346,10 @@ export async function runSetupContinuationStep(
     } catch (error) {
       const failure = continuationFailure(error, input.attempt);
       if (failure === "retry") {
-        await ops.schedule({ ...input, attempt: input.attempt + 1 });
+        await ops.schedule(
+          { ...input, attempt: input.attempt + 1 },
+          setupRetryDelayMs(input.attempt),
+        );
         return;
       }
       const failed = withFailure(input, error, null);
@@ -350,7 +388,10 @@ export async function runSetupContinuationStep(
   } catch (error) {
     const failure = continuationFailure(error, input.attempt);
     if (failure === "retry") {
-      await ops.schedule({ ...input, attempt: input.attempt + 1 });
+      await ops.schedule(
+        { ...input, attempt: input.attempt + 1 },
+        setupRetryDelayMs(input.attempt),
+      );
       return;
     }
     const failed = withFailure(input, error, current);
