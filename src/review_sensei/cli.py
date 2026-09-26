@@ -605,9 +605,9 @@ def _parser() -> argparse.ArgumentParser:
         description="Run a provider-neutral AI review against a unified diff.",
         epilog=(
             "Additional commands use the same first-token dispatch as "
-            "prepare-diff, evaluate, github, and promotion: doctor, plan, "
-            "learnings, evaluate-convergence, prepare-diff, evaluate, github, "
-            "promotion, resolve-hosted-openrouter."
+            "prepare-diff, evaluate, github, and promotion: config, doctor, "
+            "plan, learnings, evaluate-convergence, prepare-diff, evaluate, "
+            "github, promotion, resolve-hosted-openrouter."
         ),
     )
     parser.add_argument(
@@ -2436,6 +2436,96 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
         return 1
 
 
+def _config_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-sensei config",
+        description=(
+            "Validate and explain the canonical .reviewsensei.yml configuration. "
+            "These commands make no inference calls and request no write capability."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for name, summary in (
+        (
+            "validate",
+            "Validate the configuration and the effective provider/model combination",
+        ),
+        ("show", "Print the effective configuration"),
+    ):
+        subparser = subparsers.add_parser(name, help=summary)
+        subparser.add_argument(
+            "--config",
+            type=Path,
+            help="Alternative configuration file (default: .reviewsensei.yml)",
+        )
+        subparser.add_argument(
+            "--provider", default=None, help="Preview an invocation backend override"
+        )
+        subparser.add_argument(
+            "--model", default=None, help="Preview an invocation model override"
+        )
+        if name == "show":
+            subparser.add_argument(
+                "--explain",
+                action="store_true",
+                help="Include provenance and the omitted fields' default sources",
+            )
+    return parser
+
+
+def _run_config_command(arguments: list[str]) -> int:
+    args = _config_parser().parse_args(arguments)
+    try:
+        from .configuration import (
+            ConfigurationError,
+            customization_directories,
+            load_configuration,
+            render_configuration,
+            resolve_inference,
+            retired_environment_remedies,
+        )
+
+        configuration = load_configuration(args.config)
+        resolved = resolve_inference(
+            configuration,
+            cli_provider=args.provider,
+            cli_model=args.model,
+        )
+        retired = retired_environment_remedies(
+            os.environ, include_provider_overrides=False
+        )
+        if retired:
+            detail = "; ".join(
+                f"{name} ({replacement})" for name, replacement in retired
+            )
+            raise ConfigurationError(
+                "retired settings are present in the environment and have no "
+                f"effect: {detail}. Move them into "
+                f"{configuration.source or '.reviewsensei.yml'}"
+            )
+        customization = customization_directories(configuration)
+        if args.command == "validate":
+            print(
+                "configuration valid: "
+                f"{configuration.source or 'none (packaged defaults)'} "
+                f"(schema {configuration.schema}); backend {resolved.backend}; "
+                f"model {resolved.model}"
+            )
+            return 0
+        sys.stdout.write(
+            render_configuration(
+                configuration,
+                resolved,
+                explain=bool(getattr(args, "explain", False)),
+                customization=customization,
+            )
+        )
+        return 0
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+
+
 _OFFLINE_COMMANDS = {
     "doctor": _run_doctor_command,
     "plan": _run_plan_command,
@@ -2447,11 +2537,13 @@ _OFFLINE_COMMANDS = {
 def main(argv: list[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
-    # required argparse subparsers. doctor/plan/learnings/evaluate-convergence
-    # use the same first-token command map as prepare-diff, evaluate, github,
-    # and promotion.
+    # required argparse subparsers. config/doctor/plan/learnings/
+    # evaluate-convergence use the same first-token command map as prepare-diff,
+    # evaluate, github, and promotion.
     if args_list and args_list[0] in _OFFLINE_COMMANDS:
         return _OFFLINE_COMMANDS[args_list[0]](args_list[1:])
+    if args_list and args_list[0] == "config":
+        return _run_config_command(args_list[1:])
     if args_list and args_list[0] == "promotion":
         try:
             return _run_promotion(args_list[1:])
