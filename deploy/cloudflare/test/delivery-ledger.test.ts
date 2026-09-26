@@ -189,21 +189,23 @@ class MemorySql {
       });
       return [] as T[];
     }
-    if (normalized.startsWith("SELECT app_id FROM setup_continuations")) {
-      return this.cursors.slice(0, 1).map((row) => ({ app_id: row.app_id })) as T[];
-    }
     throw new Error(`unexpected SQL: ${normalized}`);
   }
 }
 
-function harness() {
+function harness(failAlarmAfter = Number.POSITIVE_INFINITY) {
   const sql = new MemorySql();
   const alarms: number[] = [];
+  let alarmCalls = 0;
   const state = {
     storage: {
       sql,
       transactionSync: <T>(callback: () => T): T => callback(),
       setAlarm: async (when: number) => {
+        alarmCalls += 1;
+        if (alarmCalls > failAlarmAfter) {
+          throw new Error("alarm storage unavailable");
+        }
         alarms.push(when);
       },
     },
@@ -375,6 +377,89 @@ describe("delivery continuation alarm", () => {
       delivery_id: "delivery-1",
       error_code: "setup_continuation_invalid",
       failure_count: 1,
+    });
+    error.mockRestore();
+  });
+
+  it("rearms at not_before when the only continuation is not due", async () => {
+    const { ledger, sql, alarms } = harness();
+    const notBefore = Date.now() + 5_000;
+    sql.cursors.push({
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+      cursor: JSON.stringify(continuation()),
+      updated_at: Date.now(),
+      not_before: notBefore,
+    });
+
+    await ledger.alarm();
+
+    expect(advanceStoredContinuation).not.toHaveBeenCalled();
+    expect(alarms).toEqual([notBefore]);
+  });
+
+  it("keeps the claim and cursor when arming the schedule alarm fails", async () => {
+    const { ledger, sql } = harness(0);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await post(ledger, "claim", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+    });
+
+    const scheduled = await post(ledger, "schedule", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+      continuation: continuation(),
+    });
+
+    expect(scheduled.status).toBe(503);
+    expect(sql.deliveries).toEqual([
+      expect.objectContaining({ state: "processing", delivery_id: "delivery-1" }),
+    ]);
+    expect(sql.cursors).toHaveLength(1);
+    expect(error).toHaveBeenCalledWith("github_setup_alarm_failed", {
+      error_code: "setup_alarm_unavailable",
+    });
+
+    const released = await post(ledger, "release", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+    });
+    expect(released.status).toBe(200);
+    expect(sql.deliveries).toEqual([]);
+    expect(sql.cursors).toEqual([]);
+    error.mockRestore();
+  });
+
+  it("logs and throws when the follow-up alarm cannot be armed", async () => {
+    const { ledger, sql } = harness(1);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await post(ledger, "claim", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+    });
+    await post(ledger, "schedule", {
+      app_id: 12345,
+      delivery_id: "delivery-1",
+      digest: DIGEST,
+      continuation: continuation(),
+    });
+    advanceStoredContinuation.mockResolvedValue({
+      kind: "continue",
+      next: continuation({ attempt: 1 }),
+      delayMs: 1000,
+    });
+
+    await expect(ledger.alarm()).rejects.toThrow("alarm storage unavailable");
+    expect(sql.cursors).toHaveLength(1);
+    expect(sql.deliveries[0]?.state).toBe("processing");
+    expect(error).toHaveBeenCalledWith("github_setup_alarm_failed", {
+      error_code: "setup_alarm_unavailable",
     });
     error.mockRestore();
   });

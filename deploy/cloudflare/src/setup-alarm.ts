@@ -1,5 +1,5 @@
 import type { WorkerEnv } from "./env";
-import { GitHubSetupService, type VerifiedDelivery } from "./github-app";
+import { GitHubSetupService, hasSetupPermissions, type VerifiedDelivery } from "./github-app";
 import {
   continuationErrorCode,
   runSetupContinuationStep,
@@ -50,8 +50,16 @@ export async function advanceStoredContinuation(
     processRepository: async (repository) => {
       await new GitHubSetupService(env).process(continuationDelivery(input, [repository]));
     },
-    resolveRepositories: () =>
-      new GitHubSetupService(env).selectSetupRepositories(continuationDelivery(input, [])),
+    resolveRepositories: () => {
+      // The stored permission map is the webhook snapshot. Skip the
+      // installation listing when it cannot set up a repository.
+      if (!hasSetupPermissions(input.permissions)) {
+        return Promise.resolve([]);
+      }
+      return new GitHubSetupService(env).selectSetupRepositories(
+        continuationDelivery(input, []),
+      );
+    },
     schedule: async (next, delayMs = 0) => {
       advance = { kind: "continue", next, delayMs };
     },

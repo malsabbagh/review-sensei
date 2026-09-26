@@ -158,7 +158,7 @@ function normalizePermissions(value: unknown): Record<string, string> {
   return permissions;
 }
 
-function hasSetupPermissions(permissions: Record<string, string>): boolean {
+export function hasSetupPermissions(permissions: Record<string, string>): boolean {
   return REQUIRED_SETUP_PERMISSIONS.every(
     (permission) => permissions[permission] === "write",
   );
@@ -615,6 +615,17 @@ export class GitHubSetupService {
     }
   }
 
+  /**
+   * Choose the repositories for one setup pass.
+   *
+   * A non-empty `repositories` list is the selection, and `repository` is
+   * added only when it is absent from that list. An installation
+   * created/new_permissions event whose selection is empty loads the
+   * installation repository list. That fallback uses `installationId`,
+   * `event`, and `action` only. The alarm passes both repository fields
+   * empty for an unresolved continuation, so it takes the same fallback.
+   * Permissions are not read here.
+   */
   async selectSetupRepositories(delivery: VerifiedDelivery): Promise<string[]> {
     if (delivery.suspended) {
       return [];

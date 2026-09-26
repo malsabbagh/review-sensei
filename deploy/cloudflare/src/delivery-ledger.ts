@@ -142,7 +142,9 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     // Arm even when this invocation returns before a step, including a cursor
     // inserted while GitHub work is in flight and a retry that is not due yet.
     // A thrown step leaves the cursor unchanged and skips this arm so the
-    // runtime retry is the only wake.
+    // runtime retry is the only wake. A failed arm after a saved step also
+    // throws, after logging setup_alarm_unavailable, so that same retry can
+    // arm the saved cursor.
     let scheduleNext = true;
     try {
       await this.advanceOneContinuation();
@@ -362,6 +364,7 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
         data.delivery_id,
         data.digest,
       );
+      this.deleteContinuation(data.app_id, data.delivery_id);
       return { state: "claimed" };
     });
   }
@@ -422,9 +425,11 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
       return json({ state: "scheduled" });
     }
     try {
-      await this.ctx.storage.setAlarm(Date.now());
+      await this.armAt(Date.now());
     } catch {
-      this.deleteContinuation(data.app_id, data.delivery_id);
+      // Leave the cursor stored. The webhook releases the claim on 503, and
+      // release removes that continuation. Deleting it here could drop a
+      // cursor written while setAlarm was in flight.
       return json({ error: "delivery_ledger_unavailable" }, 503);
     }
     return json({ state: "scheduled" });
@@ -523,7 +528,7 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
       ),
     ] as unknown as Array<{ app_id: number }>;
     if (ready.length > 0) {
-      await this.ctx.storage.setAlarm(now);
+      await this.armAt(now);
       return;
     }
     const waiting = [
@@ -531,7 +536,18 @@ export class DeliveryLedger extends DurableObject<WorkerEnv> {
     ] as unknown as Array<{ not_before: number | null }>;
     const notBefore = waiting[0]?.not_before;
     if (typeof notBefore === "number") {
-      await this.ctx.storage.setAlarm(notBefore);
+      await this.armAt(notBefore);
+    }
+  }
+
+  private async armAt(when: number): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(when);
+    } catch (error) {
+      console.error("github_setup_alarm_failed", {
+        error_code: "setup_alarm_unavailable",
+      });
+      throw error;
     }
   }
 }

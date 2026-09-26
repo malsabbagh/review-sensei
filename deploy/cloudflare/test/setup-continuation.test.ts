@@ -222,6 +222,52 @@ describe("setup continuation steps", () => {
     });
   });
 
+  it("keeps an earlier skip when a later repository is retried and then succeeds", async () => {
+    const retry = ops({
+      processRepository: vi.fn(async () => {
+        throw new GitHubSetupTransientError("github_request_transient_503");
+      }),
+    });
+    const skipped = request({
+      repositories: ["acme/two"],
+      failed: true,
+      failureCode: "setup_failed",
+      failureCount: 1,
+      failedRepository: "acme/one",
+    });
+    await runSetupContinuationStep(skipped, retry);
+    expect(retry.schedule).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositories: ["acme/two"],
+        attempt: 1,
+        failed: true,
+        failureCode: "setup_failed",
+        failureCount: 1,
+        failedRepository: "acme/one",
+      }),
+      setupRetryDelayMs(0),
+    );
+
+    const success = ops();
+    await runSetupContinuationStep(
+      request({
+        repositories: ["acme/two"],
+        attempt: 1,
+        failed: true,
+        failureCode: "setup_failed",
+        failureCount: 1,
+        failedRepository: "acme/one",
+      }),
+      success,
+    );
+    expect(success.complete).not.toHaveBeenCalled();
+    expect(success.release).toHaveBeenCalledWith({
+      errorCode: "setup_failed",
+      failureCount: 1,
+      repository: "acme/one",
+    });
+  });
+
   it("releases a recorded failure when no repositories remain", async () => {
     const continuation = ops();
     await runSetupContinuationStep(

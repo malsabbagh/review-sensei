@@ -10,7 +10,9 @@
   repository per Durable Object alarm so setup stays within the Workers Free
   plan CPU and subrequest limits. The webhook claims the delivery and arms
   that alarm before it returns 202. Transient GitHub failures wait one second,
-  then five seconds, before the next attempt.
+  then five seconds, before the next attempt. If the alarm cannot be armed,
+  the continuation stays stored, `setup_alarm_unavailable` is logged, and the
+  webhook release or the runtime retry recovers it.
 
 ## 0.6.7 - 2026-09-23
 

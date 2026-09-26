@@ -310,6 +310,8 @@ function withFailure(
   error: unknown,
   repository: string | null,
 ): SetupContinuationRequest {
+  // failureCode is the allowlisted code. The cursor, outcome row, and logs
+  // all keep that value rather than the raw error message.
   return {
     ...input,
     failed: true,
@@ -388,6 +390,9 @@ export async function runSetupContinuationStep(
   } catch (error) {
     const failure = continuationFailure(error, input.attempt);
     if (failure === "retry") {
+      // Spreading input keeps an earlier skip attached. One skipped
+      // repository stays the terminal outcome after later repositories retry
+      // and succeed.
       await ops.schedule(
         { ...input, attempt: input.attempt + 1 },
         setupRetryDelayMs(input.attempt),
