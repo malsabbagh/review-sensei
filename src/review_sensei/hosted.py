@@ -244,9 +244,9 @@ def render_hosted_plan(plan: HostedPlan, *, as_json: bool) -> str:
         return json.dumps(plan.to_dict(), indent=2) + "\n"
     credential = plan.credential_env or "none"
     if plan.credential_env:
-        credential += (
-            ", required" if plan.credential_required else ", optional"
-        ) + (", present" if plan.credential_present else ", absent")
+        credential += (", required" if plan.credential_required else ", optional") + (
+            ", present" if plan.credential_present else ", absent"
+        )
     lines = [
         f"backend: {plan.backend} ({plan.source_of('backend').detail})",
         f"model: {plan.model} ({plan.source_of('model').detail})",

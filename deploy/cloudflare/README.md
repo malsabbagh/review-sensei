@@ -60,20 +60,21 @@ GitHub rate limits and the configured App permissions.
   documented in [`docs/github-app-registration.md`](../../docs/github-app-registration.md).
 - The App's webhook URL set to the deployed Worker URL and JSON content type.
 
-The App needs `Contents: write`, `Pull requests: write`, `Variables: write`,
-and `Workflows: write` repository permissions. `Pull requests: write` covers
-reviews, inline replies, and top-level replies on pull-request conversations;
-the App does not need `Issues: write`. `Variables: write` lets the bootstrap
-create the visible `REVIEWSENSEI_*` defaults without touching secrets. GitHub's
-webhook and installation-token payloads expose this UI permission as
-`actions_variables`; the Worker accepts both names. `Workflows: write` is
-required because setup always writes generated workflow files. Enable the
-`Installation` and `Installation repositories` events.
+The App needs `Contents: write`, `Pull requests: write`, and `Workflows: write`
+repository permissions. `Pull requests: write` covers reviews, inline replies,
+and top-level replies on pull-request conversations; the App does not need
+`Issues: write`. Setup provisions no repository variables, so the App needs no
+`Variables` permission: no setup or capability token requests the retired
+scope, a webhook delivery from an installation that still carries it is
+handled exactly like one that does not, and an installation-token response
+that still reports it fails closed. `Workflows: write` is required because
+setup always writes generated workflow files. Enable the `Installation` and
+`Installation repositories` events.
 
-If the App was already installed before `Variables: write` or `Workflows: write` was added, accept
+If the App was already installed before `Workflows: write` was added, accept
 the updated permissions in the repository installation settings. GitHub then
 sends `installation.new_permissions_accepted`; that delivery is the retryable
-setup trigger and will create the missing variables and setup PR.
+setup trigger and creates the missing setup pull request.
 
 ## Configure and deploy
 
@@ -172,42 +173,47 @@ retains an outcome record with the stable error code, failure count, and
 repository slug for the one-hour retention window. Logs record the error code
 and failure count only.
 
-When setup permissions are available, the Worker also creates the missing
-repository variables `REVIEWSENSEI_PROVIDER_MODE=local`,
-`REVIEWSENSEI_LOCAL_MODEL=qwen3.5:4b`, and
-`REVIEWSENSEI_CLOUD_MODEL=deepseek-v4.1-flash:cloud`. Existing values are left
-unchanged. `OLLAMA_API_KEY` is a repository secret that the operator must add
-manually when switching the provider mode to `cloud`; the Worker never creates
-blank secrets.
+When setup permissions are available, the Worker creates the setup pull
+request and no repository variables at all: the generated files are the whole
+provisioned surface, and the only two product overrides are the optional
+`REVIEWSENSEI_PROVIDER` (`inference.backend`) and `REVIEWSENSEI_MODEL`
+(`inference.model`) Action variables an operator may set by hand. Cloud
+credentials are repository secrets the operator must add manually per backend:
+`OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`; the Worker never
+creates blank secrets.
 
 The generated setup PR includes a manual **Remove ReviewSensei setup** workflow.
 Running it uses the repository `GITHUB_TOKEN` to create a cleanup PR for the
-generated workflow/configuration files. An App installation token is revoked
-when the App is uninstalled, so the Worker cannot reliably create that PR from
-an `installation.deleted` webhook. Learnings, variables, and secrets are left
-for explicit operator cleanup.
+generated workflow/configuration files, including the retired
+`.github/review-sensei/config.yml` location. An App installation token is
+revoked when the App is uninstalled, so the Worker cannot reliably create that
+PR from an `installation.deleted` webhook. Learnings and secrets are left for
+explicit operator cleanup.
 
 ### Existing installations and setup migrations
 
-Generated files are marked `ReviewSensei setup version: 4`. On a new setup
+Generated files are marked `ReviewSensei setup version: 5`. On a new setup
 delivery, the Worker reads only the three generated paths from the repository's
 default branch, bounded to 128 KiB each. An older ReviewSensei setup (including
 the original unmarked workflow/configuration) causes the existing setup branch
 to be refreshed and a migration PR to be opened. A current setup is a no-op.
-The setup-v4 caller follows `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
+The setup-v5 caller follows `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml`
 at the configured `PUBLIC_WORKFLOW_TAG` (default `v5`); invalid values or an
 unavailable tag fail closed before any setup write.
 If a known path contains custom content, a malformed marker, or a future setup
 version, the Worker skips it without overwriting the file and reports the
-`skipped_unknown_setup` outcome in its internal result.
+`skipped_unknown_setup` outcome in its internal result. The retired
+`.github/review-sensei/config.yml` path is not part of the managed set: the
+Worker neither reads nor writes it, and the generated uninstall workflow is
+what retires it.
 
 The legacy catalog contains the union of byte-exact released pre-marker and
 setup-v2 Worker/Python artifacts. Current-v3 recognition is byte-exact for any
-valid public workflow SHA so v3 clients can migrate. Current-v4 recognition is
-byte-exact for the configured tag; a review workflow that follows another valid
-tag is managed stale content and is migrated. Edited or inconsistent content
-remains unknown. Migration uses a create-only branch named
-`review-sensei/setup-v4-<base12>-<tag>`. An existing branch is reusable only
+valid public workflow SHA so v3 clients can migrate. Current-v5 recognition is
+byte-exact for the configured tag; a caller that follows another valid tag is
+managed stale content and is migrated. Edited or inconsistent content remains
+unknown. Migration uses a create-only branch named
+`review-sensei/setup-v5-<base12>-<tag>`. An existing branch is reusable only
 when its parent is the named base SHA, its author is the ReviewSensei App, its
 exact generated content is current, and its comparison changes generated paths
 only. Any pre-existing or concurrent mismatch returns
@@ -224,7 +230,7 @@ resulting migration PR is the only repository write; merge it after review.
 No uninstall or manual deletion is required, and repository learnings and
 existing variable/secret values are preserved.
 
-### Setup-v4 execution and broker boundary
+### Setup-v5 execution and broker boundary
 
 Cloud review and `@sensei` reply operations use GitHub-hosted compute. Local
 review and reply operations use the labelled self-hosted runner. Both provider
@@ -238,9 +244,9 @@ and GitHub writes are enabled, only a validated clean exact-head review whose
 bounded final thread sweep is fully resolved emits `APPROVE`. Findings, open
 threads, ineligible pull requests, and `@sensei` replies remain ordinary
 `COMMENT` events, and the existing per-head marker prevents duplicate writes.
-The generated caller may pass `OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}` by
-name only; the App never creates, retrieves, logs, persists, or reveals that
-secret value.
+The generated caller may forward `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, or
+`OPENAI_API_KEY` from repository secrets by name only; the App never creates,
+retrieves, logs, persists, or reveals any of those values.
 
 The isolated `POST /github/token` route accepts a bounded OIDC exchange for
 `review_publish`, `review_status`, `inline_reply`, `issue_reply`, or
@@ -276,13 +282,11 @@ receive an unrequested `contents: read` because GitHub can return it to allow
 repository-data access while publishing a review. The broker never requests
 that permission, and `review_status`, `inline_reply`, `issue_reply`, and `learning_write`
 reject it if it is returned. This is a narrow compatibility exception, not an
-additional capability grant. GitHub's `variables` and `actions_variables`
-spellings represent the same requested Variables scope. The setup-token request
-uses the documented `actions_variables` field and normalizes it only to compare
-that controlled request with GitHub's returned `variables` map; capability
-maps use canonical permission names only. A response containing both aliases is
-rejected as ambiguous rather than silently selecting one, so this compatibility
-seam cannot add authority to a capability token.
+additional capability grant. The retired Variables scope is not in the
+recognized permission set at all: setup provisions no repository variables, so
+nothing requests it, and a token response that still reports it under either
+GitHub spelling (`variables` or `actions_variables`) fails closed as an unknown
+permission instead of being normalized and accepted.
 Any unknown returned permission, unexpected level, or requested-level mismatch
 also fails closed: the broker issues a token only after GitHub's returned map
 matches the approved capability contract exactly. This can temporarily reject

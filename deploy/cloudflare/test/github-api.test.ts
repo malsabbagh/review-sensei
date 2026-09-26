@@ -450,75 +450,57 @@ describe("GitHubApi capability issuance", () => {
     ).rejects.toThrow("github_installation_permissions_invalid");
   });
 
-  it("requires GitHub's mandatory metadata grant on installation-token responses", async () => {
-    const client = api();
-    vi.spyOn(client, "request").mockResolvedValue({
-      status: 201,
-      data: {
-        token: "ghs_setup_token",
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        permissions: {
+  it("fails closed on the retired variables permission in an installation-token response", async () => {
+    // Setup provisions no repository variables, so nothing requests the
+    // retired scope and a response that still carries it - under either
+    // spelling - must fail the permission-shape check instead of being
+    // recognized.
+    for (const retired of ["variables", "actions_variables"]) {
+      const client = api();
+      vi.spyOn(client, "request").mockResolvedValue({
+        status: 201,
+        data: {
+          token: "ghs_setup_token",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          permissions: {
+            contents: "write",
+            pull_requests: "write",
+            workflows: "write",
+            [retired]: "write",
+          },
+        },
+      });
+
+      await expect(
+        client.installationToken(2468, "acme/widgets", {
           contents: "write",
           pull_requests: "write",
-          variables: "write",
           workflows: "write",
-        },
-      },
-    });
-
-    await expect(
-      client.installationToken(2468, "acme/widgets", {
-        contents: "write",
-        pull_requests: "write",
-        variables: "write",
-        workflows: "write",
-      }),
-    ).rejects.toThrow("github_installation_permissions_invalid");
+        }),
+        retired,
+      ).rejects.toThrow("github_installation_permissions_invalid");
+    }
   });
 
-  it("fails closed when GitHub returns both aliases for one permission", async () => {
-    const client = api();
-    vi.spyOn(client, "request").mockResolvedValue({
-      status: 201,
-      data: {
-        token: "ghs_metadata_token",
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        permissions: {
-          metadata: "read",
-          variables: "read",
-          actions_variables: "read",
-        },
-      },
-    });
-
-    await expect(
-      client.installationToken(2468, "acme/widgets", {
-        metadata: "read",
-        variables: "read",
-      }),
-    ).rejects.toThrow("github_installation_permissions_invalid");
-  });
-
-  it("accepts the controlled setup Variables alias only as the requested Variables scope", async () => {
+  it("fails closed when the retired variables scope is requested", async () => {
+    // A requested map naming the retired scope is itself invalid, so the
+    // exchange is rejected before any comparison can accept it.
     const client = api();
     vi.spyOn(client, "request").mockResolvedValue({
       status: 201,
       data: {
         token: "ghs_setup_token",
         expires_at: new Date(Date.now() + 60_000).toISOString(),
-        permissions: {
-          metadata: "read",
-          actions_variables: "write",
-        },
+        permissions: { metadata: "read", variables: "write" },
       },
     });
 
     await expect(
       client.installationToken(2468, "acme/widgets", {
         metadata: "read",
-        actions_variables: "write",
+        variables: "write",
       }),
-    ).resolves.toMatchObject({ permissions: { metadata: "read", variables: "write" } });
+    ).rejects.toThrow("github_installation_permissions_invalid");
   });
 
   it("validates repository identity before requesting an installation token", async () => {

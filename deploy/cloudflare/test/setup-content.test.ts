@@ -9,7 +9,6 @@ import {
 import {
   BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
   DEFAULT_PUBLIC_WORKFLOW_TAG,
-  SETUP_VARIABLES,
   SETUP_VERSION,
   brokerAcceptedPublicWorkflowTags,
   buildHistoricalProviderParityV4SetupFiles,
@@ -116,32 +115,30 @@ describe("setup-v4 public boundary", () => {
     ).toBeNull();
   });
 
-  it("generates fork-safe callers at the supplied public workflow tag", () => {
+  it("generates the thin caller at the supplied public workflow tag", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
     expect(SETUP_VERSION).toBe(5);
-    expect(SETUP_VARIABLES).toContainEqual(
-      expect.objectContaining({ name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" }),
-    );
     expect(workflow).toContain("opened, reopened, synchronize, ready_for_review");
     expect(workflow).toContain(
       `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
     );
-    expect(workflow).toContain("head.repo.full_name == github.repository");
+    // A fork head is forwarded, never admitted here: eligibility and
+    // authorization belong to the reusable workflow.
+    expect(workflow).toContain(
+      "head_repository: ${{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}",
+    );
     expect(workflow).toContain("github.event.issue.pull_request");
     expect(workflow).toContain("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}");
     expect(workflow).toContain(
       "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}",
     );
-    expect(workflow).toContain("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}");
-    expect(SETUP_VARIABLES).toContainEqual(
-      expect.objectContaining({ name: "REVIEWSENSEI_MODEL", value: "" }),
-    );
-    expect(workflow).toContain("REVIEWSENSEI_GITHUB_WRITES == 'true'");
-    expect(workflow).toContain("enable_auto_approve");
-    expect(workflow).toContain(
-      "enable_auto_approve: ${{ vars.REVIEWSENSEI_AUTO_APPROVE || 'true' }}",
-    );
+    expect(workflow).toContain("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}");
+    // The caller reads no repository variable and restates no policy: the only
+    // two product overrides are mapped once by the reusable workflow.
+    expect(workflow).not.toContain("vars.");
+    expect(workflow).not.toContain("enable_auto_approve");
+    expect(workflow).not.toContain("REVIEWSENSEI_GITHUB_WRITES");
     expect(workflow).toContain("source_kind:\n        description: Source kind for manual dispatch");
     expect(workflow).toContain("root_comment_id:\n        description: Root comment ID for manual reply thread");
     expect(workflow).not.toContain("GITHUB_APP_PRIVATE_KEY");
@@ -162,25 +159,28 @@ describe("setup-v4 public boundary", () => {
         .filter((line) => line.startsWith(name + ": "));
       expect(matches).toEqual([name + ": ${{ " + expression + " }}"]);
     }
-    // The command branch must stay scoped to a created issue_comment on a pull
-    // request: the command job forwards github.event.comment fields that do
-    // not exist on a pull_request event, so the guard has to fail closed there.
-    // The branch also re-applies the caller's mention, association, and
-    // user-type checks, so it does not rely on the resolver alone to admit a
-    // runner, while the command operation still reaches the runner without
-    // requiring REVIEWSENSEI_MENTION_REPLIES.
+    // The resolver guard is event shape only: which events may start a run,
+    // and which commenters may address @sensei. Nothing in it reads
+    // configuration, so the reusable workflow stays the single authority on
+    // eligibility, authorization, and whether anything is published.
     expect(workflow).toContain(
-      "      ((github.event_name == 'issue_comment' &&\n" +
+      "      github.event_name == 'workflow_dispatch' ||\n" +
+        "      github.event_name == 'pull_request' ||\n" +
+        "      (github.event_name == 'issue_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
         "      github.event.issue.pull_request &&\n" +
         "      contains(github.event.comment.body, '@sensei') &&\n" +
         "      (github.event.comment.author_association == 'OWNER' ||\n" +
         "      github.event.comment.author_association == 'MEMBER' ||\n" +
         "      github.event.comment.author_association == 'COLLABORATOR') &&\n" +
-        "      github.event.comment.user.type != 'Bot' &&\n" +
-        "      (needs.resolve-trigger.outputs.operation == 'command' ||\n" +
-        "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n",
+        "      github.event.comment.user.type != 'Bot') ||\n",
     );
+    expect(workflow).toContain(
+      "      (github.event_name == 'pull_request_review_comment' &&\n" +
+        "      github.event.action == 'created' &&\n" +
+        "      contains(github.event.comment.body, '@sensei') &&\n",
+    );
+    expect(workflow).not.toContain("vars.");
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
     // in the trigger guard untouched.
     expect(workflow).not.toContain("@@");
@@ -298,14 +298,22 @@ describe("setup-v4 public boundary", () => {
 
   it("generates one provider-neutral reusable job with the supplied tag", () => {
     const tag = "stable";
-    const workflow = buildTaggedV4SetupFiles(tag)[0].content;
+    const files = buildTaggedV4SetupFiles(tag);
+    const workflow = files[0].content;
     const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
     expect(workflow.match(workflowPattern)).toHaveLength(1);
     expect(workflow).toContain("# ReviewSensei setup version: 5");
-    expect(workflow).toContain("pull-requests: write");
-    expect(workflow).toContain("issues: write");
-    expect(workflow).toContain("github.event.pull_request.draft != true");
-    expect(workflow).toContain("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}");
+    // Read-only plus OIDC: the run is authorized through the broker, and the
+    // reusable workflow can never exceed what this caller grants.
+    expect(workflow).toContain(
+      "permissions:\n" +
+        "  contents: read\n" +
+        "  pull-requests: read\n" +
+        "  issues: read\n" +
+        "  id-token: write\n",
+    );
+    expect(workflow).not.toContain("pull-requests: write");
+    expect(workflow).not.toContain("issues: write");
     expect(workflow).toContain("resolve-trigger:");
     expect(workflow).toContain(
       "operation: ${{ needs.resolve-trigger.outputs.operation }}",
@@ -313,16 +321,25 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).not.toContain(
       "operation: ${{ inputs.operation || (github.event_name == 'workflow_dispatch' && 'review') || 'reply' }}",
     );
-    expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'");
-    expect(workflow).not.toContain("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'");
+    expect(workflow).not.toContain("vars.");
     expect(workflow).not.toContain("default: main");
-    expect(buildTaggedV4SetupFiles(tag)[2].content).not.toContain("auto_approve");
-    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("learning_proposals: false");
-    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("model: ''");
+    // The generated configuration is the minimal operator-owned document:
+    // every behavior field belongs to the operator copy, not to generated
+    // bytes, and the package supplies the defaults.
+    expect(files[2].content).toBe(
+      "# ReviewSensei setup version: 5\n" +
+        "schema: 1\n" +
+        "\n" +
+        "inference:\n" +
+        "  backend: local-ollama\n",
+    );
+    expect(files[2].content).not.toContain("auto_approve");
+    expect(files[2].content).not.toContain("learning_proposals");
+    expect(files[2].content).not.toContain("model: ''");
+    // The historical builders keep their frozen v4 config bytes.
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).not.toContain(
       "learning_proposals",
     );
-    expect(buildTaggedV4SetupFiles(tag)[2].content).toContain("version: 0.6.8");
     expect(buildHistoricalTaggedV4SetupFiles(tag)[2].content).toContain(
       "version: 0.1.1",
     );

@@ -11,6 +11,7 @@ from pathlib import Path
 from review_sensei.configuration import parse_configuration_text
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosted import hosted_plan_outputs, plan_hosted_execution
+from review_sensei.hosting.github.setup import _tagged_workflow
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
@@ -388,40 +389,37 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn("OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}", text)
         self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", text)
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", text)
-        self.assertNotIn(
-            "provider_profile: ${{ vars.REVIEWSENSEI_PROVIDER_PROFILE || '' }}", text
-        )
+        self.assertIn("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}", text)
         self.assertIn("id-token: write", text)
-        self.assertIn("github.event.pull_request.draft != true", text)
+        # The caller is an invocation-only bridge: every policy decision
+        # (drafts, writes, automatic reviews, mentions) belongs to the reusable
+        # workflow, so the caller reads no repository variables at all.
+        self.assertNotIn("vars.", text)
+        self.assertNotIn("github.event.pull_request.draft", text)
+        self.assertIn("types: [opened, reopened, synchronize, ready_for_review]", text)
         for block in run_blocks:
             self.assertNotIn("${{ inputs.", block)
+        # The dispatch "operation" choice is declared for manual-dispatch
+        # parity with the released caller; the resolver output is what the
+        # reusable workflow consumes.
+        self.assertIn("      operation:\n", text)
+        self.assertNotIn("inputs.operation", text)
         for input_name in (
-            "review_sensei_version",
-            "base_ref",
-            "head_ref",
-            "head_repository",
             "pull_request_number",
-            "head_sha",
+            "head_repository",
+            "source_kind",
+            "source_comment_id",
+            "source_updated_at",
+            "root_comment_id",
         ):
             with self.subTest(input_name=input_name):
                 self.assertIn(f"inputs.{input_name}", text)
-        self.assertIn("REVIEWSENSEI_PROVIDER_MODE", text)
-        self.assertIn("REVIEWSENSEI_AUTO_APPROVE", text)
         self.assertEqual(text.count("review-sensei-run.yml@" + "v5"), 1)
-        self.assertIn(
-            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}", text
-        )
         self.assertIn("resolve-trigger:", text)
-        self.assertIn(
-            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
-            text,
-        )
+        self.assertIn("operation: ${{ needs.resolve-trigger.outputs.operation }}", text)
         self.assertIn('rescan = re.compile(r"\\bre[\\s-]?scan\\b"', text)
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", text)
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", text)
 
-    def test_generated_review_workflow_can_authorize_opt_in_replies(self):
+    def test_generated_review_workflow_routes_comments_read_only(self):
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
@@ -429,8 +427,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-review.yml"
         )
         text = workflow.read_text(encoding="utf-8")
-        self.assertIn("pull-requests: write", text)
-        self.assertIn("issues: write", text)
+        # The caller grants no write scope: the broker authorizes every
+        # publication, so a widened caller permission can never publish.
+        self.assertIn("pull-requests: read", text)
+        self.assertIn("issues: read", text)
+        self.assertNotIn("pull-requests: write", text)
+        self.assertNotIn("issues: write", text)
         self.assertIn("github.event.issue.pull_request", text)
         self.assertIn("github.event.comment.author_association == 'OWNER'", text)
         self.assertIn("github.event.comment.author_association == 'MEMBER'", text)
@@ -444,15 +446,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' && inputs.pull_request_number",
             text,
         )
-        self.assertIn("github.event.pull_request.draft != true", text)
-        self.assertEqual(text.count("github.event.pull_request.draft != true"), 2)
         self.assertIn("persist-credentials: false", text)
         self.assertIn(
             "ref: ${{ github.event.repository.default_branch }}",
             text,
         )
         self.assertIn(
-            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number }}",
+            "pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}",
             text,
         )
         self.assertIn("github.event.comment.pull_request_url", text)
@@ -469,15 +469,9 @@ class ActionPinPolicyTests(unittest.TestCase):
             "github.event_name == 'workflow_dispatch' ||",
             text,
         )
-        self.assertNotIn("PYTHONPATH=src python src/", text)
-        self.assertIn(
-            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
-            text,
-        )
         self.assertIn("contains(github.event.comment.body, '@sensei')", text)
-        self.assertIn("while delimiter in title:", text)
         self.assertIn(
-            'python - "$pull_json" "$AUTO_REVIEW" "$EVENT_NAME" "$COMMENT_BODY"',
+            'python - "$pull_json" "$EVENT_NAME" "$COMMENT_BODY"',
             text,
         )
         self.assertIn('event_name == "pull_request_review_comment"', text)
@@ -491,36 +485,46 @@ class ActionPinPolicyTests(unittest.TestCase):
             "trusted trigger resolver is missing from the default branch", text
         )
 
-    def test_command_branch_rechecks_the_author_before_admitting_the_operation(self):
-        """operation=command must not be the branch's only admission check.
+    def test_comment_arms_recheck_the_author_without_policy_branches(self):
+        """Comment events must pass the mention, association, and bot checks.
 
-        The resolver's job condition already requires the mention, an
-        OWNER/MEMBER/COLLABORATOR association, and a non-bot author, but the
-        command branch is a separate job: re-applying the same three checks
-        there keeps a future edit to the resolver's condition from widening the
-        branch, so an over-accepted body from an unauthorized author can never
-        satisfy it.
+        The resolver job condition is the caller's only policy expression: both
+        comment arms require the @sensei mention, an OWNER/MEMBER/COLLABORATOR
+        association, and a non-bot author, and the invocation job re-applies
+        none of them because it has no condition of its own beyond its
+        dependency. A future edit cannot widen the caller without either
+        widening the resolver's event-shape guard or adding a policy branch
+        that this contract forbids.
         """
 
         root = Path(__file__).resolve().parents[1]
         arm = (
-            "      ((github.event_name == 'issue_comment' &&\n"
+            "      (github.event_name == 'issue_comment' &&\n"
             "      github.event.action == 'created' &&\n"
             "      github.event.issue.pull_request &&\n"
             "      contains(github.event.comment.body, '@sensei') &&\n"
             "      (github.event.comment.author_association == 'OWNER' ||\n"
             "      github.event.comment.author_association == 'MEMBER' ||\n"
             "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
-            "      github.event.comment.user.type != 'Bot' &&\n"
-            "      (needs.resolve-trigger.outputs.operation == 'command' ||\n"
-            "      vars.REVIEWSENSEI_MENTION_REPLIES == 'true')) ||\n"
+            "      github.event.comment.user.type != 'Bot') ||\n"
+        )
+        invocation = (
+            "  review-or-reply:\n"
+            "    # A skipped dependency skips this job, so the event guard above is the\n"
+            "    # only guard: the reusable workflow decides eligibility, authorization,\n"
+            "    # and whether anything is published.\n"
+            "    needs: resolve-trigger\n"
         )
         for relative in (
             ".github/workflows/review-sensei-review.yml",
             "examples/github-actions/review-sensei-review.yml",
         ):
             with self.subTest(relative=relative):
-                self.assertIn(arm, (root / relative).read_text(encoding="utf-8"))
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn(arm, text)
+                self.assertEqual(text.count(arm), 1)
+                self.assertIn(invocation, text)
+                self.assertNotIn("vars.", text)
 
     def test_protection_policy_readback_workflow_is_manual_and_read_only(self):
         workflow = (
@@ -1242,9 +1246,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             workflow_text.count("Scope the selected backend credential"), 2
         )
-        self.assertEqual(
-            workflow_text.count('--api-key-env "$CREDENTIAL_ENV"'), 4
-        )
+        self.assertEqual(workflow_text.count('--api-key-env "$CREDENTIAL_ENV"'), 4)
         self.assertIn("no credential never receives one implicitly", workflow_text)
 
     def test_bootstrap_job_is_read_only_and_resolves_one_plan(self):
@@ -1271,9 +1273,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn(
             "REVIEWSENSEI_PROVIDER: ${{ vars.REVIEWSENSEI_PROVIDER }}", plan_step
         )
-        self.assertIn(
-            "REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}", plan_step
-        )
+        self.assertIn("REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}", plan_step)
         self.assertIn("working-directory: trusted-policy", plan_step)
         self.assertIn("id: plan", plan_step)
         self.assertIn("host-plan", plan_step)
@@ -1285,18 +1285,24 @@ class ActionPinPolicyTests(unittest.TestCase):
         # The bootstrap plan channel mirrors the package's plan contract
         # exactly, so a new plan output cannot appear here without the package
         # changing too.
-        from review_sensei.hosted import hosted_plan_outputs
 
         plan_outputs = {
-            name for name, _ in hosted_plan_outputs(plan_hosted_execution(
-                parse_configuration_text("schema: 1\n", root=Path("/tmp")),
-                environ={},
-            ))
+            name
+            for name, _ in hosted_plan_outputs(
+                plan_hosted_execution(
+                    parse_configuration_text("schema: 1\n", root=Path("/tmp")),
+                    environ={},
+                )
+            )
         }
         declared = set(re.findall(r"^      ([a-z_]+): \$\{\{ steps\.plan", job, re.M))
         self.assertEqual(declared, plan_outputs)
         identity = set(
-            re.findall(r"^      ([a-z_]+): \$\{\{ steps\.(?:release-identity|policy)", job, re.M)
+            re.findall(
+                r"^      ([a-z_]+): \$\{\{ steps\.(?:release-identity|policy)",
+                job,
+                re.M,
+            )
         )
         self.assertEqual(
             identity, {"package_version", "workflow_commit", "policy_commit"}
@@ -1322,8 +1328,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
         self.assertEqual(example, dogfood)
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", dogfood)
-        self.assertIn("provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE", dogfood)
+        self.assertEqual(dogfood, _tagged_workflow("v5"))
+        self.assertIn(
+            "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+            dogfood,
+        )
 
     def test_bootstrap_validator_refuses_unknown_operations_and_unsafe_refs(self):
         root = Path(__file__).resolve().parents[1]
@@ -1333,7 +1342,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         block = _run_block_containing(
             workflow_text, "operation must be review, reply, or command"
         )
-        self.assertIn("case \"$OPERATION\" in", block)
+        self.assertIn('case "$OPERATION" in', block)
         self.assertIn("review|reply|command", block)
         self.assertIn("automatic|manual", block)
         self.assertIn('"$BASE_REF" == *--*', block)
@@ -1736,8 +1745,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         text = _reusable_workflow_text()
         admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
         publish_if = (
-            admission_if
-            + " && steps.publish-admission.outputs.status == 'current'"
+            admission_if + " && steps.publish-admission.outputs.status == 'current'"
         )
         upload_if = (
             "if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
@@ -1820,12 +1828,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertNotIn("issues: write", job)
                 self.assertIn("id-token: write", job)
                 self.assertIn("contents: read", job)
-                credential = _step_block(
-                    job, "Scope the selected backend credential"
-                )
-                self.assertIn(
-                    "no credential never receives one implicitly", credential
-                )
+                credential = _step_block(job, "Scope the selected backend credential")
+                self.assertIn("no credential never receives one implicitly", credential)
                 self.assertIn('"$CREDENTIAL_ENV" "$credential_value"', credential)
                 self.assertNotIn("--allow-write", credential)
 

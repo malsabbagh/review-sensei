@@ -10,14 +10,15 @@ import {
   parseVerifiedDelivery,
 } from "../src/github-app";
 import {
-  RETIRED_REVIEW_MODE_VARIABLE,
+  CONFIG_PATH,
+  LEGACY_CONFIG_PATH,
   SETUP_FILE_PATHS,
-  SETUP_VARIABLES,
   buildCurrentV3SetupFiles,
   buildHistoricalProviderParityV4SetupFiles,
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  historicalV4UninstallWorkflow,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
@@ -29,10 +30,14 @@ const SHA = "a".repeat(40);
 const TAG = "v5";
 const BASE_SHA = "b".repeat(40);
 const SETUP_BRANCH = `review-sensei/setup-v5-${BASE_SHA.slice(0, 12)}-${TAG}`;
+// GitHub keeps reporting the retired variables permission for installations
+// that accepted it before the cutover. Setup neither requests it nor requires
+// it, and a delivery that still carries it parses exactly like one that does
+// not.
 const ALL_PERMISSIONS = {
   contents: "write",
   pull_requests: "write",
-  variables: "write",
+  actions_variables: "write",
   workflows: "write",
 };
 
@@ -100,9 +105,6 @@ class FakeGitHub {
   branchManaged = true;
   refCollision = false;
   collisionObserved = false;
-  missingVariables = false;
-  variablePatchIgnored = false;
-  variableValues: Record<string, string | null> = {};
   existingPullRequest: number | null = null;
 
   async request(method: string, path: string, _token: string, requestBody?: Record<string, unknown>) {
@@ -139,9 +141,7 @@ class FakeGitHub {
         data: {
           files: [
             {
-              filename: this.branchManaged
-                ? ".github/review-sensei/config.yml"
-                : "customer.txt",
+              filename: this.branchManaged ? CONFIG_PATH : "customer.txt",
             },
           ],
         },
@@ -170,42 +170,6 @@ class FakeGitHub {
               content: Buffer.from(content, "utf8").toString("base64"),
             },
           };
-    }
-    if (method === "GET" && path.includes("/actions/variables/")) {
-      if (this.missingVariables) {
-        return { status: 404, data: null };
-      }
-      const name = decodeURIComponent(path.split("/actions/variables/")[1].split("?", 1)[0]);
-      const value = this.variableValues[name];
-      if (value === null) {
-        return { status: 404, data: null };
-      }
-      return { status: 200, data: { value: value ?? "operator-owned" } };
-    }
-    if (method === "POST" && path.endsWith("/actions/variables")) {
-      // GitHub persists the created variable, so a later read returns the
-      // created value instead of a second 404.
-      if (
-        requestBody &&
-        typeof requestBody.name === "string" &&
-        typeof requestBody.value === "string"
-      ) {
-        this.variableValues[requestBody.name] = requestBody.value;
-      }
-      return { status: 201, data: null };
-    }
-    if (method === "PATCH" && path.includes("/actions/variables/")) {
-      // GitHub applies the update and answers 204 with no body; the flag
-      // simulates a write the API acknowledged but did not persist.
-      if (
-        !this.variablePatchIgnored &&
-        requestBody &&
-        typeof requestBody.name === "string" &&
-        typeof requestBody.value === "string"
-      ) {
-        this.variableValues[requestBody.name] = requestBody.value;
-      }
-      return { status: 204, data: null };
     }
     if (method === "GET" && path.includes("/git/ref/heads/main")) {
       return { status: 200, data: { object: { sha: BASE_SHA } } };
@@ -448,7 +412,6 @@ describe("setup repository reconciliation", () => {
     expect(fake.installationToken).toHaveBeenCalledWith(2468, "acme/widgets", {
       contents: "write",
       pull_requests: "write",
-      actions_variables: "write",
       workflows: "write",
     });
     const treeRequest = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
@@ -459,7 +422,7 @@ describe("setup repository reconciliation", () => {
       .toMatchObject({ head: SETUP_BRANCH, base: "main" });
   });
 
-  it("reuses a canonical create-only branch for recognized legacy files", async () => {
+  it("reuses a canonical create-only branch when only a legacy config exists", async () => {
     const fake = new FakeGitHub();
     fake.branchExists = true;
     fake.files = {
@@ -481,153 +444,12 @@ describe("setup repository reconciliation", () => {
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
-    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
+    // The retired path is neither read nor part of the managed set: only the
+    // three managed paths are inspected, and the existing canonical branch is
+    // adopted because its compare shows managed files only.
+    expect(fake.requests.some(({ path }) => path.includes("review-sensei%2Fconfig.yml"))).toBe(false);
     expect(fake.requests.find(({ method, path }) => method === "POST" && path.endsWith("/pulls"))?.body)
       .toMatchObject({ head: SETUP_BRANCH, base: "main" });
-  });
-
-  it("migrates a retired legacy review mode variable in place", async () => {
-    const fake = new FakeGitHub();
-    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
-
-    expect(await serviceWith(fake).process(delivery())).toEqual([
-      {
-        repository: "acme/widgets",
-        status: "created",
-        pull_request_number: 42,
-        // A confirmed migration is reported in the structured result too, so
-        // the delivery result is self-verifying instead of only silent on the
-        // happy path.
-        review_mode_migration: "observed",
-      },
-    ]);
-    const variablePath = `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`;
-    const patch = fake.requests.find(({ method, path }) =>
-      method === "PATCH" && path.endsWith(variablePath),
-    );
-    expect(patch?.body).toEqual({ name: RETIRED_REVIEW_MODE_VARIABLE, value: "merge-focused" });
-    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe("merge-focused");
-  });
-
-  it("surfaces a not-observed review mode migration in the log and the result", async () => {
-    // A 204 only says the PATCH was accepted, and the variables API has no
-    // conditional write, so the migration verifies what the API reports and
-    // reports the mismatch in the delivery result as well as the log: a
-    // warning alone does not reach the operator.
-    const fake = new FakeGitHub();
-    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "legacy";
-    fake.variablePatchIgnored = true;
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      expect(await serviceWith(fake).process(delivery())).toEqual([
-        {
-          repository: "acme/widgets",
-          status: "created",
-          pull_request_number: 42,
-          review_mode_migration: "not_observed",
-        },
-      ]);
-      expect(warn).toHaveBeenCalledWith(
-        "review_mode_migration_not_observed",
-        expect.objectContaining({
-          repository: "acme/widgets",
-          expected: "merge-focused",
-          observed: "legacy",
-        }),
-      );
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("leaves operator review mode variable values untouched", async () => {
-    const fake = new FakeGitHub();
-    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = "advisory";
-
-    expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
-    ]);
-    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
-    // Only the stored value costs a write, so an operator-owned value costs
-    // the two reads (variable reconciliation and the migration check) and no
-    // read-back: the migration is not a PATCH-plus-verify on every delivery.
-    const reviewModeReads = fake.requests.filter(
-      ({ method, path }) =>
-        method === "GET" &&
-        path.endsWith(
-          `/actions/variables/${encodeURIComponent(RETIRED_REVIEW_MODE_VARIABLE)}`,
-        ),
-    );
-    expect(reviewModeReads).toHaveLength(2);
-  });
-
-  it("touches no variables for current or customized setups", async () => {
-    // The migration runs only for deliveries the classifier sends down the
-    // setup path. A current or operator-customized (unknown) installation is
-    // skipped before any variables request, so no-op deliveries cost no
-    // variable traffic and customized installs are never rewritten.
-    const current = new FakeGitHub();
-    current.files = Object.fromEntries(
-      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
-    );
-    const customized = new FakeGitHub();
-    customized.files[SETUP_FILE_PATHS[0]] = "name: Customer ReviewSensei review\n";
-
-    for (const [setupState, fake, status] of [
-      ["current", current, "skipped_current"],
-      ["unknown", customized, "skipped_unknown_setup"],
-    ] as const) {
-      expect(await serviceWith(fake).process(delivery()), setupState).toEqual([
-        { repository: "acme/widgets", status },
-      ]);
-      expect(variableRequests(fake), setupState).toEqual([]);
-    }
-  });
-
-  it("leaves prototype-named review mode values untouched", async () => {
-    for (const value of ["__proto__", "constructor", "toString"]) {
-      const fake = new FakeGitHub();
-      // The entry is defined directly because a plain assignment through the
-      // fake's record is not guaranteed to create an own property for every
-      // value name the API could return.
-      Object.defineProperty(fake.variableValues, RETIRED_REVIEW_MODE_VARIABLE, {
-        value,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-
-      expect(await serviceWith(fake).process(delivery())).toEqual([
-        { repository: "acme/widgets", status: "created", pull_request_number: 42 },
-      ]);
-      expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
-    }
-  });
-
-  it("leaves a freshly created default review mode variable untouched", async () => {
-    const fake = new FakeGitHub();
-    fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE] = null;
-
-    expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
-    ]);
-    // A fresh install creates the variable with the generated default, so
-    // the migration pass reads that value and issues no PATCH at all.
-    const created = SETUP_VARIABLES.find(
-      ({ name }) => name === RETIRED_REVIEW_MODE_VARIABLE,
-    );
-    expect(fake.variableValues[RETIRED_REVIEW_MODE_VARIABLE]).toBe(created?.value);
-    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
-  });
-
-  it("ignores a review mode variable still absent after migration read", async () => {
-    const fake = new FakeGitHub();
-    fake.missingVariables = true;
-
-    expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
-    ]);
-    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
   });
 
   it("does not overwrite a customer-owned deterministic branch", async () => {
@@ -645,32 +467,71 @@ describe("setup repository reconciliation", () => {
     const fake = new FakeGitHub();
     fake.refCollision = true;
     fake.branchManaged = false;
-    fake.missingVariables = true;
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "skipped_branch_conflict" },
     ]);
-    expect(mutationRequests(fake).filter(({ path }) =>
-      path.includes("/actions/variables"),
-    )).toEqual([]);
-    expect(fake.requests.some(({ method }) => method === "PATCH")).toBe(false);
-    expect(fake.requests.some(({ method, path }) =>
-      method === "POST" && path.endsWith("/pulls"),
-    )).toBe(false);
+    // The dangling tree and commit objects are unreferenced, the rejected ref
+    // creation is the last mutation, and no pull request follows: the
+    // customer's branch is left exactly as it was.
+    expect(
+      mutationRequests(fake).map(({ method, path }) => `${method} ${path}`),
+    ).toEqual([
+      "POST /repos/acme/widgets/git/trees",
+      "POST /repos/acme/widgets/git/commits",
+      "POST /repos/acme/widgets/git/refs",
+    ]);
   });
 
-  it("does not replace customized setup-v2 content", async () => {
+  it("leaves a customized legacy setup-v2 config untouched", async () => {
+    // The retired configuration path is not part of the managed set: the
+    // Worker neither reads it nor writes it, so an operator's customized v2
+    // file never blocks setup and is never replaced. Retiring it is the
+    // generated uninstall workflow's job.
     const fake = new FakeGitHub();
-    fake.files[".github/review-sensei/config.yml"] = [
+    fake.files[LEGACY_CONFIG_PATH] = [
       "# ReviewSensei setup version: 2",
       "setup_version: 2",
       "provider: ollama",
       "base_url: https://customer.example/api",
     ].join("\n");
+
     expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: "skipped_unknown_setup" },
+      { repository: "acme/widgets", status: "created", pull_request_number: 42 },
     ]);
-    expect(mutationRequests(fake)).toEqual([]);
+    const reads = fake.requests.filter(({ method, path }) =>
+      method === "GET" && path.includes("/contents/"),
+    );
+    expect(
+      reads.every(({ path }) => !path.includes("review-sensei%2Fconfig.yml")),
+    ).toBe(true);
+    const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
+    expect((tree?.body?.tree as Array<{ path: string }>).map(({ path }) => path)).toEqual(
+      SETUP_FILE_PATHS,
+    );
+  });
+
+  it("touches no variables for any delivery", async () => {
+    // Setup provisions no repository variables, so no delivery - current,
+    // customized, or migrated - makes a variables request of any kind.
+    const current = new FakeGitHub();
+    current.files = Object.fromEntries(
+      buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
+    );
+    const customized = new FakeGitHub();
+    customized.files[SETUP_FILE_PATHS[0]] = "name: Customer ReviewSensei review\n";
+    const absent = new FakeGitHub();
+
+    for (const [setupState, fake, status] of [
+      ["current", current, "skipped_current"],
+      ["unknown", customized, "skipped_unknown_setup"],
+      ["absent", absent, "created"],
+    ] as const) {
+      expect(await serviceWith(fake).process(delivery()), setupState).toEqual([
+        { repository: "acme/widgets", status, ...(status === "created" ? { pull_request_number: 42 } : {}) },
+      ]);
+      expect(variableRequests(fake), setupState).toEqual([]);
+    }
   });
 
   it.each(["pre-marker-worker-review.yml", "pre-marker-python-review.yml"])(
@@ -747,15 +608,11 @@ describe("setup repository reconciliation", () => {
 
   it("migrates a managed v4 setup following an older public tag", async () => {
     const fake = new FakeGitHub();
-    fake.files = Object.fromEntries(
-      buildTaggedV4SetupFiles("old-v4").map(({ path, content }) => [path, content]),
-    );
-    fake.files[SETUP_FILE_PATHS[0]] = mergeFocusedV4WorkflowTemplate("old-v4");
-    fake.files[SETUP_FILE_PATHS[1]] = fake.files[SETUP_FILE_PATHS[1]]!.replace(
-      "ReviewSensei setup version: 5",
-      "ReviewSensei setup version: 4",
-    );
-    fake.files[SETUP_FILE_PATHS[2]] = mergeFocusedV4ConfigFile();
+    fake.files = {
+      [SETUP_FILE_PATHS[0]]: mergeFocusedV4WorkflowTemplate("old-v4"),
+      [SETUP_FILE_PATHS[1]]: historicalV4UninstallWorkflow(),
+      [SETUP_FILE_PATHS[2]]: null,
+    };
 
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: "created", pull_request_number: 42 },
@@ -914,18 +771,17 @@ describe("setup repository reconciliation", () => {
     ).toBe(true);
   });
 
-  it("does not migrate an unreleased resolve-trigger caller with the draft skip removed", async () => {
+  it("does not migrate an unreleased caller with an edited line", async () => {
+    // Recognition is byte-exact: a caller that differs from the current and
+    // from every released edition by even one line fails closed instead of
+    // being adopted as managed.
     const fake = new FakeGitHub();
     const files = Object.fromEntries(
       buildSetupFiles(TAG).map(({ path, content }) => [path, content]),
     );
     const current = files[SETUP_FILE_PATHS[0]]!;
-    const previous = current.replace(
-      "      github.event.pull_request.draft != true &&\n",
-      "",
-    );
+    const previous = current.replace("      issues: read\n", "");
     expect(previous).not.toBe(current);
-    expect(previous).toContain("resolve-trigger:");
     files[SETUP_FILE_PATHS[0]] = previous;
     fake.files = files;
 

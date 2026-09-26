@@ -71,9 +71,11 @@ and emergency revocation.
   `OPENROUTER_UPSTREAM_PROVIDER` (default `morph`) for the routing policy.
 - `doctor` and `plan` report execution location (local CLI process) versus
   inference location (remote for OpenRouter) and credential presence only.
-- `REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` means Ollama Cloud only.
-  Hosted OpenRouter is selected with `REVIEWSENSEI_PROVIDER_MODE=openrouter` and
-  `REVIEWSENSEI_MODEL`; that mode choice is the operator egress acknowledgement.
+- `inference.backend: cloud-ollama` (or the `REVIEWSENSEI_PROVIDER=cloud-ollama`
+  override) means Ollama Cloud only. Hosted OpenRouter is selected with
+  `inference.backend: openrouter` and `inference.model` (or the
+  `REVIEWSENSEI_PROVIDER`/`REVIEWSENSEI_MODEL` overrides); that backend choice
+  is the operator egress acknowledgement.
   The reusable workflow rejects `allow_unqualified_profile=true`, does not
   forward `--allow-unqualified-profile`, and only runs allowlisted models. The
   generated caller forwards `OPENROUTER_API_KEY` by name and never reads its
@@ -83,39 +85,45 @@ ReviewSensei does not make claims about provider retention, model training,
 subprocessors, residency, or deletion. Review the provider's current terms and
 configure the endpoint deliberately before using private or regulated code.
 
-## Portable manual GitHub Actions workflow
+## Portable GitHub Actions workflow
 
-The example workflow in
+The generated caller in
 [`examples/github-actions/review-sensei-review.yml`](../examples/github-actions/review-sensei-review.yml)
-is the primary open-source path. It runs on a maintainer-controlled self-hosted
-runner labelled `ollama`, checks out only the repository default branch,
-requires `base_ref` to match that default branch,
-installs the exact requested `review-sensei==X.Y.Z` package from PyPI first and
-falls back to a public GitHub source tag only when that distribution is
-unavailable. It resolves the tag, compares it with the executing workflow
-SHA, and installs from that verified commit before checking the installed
-version and dependencies before computing a bounded diff with
-`review-sensei prepare-diff`, without
-checking out or executing the head branch. Other PyPI failures remain fatal.
-The runner must provide Ollama on
-`http://127.0.0.1:11434` for the default local mode.
+is the primary open-source path. It is a read-only bootstrap: it checks out
+only the repository default branch with no persisted credentials, holds only
+`contents: read`, `pull-requests: read`, `issues: read`, and `id-token: write`,
+and calls the public reusable workflow at the configured tag. The reusable
+workflow checks out only the repository
+default branch, requires `base_ref` to match that default branch, installs the
+exact requested `review-sensei==X.Y.Z` package from PyPI first, and falls back
+to the executing workflow commit SHA only when that exact distribution is
+unavailable; other PyPI failures remain fatal. It then computes a bounded diff
+with `review-sensei prepare-diff`, without checking out or executing the head
+branch. Local backends run on the operator's self-hosted runner (labelled
+`ollama` in the example) and must have Ollama on
+`http://127.0.0.1:11434`.
 
-Provider data egress is explicit. The workflow defaults to the
-`REVIEWSENSEI_PROVIDER_MODE=local` repository variable, which uses
-`http://127.0.0.1:11434/api` with no API key. If an operator sets that variable
-to `cloud`, review and conversation steps send their bounded diff, selected
-context, and authorized thread context to Ollama Cloud
-using `deepseek-v4.1-flash:cloud` by default and requires `OLLAMA_API_KEY` from
-secrets. The workflow does not accept an arbitrary provider URL input, so a
+Provider data egress is explicit. The default local backend uses
+`http://127.0.0.1:11434/api` with no API key. If an operator selects a cloud
+backend in the trusted configuration (`inference.backend: cloud-ollama` or
+`openrouter`, or the `REVIEWSENSEI_PROVIDER` override), review and conversation
+steps send their bounded diff, selected context, and authorized thread context
+to that backend's fixed allowlisted endpoint — Ollama Cloud by default with
+`deepseek-v4.1-flash:cloud`, requiring `OLLAMA_API_KEY` from secrets. The
+workflow does not accept an arbitrary provider URL input, so a
 dispatch-supplied URL cannot redirect the provider credential. Installed
-workflows do not pass `--profile` and do not send `OPENAI_API_KEY`.
+workflows do not pass `--profile`, and only the credential the selected backend
+names is ever attached to provider requests: the generated caller forwards the
+three declared secret names, and the reusable workflow fails closed if the
+trusted plan names a credential outside them.
 
-The workflow uploads `review.json` and `review-sensei-version.txt` as GitHub
-artifacts with a retention window. Artifact retention is controlled by the
-workflow, not by ReviewSensei. Fork pull requests are not automatically
-triggered by this example; enabling fork-triggered automation requires a
-separate security review of secrets, untrusted head behavior, and provider data
-egress.
+The workflow uploads `review.json`, `outcome.json`, and the recovery artifact
+as the `review-sensei-diagnostics` GitHub artifact only when the trusted
+configuration enables diagnostics uploads, with a seven-day retention window.
+Artifact retention is controlled by the workflow, not by ReviewSensei. Fork
+pull request heads are rejected by the reusable workflow's preflight before any
+provider call; enabling fork-triggered automation would require a separate
+security review of secrets, untrusted head behavior, and provider data egress.
 
 ## OpenAI-compatible adapter
 

@@ -45,7 +45,12 @@ def _is_valid_git_ref(value: str) -> bool:
 
 @dataclass(frozen=True)
 class TriggerResolution:
-    """Normalized inputs for the reusable ReviewSensei runner."""
+    """Normalized inputs for the reusable ReviewSensei runner.
+
+    Resolution is event-shaped only. Whether a review or a reply is allowed is
+    a package decision the reusable workflow reads from configuration, so a
+    caller that is not the ReviewSensei repository cannot state it here.
+    """
 
     operation: str
     head_sha: str
@@ -53,8 +58,6 @@ class TriggerResolution:
     base_ref: str
     base_sha: str
     pull_request_number: str
-    pull_request_title: str
-    enable_review: str
 
 
 def comment_mentions_sensei(body: str) -> bool:
@@ -137,7 +140,7 @@ def choose_head_sha(pull: Mapping[str, Any], requested: str | None) -> str:
     raise ValueError("requested commit does not match the pull request head")
 
 
-def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str]:
     head = pull.get("head")
     base = pull.get("base")
     if not isinstance(head, Mapping) or not isinstance(base, Mapping):
@@ -146,7 +149,6 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
     head_ref = head.get("ref")
     base_ref = base.get("ref")
     base_sha = base.get("sha")
-    title = pull.get("title")
     if (
         not isinstance(head_sha, str)
         or not _GIT_SHA_FULL.fullmatch(head_sha)
@@ -158,15 +160,7 @@ def _pull_request_fields(pull: Mapping[str, Any]) -> tuple[str, str, str, str, s
         or not _GIT_SHA_FULL.fullmatch(base_sha)
     ):
         raise ValueError("pull request identity metadata is invalid")
-    return head_sha, head_ref, base_ref, base_sha, _normalize_pull_request_title(title)
-
-
-def _normalize_pull_request_title(title: object) -> str:
-    """Collapse PR title whitespace, including Unicode line separators."""
-
-    if not isinstance(title, str):
-        return ""
-    return " ".join(title.split())
+    return head_sha, head_ref, base_ref, base_sha
 
 
 def _pull_request_number(pull: Mapping[str, Any]) -> str:
@@ -180,10 +174,9 @@ def _resolution_from_pull(
     pull: Mapping[str, Any],
     *,
     operation: str,
-    enable_review: str,
     head_sha: str | None = None,
 ) -> TriggerResolution:
-    resolved_head, head_ref, base_ref, base_sha, title = _pull_request_fields(pull)
+    resolved_head, head_ref, base_ref, base_sha = _pull_request_fields(pull)
     return TriggerResolution(
         operation=operation,
         head_sha=resolved_head if head_sha is None else head_sha,
@@ -191,8 +184,6 @@ def _resolution_from_pull(
         base_ref=base_ref,
         base_sha=base_sha,
         pull_request_number=_pull_request_number(pull),
-        pull_request_title=title,
-        enable_review="true" if enable_review == "true" else "false",
     )
 
 
@@ -207,22 +198,17 @@ def resolve_issue_comment(
         return _resolution_from_pull(
             pull,
             operation="review",
-            enable_review="true",
             head_sha=choose_head_sha(pull, requested),
         )
     if _is_maintainer_command(body):
-        return _resolution_from_pull(pull, operation="command", enable_review="false")
-    return _resolution_from_pull(pull, operation="reply", enable_review="false")
+        return _resolution_from_pull(pull, operation="command")
+    return _resolution_from_pull(pull, operation="reply")
 
 
-def resolve_pull_request_event(
-    pull: Mapping[str, Any],
-    *,
-    auto_review: str,
-) -> TriggerResolution:
+def resolve_pull_request_event(pull: Mapping[str, Any]) -> TriggerResolution:
     """Resolve a pull_request webhook event."""
 
-    return _resolution_from_pull(pull, operation="review", enable_review=auto_review)
+    return _resolution_from_pull(pull, operation="review")
 
 
 def resolve_review_comment_event(
@@ -231,25 +217,18 @@ def resolve_review_comment_event(
 ) -> TriggerResolution:
     """Resolve an inline review comment mention into mention-reply inputs."""
 
-    return _resolution_from_pull(pull, operation="reply", enable_review="false")
+    return _resolution_from_pull(pull, operation="reply")
 
 
-def _write_github_output_value(
-    handle: TextIO,
-    name: str,
-    value: str,
-    *,
-    multiline: bool = False,
-) -> None:
-    """Write one GitHub Actions output, using a heredoc when needed."""
+def _write_github_output_value(handle: TextIO, name: str, value: str) -> None:
+    """Write one GitHub Actions output.
 
-    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
-    if multiline or "\n" in normalized:
-        delimiter = f"RS_{name.upper()}"
-        while delimiter in normalized:
-            delimiter += "_EOF"
-        handle.write(f"{name}<<{delimiter}\n{normalized}\n{delimiter}\n")
-        return
+    Every field is single-line by construction - the operation is one of three
+    literals, both SHAs are 40 hex characters, both refs are matched against
+    the git ref grammar, and the number is decimal digits - so the
+    multi-line heredoc form has nothing to escape here.
+    """
+
     handle.write(f"{name}={value}\n")
 
 
@@ -268,13 +247,6 @@ def write_github_output(resolution: TriggerResolution) -> None:
         _write_github_output_value(
             handle, "pull_request_number", resolution.pull_request_number
         )
-        _write_github_output_value(
-            handle,
-            "pull_request_title",
-            resolution.pull_request_title,
-            multiline=True,
-        )
-        _write_github_output_value(handle, "enable_review", resolution.enable_review)
 
 
 def _load_pull_json(path: str) -> Mapping[str, Any]:
@@ -292,20 +264,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event", required=True)
     parser.add_argument("--comment-body", default="")
     parser.add_argument("--pull-json", required=True)
-    parser.add_argument("--auto-review", default="false")
     args = parser.parse_args(argv)
     pull = _load_pull_json(args.pull_json)
     event = args.event.strip()
     if event == "issue_comment":
         resolution = resolve_issue_comment(args.comment_body, pull)
     elif event == "pull_request":
-        resolution = resolve_pull_request_event(pull, auto_review=args.auto_review)
+        resolution = resolve_pull_request_event(pull)
     elif event == "pull_request_review_comment":
         resolution = resolve_review_comment_event(args.comment_body, pull)
     elif event == "workflow_dispatch":
-        resolution = _resolution_from_pull(
-            pull, operation="review", enable_review="true"
-        )
+        resolution = _resolution_from_pull(pull, operation="review")
     else:
         raise SystemExit(f"unsupported event: {event}")
     write_github_output(resolution)

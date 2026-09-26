@@ -55,23 +55,32 @@ python -m pip install .
 review-sensei --version
 ```
 
-The default is a local Ollama server using Qwen3.5 4B. Leave the API key empty
-and select the local mode:
+The default is a local Ollama server using the packaged local model. A
+repository selects its backend in `.reviewsensei.yml` at the repository root,
+and a repository without that file uses the packaged defaults:
 
-```bash
-export REVIEWSENSEI_PROVIDER_MODE="local"
-export REVIEWSENSEI_LOCAL_MODEL="qwen3.5:4b"
-unset OLLAMA_API_KEY
+```yaml
+schema: 1
+
+inference:
+  backend: local-ollama
 ```
 
-Ollama Cloud is explicit opt-in:
+Ollama Cloud is explicit opt-in and requires `OLLAMA_API_KEY`:
 
-```bash
-export OLLAMA_API_KEY="your-key"
-export REVIEWSENSEI_PROVIDER_MODE="cloud"
-export REVIEWSENSEI_CLOUD_MODEL="deepseek-v4.1-flash:cloud"
-unset OLLAMA_BASE_URL OLLAMA_MODEL
+```yaml
+schema: 1
+
+inference:
+  backend: cloud-ollama
 ```
+
+The packaged model for the selected backend applies unless `inference.model`
+names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` remain the
+only supported environment overrides; the retired
+`REVIEWSENSEI_PROVIDER_MODE`, `REVIEWSENSEI_LOCAL_MODEL`, and
+`REVIEWSENSEI_CLOUD_MODEL` variables have no effect and are reported with their
+replacements by `review-sensei config`.
 
 ### Run through npx
 
@@ -176,7 +185,7 @@ environment.
 
 During installation or migration, the Worker separately uses GitHub App
 authentication to obtain a repository-scoped installation token for the setup
-branch, pull request, and default variables.
+branch and pull request.
 
 Installation, reinstall, permission-acceptance, and repository-added events
 reconcile absent or older generated clients through at most one setup-v5 PR.
@@ -490,10 +499,14 @@ See [ADR 0036](docs/adr/0036-learning-lifecycle-diagnostics-and-feedback.md).
 
 ## Local Ollama
 
+```yaml
+schema: 1
+
+inference:
+  backend: local-ollama
+```
+
 ```bash
-export REVIEWSENSEI_PROVIDER_MODE="local"
-export REVIEWSENSEI_LOCAL_MODEL="qwen3.5:4b"
-unset OLLAMA_API_KEY
 review-sensei --diff pr.patch
 ```
 
@@ -537,13 +550,18 @@ The GitHub App opens a setup-v5 PR containing a thin caller that follows the
 operator-managed `v5` public git tag. The reusable workflow prefers the
 requested exact package from PyPI and falls back to its executing workflow
 commit only when that package/version is unavailable. Unrelated PyPI
-installation failures remain fatal. Setup provisions 15 repository variables,
-including 7 boolean controls, and manages 3 generated files. Automatic review,
-GitHub writes, learning proposals, learning PRs, mention replies, and artifact
-upload default to `false`; automatic approval defaults to `true` but is effective
-only when review and write gates are enabled. `REVIEWSENSEI_REVIEW_MODE` is a
-policy selector, not a boolean control, and defaults to `merge-focused`.
-The App never creates the customer-owned `OLLAMA_API_KEY` secret.
+installation failures remain fatal. Setup creates no repository variables and
+manages 3 generated files: the caller, the uninstall workflow, and the minimal
+root `.reviewsensei.yml` that the operator owns from the first install on. The
+only two optional Actions overrides the product consumes are
+`REVIEWSENSEI_PROVIDER` (`inference.backend`) and `REVIEWSENSEI_MODEL`
+(`inference.model`); the reusable workflow maps them once from the trusted
+policy commit. Every other policy decision is a field of `.reviewsensei.yml`:
+`github.automatic_reviews` defaults to `true`, `github.writes` to `false`,
+`github.reviews` to `auto-approve`, `github.mentions` to `true`,
+`github.learning` to `disabled`, and `github.artifacts` to `none`. The App
+requests no Variables permission and never creates the customer-owned
+`OLLAMA_API_KEY` secret.
 
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
@@ -557,8 +575,9 @@ item only when the transport reports an oversized response. The 512 KiB
 transport ceiling remains unchanged. Fork pull requests fail closed before
 provider or broker access.
 
-When automatic review and GitHub writes are enabled, automatic approval is on by
-default; set `REVIEWSENSEI_AUTO_APPROVE=false` for an explicit opt-out.
+When automatic review and GitHub writes are enabled, automatic approval applies
+by default; `github.reviews: blocking` or `github.reviews: advisory` in
+`.reviewsensei.yml` selects a non-approving policy instead.
 ReviewSensei publishes blocking findings as `REQUEST_CHANGES` and non-blocking
 findings as `COMMENT`, then invokes one shared, idempotent approval finalizer.
 It emits `APPROVE` for an eligible exact head when no unresolved ReviewSensei
@@ -589,9 +608,9 @@ mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
 findings also tell readers to reply with @sensei followed by their question.
 `review.json` is uploaded only when
-`REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; setup-v5 does not create a separate
-version artifact. See [installation and migration](docs/installation.md) and
-the reviewable
+`github.artifacts: diagnostics` is set in `.reviewsensei.yml`; setup-v5 does not
+create a separate version artifact. See
+[installation and migration](docs/installation.md) and the reviewable
 [`setup-v5 example`](examples/github-actions/review-sensei-review.yml).
 
 ## Concurrency policy

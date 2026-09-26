@@ -41,7 +41,7 @@ Repair actions:
 | `package` action | Reinstall the exact `review-sensei` version; do not mix checkout `src/` with a wheel. |
 | `packaged-assets` action | Reinstall the package so default stages/categories are present. |
 | `stages`/`categories` action | Point `--stages-dir`/`--categories-dir` at trusted-base directories that contain valid JSON, not a PR-head copy. |
-| `provider-mode` action | Set `REVIEWSENSEI_PROVIDER_MODE` to `local` or `cloud` (Ollama only; not OpenRouter). |
+| `provider-mode` action | Select `inference.backend` in `.reviewsensei.yml` (`local-ollama` or `cloud-ollama`; Ollama only, not OpenRouter). |
 | `endpoint` action | Start a local Ollama runner on loopback, or correct `OLLAMA_BASE_URL`. |
 | `model` action | `ollama pull` the configured model. |
 | `repository-metadata` action | Use a read-only `GITHUB_TOKEN` you already have; doctor never mints a broker token. |
@@ -125,68 +125,62 @@ is operator-gated and is not a required CI job.
 
 ## Configuration
 
-Copy the documented variables from [`.env.example`](../.env.example) into the
-environment used to run ReviewSensei. The CLI reads:
+A repository selects its backend and policy in `.reviewsensei.yml` at the
+repository root; `--config` selects another path, and a repository without the
+file uses the packaged defaults:
 
-| Variable | Default | Purpose |
+| Field | Default | Purpose |
 | --- | --- | --- |
-| `REVIEWSENSEI_PROVIDER` | `ollama` | Provider registry key |
-| `REVIEWSENSEI_PROVIDER_MODE` | `local` | `local` keeps requests on loopback; `cloud` selects Ollama Cloud |
-| `REVIEWSENSEI_LOCAL_MODEL` | `qwen3.5:4b` | Local Ollama model |
-| `REVIEWSENSEI_CLOUD_MODEL` | `deepseek-v4.1-flash:cloud` | Ollama Cloud model |
-| `REVIEWSENSEI_REVIEW_MODE` | `merge-focused` | Review-convergence mode (`advisory`, `merge-focused`, `strict`). An explicit historical `legacy` setting is rejected before inference or writes; setup replaces a stored `legacy` value with `merge-focused` in place. |
-| `OLLAMA_BASE_URL` | mode-specific | Optional explicit Ollama API root override |
-| `OLLAMA_MODEL` | mode-specific | Optional explicit model override |
-| `OLLAMA_API_KEY` | empty | Optional bearer credential |
-| `OLLAMA_TIMEOUT_SECONDS` | `900` | Total request timeout |
+| `inference.backend` | `local-ollama` | `local-ollama`, `cloud-ollama`, `openrouter`, or `openai-compatible` |
+| `inference.model` | backend default | Model slug; a slug of the wrong shape for the selected backend fails closed |
+| `github.automatic_reviews` | `true` | Automatic review of eligible pull requests |
+| `github.writes` | `false` | Publication of the validated result to GitHub |
+| `github.reviews` | `auto-approve` | Review policy: `auto-approve`, `blocking`, or `advisory` |
+| `github.mentions` | `true` | Authorized `@sensei` conversation |
+| `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
+| `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
+
+The packaged model for the selected backend applies unless `inference.model`
+names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` are the
+only supported environment overrides: they map to `inference.backend` and
+`inference.model`, an explicit `--provider` or `--model` wins over them, and
+`.reviewsensei.yml` is the source of record. The retired
+`REVIEWSENSEI_PROVIDER_MODE`, `OLLAMA_MODEL`, `REVIEWSENSEI_LOCAL_MODEL`, and
+`REVIEWSENSEI_CLOUD_MODEL` settings have no effect; `review-sensei config`
+reports each one with its replacement instead of reading it.
+`review-sensei config validate` checks the file and the effective
+provider/model combination, and `review-sensei config show [--explain]` prints
+the effective configuration with optional provenance.
+
+The packaged backend defaults are:
+
+| `inference.backend` | Where it runs | Credential | Default model |
+| --- | --- | --- | --- |
+| `local-ollama` (default) | Self-hosted runner labelled `ollama`, loopback API | none required | `qwen3.5:4b` |
+| `cloud-ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4.1-flash:cloud` |
+| `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
+| `openai-compatible` | `ubuntu-latest` + a gateway you select | `OPENAI_API_KEY`, or `advanced.endpoint.credential_env` | `gpt-4o-mini` |
+
+The default configuration is local-first and leaves `OLLAMA_API_KEY` empty.
+Cloud egress is explicit opt-in: select `cloud-ollama` and provide
+`OLLAMA_API_KEY`. A custom gateway is declared in `.reviewsensei.yml` under
+`advanced.endpoint` with `allow_custom_endpoint: true`, the gateway `base_url`,
+and the name of the environment variable that holds its credential. The model
+slug must match the selected backend shape (Ollama slugs for local/cloud,
+`vendor/model` slugs for OpenRouter); a cross-backend value fails closed before
+any provider call.
 
 Optional GitHub App-identity publication uses `GITHUB_APP_PRIVATE_KEY` by
 default through `EnvPrivateKeySource`. The App id is passed when constructing
 `GitHubAppAuth`. See [`docs/github-app-auth.md`](github-app-auth.md) for
 registration and secrets guidance.
 
-The default configuration is local-first: `REVIEWSENSEI_PROVIDER_MODE=local`
-selects `qwen3.5:4b`, points at a local Ollama API, and leaves
-`OLLAMA_API_KEY` empty. Cloud egress is explicit opt-in: set
-`REVIEWSENSEI_PROVIDER_MODE=cloud` and `OLLAMA_API_KEY`; the default cloud model
-is `deepseek-v4.1-flash:cloud`. `OLLAMA_BASE_URL` and `OLLAMA_MODEL` remain
-available as explicit overrides.
-
 Optional CLI `--profile` selects a named preset (`local-private`,
 `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`)
-without changing these workflow defaults. Installed GitHub workflows continue to
-use `REVIEWSENSEI_PROVIDER_MODE` and do not pass `--profile`. `fast-triage` is
-an explicit CLI/OpenAI path and requires `OPENAI_API_KEY`; it is not enabled by
-the reusable workflow.
-
-Installed GitHub workflows select the backend with one variable and one shared
-model:
-
-| `REVIEWSENSEI_PROVIDER_MODE` | Where it runs | Secret | Default model when `REVIEWSENSEI_MODEL` is empty |
-| --- | --- | --- | --- |
-| `local` or `local-ollama` (default) | Self-hosted runner labelled `ollama` | none | `qwen3.5:4b` |
-| `cloud` or `cloud-ollama` | `ubuntu-latest` + Ollama Cloud | `OLLAMA_API_KEY` | `deepseek-v4.1-flash:cloud` |
-| `openrouter` | `ubuntu-latest` + OpenRouter | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
-
-Set `REVIEWSENSEI_MODEL` to override the model for whichever backend is
-selected. The slug must match the active backend shape (Ollama slugs for
-local/cloud jobs, vendor/model slugs for OpenRouter); cross-backend values
-fail closed when each provider job resolves and validates its fallback chain.
-When `REVIEWSENSEI_MODEL` is empty, the hosted workflow resolves the model
-per backend:
-
-- **Local Ollama jobs** use `REVIEWSENSEI_LOCAL_MODEL`, then `qwen3.5:4b`.
-- **Cloud Ollama jobs** use `REVIEWSENSEI_CLOUD_MODEL`, then
-  `deepseek-v4.1-flash:cloud`.
-- **OpenRouter jobs** use `REVIEWSENSEI_MODEL` when set (must be an
-  allowlisted vendor/model slug), otherwise the hosted allowlist default
-  (`deepseek/deepseek-v4.1-flash`). They do not consult
-  `REVIEWSENSEI_LOCAL_MODEL`, `REVIEWSENSEI_CLOUD_MODEL`, or
-  `OPENROUTER_MODEL` (CLI-only).
-
-Legacy `REVIEWSENSEI_LOCAL_MODEL` and `REVIEWSENSEI_CLOUD_MODEL` apply only
-to their respective Ollama jobs. Hosted OpenRouter accepts only the published
-allowlist in
+without changing the configuration file. Installed GitHub workflows never pass
+`--profile`. `fast-triage` is an explicit CLI/OpenAI path and requires
+`OPENAI_API_KEY`; it is not enabled by the reusable workflow. Hosted OpenRouter
+accepts only the published allowlist in
 `provider_config.HOSTED_OPENROUTER_DEFAULTS` (default
 `deepseek/deepseek-v4.1-flash`, plus `anthropic/claude-3.5-sonnet` and
 `openai/gpt-4o-mini`).
@@ -199,7 +193,6 @@ OpenRouter CLI flags and environment (used with `--provider openrouter` or
 | `OPENROUTER_API_KEY` | empty | Required bearer credential for OpenRouter modes |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Allowlisted OpenRouter API root |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Default model for unprofiled OpenRouter CLI runs |
-| `OPENROUTER_UPSTREAM_PROVIDER` | `morph` | Upstream slug for unprofiled OpenRouter routing policy |
 | `OPENROUTER_TIMEOUT_SECONDS` | `120` | Request timeout |
 | `REVIEWSENSEI_OPENROUTER_TIMEOUT_SECONDS` | unset | Overrides `OPENROUTER_TIMEOUT_SECONDS` when set |
 
@@ -208,14 +201,18 @@ OpenRouter CLI profiles start `unqualified` and require
 `--allow-unqualified-profile` for live review until separate qualification
 evidence exists. Hosted workflows reject `allow_unqualified_profile=true` and
 do not forward `--allow-unqualified-profile`; use the CLI for unqualified
-profile runs. Hosted OpenRouter uses `--provider openrouter --model` and
-derives `OPENROUTER_UPSTREAM_PROVIDER` from the hosted OpenRouter model
-allowlist in `provider_config.py`.
+profile runs. Hosted OpenRouter runs the provider arguments the resolved plan
+emitted (`--provider`, `--base-url`, `--model`) and derives the upstream
+provider from the hosted OpenRouter model allowlist in `provider_config.py`;
+upstream routing is declared in `.reviewsensei.yml` under
+`advanced.routing.upstream_provider`, and the retired
+`OPENROUTER_UPSTREAM_PROVIDER` variable is reported by `review-sensei config`.
 Every OpenRouter request includes `provider.data_collection=deny` (plus
 no fallbacks and zero-data-retention) through the typed routing policy.
 
-To roll back from OpenRouter, set `REVIEWSENSEI_PROVIDER_MODE` back to `local`
-or `cloud`, and remove `OPENROUTER_API_KEY` when it is no longer needed.
+To roll back from OpenRouter, set `inference.backend` back to `local-ollama` or
+`cloud-ollama` in `.reviewsensei.yml`, and remove `OPENROUTER_API_KEY` when it
+is no longer needed.
 
 ## GitHub workflow example
 
@@ -243,22 +240,42 @@ It then checks out only trusted base content, validates refs, and computes a
 bounded diff without installing or executing the
 head branch.
 
-The App creates repository variables for provider mode/model selection, package
-version, independent analysis/publication controls, learning proposals and
-learning PRs, mention replies, artifact upload, and optional trusted stage and
-category directories (`REVIEWSENSEI_STAGES_DIR`, `REVIEWSENSEI_CATEGORIES_DIR`).
-The generated setup contains 15 repository variables, including 7 boolean
-controls, and 3 generated files. Boolean controls default to `false` except
-`REVIEWSENSEI_AUTO_APPROVE=true`, which remains gated by review and write
-settings. `REVIEWSENSEI_REVIEW_MODE=merge-focused` selects a policy; it is not a
-boolean control. The reusable workflow's `review_mode` input is optional and
-defaults to `merge-focused`, and the generated caller maps an unset or empty
-repository variable to that default, so an absent or blank value resolves like
-the CLI rather than failing the workflow guard. Only review operations fail
-closed on a retired stored value: reply and command runs warn and continue on
-`merge-focused`, matching the CLI reply path, which never resolves a review
-policy. Merge-focused requires a trusted session ledger for admission
-and round enforcement: every hosted review runs through the reusable workflow,
+The App creates no repository variables: every behavioral decision is a field
+of `.reviewsensei.yml`, and the generated setup contains 3 generated files:
+`.github/workflows/review-sensei-review.yml`,
+`.github/workflows/review-sensei-uninstall.yml`, and the root
+`.reviewsensei.yml` the operator owns from the first install on. The only two
+optional Actions overrides the product consumes are `REVIEWSENSEI_PROVIDER`
+(`inference.backend`) and `REVIEWSENSEI_MODEL` (`inference.model`); the
+reusable workflow maps them once from the trusted policy commit, and no other
+variable, boolean, or path reaches a run. A repository that still carries a
+retired managed variable (`REVIEWSENSEI_AUTO_REVIEW`,
+`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_GITHUB_WRITES`,
+`REVIEWSENSEI_MENTION_REPLIES`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
+`REVIEWSENSEI_LEARNING_PRS`, `REVIEWSENSEI_UPLOAD_ARTIFACTS`,
+`REVIEWSENSEI_REVIEW_MODE`, `REVIEWSENSEI_VERSION`,
+`REVIEWSENSEI_STAGES_DIR`, or `REVIEWSENSEI_CATEGORIES_DIR`) sees it reported
+with its `.reviewsensei.yml` replacement on each run and otherwise ignored.
+
+Stage and category documents live in the conventional directories
+`.reviewsensei/stages/` and `.reviewsensei/categories/` beside the
+configuration root of the trusted base commit; the retired
+`REVIEWSENSEI_STAGES_DIR` and `REVIEWSENSEI_CATEGORIES_DIR` variables are
+reported with that replacement. Pull-request head edits to custom stage or
+category JSON cannot change the instructions used for that review. A stage
+whose lenses are all inactive for the diff makes zero provider calls; a
+category-less independent-output stage still runs once.
+
+The 3 generated files are byte-addressed and are migrated only when their
+managed content matches exactly. Editing a generated file makes the
+installation custom (`unknown`) and prevents automatic overwrites, in both
+historical and current setup versions; reconcile custom files manually rather
+than weakening managed-file recognition, and configure behavior in
+`.reviewsensei.yml`. The App requests no Variables permission, does not create
+a placeholder secret, and never creates the customer-owned provider secrets.
+
+Every hosted review requires a trusted session ledger for admission
+and round enforcement: it runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes
 reviews without any additional ledger provisioning. The analysis job and the
@@ -272,60 +289,41 @@ without `--session-ledger` or `--github-session-ledger` reports `doctor`
 `status=action` (exit 2) and `plan` lists `session-ledger-required`, and an
 unadmitted round is skipped with zero provider calls rather than silently
 downgraded. See [`docs/diagnostics.md`](diagnostics.md) and
-[ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md). Empty stage/category paths preserve the packaged defaults. Manual dispatch may override those directories; both the
-variable and the input are repository-relative paths loaded from the trusted
-base checkout after authoritative PR preflight. Pull-request head edits to
-custom stage or category JSON cannot change the instructions used for that
-review. A stage whose lenses are all inactive for the diff makes zero provider
-calls; a category-less independent-output stage still runs once.
-The 7 boolean controls are `REVIEWSENSEI_AUTO_REVIEW`,
-`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
-`REVIEWSENSEI_GITHUB_WRITES`, `REVIEWSENSEI_LEARNING_PRS`,
-`REVIEWSENSEI_MENTION_REPLIES`, and `REVIEWSENSEI_UPLOAD_ARTIFACTS`.
-The 3 generated files are `.github/workflows/review-sensei-review.yml`,
-`.github/workflows/review-sensei-uninstall.yml`, and
-`.github/review-sensei/config.yml`. They remain byte-addressed and are migrated
-only when their managed content matches exactly. Editing generated provider,
-model, or other configuration fields makes the installation custom (`unknown`)
-and prevents automatic overwrites, in both historical and current setup
-versions. Configure the generated caller through repository Actions variables;
-reconcile custom files manually rather than weakening managed-file recognition.
-The App does not create a placeholder secret or overwrite an existing variable.
+[ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md).
 
 To enable automatic same-repository analysis, set
-`REVIEWSENSEI_AUTO_REVIEW=true`. Draft pull requests skip that automatic run
-until they are marked ready for review. Set `REVIEWSENSEI_GITHUB_WRITES=true`
-separately when the validated result may publish to GitHub; analysis remains
-provider-only while writes are disabled. Set
-`REVIEWSENSEI_LEARNING_PROPOSALS=true` independently when model-generated
-learning proposals are desired, and `REVIEWSENSEI_LEARNING_PRS=true` to publish
-those proposals as draft PRs.
-Enabling `REVIEWSENSEI_GITHUB_WRITES=true` also exposes the maintainer command
-surface, independently of `REVIEWSENSEI_MENTION_REPLIES`. An authorized human
+`github.automatic_reviews: true` (the default). Draft pull requests skip that
+automatic run until they are marked ready for review. Set
+`github.writes: true` separately when the validated result may publish to
+GitHub; analysis remains provider-only while writes are disabled. Model-
+generated learning proposals require `github.learning: proposals`, and
+`github.learning: pull-requests` additionally publishes those proposals as
+draft PRs. `github.writes: true` also exposes the maintainer command
+surface, independently of `github.mentions`. An authorized human
 `OWNER`, `MEMBER`, or `COLLABORATOR` may post `@sensei review
 status|pause|continue|reenroll`, `@sensei verify`, or `@sensei
 dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
 those comments take the command path whenever writes are enabled, while
-`REVIEWSENSEI_MENTION_REPLIES` continues to control only conversational
+`github.mentions` continues to control only conversational
 replies. The command path is the pull-request conversation: an inline review
 comment on a diff line always resolves as a conversational reply and therefore
-still requires `REVIEWSENSEI_MENTION_REPLIES`. The caller workflow's `@sensei`
+still requires `github.mentions`. The caller workflow's `@sensei`
 and association checks are routing gates, not the authorization decision: every
 mutation is re-authorized inside the reusable workflow against the
 broker-attested actor and the durable session ledger before any write.
-`REVIEWSENSEI_PROVIDER_MODE=cloud` or `cloud-ollama` runs on `ubuntu-latest`
+`inference.backend: cloud-ollama` runs on `ubuntu-latest`
 and requires the customer-owned `OLLAMA_API_KEY` under Repository Settings →
-Secrets and variables → Actions. `REVIEWSENSEI_PROVIDER_MODE=local` or
-`local-ollama` runs the same review path on the labelled self-hosted runner.
-`REVIEWSENSEI_PROVIDER_MODE=openrouter` runs on `ubuntu-latest` with
-`OPENROUTER_API_KEY` and `REVIEWSENSEI_MODEL`. All modes reject fork heads before provider
-or broker access and can publish one exact-head App review with valid inline
-comments and a validated summary. Enable `REVIEWSENSEI_LEARNING_PRS` separately for deterministic draft
-learning PRs.
+Secrets and variables → Actions. `inference.backend: local-ollama` runs the
+same review path on the labelled self-hosted runner.
+`inference.backend: openrouter` runs on `ubuntu-latest` with
+`OPENROUTER_API_KEY` and the resolved model. All backends reject fork heads
+before provider or broker access and can publish one exact-head App review with
+valid inline comments and a validated summary.
 
 With automatic review and GitHub writes enabled, clean eligible reviews can
 satisfy branch-protection approvals automatically by default. Set
-`REVIEWSENSEI_AUTO_APPROVE=false` to publish `COMMENT` instead. Blocking
+`github.reviews: blocking` or `github.reviews: advisory` in
+`.reviewsensei.yml` to select a non-approving policy instead. Blocking
 findings are published as `REQUEST_CHANGES`, then a shared idempotent
 finalizer may emit `APPROVE` once no unresolved ReviewSensei root is classified
 blocking. A later execution on the same head can still request changes after
@@ -354,10 +352,10 @@ runner. Automatic reviews, manual reviews, learning proposals, artifact upload,
 and authorized `@sensei` replies are available in both provider modes. A cloud
 reply sends its bounded thread and review context to Ollama Cloud; local mode
 keeps that context on the configured local service.
-`review.json` is uploaded only when `REVIEWSENSEI_UPLOAD_ARTIFACTS=true`; there
-is no separate version artifact. The generated **Remove ReviewSensei setup**
-workflow opens a cleanup PR and leaves learnings, variables, and secrets for
-explicit operator review.
+`review.json` is uploaded only when `github.artifacts: diagnostics` is set in
+`.reviewsensei.yml`; there is no separate version artifact. The generated
+**Remove ReviewSensei setup** workflow opens a cleanup PR and leaves learnings
+and repository secrets for explicit operator review.
 
 If the GitHub App was already installed before a setup version change, do not
 remove the generated files manually. Deploy the updated Worker, then accept a
@@ -365,25 +363,26 @@ pending App permission update or remove and re-add the repository to generate a
 fresh setup delivery. The bootstrap identifies older generated files, including
 a byte-exact managed v3 workflow (including its older SHA pin), and opens a
 migration PR that updates only those files to setup-v5. It also migrates a
-managed v4/v5 caller that follows an older tag, and replaces a
-`REVIEWSENSEI_REVIEW_MODE` value of exactly `legacy` with `merge-focused` in
-place so the generated caller and its workflow guard keep working, and reports
-`review_mode_migration: observed` or `not_observed` in the setup result. It skips
-custom or future versions for manual review and preserves learnings, every
-other existing variable value, and secrets.
+managed v4/v5 caller that follows an older tag. It skips custom or future
+versions for manual review, preserves learnings and repository secrets, and
+never creates, reads, or rewrites a repository variable.
 
 ## Setup-v5 and tag-based reusable workflow
 
-The current generated setup is version 5. The caller follows the public
-`malsabbagh/review-sensei` reusable workflow at the operator-managed `v5` git
-tag and passes only bounded event inputs. It requests `contents: read`,
-`pull-requests: read`, `issues: read`, and `id-token: write`; generated write
-and artifact switches are all `false`.
-The caller passes an explicit provider mode to one provider-neutral reusable
-job. Cloud review and reply operations run on `ubuntu-latest`; local review and
-reply operations run on `[self-hosted, linux, x64, ollama]`. Both modes support
-automatic review, manual review, validated review publication, learning draft
-PRs, optional artifacts, and authorized `@sensei` conversations. An authorized
+The current generated setup is version 5. The caller is a thin bootstrap: it
+resolves the pull-request trigger from the trusted default branch, passes only
+bounded event inputs to the public `malsabbagh/review-sensei` reusable workflow
+at the operator-managed `v5` git tag, and reads no repository variables. It
+requests `contents: read`, `pull-requests: read`, `issues: read`, and
+`id-token: write`; whether anything is published is `github.writes` in
+`.reviewsensei.yml`, and each write is authorized by the broker for that
+operation rather than by a permission the caller grants.
+The reusable workflow resolves the trusted configuration plan once and derives
+the backend, endpoint, model, and credential name from it. Cloud review and
+reply operations run on `ubuntu-latest`; local review and reply operations run
+on `[self-hosted, linux, x64, ollama]`. Both modes support automatic review,
+manual review, validated review publication, learning draft PRs, optional
+artifacts, and authorized `@sensei` conversations. An authorized
 mention receives 👀 while the response is being generated, and the reaction is
 removed after the reply or another terminal outcome. The provider may include
 `resolve: true` in its validated reply when the current exact-head context
@@ -394,13 +393,17 @@ Issue comments and human-authored roots remain open. Add another standalone
 successful AI resolution automatically causes one fresh same-head review pass;
 approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
-The generated caller may contain the literal name-only mapping
-`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`. This does not read
-secret values during setup and the App never creates, retrieves, logs,
-persists, or interpolates a secret value into generated output. Add the
-customer-owned `OLLAMA_API_KEY` yourself only when explicitly enabling cloud
-mode. `OPENROUTER_API_KEY` is forwarded by generated callers only after the
-public `v5` tag includes the reusable-workflow contract.
+The generated caller declares the three optional provider secrets by name only:
+`OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}`,
+`OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}`, and
+`OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}`. These are literal name-only
+mappings: they do not read secret values during setup, and the App never
+creates, retrieves, logs, persists, or interpolates a secret value into
+generated output. Add the customer-owned secret for the backend you select
+(`OLLAMA_API_KEY` for `cloud-ollama`, `OPENROUTER_API_KEY` for `openrouter`,
+`OPENAI_API_KEY` for `openai-compatible`) and leave the others unset. A backend
+whose credential is required fails closed before any provider call when its
+secret is not available to the workflow.
 
 Setup reconciliation is PR-only and changes only the three generated paths.
 `installation.created` (including reinstall),

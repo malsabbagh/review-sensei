@@ -102,9 +102,8 @@ class WorkflowValidationTests(unittest.TestCase):
         # The complete set of repository variables this workflow reads: the two
         # supported overrides, plus the retired names the diagnostic report maps
         # so it can warn about them. Nothing else is read from `vars`.
-        retired = (
-            set(RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS)
-            | set(RETIRED_ENVIRONMENT_SETTINGS)
+        retired = set(RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS) | set(
+            RETIRED_ENVIRONMENT_SETTINGS
         )
         managed = sorted(
             name for name in retired if name.startswith("REVIEWSENSEI_")

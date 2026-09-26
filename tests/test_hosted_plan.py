@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -151,9 +152,7 @@ class HostedPlanResolutionTests(unittest.TestCase):
         for name, replacement in remedies.items():
             with self.subTest(setting=name):
                 with self.assertRaises(ConfigurationError) as caught:
-                    plan_hosted_execution(
-                        configuration(LOCAL), environ={name: "cloud"}
-                    )
+                    plan_hosted_execution(configuration(LOCAL), environ={name: "cloud"})
                 message = str(caught.exception)
                 self.assertIn(name, message)
                 self.assertIn("retired", message)
@@ -194,9 +193,10 @@ class HostedPlanResolutionTests(unittest.TestCase):
         rendered = render_hosted_plan(plan, as_json=True)
         self.assertIn("OLLAMA_API_KEY", rendered)
         self.assertNotIn("hosted-secret-value", rendered)
-        self.assertNotIn("hosted-secret-value", "".join(
-            value for _, value in hosted_plan_outputs(plan)
-        ))
+        self.assertNotIn(
+            "hosted-secret-value",
+            "".join(value for _, value in hosted_plan_outputs(plan)),
+        )
 
 
 class HostedPlanOutputTests(unittest.TestCase):
@@ -218,9 +218,9 @@ class HostedPlanOutputTests(unittest.TestCase):
         self.assertEqual(outputs["mentions"], "true")
         self.assertEqual(outputs["learning"], "disabled")
         self.assertEqual(outputs["artifacts"], "none")
-        self.assertNotIn("hosted-secret-value", render_github_outputs(
-            hosted_plan_outputs(plan)
-        ))
+        self.assertNotIn(
+            "hosted-secret-value", render_github_outputs(hosted_plan_outputs(plan))
+        )
 
     def test_rendered_outputs_use_a_heredoc_delimiter_per_value(self):
         rendered = render_github_outputs((("model", "qwen3.5:4b"),))
@@ -228,9 +228,7 @@ class HostedPlanOutputTests(unittest.TestCase):
 
     def test_delimiter_collisions_extend_the_delimiter(self):
         rendered = render_github_outputs((("source", "RS_SOURCE"),))
-        self.assertEqual(
-            rendered, "source<<RS_SOURCE_EOF\nRS_SOURCE\nRS_SOURCE_EOF\n"
-        )
+        self.assertEqual(rendered, "source<<RS_SOURCE_EOF\nRS_SOURCE\nRS_SOURCE_EOF\n")
 
     def test_unsupported_output_names_are_rejected(self):
         with self.assertRaises(ConfigurationError):
@@ -341,8 +339,12 @@ class HostedPlanCliTests(unittest.TestCase):
 
     def test_host_plan_defaults_to_packaged_defaults_without_a_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("review_sensei.configuration.Path.cwd", return_value=Path(tmp)):
+            previous = Path.cwd()
+            os.chdir(tmp)
+            try:
                 plan = load_and_plan_hosted(None, environ={})
+            finally:
+                os.chdir(previous)
         self.assertEqual(plan.source, None)
         self.assertEqual(plan.backend, "local-ollama")
 

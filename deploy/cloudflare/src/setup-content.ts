@@ -45,11 +45,8 @@ export const BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS: readonly string[] = [
   "v4",
   "v5",
 ];
-export const DEFAULT_PROVIDER_MODE = "local";
 export const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 export const DEFAULT_CLOUD_MODEL = "deepseek-v4.1-flash:cloud";
-export const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash";
-export const REVIEWSENSEI_VERSION = "0.6.8";
 /** Package version embedded in byte-exact setup-v3 recognition templates. */
 export const HISTORICAL_V3_SETUP_PACKAGE_VERSION = "0.1.0";
 /** Package version embedded in byte-exact setup-v4 recognition templates. */
@@ -60,43 +57,31 @@ export interface SetupFile {
   content: string;
 }
 
-export interface SetupVariable {
-  readonly name: string;
-  readonly value: string;
-}
-
+export const SETUP_WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml";
+export const SETUP_UNINSTALL_WORKFLOW_PATH =
+  ".github/workflows/review-sensei-uninstall.yml";
+/**
+ * The canonical configuration surface: a root file the package reads from the
+ * trusted policy commit. Setup generates it once with the setup-time backend
+ * choice and never rewrites it: the file belongs to the operator.
+ */
+export const CONFIG_PATH = ".reviewsensei.yml";
+/**
+ * The retired setup-v5 configuration location. Nothing reads it any more
+ * (there is no dual-read), and the uninstall flow still removes it, so an
+ * installation that migrates does not leave a second, silently ignored
+ * configuration behind.
+ */
+export const LEGACY_CONFIG_PATH = ".github/review-sensei/config.yml";
 export const SETUP_FILE_PATHS: readonly string[] = [
-  ".github/workflows/review-sensei-review.yml",
-  ".github/workflows/review-sensei-uninstall.yml",
-  ".github/review-sensei/config.yml",
+  SETUP_WORKFLOW_PATH,
+  SETUP_UNINSTALL_WORKFLOW_PATH,
+  CONFIG_PATH,
 ];
-
-export const SETUP_VARIABLES: readonly SetupVariable[] = [
-  { name: "REVIEWSENSEI_PROVIDER_MODE", value: DEFAULT_PROVIDER_MODE },
-  { name: "REVIEWSENSEI_MODEL", value: "" },
-  { name: "REVIEWSENSEI_LOCAL_MODEL", value: DEFAULT_LOCAL_MODEL },
-  { name: "REVIEWSENSEI_CLOUD_MODEL", value: DEFAULT_CLOUD_MODEL },
-  { name: "REVIEWSENSEI_VERSION", value: REVIEWSENSEI_VERSION },
-  { name: "REVIEWSENSEI_REVIEW_MODE", value: "merge-focused" },
-  { name: "REVIEWSENSEI_AUTO_REVIEW", value: "false" },
-  { name: "REVIEWSENSEI_AUTO_APPROVE", value: "true" },
-  { name: "REVIEWSENSEI_LEARNING_PROPOSALS", value: "false" },
-  { name: "REVIEWSENSEI_GITHUB_WRITES", value: "false" },
-  { name: "REVIEWSENSEI_LEARNING_PRS", value: "false" },
-  { name: "REVIEWSENSEI_MENTION_REPLIES", value: "false" },
-  { name: "REVIEWSENSEI_UPLOAD_ARTIFACTS", value: "false" },
-  { name: "REVIEWSENSEI_STAGES_DIR", value: "" },
-  { name: "REVIEWSENSEI_CATEGORIES_DIR", value: "" },
-];
-
-// The retired review mode survives in existing installations as a repository
-// variable that setup never overwrites, which would make the reusable-workflow
-// guard fail every review. Only this variable and only these exact values are
-// migrated in place; every other operator-set value is left as-is.
-export const RETIRED_REVIEW_MODE_VARIABLE = "REVIEWSENSEI_REVIEW_MODE";
-export const RETIRED_REVIEW_MODE_MIGRATIONS: Readonly<Record<string, string>> = {
-  legacy: "merge-focused",
-};
+// Setup creates no behavioral repository variables. The configuration file is
+// the canonical surface; the only two optional Actions overrides the product
+// consumes are REVIEWSENSEI_PROVIDER and REVIEWSENSEI_MODEL, read once by the
+// reusable workflow itself. Setup never creates, reads, or rewrites either one.
 
 export function validatePublicWorkflowSha(value: string): string {
   if (
@@ -438,7 +423,13 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
-function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
+/**
+ * Released setup-v5 caller bytes, kept frozen for managed recognition.
+ *
+ * These are the bytes every existing installation carries; recognition of an
+ * installed setup must not change when the current template changes.
+ */
+export function historicalV5WorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 5
 name: ReviewSensei review
@@ -804,6 +795,303 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+/**
+ * Current setup-v5 caller: invocation-only.
+ *
+ * The caller resolves the event into the reusable workflow's declared inputs,
+ * states the read-only permissions and the optional OIDC scope that workflow
+ * needs, and names the three optional provider secrets. Backend, model,
+ * endpoint, credential, and every github.* policy decision come from
+ * .reviewsensei.yml on the trusted policy commit, so this file reads no
+ * repository variables and carries no policy expression.
+ */
+function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
+  const tag = validatePublicWorkflowTag(publicWorkflowTag);
+  return String.raw`# ReviewSensei setup version: 5
+name: ReviewSensei review
+run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
+
+# Configuration lives in .reviewsensei.yml at the repository root of the
+# trusted policy commit (the repository default branch) that the reusable
+# workflow freezes. This caller reads no repository variables: the only two
+# product overrides are REVIEWSENSEI_PROVIDER (inference.backend) and
+# REVIEWSENSEI_MODEL (inference.model), and the reusable workflow maps them,
+# once, from configuration.
+#
+# The installer and this caller follow the operator-managed v5 git tag. Moving
+# that tag is the public setup-v5 release action, so the reusable workflow,
+# its exact package install, and every policy decision arrive without editing
+# this file.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Review the selected pull request
+        required: true
+        default: review
+        type: choice
+        options: [review]
+      pull_request_number:
+        description: Pull request number to review
+        required: true
+      head_repository:
+        description: Optional owner/repo slug for fork review
+        required: false
+      source_kind:
+        description: Source kind for manual dispatch (issue or inline)
+        required: false
+      source_comment_id:
+        description: Source comment ID for manual reply
+        required: false
+      source_updated_at:
+        description: Timestamp of source comment
+        required: false
+      root_comment_id:
+        description: Root comment ID for manual reply thread
+        required: false
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+# Read-only plus OIDC. The reusable workflow needs no write scope from this
+# repository - every publication is authorized by the broker - and it can
+# never exceed what this caller grants. Whether anything is published is
+# github.writes in .reviewsensei.yml, not a permission.
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
+
+jobs:
+  resolve-trigger:
+    # Event shape only: which events may start a run, and which commenters may
+    # address @sensei. Nothing here depends on configuration.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot') ||
+      (github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      contains(github.event.comment.body, '@sensei') &&
+      (github.event.comment.author_association == 'OWNER' ||
+      github.event.comment.author_association == 'MEMBER' ||
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      github.event.comment.user.type != 'Bot')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      operation: @@{{ steps.resolve.outputs.operation }}
+      head_sha: @@{{ steps.resolve.outputs.head_sha }}
+      head_ref: @@{{ steps.resolve.outputs.head_ref }}
+      base_ref: @@{{ steps.resolve.outputs.base_ref }}
+      base_sha: @@{{ steps.resolve.outputs.base_sha }}
+      pull_request_number: @@{{ steps.resolve.outputs.pull_request_number }}
+    steps:
+      - name: Check out trusted trigger resolver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: @@{{ github.event.repository.default_branch }}
+
+      - name: Resolve pull-request trigger metadata
+        id: resolve
+        env:
+          GH_TOKEN: @@{{ github.token }}
+          EVENT_NAME: @@{{ github.event_name }}
+          REPOSITORY: @@{{ github.repository }}
+          PULL_REQUEST: @@{{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
+          PULL_REQUEST_URL: @@{{ github.event.comment.pull_request_url }}
+          COMMENT_BODY: @@{{ github.event.comment.body }}
+          PULL_REQUEST_JSON: @@{{ github.event_name == 'pull_request' && toJson(github.event.pull_request) || '' }}
+        run: |
+          set -euo pipefail
+          PULL_REQUEST="@@{PULL_REQUEST:-}"
+          PULL_REQUEST_URL="@@{PULL_REQUEST_URL:-}"
+          COMMENT_BODY="@@{COMMENT_BODY:-}"
+          if [[ -z "@@{PULL_REQUEST}" && "@@{PULL_REQUEST_URL}" =~ /pulls/([1-9][0-9]*)$ ]]; then
+            PULL_REQUEST="@@{BASH_REMATCH[1]}"
+          fi
+          if [[ ! "@@{PULL_REQUEST}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::pull request number is unavailable"
+            exit 1
+          fi
+          if [[ ! "@@{REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::repository identity is invalid"
+            exit 1
+          fi
+          pull_json="$RUNNER_TEMP/review-sensei-pull.json"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ -z "@@{PULL_REQUEST_JSON}" ]]; then
+              echo "::error::pull request payload is unavailable"
+              exit 1
+            fi
+            printf '%s' "$PULL_REQUEST_JSON" > "$pull_json"
+          else
+            gh api --method GET "repos/@@{REPOSITORY}/pulls/@@{PULL_REQUEST}" > "$pull_json"
+          fi
+          resolver="src/review_sensei/hosting/github/trigger.py"
+          if [[ -f "$resolver" ]]; then
+            PYTHONPATH=src python "$resolver" \
+              --event "$EVENT_NAME" \
+              --comment-body "$COMMENT_BODY" \
+              --pull-json "$pull_json"
+            exit 0
+          fi
+          python - "$pull_json" "$EVENT_NAME" "$COMMENT_BODY" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sha_full = re.compile(r"^[a-f0-9]{40}$")
+          sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
+          ref = re.compile(r"^[A-Za-z0-9._/-]+$")
+          rescan = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
+          commit_sha = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
+          pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          event_name = sys.argv[2]
+          comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
+
+          def valid_ref(value):
+              return (
+                  isinstance(value, str)
+                  and ref.fullmatch(value) is not None
+                  and ".." not in value
+                  and not value.startswith("/")
+                  and not value.endswith("/")
+                  and "//" not in value
+              )
+
+          head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+          base = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+          number = pull.get("number")
+          head_sha = head.get("sha")
+          head_ref = head.get("ref")
+          base_sha = base.get("sha")
+          base_ref = base.get("ref")
+          if (
+              isinstance(number, bool)
+              or not isinstance(number, int)
+              or number < 1
+              or not isinstance(head_sha, str)
+              or sha_full.fullmatch(head_sha) is None
+              or not valid_ref(head_ref)
+              or not isinstance(base_sha, str)
+              or sha_full.fullmatch(base_sha) is None
+              or not valid_ref(base_ref)
+          ):
+              print("::error::pull request identity metadata is invalid", file=sys.stderr)
+              raise SystemExit(1)
+
+          def choose_head(requested):
+              if not requested:
+                  return head_sha
+              requested = requested.casefold()
+              if sha_full.fullmatch(requested):
+                  if requested != head_sha:
+                      print(
+                          "::error::requested head sha does not match the pull request head",
+                          file=sys.stderr,
+                      )
+                      raise SystemExit(1)
+                  return requested
+              if head_sha.startswith(requested):
+                  return head_sha
+              print(
+                  "::error::requested commit does not match the pull request head",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          operation = "review"
+          resolved_head = head_sha
+          if event_name == "pull_request" or event_name == "workflow_dispatch":
+              pass
+          elif event_name == "pull_request_review_comment":
+              operation = "reply"
+          elif event_name == "issue_comment":
+              wants_rescan = (
+                  isinstance(comment_body, str)
+                  and "@sensei" in comment_body
+                  and rescan.search(comment_body) is not None
+              )
+              if wants_rescan:
+                  match = commit_sha.search(comment_body)
+                  token = match.group(1).casefold() if match is not None else None
+                  if token is not None and not (
+                      sha_full.fullmatch(token) or sha_prefix.fullmatch(token)
+                  ):
+                      token = None
+                  resolved_head = choose_head(token)
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue(?:\s+--rounds\s+[01])?|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+                  operation = "command"
+              else:
+                  operation = "reply"
+          else:
+              print("::error::unsupported event", file=sys.stderr)
+              raise SystemExit(1)
+          output = os.environ.get("GITHUB_OUTPUT")
+          if not output:
+              print("::error::GITHUB_OUTPUT is unavailable", file=sys.stderr)
+              raise SystemExit(1)
+          with open(output, "a", encoding="utf-8") as handle:
+              handle.write(f"operation={operation}\n")
+              handle.write(f"head_sha={resolved_head}\n")
+              handle.write(f"head_ref={head_ref}\n")
+              handle.write(f"base_ref={base_ref}\n")
+              handle.write(f"base_sha={base_sha}\n")
+              handle.write(f"pull_request_number={number}\n")
+          PY
+
+  review-or-reply:
+    # A skipped dependency skips this job, so the event guard above is the
+    # only guard: the reusable workflow decides eligibility, authorization,
+    # and whether anything is published.
+    needs: resolve-trigger
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@__PUBLIC_WORKFLOW_TAG__
+    with:
+      mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
+      operation: @@{{ needs.resolve-trigger.outputs.operation }}
+      repository: @@{{ github.repository }}
+      repository_id: @@{{ github.repository_id }}
+      pull_request_number: @@{{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}
+      base_ref: @@{{ needs.resolve-trigger.outputs.base_ref }}
+      base_sha: @@{{ needs.resolve-trigger.outputs.base_sha }}
+      head_ref: @@{{ needs.resolve-trigger.outputs.head_ref }}
+      head_repository: @@{{ inputs.head_repository || github.event.pull_request.head.repo.full_name || github.repository }}
+      head_sha: @@{{ needs.resolve-trigger.outputs.head_sha }}
+      source_kind: @@{{ inputs.source_kind || (github.event_name == 'pull_request_review_comment' && 'inline') || 'issue' }}
+      source_comment_id: @@{{ inputs.source_comment_id || github.event.comment.id }}
+      source_updated_at: @@{{ inputs.source_updated_at || github.event.comment.updated_at }}
+      root_comment_id: @@{{ inputs.root_comment_id || github.event.comment.in_reply_to_id || github.event.comment.id }}
+      comment_body: @@{{ github.event.comment.body || '' }}
+      comment_actor: @@{{ github.event.comment.user.login || '' }}
+      comment_actor_type: @@{{ github.event.comment.user.type || 'User' }}
+      comment_association: @@{{ github.event.comment.author_association || '' }}
+    secrets:
+      OLLAMA_API_KEY: @@{{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: @@{{ secrets.OPENROUTER_API_KEY }}
+      OPENAI_API_KEY: @@{{ secrets.OPENAI_API_KEY }}
+`
+    .replaceAll("__PUBLIC_WORKFLOW_TAG__", tag)
+    .replaceAll(GITHUB_EXPRESSION, "$");
+}
+
 const FROZEN_RUN_WORKFLOW_TAG_REFERENCE =
   /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([A-Za-z0-9][A-Za-z0-9._-]{0,127})/g;
 
@@ -966,41 +1254,86 @@ function historicalV3UninstallWorkflowTemplate(): string {
   );
 }
 
-function configFile(
-  version: number,
-  includeAutoApprove = false,
-  includeLearningProposals = false,
-  packageVersion?: string,
-): string {
-  const autoApprove = includeAutoApprove ? "auto_approve: false\n" : "";
+/**
+ * Released setup-v5 uninstall bytes.
+ *
+ * The released uninstall removed the retired config location. The current one
+ * also removes the root configuration file, so the released bytes are frozen
+ * here for recognition rather than derived from the live template.
+ */
+export function historicalV5UninstallWorkflow(): string {
+  return uninstallWorkflowTemplate().replace(
+    "# ReviewSensei setup version: 3",
+    `# ReviewSensei setup version: ${SETUP_VERSION}`,
+  );
+}
+
+/** Current setup-v5 uninstall: also removes the root configuration file. */
+export function currentUninstallWorkflow(): string {
+  const releasedPaths =
+    "          paths = (\n" +
+    '              ".github/workflows/review-sensei-review.yml",\n' +
+    '              ".github/workflows/review-sensei-uninstall.yml",\n' +
+    '              ".github/review-sensei/config.yml",\n' +
+    "          )\n";
+  const currentPaths =
+    "          paths = (\n" +
+    '              ".github/workflows/review-sensei-review.yml",\n' +
+    '              ".github/workflows/review-sensei-uninstall.yml",\n' +
+    '              ".reviewsensei.yml",\n' +
+    '              ".github/review-sensei/config.yml",\n' +
+    "          )\n";
+  const current = historicalV5UninstallWorkflow().replace(
+    releasedPaths,
+    currentPaths,
+  );
+  if (current === historicalV5UninstallWorkflow()) {
+    throw new Error("uninstall cleanup paths are missing from the template");
+  }
+  return current;
+}
+
+function configFile(version: number, packageVersion?: string): string {
   const resolvedPackageVersion =
     packageVersion ??
-    (version === SETUP_VERSION
-      ? REVIEWSENSEI_VERSION
-      : version === 3
-        ? HISTORICAL_V3_SETUP_PACKAGE_VERSION
-        : HISTORICAL_V4_SETUP_PACKAGE_VERSION);
+    (version === 3
+      ? HISTORICAL_V3_SETUP_PACKAGE_VERSION
+      : HISTORICAL_V4_SETUP_PACKAGE_VERSION);
   return (
     `# ReviewSensei setup version: ${version}\n` +
     `setup_version: ${version}\n` +
     "provider: ollama\n" +
     "provider_mode: local\n" +
     "model: ''\n" +
-    (version === SETUP_VERSION ? "review_mode: merge-focused\n" : "") +
     "base_url: http://127.0.0.1:11434/api\n" +
     "cloud_base_url: https://ollama.com/api\n" +
     `local_model: ${DEFAULT_LOCAL_MODEL}\n` +
     `cloud_model: ${DEFAULT_CLOUD_MODEL}\n` +
     `version: ${resolvedPackageVersion}\n` +
     "auto_review: false\n" +
-    autoApprove +
-    (includeLearningProposals ? "learning_proposals: false\n" : "") +
     "github_writes: false\n" +
     "learning_prs: false\n" +
     "mention_replies: false\n" +
     "upload_artifacts: false\n" +
     "stages_dir: ''\n" +
     "categories_dir: ''\n"
+  );
+}
+
+/**
+ * Current setup-v5 configuration: minimal and operator-owned.
+ *
+ * The package defines a default for every other field, so the generated file
+ * states the setup-time backend choice and nothing else; the byte equivalence
+ * with the Python builder is pinned by test_current_config_matches_ts_builder_bytes.
+ */
+export function currentConfigFile(): string {
+  return (
+    `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
+    "schema: 1\n" +
+    "\n" +
+    "inference:\n" +
+    "  backend: local-ollama\n"
   );
 }
 
@@ -1020,19 +1353,14 @@ export function buildPinnedV4SetupFiles(
 ): readonly SetupFile[] {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return [
-    { path: SETUP_FILE_PATHS[0], content: pinnedV4WorkflowTemplate(sha) },
+    { path: SETUP_WORKFLOW_PATH, content: pinnedV4WorkflowTemplate(sha) },
     {
-      path: SETUP_FILE_PATHS[1],
+      path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: historicalV4UninstallWorkflow(),
     },
     {
-      path: SETUP_FILE_PATHS[2],
-      content: configFile(
-        4,
-        false,
-        false,
-        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
-      ),
+      path: LEGACY_CONFIG_PATH,
+      content: configFile(4, HISTORICAL_V4_SETUP_PACKAGE_VERSION),
     },
   ];
 }
@@ -1043,18 +1371,12 @@ export function buildTaggedV4SetupFiles(
 ): readonly SetupFile[] {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return [
-    { path: SETUP_FILE_PATHS[0], content: resolveTriggerWorkflowTemplate(tag) },
+    { path: SETUP_WORKFLOW_PATH, content: resolveTriggerWorkflowTemplate(tag) },
     {
-      path: SETUP_FILE_PATHS[1],
-      content: uninstallWorkflowTemplate().replace(
-        "# ReviewSensei setup version: 3",
-        `# ReviewSensei setup version: ${SETUP_VERSION}`,
-      ),
+      path: SETUP_UNINSTALL_WORKFLOW_PATH,
+      content: currentUninstallWorkflow(),
     },
-    {
-      path: SETUP_FILE_PATHS[2],
-      content: configFile(SETUP_VERSION, false, true),
-    },
+    { path: CONFIG_PATH, content: currentConfigFile() },
   ];
 }
 
@@ -1064,19 +1386,14 @@ export function buildHistoricalTaggedV4SetupFiles(
 ): readonly SetupFile[] {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return [
-    { path: SETUP_FILE_PATHS[0], content: taggedWorkflowTemplate(tag) },
+    { path: SETUP_WORKFLOW_PATH, content: taggedWorkflowTemplate(tag) },
     {
-      path: SETUP_FILE_PATHS[1],
+      path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: historicalV4UninstallWorkflow(),
     },
     {
-      path: SETUP_FILE_PATHS[2],
-      content: configFile(
-        4,
-        false,
-        false,
-        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
-      ),
+      path: LEGACY_CONFIG_PATH,
+      content: configFile(4, HISTORICAL_V4_SETUP_PACKAGE_VERSION),
     },
   ];
 }
@@ -1088,21 +1405,16 @@ export function buildHistoricalProviderParityV4SetupFiles(
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return [
     {
-      path: SETUP_FILE_PATHS[0],
+      path: SETUP_WORKFLOW_PATH,
       content: historicalProviderParityWorkflowTemplate(tag),
     },
     {
-      path: SETUP_FILE_PATHS[1],
+      path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: historicalV4UninstallWorkflow(),
     },
     {
-      path: SETUP_FILE_PATHS[2],
-      content: configFile(
-        4,
-        false,
-        false,
-        HISTORICAL_V4_SETUP_PACKAGE_VERSION,
-      ),
+      path: LEGACY_CONFIG_PATH,
+      content: configFile(4, HISTORICAL_V4_SETUP_PACKAGE_VERSION),
     },
   ];
 }
@@ -1118,12 +1430,12 @@ export function buildHistoricalV3SetupFiles(
 ): readonly SetupFile[] {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return [
-    { path: SETUP_FILE_PATHS[0], content: historicalV3WorkflowTemplate(sha) },
+    { path: SETUP_WORKFLOW_PATH, content: historicalV3WorkflowTemplate(sha) },
     {
-      path: SETUP_FILE_PATHS[1],
+      path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: historicalV3UninstallWorkflowTemplate(),
     },
-    { path: SETUP_FILE_PATHS[2], content: configFile(3) },
+    { path: LEGACY_CONFIG_PATH, content: configFile(3) },
   ];
 }
 
@@ -1133,9 +1445,9 @@ export function buildCurrentV3SetupFiles(
 ): readonly SetupFile[] {
   const sha = validatePublicWorkflowSha(publicWorkflowSha);
   return [
-    { path: SETUP_FILE_PATHS[0], content: workflowTemplate(sha) },
-    { path: SETUP_FILE_PATHS[1], content: uninstallWorkflowTemplate() },
-    { path: SETUP_FILE_PATHS[2], content: configFile(3) },
+    { path: SETUP_WORKFLOW_PATH, content: workflowTemplate(sha) },
+    { path: SETUP_UNINSTALL_WORKFLOW_PATH, content: uninstallWorkflowTemplate() },
+    { path: LEGACY_CONFIG_PATH, content: configFile(3) },
   ];
 }
 
@@ -1144,15 +1456,35 @@ export const SETUP_FILES: readonly SetupFile[] = buildSetupFiles();
 export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 export const SETUP_PULL_REQUEST_BODY =
-  "This pull request adds or updates the ReviewSensei setup-v5 caller, which " +
-  "follows the operator-managed public v5 git tag. " +
-  "Cloud operations use GitHub-hosted compute and local operations use the labelled " +
-  "self-hosted runner; both support reviews and authorized conversations. All write and artifact " +
-  "switches default to false. Cloud mode passes the existing customer-owned " +
-  "OLLAMA_API_KEY and OPENROUTER_API_KEY secrets by name only; the App never creates or reads their values. " +
-  "If you previously used REVIEWSENSEI_PROVIDER_PROFILE for OpenRouter, delete that deprecated repository variable " +
-  "(Settings → Secrets and variables → Actions → Variables) and set " +
-  "REVIEWSENSEI_PROVIDER_MODE=openrouter with an allowlisted REVIEWSENSEI_MODEL instead; leaving provider_profile " +
-  "non-empty or forwarding it to the reusable workflow now fails closed. " +
-  "Migration changes only these generated paths through a reviewable PR and " +
-  "never overwrites custom or future setup files.";
+  "This pull request adds or updates the ReviewSensei review workflow " +
+  "(setup version 5): a thin caller that follows the operator-managed " +
+  "public v5 git tag, the canonical .reviewsensei.yml configuration, and " +
+  "a manual uninstall-cleanup workflow. " +
+  "Configuration lives in .reviewsensei.yml at the repository root of the " +
+  "default branch. The generated file states the setup-time backend " +
+  "choice and nothing else; every other setting has a package default and " +
+  "the file belongs to you from here on. Setup creates no repository " +
+  "variables and never rewrites the file. " +
+  "The only two optional Actions overrides are REVIEWSENSEI_PROVIDER " +
+  "(inference.backend) and REVIEWSENSEI_MODEL (inference.model); set them " +
+  "under Settings → Secrets and variables → Actions → Variables only to " +
+  "override the file, and the reusable workflow reads them once. " +
+  "The selected backend applies to automatic/manual reviews and " +
+  "authorized mention conversations: local-ollama uses the labelled " +
+  "self-hosted runner, cloud-ollama uses GitHub-hosted Ollama Cloud, " +
+  "openrouter uses GitHub-hosted OpenRouter, and openai-compatible uses " +
+  "the endpoint and model named in the configuration. Cloud credentials " +
+  "are read by name only: OLLAMA_API_KEY, OPENROUTER_API_KEY, or " +
+  "OPENAI_API_KEY. The App never creates or reads secret values. " +
+  "Upgrading from an earlier setup: the old workflow's repository " +
+  "variables (including REVIEWSENSEI_REVIEW_MODE, " +
+  "REVIEWSENSEI_PROVIDER_MODE, REVIEWSENSEI_GITHUB_WRITES, " +
+  "REVIEWSENSEI_MENTION_REPLIES, and the model variables) and the retired " +
+  ".github/review-sensei/config.yml are no longer read by anything. Move " +
+  "any settings you changed into .reviewsensei.yml, then delete the old " +
+  "variables and file; this is a one-time cleanup, and leaving them in " +
+  "place is harmless but silently ignored. " +
+  "The uninstall workflow creates a reviewable PR that removes these " +
+  "generated files, including .reviewsensei.yml and the retired config " +
+  "location; it does not delete learnings or secrets. No private keys, " +
+  "installation tokens, or webhook bodies are included in these files.";
