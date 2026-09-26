@@ -83,8 +83,8 @@ Node.js 22 or newer can invoke the same Python review engine through the
 provider-neutral `@reviewsensei/cli` launcher:
 
 ```bash
-npx --yes @reviewsensei/cli@0.6.8 --version
-npx --yes @reviewsensei/cli@0.6.8 --help
+npx --yes @reviewsensei/cli@0.6.9 --version
+npx --yes @reviewsensei/cli@0.6.9 --help
 ```
 
 The launcher selects one of the five native packages (macOS arm64/x64,
