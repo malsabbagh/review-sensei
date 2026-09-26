@@ -265,12 +265,12 @@ the CLI rather than failing the workflow guard. Only review operations fail
 closed on a retired stored value: reply and command runs warn and continue on
 `merge-focused`, matching the CLI reply path, which never resolves a review
 policy. Merge-focused requires a trusted session ledger for admission
-and round enforcement: every hosted review runs through the reusable workflow,
+and duplicate suppression: every hosted review runs through the reusable workflow,
 which invokes `review-sensei github review` with the broker-attested
 `--github-session-ledger`. A default setup-v5 installation therefore completes
 reviews without any additional ledger provisioning. The analysis job and the
 publication job of one run resolve the same broker-attested comment ledger, so
-rounds, baselines, and grants recorded by one job are visible to the next
+rounds, baselines, and dispositions recorded by one job are visible to the next
 instead of living on a runner filesystem no later job can read; the first job
 of a fresh installation enrolls the marker when the broker reports no prior
 session. The ledger requirement is

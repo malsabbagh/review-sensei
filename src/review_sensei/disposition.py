@@ -14,14 +14,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, cast
 
-from .convergence import ReviewConvergencePolicy
 from .errors import ReviewInputError
 from .session import (
     MAX_STORED_DISPOSITIONS,
     SessionIdentity,
     SessionLedger,
     SessionRecord,
-    issue_continuation_grant,
 )
 
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -41,9 +39,9 @@ FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 MAX_REASON_BYTES = 512
 MAX_ACTOR_BYTES = 256
-# The Cloudflare broker mirrors this parser before it issues a one-use grant.
-# Keep command separators deliberately ASCII so Python and JavaScript cannot
-# disagree about control/Unicode whitespace at the trust boundary.
+# The Cloudflare broker mirrors this parser before it attests a maintainer
+# command. Keep command separators deliberately ASCII so Python and JavaScript
+# cannot disagree about control/Unicode whitespace at the trust boundary.
 _COMMAND_WHITESPACE = " \t\r\n"
 _COMMAND_WS = r"[ \t\r\n]"
 _COMMAND_NON_WS = r"[^ \t\r\n]"
@@ -51,8 +49,8 @@ _COMMAND_NON_WS = r"[^ \t\r\n]"
 # This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
 # text such as ``!@sensei`` and ``(@sensei``.
 _SENSEI = re.compile(r"(?m)(?<![^ \t\r\n])@sensei(?=[ \t\r\n]+)")
-_CONTINUE_ROUNDS = re.compile(
-    rf"^review{_COMMAND_WS}+continue(?:{_COMMAND_WS}+--rounds{_COMMAND_WS}+(0|1))?{_COMMAND_WS}*$",
+_CONTINUE = re.compile(
+    rf"^review{_COMMAND_WS}+continue{_COMMAND_WS}*$",
     re.IGNORECASE,
 )
 _REVIEW_STATUS = re.compile(
@@ -121,7 +119,6 @@ class MaintainerCommand:
     actor: str
     reason: str | None = None
     finding_fingerprint: str | None = None
-    continuation_rounds: int = 0
     head_sha: str | None = None
     command_id: str | None = None
 
@@ -130,8 +127,6 @@ class MaintainerCommand:
             raise ReviewInputError("maintainer action is unsupported")
         if not isinstance(self.actor, str) or not self.actor.strip():
             raise ReviewInputError("maintainer actor is invalid")
-        if self.continuation_rounds not in {0, 1}:
-            raise ReviewInputError("continuation_rounds must be 0 or 1")
         if self.head_sha is not None and (
             not isinstance(self.head_sha, str) or not _HEAD_SHA.fullmatch(self.head_sha)
         ):
@@ -175,13 +170,12 @@ def parse_maintainer_command(
         return MaintainerCommand(action="verify", actor=actor, head_sha=head_sha)
     if _REENROLL.fullmatch(remainder):
         return MaintainerCommand(action="reenroll", actor=actor, head_sha=head_sha)
-    continued = _CONTINUE_ROUNDS.fullmatch(remainder)
-    if continued is not None:
-        rounds = int(continued.group(1) or "1")
+    if _CONTINUE.fullmatch(remainder):
+        # Continuation is only an unpause.  Rounds are uncapped, so there is no
+        # allowance for a command to grant and no ``--rounds`` option to parse.
         return MaintainerCommand(
             action="continue",
             actor=actor,
-            continuation_rounds=rounds,
             head_sha=head_sha,
             command_id=command_id,
         )
@@ -274,7 +268,6 @@ class MaintainerCommandResult:
     action: str
     applied: bool
     operator_paused: bool
-    continuation_rounds: int = 0
     summary: str = ""
     disposition: FindingDisposition | None = None
 
@@ -285,7 +278,6 @@ def apply_session_command(
     command: MaintainerCommand,
     *,
     now: datetime | None = None,
-    policy: ReviewConvergencePolicy | None = None,
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
@@ -295,7 +287,7 @@ def apply_session_command(
         and not callable(getattr(ledger, "initialize_with_mutation", None))
     ):
         raise ReviewInputError(
-            "grant-bound session ledger requires atomic initialization"
+            "broker-bound session ledger requires atomic initialization"
         )
     loaded = ledger.load(identity, now=now)
     if command.action == "reenroll":
@@ -336,23 +328,6 @@ def apply_session_command(
                     if command.action == "pause":
                         return _evolve_operator_paused(initial, paused=True, now=now)
                     if command.action == "continue":
-                        if command.command_id is not None:
-                            if not isinstance(policy, ReviewConvergencePolicy):
-                                raise ReviewInputError(
-                                    "identified continuation requires a review policy"
-                                )
-                            if command.head_sha is None:
-                                raise ReviewInputError(
-                                    "identified continuation requires an exact head_sha"
-                                )
-                            return issue_continuation_grant(
-                                initial,
-                                command_id=command.command_id,
-                                actor=command.actor,
-                                head_sha=command.head_sha,
-                                policy_digest=policy.digest(),
-                                now=now,
-                            )
                         return _evolve_operator_paused(initial, paused=False, now=now)
                     if command.action in FINDING_ACTIONS:
                         if disposition is None:
@@ -391,31 +366,6 @@ def apply_session_command(
             ),
         )
     if command.action == "continue":
-        if command.command_id is not None:
-            if not isinstance(policy, ReviewConvergencePolicy):
-                raise ReviewInputError(
-                    "identified continuation requires a review policy"
-                )
-            if command.head_sha is None:
-                raise ReviewInputError(
-                    "identified continuation requires an exact head_sha"
-                )
-            if not initialized_with_mutation:
-                record = _issue_continuation_grant(
-                    ledger,
-                    identity,
-                    record,
-                    command=command,
-                    policy=policy,
-                    now=now,
-                )
-            return record, MaintainerCommandResult(
-                action="continue",
-                applied=True,
-                operator_paused=False,
-                continuation_rounds=0,
-                summary="one-use continuation grant issued for the exact head and policy",
-            )
         if not initialized_with_mutation:
             record = _set_operator_paused(
                 ledger, identity, record, paused=False, now=now
@@ -424,8 +374,7 @@ def apply_session_command(
             action="continue",
             applied=True,
             operator_paused=False,
-            continuation_rounds=command.continuation_rounds,
-            summary="automated review may continue under C5 admission",
+            summary="automated review may continue; rounds are uncapped",
         )
     if command.action == "status":
         head_suffix = f" head={command.head_sha}" if command.head_sha else ""
@@ -505,37 +454,6 @@ def _set_operator_paused(
     return replace(identity, mutate, now=now)
 
 
-def _issue_continuation_grant(
-    ledger: SessionLedger,
-    identity: SessionIdentity,
-    record: SessionRecord,
-    *,
-    command: MaintainerCommand,
-    policy: ReviewConvergencePolicy,
-    now: datetime | None,
-) -> SessionRecord:
-    replace = getattr(ledger, "replace", None)
-    if not callable(replace):
-        raise ReviewInputError("session ledger does not support CAS mutation")
-
-    def mutate(current: SessionRecord) -> SessionRecord:
-        if current.generation != record.generation:
-            raise ReviewInputError("session generation conflict")
-        # The command id, actor, exact head, and policy digest are rechecked
-        # by the durable constructor.  Returning an equal record makes a
-        # delivery replay idempotent without reviving an already-consumed grant.
-        return issue_continuation_grant(
-            current,
-            command_id=command.command_id or "",
-            actor=command.actor,
-            head_sha=command.head_sha or "",
-            policy_digest=policy.digest(),
-            now=now,
-        )
-
-    return replace(identity, mutate, now=now)
-
-
 def _append_disposition(
     ledger: SessionLedger,
     identity: SessionIdentity,
@@ -592,17 +510,22 @@ def render_convergence_summary(
     *,
     mode: str,
     round_kind: str,
-    remaining_verification: int,
+    completed_rounds: int,
     verified_fixed: int = 0,
     new_regressions: int = 0,
     advisory: int = 0,
     handoff: bool = False,
     handoff_reason: str | None = None,
 ) -> str:
-    """One durable author-facing summary. Numbers are caller-supplied facts."""
+    """One durable author-facing summary. Numbers are caller-supplied facts.
+
+    Rounds are uncapped, so the summary reports counted history rather than a
+    remaining allowance: nothing here may read as a budget the reader is
+    running out of.
+    """
 
     for label, value in (
-        ("remaining_verification", remaining_verification),
+        ("completed_rounds", completed_rounds),
         ("verified_fixed", verified_fixed),
         ("new_regressions", new_regressions),
         ("advisory", advisory),
@@ -621,7 +544,7 @@ def render_convergence_summary(
     )
     reason = f" ({handoff_reason})" if handoff and handoff_reason else ""
     return (
-        f"{round_kind.capitalize()} remaining={remaining_verification}: "
+        f"{round_kind.capitalize()} rounds={completed_rounds}: "
         f"{verified_fixed} concerns fixed; {new_regressions} fix-introduced "
         f"regressions; {advisory} advisory suggestions; mode={mode}; "
         f"next={next_action}{reason}."

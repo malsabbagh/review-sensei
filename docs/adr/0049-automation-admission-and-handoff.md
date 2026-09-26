@@ -2,11 +2,20 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-19
+Last amended: 2026-09-26
 GitHub Issue: #136
 Pull Request: [#141](https://github.com/malsabbagh/review-sensei/pull/141)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
+
+Status note (2026-09-26): the PR-wide count admission described below —
+completed-round budgets, the workflow budget pre-check, and replenishment
+through continuation grants — was removed by
+[ADR 0056](0056-remove-pr-wide-review-count-caps.md) (epic #181 C). Admission
+immediately before inference and the write-boundary checks stand; what can
+refuse a round is now only a live cause (operator pause, no-progress, the
+per-head failed-attempt retry bound, duplicates/replay). Where this record
+says a round is refused for a spent count allowance, read that as retired.
 
 ## Context
 

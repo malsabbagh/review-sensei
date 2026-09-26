@@ -14,6 +14,7 @@ from review_sensei.cli import main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import run_doctor
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
 from review_sensei.hosting.github.publication import PublicationResult
 from review_sensei.models import ReviewResult
@@ -71,13 +72,15 @@ class RecordingReviewer:
 
 
 class AutomationAdmissionTests(unittest.TestCase):
-    def test_exhausted_round_is_not_reserved_and_skips_publication(self):
+    def test_failed_attempt_handoff_is_not_reserved_and_skips_publication(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
             completed_verification_rounds=5,
+            failed_attempts=6,
+            failed_attempts_head_sha=HEAD,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -87,20 +90,25 @@ class AutomationAdmissionTests(unittest.TestCase):
             policy,
             reservation_id=_reservation(),
             now=FIXED_NOW,
+            head_sha=HEAD,
             latest_head_reviewed=True,
             coverage_complete=True,
         )
         self.assertFalse(prepared.decision.admit)
+        self.assertTrue(prepared.decision.handoff)
+        self.assertEqual(
+            prepared.decision.handoff_reason, "failed-attempt-budget-exhausted"
+        )
         self.assertIsNone(prepared.reservation_id)
         self.assertTrue(should_skip_automation(prepared.decision, inference=True))
         self.assertTrue(should_skip_automation(prepared.decision, inference=False))
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertIsNone(loaded.record.reservation_id)
         self.assertEqual(loaded.record.completed_verification_rounds, 5)
-        self.assertEqual(loaded.record.failed_attempts, 0)
+        self.assertEqual(loaded.record.failed_attempts, 6)
         self.assertEqual(loaded.record.generation, record.generation)
         self.assertEqual(
-            admission_diagnostic(prepared.decision), "round-budget-exhausted"
+            admission_diagnostic(prepared.decision), "failed-attempt-budget-exhausted"
         )
 
     def test_in_flight_reservation_pauses_other_jobs(self):
@@ -121,7 +129,7 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertEqual(second.decision.handoff_reason, "paused")
         self.assertIsNone(second.reservation_id)
 
-    def test_exhausted_unreviewed_head_reports_unreviewed_diagnostic(self):
+    def test_unreviewed_head_is_admitted_but_cannot_approve(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
             IDENTITY,
@@ -138,8 +146,11 @@ class AutomationAdmissionTests(unittest.TestCase):
             now=FIXED_NOW,
             coverage_complete=True,
         )
-        self.assertFalse(prepared.decision.admit)
-        self.assertEqual(admission_diagnostic(prepared.decision), "unreviewed-head")
+        self.assertTrue(prepared.decision.admit)
+        self.assertIsNotNone(prepared.reservation_id)
+        self.assertEqual(prepared.decision.round_kind, "verification")
+        self.assertFalse(prepared.decision.may_emit_approve)
+        self.assertFalse(should_skip_automation(prepared.decision, inference=True))
 
     def test_same_reservation_after_commit_is_duplicate_not_a_new_round(self):
         ledger = InMemorySessionLedger()
@@ -177,13 +188,13 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertEqual(retry.decision.handoff_reason, "paused")
         self.assertIsNone(retry.reservation_id)
 
-    def test_continuation_reserves_one_extra_verification_round(self):
+    def test_late_round_is_reserved_without_a_continuation(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
-            completed_verification_rounds=5,
+            completed_verification_rounds=20,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         policy = ReviewConvergencePolicy(mode="merge-focused")
@@ -193,13 +204,21 @@ class AutomationAdmissionTests(unittest.TestCase):
             policy,
             reservation_id=_reservation(),
             now=FIXED_NOW,
-            continuation_rounds=1,
             coverage_complete=True,
             latest_head_reviewed=True,
         )
         self.assertTrue(prepared.decision.admit)
         self.assertEqual(prepared.decision.round_kind, "verification")
         self.assertIsNotNone(prepared.reservation_id)
+        with self.assertRaisesRegex(ReviewInputError, "no longer supported"):
+            prepare_session_round(
+                ledger,
+                IDENTITY,
+                policy,
+                reservation_id="bbbbbbbb",
+                now=FIXED_NOW,
+                continuation_rounds=1,
+            )
 
     def test_failed_attempt_charges_separately(self):
         ledger = InMemorySessionLedger()
@@ -218,13 +237,15 @@ class AutomationAdmissionTests(unittest.TestCase):
 
 
 class GitHubHandoffPublicationTests(unittest.TestCase):
-    def test_exhausted_session_does_not_publish(self):
+    def test_failed_attempt_handoff_does_not_publish(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
             IDENTITY,
             now=FIXED_NOW,
             completed_initial_reviews=1,
             completed_verification_rounds=5,
+            failed_attempts=6,
+            failed_attempts_head_sha=HEAD,
         )
         ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
         reviewer = RecordingReviewer()
@@ -253,7 +274,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
             convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
         self.assertEqual(result.status, "handoff")
-        self.assertEqual(result.diagnostic, "round-budget-exhausted")
+        self.assertEqual(result.diagnostic, "failed-attempt-budget-exhausted")
         self.assertEqual(reviewer.calls, [])
 
     def test_prior_round_without_durable_baseline_requires_recovery(self):
@@ -298,6 +319,71 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
         self.assertEqual(result.status, "handoff")
         self.assertEqual(result.diagnostic, "durable_baseline_recovery_required")
         self.assertEqual(reviewer.calls, [])
+
+    def test_late_round_publishes_without_a_count_grant(self):
+        ledger = InMemorySessionLedger()
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=1,
+            completed_verification_rounds=20,
+        )
+        ledger._records[(IDENTITY.repository, IDENTITY.pull_request)] = record
+        reviewer = RecordingReviewer()
+        application = GitHubApplication(
+            broker=RecordingBroker(),
+            http=None,
+            reviewer=reviewer,
+            learner=object(),
+            replier=object(),
+            session_ledger=ledger,
+        )
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha="b" * 40,
+                head_sha=HEAD,
+                engine="fixture",
+                model="fixture-model",
+                profile="default",
+                stage_digest="1" * 64,
+                context_digest="2" * 64,
+                learning_digest="3" * 64,
+            ),
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            generation=1,
+        )
+        result = application.publish_review(
+            options=GitHubWriteOptions(
+                auto_review=True, github_writes=True, github_session_ledger=True
+            ),
+            oidc_token="oidc",
+            repository=IDENTITY.repository,
+            repository_id=99,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            base_branch="main",
+            base_sha="b" * 40,
+            result=ReviewResult(
+                summary="ok",
+                comments=(),
+                provider="fixture",
+                review_status="complete",
+            ),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            convergence_policy=policy,
+            baseline=baseline,
+            current_key=baseline.cache_key,
+        )
+        self.assertEqual(result.status, "published")
+        self.assertEqual(len(reviewer.calls), 1)
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.record.completed_verification_rounds, 21)
 
     def test_provider_failure_records_failed_attempt(self):
         class FailingReviewer:
@@ -363,7 +449,7 @@ class DiagnosticAutomationTests(unittest.TestCase):
         self.assertEqual(check["status"], "action")
         self.assertIn("session ledger", check["detail"])
 
-    def test_doctor_reports_exhausted_admission(self):
+    def test_doctor_reports_handoff_admission(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             ledger = LocalSessionLedger(root)
@@ -372,6 +458,8 @@ class DiagnosticAutomationTests(unittest.TestCase):
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
                 completed_verification_rounds=5,
+                failed_attempts=6,
+                failed_attempts_head_sha=HEAD,
             )
             ledger._write(IDENTITY, record)
             doctor = run_doctor(
@@ -387,11 +475,37 @@ class DiagnosticAutomationTests(unittest.TestCase):
             )
             self.assertEqual(check["status"], "action")
             self.assertIn("admit=False", check["detail"])
-            self.assertIn("diagnostic=unreviewed-head", check["detail"])
+            self.assertIn("diagnostic=failed-attempt-budget-exhausted", check["detail"])
+
+    def test_doctor_reports_a_late_round_as_admitted(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ledger = LocalSessionLedger(root)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=20,
+            )
+            ledger._write(IDENTITY, record)
+            doctor = run_doctor(
+                session_ledger=root,
+                repository="owner/repo",
+                pull_request=136,
+                review_mode="merge-focused",
+            )
+            check = next(
+                item
+                for item in doctor["checks"]
+                if item["name"] == "automation-admission"
+            )
+            self.assertEqual(check["status"], "pass")
+            self.assertIn("admit=True", check["detail"])
+            self.assertIn("verification=20", check["detail"])
 
 
 class CliInferenceSkipTests(unittest.TestCase):
-    def test_exhausted_operator_mode_makes_zero_provider_calls(self):
+    def test_handoff_operator_mode_makes_zero_provider_calls(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             ledger = LocalSessionLedger(root)
@@ -400,6 +514,8 @@ class CliInferenceSkipTests(unittest.TestCase):
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
                 completed_verification_rounds=5,
+                failed_attempts=6,
+                failed_attempts_head_sha=HEAD,
             )
             ledger._write(IDENTITY, record)
             diff_path = root / "review.patch"
@@ -460,7 +576,7 @@ class CliInferenceSkipTests(unittest.TestCase):
             self.assertIn("reason=round-budget-exhausted", stderr.getvalue())
             self.assertIn("action_required", stderr.getvalue())
             payload = json.loads(outcome_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
+            self.assertEqual(payload["diagnostic"], "failed-attempt-budget-exhausted")
             self.assertIn(payload["diagnostic"], PUBLIC_DIAGNOSTICS)
             self.assertEqual(payload["provider_calls"], 0)
 

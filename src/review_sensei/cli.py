@@ -829,16 +829,6 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _continuation_rounds(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed not in {0, 1}:
-        raise argparse.ArgumentTypeError("must be 0 or 1")
-    return parsed
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
@@ -1135,12 +1125,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--oidc-token",
         help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
-    )
-    parser.add_argument(
-        "--continue-rounds",
-        type=_continuation_rounds,
-        default=0,
-        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
     )
     return parser
 
@@ -1709,16 +1693,10 @@ def _github_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Persist the C3 session ledger as one GitHub issue comment on the "
-            "source pull request. Operator modes only count rounds."
+            "source pull request. Operator modes keep rounds, baselines, and "
+            "dispositions durable."
         ),
     )
-    review.add_argument(
-        "--continue-rounds",
-        type=_continuation_rounds,
-        default=0,
-        help="Authenticated bounded continuation: admit one extra verification round (0 or 1).",
-    )
-
     command = subparsers.add_parser(
         "command",
         help="Apply an authenticated @sensei maintainer command to the session ledger",
@@ -2225,7 +2203,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 diff=diff,
                 app_slug=args.app_slug,
                 convergence_policy=convergence_policy,
-                continuation_rounds=getattr(args, "continue_rounds", 0),
                 configuration_context=configuration_context,
                 evidence_context=evidence_context,
                 baseline=admission_baseline,
@@ -2681,8 +2658,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 sys.stdout.write(
                     f"mode={observed.mode} events={len(observed.events)} "
                     f"cutover_status={observed.cutover_status} "
-                    f"approval_events={observed.approval_events} "
-                    f"cap_created_approval={observed.cap_created_approval}\n"
+                    f"approval_events={observed.approval_events}\n"
                 )
             unavailable_fields = [
                 label
@@ -2710,8 +2686,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
             else:
                 sys.stdout.write(
                     f"default={payload['publication_default']} "
-                    f"proposed={report.mode} handoffs={report.handoffs} "
-                    f"cap_created_approval={payload['cap_created_approval']}\n"
+                    f"proposed={report.mode} handoffs={report.handoffs}\n"
                 )
             return 0
         if args.as_json:
@@ -2719,8 +2694,7 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
         else:
             sys.stdout.write(
                 f"mode={report.mode} default={DEFAULT_REVIEW_MODE} "
-                f"handoffs={report.handoffs} cap_created_approval="
-                f"{report.cap_created_approval}\n"
+                f"handoffs={report.handoffs}\n"
             )
         return 0
     except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
@@ -3117,6 +3091,7 @@ def main(argv: list[str] | None = None) -> int:
                     ledger,
                     identity,
                     reservation_id=held_reservation,
+                    head_sha=head_sha,
                     expected_generation=current.generation,
                 )
             else:
@@ -3202,7 +3177,6 @@ def main(argv: list[str] | None = None) -> int:
                         category_policy=category_policy,
                         publication_mode=policy.mode,
                         orchestration_enabled=orchestrate,
-                        continue_rounds=getattr(args, "continue_rounds", 0),
                     )
                 )
                 transaction_configuration_digest = (
@@ -3226,7 +3200,6 @@ def main(argv: list[str] | None = None) -> int:
                     head_sha=head_sha,
                     configuration_digest=transaction_configuration_digest,
                     evidence_digest=transaction_evidence_digest,
-                    continuation_rounds=getattr(args, "continue_rounds", 0),
                 )
                 prepared_transaction = prepared_round.transaction
             else:
@@ -3235,7 +3208,7 @@ def main(argv: list[str] | None = None) -> int:
                     identity,
                     policy,
                     reservation_id=reservation,
-                    continuation_rounds=getattr(args, "continue_rounds", 0),
+                    head_sha=head_sha,
                 )
             held_reservation = (
                 prepared_round.reservation_id if prepared_round.decision.admit else None

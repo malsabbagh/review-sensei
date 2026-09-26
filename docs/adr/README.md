@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-09-20
+Last updated: 2026-09-26
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -54,16 +54,17 @@ Process: `docs/process/adr-process.md`
 | [0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md) | Proposed | Structured run outcomes, resource budgets, and publication-only recovery | #36 | Machine-readable outcomes, hard admission budgets, publication-only recovery |
 | [0044](0044-bounded-large-change-coverage-and-deletion-aware-findings.md) | Proposed | Bounded large-change coverage, deletion-aware locations, and opt-in chunk orchestration | #39 | Per-request limits stay; total-work budgets and explicit coverage outcomes are added. |
 | [0045](0045-openrouter-trusted-configuration.md) | Proposed | OpenRouter trusted configuration, CLI profiles, and zero-write diagnostics | #97 | `--provider openrouter`, named profiles, doctor/plan policy summary; workflow wiring in #98 |
-| [0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 | C1 contract plus C2 publication wiring; `legacy` unchanged |
+| [0046](0046-evidence-based-blocker-admission-and-review-loop-convergence.md) | Proposed | Evidence-based blocker admission and bounded review-loop policy | #136 | C1 contract plus C2 publication wiring; `legacy` unchanged; amended 2026-09-26 |
 | [0047](0047-durable-review-session-ledger.md) | Proposed | Durable PR-wide review-session ledger | #136 | Local and GitHub-backed adapters; CAS/expiry; no publication refusal |
 | [0048](0048-baseline-aware-verification.md) | Proposed | Baseline-aware verification scope and late-finding classification | #136 | Reuses ADR 0042 plans and related paths; omission is not a fix |
-| [0049](0049-automation-admission-and-handoff.md) | Proposed | Enforce PR-wide round admission before inference and publication | #136 | Pause/duplicate/no-progress/continuation; cap never mints approval |
-| [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff |
+| [0049](0049-automation-admission-and-handoff.md) | Proposed | Enforce PR-wide round admission before inference and publication | #136 | Pause/duplicate/no-progress/continuation; cap never mints approval; amended 2026-09-26 |
+| [0050](0050-maintainer-disposition-and-handoff-status.md) | Proposed | Authenticated maintainer commands and non-passing handoff status | #136 | Human dispositions are not verified fixes; skipped is not a handoff; amended 2026-09-26 |
 | [0051](0051-sequential-evaluation-and-shadowing.md) | Proposed | Sequential evaluation and observation-only shadowing | #136 | Default publication stays `legacy`; shadow never skips GitHub events |
-| [0052](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery |
-| [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger |
+| [0052](0052-logical-review-transaction-across-analysis-and-publication.md) | Proposed | Logical review transaction across analysis and publication | #146 | F1 logical review transaction and publication recovery; amended 2026-09-26 |
+| [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger; amended 2026-09-26 |
 | [0054](0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6 | Real internal seams, bounded fixture edges, explicit unknown metrics |
 | [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
+| [0056](0056-remove-pr-wide-review-count-caps.md) | Proposed | Remove the PR-wide review count cap | #181 C | Rounds are uncapped; only live causes refuse; counters are diagnostic history |
 
 ## Policy
 
