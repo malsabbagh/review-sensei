@@ -276,13 +276,73 @@ optional Actions overrides the product consumes are `REVIEWSENSEI_PROVIDER`
 (`inference.backend`) and `REVIEWSENSEI_MODEL` (`inference.model`); the
 reusable workflow maps them once from the trusted policy commit, and no other
 variable, boolean, or path reaches a run. A repository that still carries a
-retired managed variable (`REVIEWSENSEI_AUTO_REVIEW`,
-`REVIEWSENSEI_AUTO_APPROVE`, `REVIEWSENSEI_GITHUB_WRITES`,
-`REVIEWSENSEI_MENTION_REPLIES`, `REVIEWSENSEI_LEARNING_PROPOSALS`,
-`REVIEWSENSEI_LEARNING_PRS`, `REVIEWSENSEI_UPLOAD_ARTIFACTS`,
-`REVIEWSENSEI_REVIEW_MODE`, `REVIEWSENSEI_VERSION`,
-`REVIEWSENSEI_STAGES_DIR`, or `REVIEWSENSEI_CATEGORIES_DIR`) sees it reported
-with its `.reviewsensei.yml` replacement on each run and otherwise ignored.
+retired managed variable sees it reported with its `.reviewsensei.yml`
+replacement on each run and otherwise ignored; the complete list and the
+separately authorized cleanup are in Retiring old repository variables below.
+
+### Retiring old repository variables
+
+The reviewed replacement keeps every behavioral decision in `.reviewsensei.yml`,
+and no run reads an obsolete managed variable as configuration: a retired
+variable has no dual-read precedence to outlive the transition. A hosted run
+reports each retired variable it still sees, once, with the replacement that
+carries its meaning now, and reads nothing else from it. Removal is a separate,
+authorized cleanup that the operator performs after reviewing the list below
+against the repository's own settings; no setup, App, or workflow run deletes a
+repository variable, and no credential or unrelated repository setting is
+touched.
+
+The complete list of managed repository variables this cleanup may delete, each
+with the replacement a run reports for it, is:
+
+| Retired variable | Reported replacement |
+| --- | --- |
+| `REVIEWSENSEI_PROVIDER_MODE` | select `inference.backend` ('local-ollama' or 'cloud-ollama') or set `REVIEWSENSEI_PROVIDER` |
+| `REVIEWSENSEI_PROVIDER_PROFILE` | select `inference.backend` and set the `advanced.endpoint` fields in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LOCAL_MODEL` | set `inference.model` in `.reviewsensei.yml` or `REVIEWSENSEI_MODEL` |
+| `REVIEWSENSEI_CLOUD_MODEL` | set `inference.model` in `.reviewsensei.yml` or `REVIEWSENSEI_MODEL` |
+| `REVIEWSENSEI_REVIEW_MODE` | one evidence-focused pipeline is the only engine; set `github.reviews` |
+| `REVIEWSENSEI_AUTO_REVIEW` | set `github.automatic_reviews` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_GITHUB_WRITES` | set `github.writes` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_AUTO_APPROVE` | set `github.reviews` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_MENTION_REPLIES` | set `github.mentions` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LEARNING_PROPOSALS` | set `github.learning` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_LEARNING_PRS` | set `github.learning: pull-requests` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_UPLOAD_ARTIFACTS` | set `github.artifacts: diagnostics` in `.reviewsensei.yml` |
+| `REVIEWSENSEI_STAGES_DIR` | place stage JSON files under `.reviewsensei/stages/` |
+| `REVIEWSENSEI_CATEGORIES_DIR` | place category JSON files under `.reviewsensei/categories/` |
+| `REVIEWSENSEI_VERSION` | release/installer identity; remove it |
+
+After that review, the cleanup is exactly these repository-variable deletions:
+
+```bash
+gh variable delete REVIEWSENSEI_PROVIDER_MODE
+gh variable delete REVIEWSENSEI_PROVIDER_PROFILE
+gh variable delete REVIEWSENSEI_LOCAL_MODEL
+gh variable delete REVIEWSENSEI_CLOUD_MODEL
+gh variable delete REVIEWSENSEI_REVIEW_MODE
+gh variable delete REVIEWSENSEI_AUTO_REVIEW
+gh variable delete REVIEWSENSEI_GITHUB_WRITES
+gh variable delete REVIEWSENSEI_AUTO_APPROVE
+gh variable delete REVIEWSENSEI_MENTION_REPLIES
+gh variable delete REVIEWSENSEI_LEARNING_PROPOSALS
+gh variable delete REVIEWSENSEI_LEARNING_PRS
+gh variable delete REVIEWSENSEI_UPLOAD_ARTIFACTS
+gh variable delete REVIEWSENSEI_STAGES_DIR
+gh variable delete REVIEWSENSEI_CATEGORIES_DIR
+gh variable delete REVIEWSENSEI_VERSION
+```
+
+Two variables are deliberately absent. `REVIEWSENSEI_PROVIDER`
+(`inference.backend`) and `REVIEWSENSEI_MODEL` (`inference.model`) are the only
+supported Actions overrides and remain supported, so they are not retired and
+must not be deleted. Credentials are secrets, not variables: nothing here
+deletes `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or an App
+private key, and no `gh secret delete` command belongs to this cleanup.
+Unscoped process settings such as `AUTO_REVIEW`, `AUTO_APPROVE`,
+`GITHUB_WRITES`, `MENTION_REPLIES`, `OLLAMA_MODEL`, and
+`OPENROUTER_UPSTREAM_PROVIDER` are reported by `review-sensei config` and are
+not repository variables, so they are not part of this cleanup either.
 
 Stage and category documents live in the conventional directories
 `.reviewsensei/stages/` and `.reviewsensei/categories/` beside the
