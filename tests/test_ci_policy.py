@@ -797,7 +797,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
-            self.assertEqual(job.count(pull_request_env), 5)
+            # Provider review, publication admission, publication, and the
+            # mention reply each carry the pull request env; the retired
+            # budget-admission step was the fifth.
+            self.assertEqual(job.count(pull_request_env), 4)
         for job_id in ("cloud", "openrouter", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
@@ -1003,11 +1006,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             "&& inputs.enable_mention_replies == 'true')"
         )
         self.assertEqual(text.count(expected_gate), 3)
+        # One gated provider-review step per provider job. The retired
+        # budget-admission step carried this same gate, so the count is exactly
+        # the number of provider jobs.
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && inputs.enable_review == 'true'"
             ),
-            6,
+            3,
         )
         self.assertEqual(
             text.count(
@@ -1689,13 +1695,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
-        budget_guard = (
-            " && steps.budget-admission.outcome == 'success'"
-            " && steps.budget-admission.outputs.spent != 'true'"
-        )
         handoff_guard = (
-            budget_guard
-            + " && steps.provider-review.outputs.outcome_status != 'action_required'"
+            " && steps.provider-review.outputs.outcome_status != 'action_required'"
         )
         publish_if = (
             admission_if
@@ -1762,22 +1763,12 @@ class ReusablePublishGuardTests(unittest.TestCase):
         local_confirm = _step_block(_job_section(text, "local"), confirm_name)
         self.assertEqual(cloud_confirm, local_confirm)
 
-    def test_workflow_reads_the_ledger_before_starting_the_review_cli(self):
+    def test_review_starts_without_a_spent_budget_precheck(self):
         text = _reusable_workflow_text()
         self.assertNotIn("def automatic_budget_spent", text)
-        blocks = [
-            block for block in _run_blocks(text) if "budget_admission decide" in block
-        ]
-        self.assertEqual(len(blocks), 3)
-        self.assertEqual(len(set(blocks)), 1)
-        block = blocks[0]
-        self.assertIn("ENABLE_GITHUB_WRITES", block)
-        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN:-", block)
-        self.assertIn("per_page=100&page=", block)
-        self.assertNotIn("grep -F", block)
-        self.assertIn("budget_admission assemble", block)
-        self.assertIn("budget_admission notice-status", block)
-        self.assertIn("budget_admission render-notice", block)
+        self.assertNotIn("budget-admission", text)
+        self.assertNotIn("budget_admission", text)
+        self.assertNotIn("automatic review budget", text)
 
         for job_id, review_name in (
             ("cloud", "Run cloud-provider review"),
@@ -1785,18 +1776,12 @@ class ReusablePublishGuardTests(unittest.TestCase):
             ("local", "Prepare and run trusted local review"),
         ):
             with self.subTest(job=job_id):
-                names = _named_steps(_job_section(text, job_id))
-                review_index = names.index(review_name)
-                self.assertEqual(
-                    names[review_index - 1],
-                    "Decide whether the automatic review budget is already spent",
-                )
                 review = _step_block(_job_section(text, job_id), review_name)
                 self.assertIn(
-                    "steps.budget-admission.outcome == 'success'"
-                    " && steps.budget-admission.outputs.spent != 'true'",
+                    "if: inputs.operation == 'review' && inputs.enable_review == 'true'",
                     review,
                 )
+                self.assertNotIn("spent", review)
 
 
 class PythonWorkflowConcurrencyParityTests(unittest.TestCase):

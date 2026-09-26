@@ -52,11 +52,8 @@ class MaintainerCommandParseTests(unittest.TestCase):
         self.assertEqual(pause.action, "pause")
         verify = parse_maintainer_command("@sensei verify", actor="alice")
         self.assertEqual(verify.action, "verify")
-        cont = parse_maintainer_command(
-            "@sensei review continue --rounds 1", actor="alice"
-        )
+        cont = parse_maintainer_command("@sensei review continue", actor="alice")
         self.assertEqual(cont.action, "continue")
-        self.assertEqual(cont.continuation_rounds, 1)
         dismissed = parse_maintainer_command(
             "@sensei dismiss abcd1234abcd1234 --reason accepted architecture",
             actor="alice",
@@ -72,7 +69,7 @@ class MaintainerCommandParseTests(unittest.TestCase):
         cases = (
             ("@sensei review STATUS", "status"),
             ("@sensei review PAUSE", "pause"),
-            ("@sensei review CONTINUE --rounds 1", "continue"),
+            ("@sensei review CONTINUE", "continue"),
             ("@sensei review REENROLL", "reenroll"),
             ("@sensei VERIFY", "verify"),
             ("@sensei DISMISS abcd1234abcd1234 --reason accepted", "dismiss"),
@@ -85,6 +82,19 @@ class MaintainerCommandParseTests(unittest.TestCase):
                 self.assertIsNotNone(command)
                 self.assertEqual(command.action, expected)
                 self.assertIn(command.action, MAINTAINER_ACTIONS)
+
+    def test_retired_rounds_option_is_not_a_command(self):
+        # Rounds are uncapped, so no command grants an allowance. The retired
+        # ``--rounds`` spellings must not be silently reinterpreted as a plain
+        # continue/reenroll: the operator asks for a budget that no longer
+        # exists, and honouring it would misrepresent what the engine will do.
+        for body in (
+            "@sensei review continue --rounds 0",
+            "@sensei review continue --rounds 1",
+            "@sensei review reenroll --rounds 1",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(parse_maintainer_command(body, actor="alice"))
 
     def test_unknown_or_bot_self_commands_are_ignored(self):
         self.assertIsNone(
@@ -200,7 +210,7 @@ class MaintainerCommandParseTests(unittest.TestCase):
 
 
 class SessionCommandTests(unittest.TestCase):
-    def test_grant_bound_ledger_without_atomic_initialization_fails_closed(self):
+    def test_broker_bound_ledger_without_atomic_initialization_fails_closed(self):
         ledger = InMemorySessionLedger()
         ledger._broker = object()  # type: ignore[attr-defined]
         command = parse_maintainer_command("@sensei review pause", actor="alice")
@@ -210,7 +220,7 @@ class SessionCommandTests(unittest.TestCase):
             apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
 
-    def test_identified_continuation_creates_an_integrity_covered_grant(self):
+    def test_identified_continuation_is_only_an_unpause(self):
         ledger = InMemorySessionLedger()
         policy = ReviewConvergencePolicy(mode="merge-focused")
         command = parse_maintainer_command(
@@ -219,157 +229,12 @@ class SessionCommandTests(unittest.TestCase):
             head_sha="a" * 40,
             command_id="issue-comment-101",
         )
-        record, result = apply_session_command(
-            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
-        )
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
 
         self.assertTrue(result.applied)
-        self.assertEqual(result.continuation_rounds, 0)
-        self.assertEqual(len(record.continuation_grants), 1)
-        grant = record.continuation_grants[0]
-        self.assertEqual(grant["command_id"], "issue-comment-101")
-        self.assertEqual(grant["actor"], "alice")
-        self.assertEqual(grant["head_sha"], "a" * 40)
-        self.assertEqual(grant["policy_digest"], policy.digest())
-        self.assertIsNone(grant["consumed_reservation_id"])
-        tampered = record.to_dict()
-        tampered["continuation_grants"][0]["actor"] = "mallory"  # type: ignore[index]
-        with self.assertRaisesRegex(ReviewInputError, "integrity"):
-            type(record).from_dict(tampered)
-
-    def test_identified_continuation_command_is_idempotent(self):
-        ledger = InMemorySessionLedger()
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        command = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="a" * 40,
-            command_id="issue-comment-102",
-        )
-        first, _ = apply_session_command(
-            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
-        )
-        replay, _ = apply_session_command(
-            ledger,
-            IDENTITY,
-            command,
-            now=FIXED_NOW + timedelta(minutes=1),
-            policy=policy,
-        )
-        self.assertEqual(replay.generation, first.generation)
-        self.assertEqual(replay.continuation_grants, first.continuation_grants)
-
-    def test_new_scope_supersedes_an_unconsumed_continuation_grant(self):
-        ledger = InMemorySessionLedger()
-        first_policy = ReviewConvergencePolicy(mode="merge-focused")
-        first = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="a" * 40,
-            command_id="issue-comment-old",
-        )
-        initial, _ = apply_session_command(
-            ledger, IDENTITY, first, now=FIXED_NOW, policy=first_policy
-        )
-        same_scope = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="a" * 40,
-            command_id="issue-comment-same-scope",
-        )
-        with self.assertRaisesRegex(ReviewInputError, "already pending"):
-            apply_session_command(
-                ledger, IDENTITY, same_scope, now=FIXED_NOW, policy=first_policy
-            )
-
-        changed_head = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="b" * 40,
-            command_id="issue-comment-new-head",
-        )
-        replaced, _ = apply_session_command(
-            ledger, IDENTITY, changed_head, now=FIXED_NOW, policy=first_policy
-        )
-        self.assertEqual(
-            [grant["command_id"] for grant in replaced.continuation_grants],
-            ["issue-comment-new-head"],
-        )
-        from review_sensei.session import active_continuation_grant
-
-        self.assertIsNone(
-            active_continuation_grant(
-                replaced,
-                head_sha="a" * 40,
-                policy_digest=first_policy.digest(),
-                now=FIXED_NOW,
-            )
-        )
-
-        changed_policy = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="b" * 40,
-            command_id="issue-comment-new-policy",
-        )
-        second_policy = ReviewConvergencePolicy(mode="strict")
-        replaced_again, _ = apply_session_command(
-            ledger, IDENTITY, changed_policy, now=FIXED_NOW, policy=second_policy
-        )
-        self.assertEqual(
-            [grant["command_id"] for grant in replaced_again.continuation_grants],
-            ["issue-comment-new-policy"],
-        )
-        self.assertIsNone(initial.continuation_grants[0].get("consumed_reservation_id"))
-
-    def test_identified_continuation_uses_a_generation_guard(self):
-        class RacingLedger(InMemorySessionLedger):
-            def replace(self, identity, mutate, *, now=None):
-                loaded = self.load(identity, now=now)
-                assert loaded.record is not None
-                stale = loaded.record.evolve(
-                    now=now, generation=loaded.record.generation + 1
-                )
-                return mutate(stale)
-
-        ledger = RacingLedger()
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        command = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="a" * 40,
-            command_id="issue-comment-race",
-        )
-        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
-            apply_session_command(
-                ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
-            )
-        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
-        assert loaded.record is not None
-        self.assertEqual(loaded.record.continuation_grants, ())
-
-    def test_identified_command_replay_does_not_revive_a_consumed_grant(self):
-        ledger = InMemorySessionLedger()
-        policy = ReviewConvergencePolicy(mode="merge-focused")
-        command = parse_maintainer_command(
-            "@sensei review continue",
-            actor="alice",
-            head_sha="a" * 40,
-            command_id="issue-comment-103",
-        )
-        apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW, policy=policy)
-        ledger.replace(
-            IDENTITY,
-            lambda current: current.evolve(
-                now=FIXED_NOW,
-                completed_initial_reviews=1,
-                completed_verification_rounds=5,
-            ),
-            now=FIXED_NOW,
-        )
-        from review_sensei.session import prepare_session_round
-
-        prepare_session_round(
+        self.assertFalse(record.operator_paused)
+        self.assertEqual(record.continuation_grants, ())
+        prepared = prepare_session_round(
             ledger,
             IDENTITY,
             policy,
@@ -379,12 +244,52 @@ class SessionCommandTests(unittest.TestCase):
             coverage_complete=True,
             latest_head_reviewed=True,
         )
+        self.assertTrue(prepared.decision.admit)
+
+    def test_identified_continuation_command_is_idempotent(self):
+        ledger = InMemorySessionLedger()
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-102",
+        )
+        first, _ = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
         replay, _ = apply_session_command(
-            ledger, IDENTITY, command, now=FIXED_NOW, policy=policy
+            ledger, IDENTITY, command, now=FIXED_NOW + timedelta(minutes=1)
         )
-        self.assertEqual(
-            replay.continuation_grants[0]["consumed_reservation_id"], "abcd1234"
+        self.assertEqual(replay.generation, first.generation)
+        self.assertEqual(replay.continuation_grants, ())
+
+    def test_identified_continuation_uses_a_generation_guard(self):
+        class RacingLedger(InMemorySessionLedger):
+            racing = False
+
+            def replace(self, identity, mutate, *, now=None):
+                loaded = self.load(identity, now=now)
+                assert loaded.record is not None
+                if not self.racing:
+                    return super().replace(identity, mutate, now=now)
+                stale = loaded.record.evolve(
+                    now=now, generation=loaded.record.generation + 1
+                )
+                return mutate(stale)
+
+        ledger = RacingLedger()
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        ledger.racing = True
+        command = parse_maintainer_command(
+            "@sensei review continue",
+            actor="alice",
+            head_sha="a" * 40,
+            command_id="issue-comment-race",
         )
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        assert loaded.record is not None
+        self.assertTrue(loaded.record.operator_paused)
 
     def test_pause_and_continue_mutate_operator_paused(self):
         ledger = InMemorySessionLedger()
@@ -393,8 +298,6 @@ class SessionCommandTests(unittest.TestCase):
         self.assertTrue(result.applied)
         self.assertTrue(record.operator_paused)
         policy = ReviewConvergencePolicy(mode="merge-focused")
-        from review_sensei.session import prepare_session_round
-
         prepared = prepare_session_round(
             ledger,
             IDENTITY,
@@ -404,12 +307,12 @@ class SessionCommandTests(unittest.TestCase):
         )
         self.assertFalse(prepared.decision.admit)
         self.assertEqual(prepared.decision.handoff_reason, "paused")
-        cont = parse_maintainer_command(
-            "@sensei review continue --rounds 1", actor="alice"
-        )
+        cont = parse_maintainer_command("@sensei review continue", actor="alice")
         record, result = apply_session_command(ledger, IDENTITY, cont, now=FIXED_NOW)
         self.assertFalse(record.operator_paused)
-        self.assertEqual(result.continuation_rounds, 1)
+        self.assertEqual(
+            result.summary, "automated review may continue; rounds are uncapped"
+        )
 
         pause = parse_maintainer_command("@sensei review pause", actor="alice")
         paused, _result = apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
@@ -443,7 +346,7 @@ class SessionCommandTests(unittest.TestCase):
             self.assertEqual(record.generation, 0)
             self.assertIn("session re-enrolled", result.summary)
             # The recovered session admits a round again, which is what makes
-            # this the documented operator path out of an expired budget.
+            # this the documented operator path out of an expired session.
             prepared = prepare_session_round(
                 ledger,
                 IDENTITY,
@@ -1035,28 +938,30 @@ class SummaryTests(unittest.TestCase):
         text = render_convergence_summary(
             mode="merge-focused",
             round_kind="verification",
-            remaining_verification=0,
+            completed_rounds=20,
             verified_fixed=2,
             new_regressions=1,
             advisory=3,
             handoff=True,
-            handoff_reason="round-budget-exhausted",
+            handoff_reason="failed-attempt-budget-exhausted",
         )
         self.assertIn("human review", text)
-        self.assertIn("round-budget-exhausted", text)
+        self.assertIn("rounds=20", text)
+        self.assertIn("failed-attempt-budget-exhausted", text)
+        self.assertNotIn("remaining", text)
 
     def test_handoff_summary_rejects_unbounded_counts_and_reasons(self):
-        with self.assertRaisesRegex(ReviewInputError, "remaining_verification"):
+        with self.assertRaisesRegex(ReviewInputError, "completed_rounds"):
             render_convergence_summary(
                 mode="merge-focused",
                 round_kind="verification",
-                remaining_verification=-1,
+                completed_rounds=-1,
             )
         with self.assertRaisesRegex(ReviewInputError, "handoff_reason"):
             render_convergence_summary(
                 mode="merge-focused",
                 round_kind="verification",
-                remaining_verification=0,
+                completed_rounds=0,
                 handoff=True,
                 handoff_reason="x" * 129,
             )
