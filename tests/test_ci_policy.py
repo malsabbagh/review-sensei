@@ -1663,8 +1663,13 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "if: success() && !cancelled() && inputs.operation == 'review' "
             "&& inputs.enable_github_writes == 'true'"
         )
+        handoff_guard = (
+            " && steps.provider-review.outputs.outcome_status != 'action_required'"
+        )
         publish_if = (
-            admission_if + " && steps.publish-admission.outputs.status == 'current'"
+            admission_if
+            + handoff_guard
+            + " && steps.publish-admission.outputs.status == 'current'"
         )
         confirm_name = "Confirm live pull-request head is still current"
         self.assertEqual(text.count(confirm_name), 3)
@@ -1687,7 +1692,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertEqual(names[publish_index - 1], confirm_name)
                 revalidate = _step_block(job, confirm_name)
                 publish = _step_block(job, publish_name)
-                self.assertIn(admission_if, revalidate)
+                self.assertIn(admission_if + handoff_guard, revalidate)
                 self.assertNotIn("steps.publish-admission.outputs.status", revalidate)
                 self.assertIn(publish_if, publish)
                 self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)

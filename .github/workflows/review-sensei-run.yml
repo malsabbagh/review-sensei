@@ -781,6 +781,7 @@ jobs:
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
       - name: Run cloud-provider review
+        id: provider-review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -874,7 +875,7 @@ jobs:
       # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -926,7 +927,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1062,7 +1063,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
@@ -1222,6 +1223,7 @@ jobs:
             --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
 
       - name: Run OpenRouter-provider review
+        id: provider-review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1317,7 +1319,7 @@ jobs:
 
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1369,7 +1371,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1512,7 +1514,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
@@ -1651,6 +1653,7 @@ jobs:
           echo "Installed ReviewSensei $installed_version from $install_source."
 
       - name: Prepare and run trusted local review
+        id: provider-review
         if: inputs.operation == 'review' && inputs.enable_review == 'true'
         env:
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1749,7 +1752,7 @@ jobs:
       # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1801,7 +1804,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote trusted local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.enable_github_writes == 'true' && steps.provider-review.outputs.outcome_status != 'action_required' && steps.publish-admission.outputs.status == 'current'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1933,7 +1936,7 @@ jobs:
           exit 1
 
       - name: Upload opt-in review artifact
-        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true'
+        if: inputs.operation == 'review' && inputs.upload_artifacts == 'true' && steps.provider-review.outputs.outcome_status != 'action_required'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-review
