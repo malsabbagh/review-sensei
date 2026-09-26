@@ -29,7 +29,11 @@ from review_sensei.hosting.github import (
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
 )
-from review_sensei.hosting.github.errors import GitHubPublicationTransientError
+from review_sensei.hosting.github.errors import (
+    GitHubHTTPError,
+    GitHubPublicationError,
+    GitHubPublicationTransientError,
+)
 from review_sensei.hosting.github.session_ledger import (
     SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
@@ -3237,39 +3241,204 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
 
 
 class HandoffNoticeTests(unittest.TestCase):
-    def test_spent_budget_posts_one_author_comment(self):
+    APP = "reviewsensei[bot]"
+
+    class _Broker:
+        def __init__(self, token: str = "reply-token"):
+            self.token = token
+            self.capabilities: list[tuple[str, str | None]] = []
+
+        def request_oidc_token(self) -> str:
+            return "oidc-token"
+
+        def exchange(self, oidc_token: str, *, capability: str | None = None):
+            self.capabilities.append((oidc_token, capability))
+            return self.token
+
+    def _http(self, responses):
+        calls: list[tuple[str, str, str | None, bytes | None]] = []
+
+        def opener(request, timeout):
+            del timeout
+            calls.append(
+                (
+                    request.method,
+                    request.full_url,
+                    request.get_header("Authorization"),
+                    request.data,
+                )
+            )
+            if not responses:
+                raise AssertionError("unexpected GitHub request")
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        return (
+            GitHubHttp(api_url="https://api.github.test", opener=opener),
+            calls,
+        )
+
+    def _ledger(self, responses, **kwargs):
+        http, calls = self._http(responses)
+        broker = kwargs.pop("broker", None)
+        if broker is None and "reply_broker" not in kwargs:
+            broker = self._Broker()
+        ledger = GitHubIssueCommentSessionLedger(
+            http,
+            token=kwargs.pop("token", "session-token"),
+            app_slug=kwargs.pop("app_slug", self.APP),
+            reply_broker=kwargs.pop("reply_broker", broker),
+        )
+        self.assertEqual(kwargs, {})
+        return ledger, calls, ledger._reply_broker
+
+    def _publish(self, ledger):
+        ledger.publish_handoff_notice(
+            IDENTITY,
+            diagnostic="round-budget-exhausted",
+            head_sha="a" * 40,
+        )
+
+    def _app_comment(self, body: str) -> dict[str, object]:
+        return {
+            "id": 9,
+            "body": body,
+            "user": {"login": self.APP, "type": "Bot"},
+        }
+
+    def test_spent_budget_posts_one_author_comment_with_reply_capability(self):
         from review_sensei.disposition import render_maintainer_handoff_notice
 
-        head = "a" * 40
-        body = render_maintainer_handoff_notice(
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
+        body = render_maintainer_handoff_notice(head_sha="a" * 40)
         self.assertIn("`@sensei review continue --rounds 1`", body)
         self.assertIn("`@sensei re-scan`", body)
-        http, calls = make_http(
+        posted = self._app_comment(body)
+        ledger, calls, broker = self._ledger(
             [
                 json_response([]),
                 json_response({"id": 9, "body": body}),
-                json_response([{"id": 9, "body": body}]),
+                json_response([posted]),
             ]
         )
-        ledger = GitHubIssueCommentSessionLedger(http, token="token")
-        ledger.publish_handoff_notice(
-            IDENTITY,
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
-        ledger.publish_handoff_notice(
-            IDENTITY,
-            diagnostic="round-budget-exhausted",
-            head_sha=head,
-        )
-        methods = [method for method, _url, _data in calls]
+        self._publish(ledger)
+        self._publish(ledger)
+        methods = [method for method, _url, _auth, _data in calls]
         self.assertEqual(methods, ["GET", "POST", "GET"])
-        posted = json.loads(calls[1][2].decode("utf-8"))
-        self.assertEqual(posted["body"], body)
-        self.assertNotIn("reviewsensei:session:", posted["body"])
+        self.assertTrue(
+            all(
+                "per_page=20" in url
+                for _method, url, _auth, _data in calls
+                if _method == "GET"
+            )
+        )
+        self.assertTrue(
+            all(auth == "Bearer reply-token" for _method, _url, auth, _data in calls)
+        )
+        self.assertNotIn("Bearer session-token", [auth for _m, _u, auth, _d in calls])
+        self.assertEqual(broker.capabilities, [("oidc-token", "issue_reply")] * 2)
+        payload = json.loads(calls[1][3].decode("utf-8"))
+        self.assertEqual(payload["body"], body)
+        self.assertNotIn("reviewsensei:session:", payload["body"])
+
+    def test_quoted_marker_does_not_suppress_the_notice(self):
+        from review_sensei.disposition import (
+            handoff_notice_marker,
+            render_maintainer_handoff_notice,
+        )
+
+        body = render_maintainer_handoff_notice(head_sha="a" * 40)
+        marker = handoff_notice_marker(
+            head_sha="a" * 40, diagnostic="round-budget-exhausted"
+        )
+        quoted = {
+            "id": 3,
+            "body": body,
+            "user": {"login": "alice", "type": "User"},
+        }
+        embedded = self._app_comment(f"The marker was {marker} in the middle.")
+        ledger, calls, _broker = self._ledger(
+            [json_response([quoted, embedded]), json_response({"id": 9})]
+        )
+        self._publish(ledger)
+        methods = [method for method, _url, _auth, _data in calls]
+        self.assertEqual(methods, ["GET", "POST"])
+
+    def test_existing_app_terminal_marker_is_not_posted_again(self):
+        from review_sensei.disposition import render_maintainer_handoff_notice
+
+        body = render_maintainer_handoff_notice(head_sha="a" * 40)
+        ledger, calls, _broker = self._ledger(
+            [json_response([self._app_comment(body)])]
+        )
+        self._publish(ledger)
+        self.assertEqual([method for method, _url, _auth, _data in calls], ["GET"])
+
+    def test_discovery_failures_do_not_post(self):
+        from urllib.error import URLError
+
+        cases = (
+            (
+                URLError("temporary"),
+                GitHubPublicationTransientError,
+                "discovery failed",
+            ),
+            (
+                GitHubHTTPPaginationLimitError("page cap"),
+                GitHubPublicationTransientError,
+                "exceeded bound",
+            ),
+            (GitHubHTTPError("rejected"), GitHubPublicationError, "discovery failed"),
+        )
+        for failure, error_type, message in cases:
+            with self.subTest(failure=type(failure).__name__):
+                ledger, calls, _broker = self._ledger([failure])
+                with self.assertRaisesRegex(error_type, message):
+                    self._publish(ledger)
+                self.assertEqual(
+                    [method for method, _url, _auth, _data in calls], ["GET"]
+                )
+
+    def test_non_2xx_post_fails_closed(self):
+        ledger, calls, _broker = self._ledger(
+            [json_response([]), json_response({"message": "no"}, status=422)]
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "create failed"):
+            self._publish(ledger)
+        self.assertEqual(
+            [method for method, _url, _auth, _data in calls], ["GET", "POST"]
+        )
+
+    def test_missing_reply_capability_or_app_slug_does_not_post(self):
+        http, calls = self._http([])
+        missing_broker = GitHubIssueCommentSessionLedger(
+            http, token="session-token", app_slug=self.APP
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "issue_reply"):
+            self._publish(missing_broker)
+        colliding = GitHubIssueCommentSessionLedger(
+            http,
+            token="session-token",
+            app_slug=self.APP,
+            reply_broker=self._Broker(token="session-token"),
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "capability token"):
+            self._publish(colliding)
+        missing_slug = GitHubIssueCommentSessionLedger(
+            http, token="session-token", reply_broker=self._Broker()
+        )
+        with self.assertRaisesRegex(GitHubPublicationError, "App slug"):
+            self._publish(missing_slug)
+        self.assertEqual(calls, [])
+
+    def test_rejects_a_diagnostic_other_than_spent_budget(self):
+        ledger, calls, _broker = self._ledger([])
+        with self.assertRaisesRegex(ReviewInputError, "diagnostic"):
+            ledger.publish_handoff_notice(
+                IDENTITY, diagnostic="paused", head_sha="a" * 40
+            )
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

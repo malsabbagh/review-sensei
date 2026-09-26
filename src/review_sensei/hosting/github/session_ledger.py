@@ -22,7 +22,11 @@ import re
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
-from ...disposition import handoff_notice_marker, render_maintainer_handoff_notice
+from ...disposition import (
+    SPENT_BUDGET_DIAGNOSTIC,
+    handoff_notice_marker,
+    render_maintainer_handoff_notice,
+)
 from ...errors import ReviewInputError
 from ...session import (
     MAX_SESSION_COMMENT_BYTES,
@@ -45,6 +49,10 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
+
+# Same adaptive page sizes as conversation discovery: a page that exceeds the
+# response budget is retried smaller, and paginate still stops at its item cap.
+_HANDOFF_NOTICE_PAGE_SIZES = (20, 10, 5, 1)
 
 SESSION_MARKER_PREFIX = "<!-- reviewsensei:session:v1"
 SESSION_MARKER_RE = re.compile(
@@ -88,6 +96,28 @@ def _marker_shaped(body: str) -> bool:
     return terminal_line.startswith(
         SESSION_MARKER_ANY_VERSION
     ) and terminal_line.endswith("-->")
+
+
+def _handoff_notice_from_app(item: object, *, marker: str, app_slug: str) -> bool:
+    """True only for an App comment whose last line is the notice marker.
+
+    A quoted marker, including a full copy of the notice, must not suppress a
+    later post. The author check is the same Bot login rule as session
+    discovery; the terminal-line rule is the ADR 0053 marker discipline.
+    """
+
+    if not isinstance(item, dict):
+        return False
+    body = item.get("body")
+    if not isinstance(body, str):
+        return False
+    if body.rstrip().rsplit("\n", 1)[-1].strip() != marker:
+        return False
+    author = item.get("user")
+    if not isinstance(author, dict) or author.get("type") != "Bot":
+        return False
+    login = author.get("login")
+    return isinstance(login, str) and login.casefold() == app_slug.casefold()
 
 
 def session_marker(
@@ -189,9 +219,12 @@ class GitHubIssueCommentSessionLedger:
     The GitHub REST API path used here has no conditional PATCH primitive, so
     generation checks are advisory across independent writers. A deployment
     that needs strict compare-and-swap semantics must serialize mutations
-    outside this adapter. The caller supplies the short-lived capability token
-    exchanged for the review-publication capability; this adapter deliberately
+    outside this adapter.     The caller supplies the short-lived capability token
+    exchanged for the review-session capability; this adapter deliberately
     uses only the issue-comment endpoints on the shared bounded HTTP client.
+    A spent-budget author notice is not a session document. It is posted with
+    a separate ``issue_reply`` capability from ``reply_broker``, never with
+    the session token.
     """
 
     def __init__(
@@ -204,6 +237,7 @@ class GitHubIssueCommentSessionLedger:
         session_grant: str | None = None,
         session_attestation: Mapping[str, object] | None = None,
         head_sha: str | None = None,
+        reply_broker: Any | None = None,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -245,6 +279,7 @@ class GitHubIssueCommentSessionLedger:
             dict(session_attestation) if session_attestation is not None else None
         )
         self._head_sha = head_sha
+        self._reply_broker = reply_broker
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -476,6 +511,30 @@ class GitHubIssueCommentSessionLedger:
         record = mutate(SessionRecord.create(identity, now=now, expires_at=expires_at))
         return self._create_initial_record(identity, record, now=now)
 
+    def _issue_reply_token(self) -> str:
+        """Exchange a conversation reply capability, distinct from the session token."""
+
+        broker = self._reply_broker
+        exchange = getattr(broker, "exchange", None)
+        request_oidc = getattr(broker, "request_oidc_token", None)
+        if broker is None or not callable(exchange) or not callable(request_oidc):
+            raise GitHubPublicationError(
+                "handoff notice requires an issue_reply capability"
+            )
+        try:
+            reply_token = exchange(request_oidc(), capability="issue_reply")
+        except GitHubBrokerClientError as exc:
+            raise GitHubPublicationError(
+                "handoff notice capability exchange failed"
+            ) from exc
+        if (
+            not isinstance(reply_token, str)
+            or not reply_token.strip()
+            or reply_token == self.token
+        ):
+            raise GitHubPublicationError("handoff notice capability token is invalid")
+        return reply_token
+
     def publish_handoff_notice(
         self,
         identity: SessionIdentity,
@@ -485,33 +544,52 @@ class GitHubIssueCommentSessionLedger:
     ) -> None:
         """Post one author-facing comment for a spent automatic review budget.
 
-        A later run for the same head and reason finds the marker and returns
-        without posting again. The marker is not a session document.
+        The write uses an ``issue_reply`` capability, not the session token.
+        A later run for the same head returns without posting when an
+        App-authored comment already ends with the marker. Discovery is
+        bounded; a page cap or transport failure fails closed and does not POST.
         """
 
-        body = render_maintainer_handoff_notice(
-            diagnostic=diagnostic, head_sha=head_sha
-        )
+        if diagnostic != SPENT_BUDGET_DIAGNOSTIC:
+            raise ReviewInputError("handoff notice diagnostic is invalid")
+        if not isinstance(self.app_slug, str) or not self.app_slug.strip():
+            raise GitHubPublicationError("handoff notice requires the App slug")
+        body = render_maintainer_handoff_notice(head_sha=head_sha)
         marker = handoff_notice_marker(head_sha=head_sha, diagnostic=diagnostic)
+        reply_token = self._issue_reply_token()
         try:
             items = self.http.paginate(
-                path=self._comments_path(identity), token=self.token
+                path=self._comments_path(identity),
+                token=reply_token,
+                page_sizes=_HANDOFF_NOTICE_PAGE_SIZES,
             )
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "handoff notice discovery failed"
             ) from exc
-        except (GitHubHTTPError, GitHubHTTPPaginationLimitError) as exc:
+        except GitHubHTTPPaginationLimitError as exc:
+            # The marker may sit past the cap. Do not POST a second notice.
+            raise GitHubPublicationTransientError(
+                "handoff notice discovery exceeded bound"
+            ) from exc
+        except GitHubHTTPError as exc:
             raise GitHubPublicationError("handoff notice discovery failed") from exc
         for item in items:
-            if isinstance(item, dict) and isinstance(item.get("body"), str):
-                if marker in item["body"]:
-                    return
-        status, _payload = self._request(
-            "POST",
-            self._comments_path(identity),
-            body={"body": body},
-        )
+            if _handoff_notice_from_app(item, marker=marker, app_slug=self.app_slug):
+                return
+        try:
+            status, _payload = self.http.request(
+                "POST",
+                self._comments_path(identity),
+                token=reply_token,
+                body={"body": body},
+            )
+        except GitHubHTTPTransientError as exc:
+            raise GitHubPublicationTransientError(
+                "handoff notice create failed"
+            ) from exc
+        except GitHubHTTPError as exc:
+            raise GitHubPublicationError("handoff notice create failed") from exc
         if not 200 <= status < 300:
             raise GitHubPublicationError("handoff notice create failed")
 

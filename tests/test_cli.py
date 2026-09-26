@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -3244,6 +3244,177 @@ class HostedSessionLedgerFlagTests(unittest.TestCase):
         status, stderr = self._run(["--transaction", "--github-session-ledger"])
         self.assertEqual(status, 1)
         self.assertIn("--transaction requires a session ledger", stderr)
+
+
+class SpentBudgetNoticeCliTests(unittest.TestCase):
+    def _invoke(self, *, diagnostic: str, publish):
+        from review_sensei.session import LocalSessionLedger
+
+        prepared = SimpleNamespace(
+            decision=SimpleNamespace(handoff=True, admit=False),
+            reservation_id=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pr.patch").write_text(DIFF, encoding="utf-8")
+            (root / "fixture.json").write_text(
+                '{"summary":"Architecture reviewed."}\n', encoding="utf-8"
+            )
+            (root / "ledger").mkdir()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "review_sensei.session.prepare_session_round",
+                    return_value=prepared,
+                ),
+                patch(
+                    "review_sensei.session.admission_diagnostic",
+                    return_value=diagnostic,
+                ),
+                patch(
+                    "review_sensei.session.should_skip_automation",
+                    return_value=True,
+                ),
+                patch.object(
+                    LocalSessionLedger,
+                    "publish_handoff_notice",
+                    publish,
+                    create=True,
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(root / "pr.patch"),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(root / "fixture.json"),
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "7",
+                        "--head-sha",
+                        "a" * 40,
+                        "--review-mode",
+                        "merge-focused",
+                        "--session-ledger",
+                        str(root / "ledger"),
+                        "--outcome",
+                        str(root / "outcome.json"),
+                    ]
+                )
+            payload = json.loads((root / "outcome.json").read_text(encoding="utf-8"))
+        return status, payload, stderr.getvalue(), stdout.getvalue()
+
+    def test_local_ledger_without_a_notice_method_fails_closed(self):
+        prepared = SimpleNamespace(
+            decision=SimpleNamespace(handoff=True, admit=False),
+            reservation_id=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pr.patch").write_text(DIFF, encoding="utf-8")
+            (root / "fixture.json").write_text(
+                '{"summary":"Architecture reviewed."}\n', encoding="utf-8"
+            )
+            (root / "ledger").mkdir()
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "review_sensei.session.prepare_session_round",
+                    return_value=prepared,
+                ),
+                patch(
+                    "review_sensei.session.admission_diagnostic",
+                    return_value="round-budget-exhausted",
+                ),
+                patch(
+                    "review_sensei.session.should_skip_automation",
+                    return_value=True,
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(root / "pr.patch"),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(root / "fixture.json"),
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "7",
+                        "--head-sha",
+                        "a" * 40,
+                        "--review-mode",
+                        "merge-focused",
+                        "--session-ledger",
+                        str(root / "ledger"),
+                        "--outcome",
+                        str(root / "outcome.json"),
+                    ]
+                )
+            payload = json.loads((root / "outcome.json").read_text(encoding="utf-8"))
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["status"], "action_required")
+        self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
+        self.assertIn("maintainer attention required", stderr.getvalue())
+
+    def test_delivered_notice_exits_zero_without_an_error_annotation(self):
+        calls: list[str] = []
+
+        def publish(self, identity, *, diagnostic, head_sha):
+            del self, identity, head_sha
+            calls.append(diagnostic)
+
+        status, payload, stderr, stdout = self._invoke(
+            diagnostic="round-budget-exhausted",
+            publish=publish,
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, ["round-budget-exhausted"])
+        self.assertEqual(payload["diagnostic"], "round-budget-exhausted")
+        self.assertNotIn("::error", stderr)
+        self.assertIn("action_required", stdout)
+
+    def test_failed_notice_delivery_keeps_the_failing_outcome(self):
+        from review_sensei.hosting.github.errors import GitHubPublicationError
+
+        def publish(self, identity, *, diagnostic, head_sha):
+            del self, identity, diagnostic, head_sha
+            raise GitHubPublicationError("handoff notice create failed")
+
+        status, payload, stderr, _stdout = self._invoke(
+            diagnostic="round-budget-exhausted",
+            publish=publish,
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["status"], "action_required")
+        self.assertIn("handoff notice create failed", stderr)
+        self.assertIn("maintainer attention required", stderr)
+
+    def test_other_handoffs_stay_failing_when_a_notice_method_exists(self):
+        calls: list[str] = []
+
+        def publish(self, identity, *, diagnostic, head_sha):
+            del self, identity, head_sha
+            calls.append(diagnostic)
+
+        status, payload, stderr, _stdout = self._invoke(
+            diagnostic="paused",
+            publish=publish,
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(calls, [])
+        self.assertEqual(payload["diagnostic"], "paused")
+        self.assertIn("maintainer attention required", stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -25,7 +25,10 @@ budgets are exhausted; callers that need the structured envelope should use
 `already_published`, and `action_required`. `action_required` is a non-passing
 operator handoff or durable-recovery outcome: it requires a maintainer decision
 before another automated pass and must not be treated as a successful skip (see
-ADRs 0048 and 0050). Diagnostics are closed tokens enumerated by
+ADRs 0048 and 0050). The one exception is a delivered `round-budget-exhausted`
+author notice, which ADR 0050 allows to exit 0 after the comment is posted.
+Every other `action_required` outcome remains a failing check. Diagnostics
+are closed tokens enumerated by
 `PUBLIC_DIAGNOSTICS` in `src/review_sensei/outcomes.py`; the `cancelled` token
 is reserved for host-layer cancellation and is not emitted by `ReviewService`
 today. Actions summaries and

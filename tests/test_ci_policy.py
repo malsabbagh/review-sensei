@@ -1664,7 +1664,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
             "&& inputs.enable_github_writes == 'true'"
         )
         handoff_guard = (
-            " && steps.provider-review.outputs.outcome_status != 'action_required'"
+            " && steps.provider-review.outputs.outcome_diagnostic "
+            "!= 'round-budget-exhausted'"
         )
         publish_if = (
             admission_if
@@ -1674,6 +1675,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
         confirm_name = "Confirm live pull-request head is still current"
         self.assertEqual(text.count(confirm_name), 3)
         self.assertEqual(text.count(publish_if), 3)
+        self.assertEqual(text.count(handoff_guard.strip()), 9)
+        self.assertNotIn("outcome_status != 'action_required'", text)
         self.assertEqual(text.count("id: publish-admission"), 3)
         self.assertNotIn(
             "if: inputs.operation == 'review' && inputs.enable_github_writes == 'true'\n",
