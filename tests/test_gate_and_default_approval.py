@@ -23,7 +23,11 @@ from review_sensei.hosting.github.application import (
     GitHubApplication,
     GitHubWriteOptions,
 )
-from review_sensei.hosting.github.approval import approval_eligibility_from_result
+from review_sensei.hosting.github.approval import (
+    approval_eligibility_from_result,
+    approval_withheld_diagnostic,
+    evaluate_auto_approval,
+)
 from review_sensei.hosting.github.checks import (
     CheckOutcome,
     ReviewCheckPublisher,
@@ -686,6 +690,25 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         )
         self.assertIsNone(loaded)
         self.assertEqual({method for method, _, _ in calls}, {"GET"})
+
+    def test_unknown_thread_state_withholds_with_the_incomplete_diagnostic(self):
+        """An unknown conversation resolution can never approve, at any layer.
+
+        The adapter fails closed before writing, so the unknown state reaches
+        the public vocabulary through the pure policy a caller without a
+        completed sweep actually evaluates.
+        """
+
+        decision = evaluate_auto_approval(
+            enabled=True,
+            app_authored=False,
+            result=clean_result(),
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("review-threads-incomplete",))
+        self.assertEqual(
+            approval_withheld_diagnostic(decision), "review_threads_incomplete"
+        )
 
 
 class OneGateAcceptanceTests(GateAcceptanceCase):
