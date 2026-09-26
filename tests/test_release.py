@@ -645,7 +645,7 @@ class NpmResumeRunTests(unittest.TestCase):
             "conclusion": "failure",
             "event": "workflow_dispatch",
             "head_branch": "main",
-            "display_title": "publish-npm 0.6.7",
+            "display_title": "publish-npm 0.6.8",
             "head_sha": self.sha,
         }
 
@@ -655,7 +655,7 @@ class NpmResumeRunTests(unittest.TestCase):
             run_id="123",
             repository="malsabbagh/review-sensei",
             default_branch="main",
-            version="0.6.7",
+            version="0.6.8",
             dispatch_source_sha=self.sha,
         )
 
