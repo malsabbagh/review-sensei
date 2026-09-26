@@ -26,7 +26,7 @@ from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .convergence import (
     DIAGNOSTIC_ROUND_CEILING,
@@ -1297,7 +1297,7 @@ def next_session_generation(record: SessionRecord) -> int:
 
 def _failed_attempt_scope(
     record: SessionRecord, head_sha: str | None
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Return the failed-attempt bookkeeping a reservation for this head owes.
 
     The retry budget belongs to the head that burned it.  A changed head
