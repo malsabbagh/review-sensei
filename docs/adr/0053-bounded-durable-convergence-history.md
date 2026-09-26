@@ -2,8 +2,16 @@
 
 Status: Proposed
 Date: 2026-09-20
+Last amended: 2026-09-26
 GitHub Issue: #146 F2
 Owners/Reviewers: Maintainers
+
+Status note (2026-09-26): the completed-round counters this record bounds are
+diagnostic history only; no round is refused for exceeding a count
+([ADR 0056](0056-remove-pr-wide-review-count-caps.md), epic #181 C). The
+storage bounds, envelope, and integrity checks below are unchanged, and
+retained continuation grants stay counted as stored members because their
+history is preserved verbatim.
 
 ## Context
 
