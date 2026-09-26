@@ -5,6 +5,7 @@ import type { WorkerEnv } from "../src/env";
 import {
   GitHubSetupService,
   WebhookPayloadError,
+  deferInstallationSetup,
   type VerifiedDelivery,
   parseVerifiedDelivery,
 } from "../src/github-app";
@@ -299,6 +300,35 @@ describe("installation and migration events", () => {
       permissions: ALL_PERMISSIONS,
       suspended: false,
     });
+    expect(deferInstallationSetup(parsed!)).toBe(true);
+  });
+
+  it("keeps a single selected repository on the webhook invocation", () => {
+    const parsed = parseVerifiedDelivery(
+      body(payload("created", "repositories", ["acme/one"])),
+      "installation",
+      "delivery-one",
+      12345,
+    );
+    expect(deferInstallationSetup(parsed!)).toBe(false);
+    expect(
+      deferInstallationSetup({
+        ...parsed!,
+        permissions: { contents: "read" },
+        repositories: ["acme/one", "acme/two"],
+      }),
+    ).toBe(false);
+    expect(deferInstallationSetup({ ...parsed!, suspended: true })).toBe(false);
+  });
+
+  it("defers an installation whose repository list must be loaded", () => {
+    const parsed = parseVerifiedDelivery(
+      body(payload("created", "repositories", [])),
+      "installation",
+      "delivery-empty",
+      12345,
+    );
+    expect(deferInstallationSetup(parsed!)).toBe(true);
   });
 
   it("accepts lifecycle delivery without a repository list for API fallback", () => {

@@ -131,9 +131,10 @@ function positiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-function repositorySlug(value: unknown): value is string {
+export function repositorySlug(value: unknown): value is string {
   return (
     typeof value === "string" &&
+    value.length <= 200 &&
     !/[\r\n]/.test(value) &&
     REPOSITORY_PATTERN.test(value)
   );
@@ -161,6 +162,30 @@ function hasSetupPermissions(permissions: Record<string, string>): boolean {
   return REQUIRED_SETUP_PERMISSIONS.every(
     (permission) => permissions[permission] === "write",
   );
+}
+
+/**
+ * Multi-repository setup does not fit in one Workers Free invocation.
+ * A single repository setup stays on the webhook request. Several selected
+ * repositories, or an installation event whose repository list must be loaded
+ * from GitHub, continue one repository per invocation.
+ */
+export function deferInstallationSetup(delivery: VerifiedDelivery): boolean {
+  if (delivery.suspended || !hasSetupPermissions(delivery.permissions)) {
+    return false;
+  }
+  const installationLifecycle =
+    delivery.event === "installation" &&
+    (delivery.action === "created" || delivery.action === "new_permissions_accepted");
+  const repositoriesAdded =
+    delivery.event === "installation_repositories" && delivery.action === "added";
+  if (!installationLifecycle && !repositoriesAdded) {
+    return false;
+  }
+  if (delivery.repositories.length > 1) {
+    return true;
+  }
+  return installationLifecycle && delivery.repositories.length === 0;
 }
 
 function repositoryPath(repository: string): string {
@@ -590,7 +615,7 @@ export class GitHubSetupService {
     }
   }
 
-  async process(delivery: VerifiedDelivery): Promise<SetupResult[]> {
+  async selectSetupRepositories(delivery: VerifiedDelivery): Promise<string[]> {
     if (delivery.suspended) {
       return [];
     }
@@ -615,6 +640,14 @@ export class GitHubSetupService {
       ["created", "new_permissions_accepted"].includes(delivery.action)
     ) {
       selected = await this.installationRepositories(delivery.installationId);
+    }
+    return selected;
+  }
+
+  async process(delivery: VerifiedDelivery): Promise<SetupResult[]> {
+    const selected = await this.selectSetupRepositories(delivery);
+    if (selected.length === 0) {
+      return [];
     }
 
     if (!hasSetupPermissions(delivery.permissions)) {

@@ -17,6 +17,13 @@
 			"previews_enabled": false
 		}
 	],
+	"services": [
+		{
+			"binding": "SETUP_CONTINUATION",
+			"service": "reviewsensei-github-app",
+			"entrypoint": "SetupContinuation"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
