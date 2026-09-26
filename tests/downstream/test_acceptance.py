@@ -149,19 +149,30 @@ def _make_application(http=None):
 
 
 class GeneratedCallerContractTests(unittest.TestCase):
-    def test_setup_smoke_generates_v4_caller_config_and_uninstall(self) -> None:
+    def test_setup_smoke_generates_v5_caller_config_and_uninstall(self) -> None:
         files = _generated_files()
         workflow = files[WORKFLOW_PATH]
         config = files[CONFIG_PATH]
         uninstall = files[UNINSTALL_WORKFLOW_PATH]
         self.assertIn("# ReviewSensei setup version: 5", workflow)
         self.assertIn("review-sensei-run.yml@v5", workflow)
-        self.assertIn("setup_version: 5", config)
-        self.assertIn("auto_review: false", config)
-        self.assertIn("github_writes: false", config)
-        self.assertIn("mention_replies: false", config)
-        self.assertIn("learning_prs: false", config)
+        self.assertIn("schema: 1", config)
+        self.assertIn("inference:", config)
+        self.assertIn("backend: local-ollama", config)
+        # The retired variables have no successor surface: behavior lives in
+        # the canonical configuration, not in repository variables.
+        for retired in (
+            "auto_review",
+            "github_writes",
+            "mention_replies",
+            "learning_prs",
+            "provider_mode",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, config)
+                self.assertNotIn(f"vars.REVIEWSENSEI_{retired.upper()}", workflow)
         self.assertIn("Remove ReviewSensei setup", uninstall)
+        self.assertIn(".reviewsensei.yml", uninstall)
         self.assertIn(".github/review-sensei/config.yml", uninstall)
         self.assertNotIn("OLLAMA_API_KEY", uninstall)
         self.assertIn("learnings and secrets remain untouched", uninstall)
@@ -174,27 +185,20 @@ class GeneratedCallerContractTests(unittest.TestCase):
         )
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("options: [review]", workflow)
-        self.assertIn(
-            "enable_github_writes: ${{ vars.REVIEWSENSEI_GITHUB_WRITES }}",
-            workflow,
-        )
-        self.assertIn(
-            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
-            workflow,
-        )
         self.assertIn("resolve-trigger:", workflow)
         self.assertIn(
             "operation: ${{ needs.resolve-trigger.outputs.operation }}",
             workflow,
         )
-        self.assertIn(
-            "enable_review: ${{ needs.resolve-trigger.outputs.enable_review == 'true' && 'true' || 'false' }}",
-            workflow,
-        )
         self.assertIn('operation = "reply"', workflow)
         self.assertIn("@sensei", workflow)
-        self.assertIn("vars.REVIEWSENSEI_MENTION_REPLIES == 'true'", workflow)
-        self.assertIn("vars.REVIEWSENSEI_GITHUB_WRITES == 'true'", workflow)
+        # Event shape only: the caller decides which events may start a run and
+        # which commenters may address @sensei, and nothing else.
+        self.assertIn(
+            "github.event.comment.author_association == 'OWNER'",
+            workflow,
+        )
+        self.assertIn("github.event.comment.user.type != 'Bot'", workflow)
         self.assertIn("github.event_name == 'pull_request'", workflow)
         self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
 
@@ -202,21 +206,19 @@ class GeneratedCallerContractTests(unittest.TestCase):
         files = _generated_files()
         workflow = files[WORKFLOW_PATH]
         config = files[CONFIG_PATH]
-        self.assertIn(
-            "provider_mode: ${{ vars.REVIEWSENSEI_PROVIDER_MODE || 'local' }}",
-            workflow,
-        )
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE != 'cloud'", workflow)
-        self.assertNotIn("vars.REVIEWSENSEI_PROVIDER_MODE == 'cloud'", workflow)
-        self.assertIn("provider_mode: local", config)
-        self.assertIn("model: ''", config)
-        self.assertIn("model: ${{ vars.REVIEWSENSEI_MODEL || '' }}", workflow)
-        self.assertIn("OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}", workflow)
-        self.assertIn("cloud_base_url: https://ollama.com/api", config)
-        self.assertIn("base_url: http://127.0.0.1:11434/api", config)
-        self.assertIn("enable_learning_proposals:", workflow)
-        self.assertIn("enable_mention_replies:", workflow)
-        self.assertIn("upload_artifacts:", workflow)
+        # One caller serves either backend: the backend and model come from the
+        # canonical configuration (or the two optional provider/model
+        # overrides), so the caller reads no repository variables at all and
+        # carries no provider-mode switch.
+        self.assertNotIn("vars.", workflow)
+        self.assertNotIn("provider_mode", workflow)
+        self.assertIn("backend: local-ollama", config)
+        self.assertNotIn("cloud_base_url", config)
+        self.assertNotIn("base_url", config)
+        self.assertNotIn("provider_mode", config)
+        for secret in ("OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+            with self.subTest(secret=secret):
+                self.assertIn(f"secrets.{secret}", workflow)
 
     def test_uninstall_is_upgrade_safe_and_does_not_wipe_operator_state(self) -> None:
         uninstall = _generated_files()[UNINSTALL_WORKFLOW_PATH]
