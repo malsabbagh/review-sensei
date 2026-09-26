@@ -638,7 +638,7 @@ def render_review_text(result: ReviewResult) -> str:
 def render_review_markdown(result: ReviewResult) -> str:
     """Render one validated review result as readable Markdown."""
 
-    parts = [format_review_summary(result.summary, result.comments)]
+    parts = [result.summary]
     for title, group in _finding_groups(result):
         if not group:
             continue
@@ -647,8 +647,10 @@ def render_review_markdown(result: ReviewResult) -> str:
         for comment in group:
             parts.append("")
             parts.append(f"**{escape_markdown_label(_finding_location(comment))}**")
-            parts.append("")
-            parts.append(format_review_comment(comment))
+            labels = _finding_labels(comment)
+            if labels:
+                parts.extend(["", labels])
+            parts.extend(["", sanitize_finding_markdown(comment.body)])
     return "\n".join(parts) + "\n"
 
 

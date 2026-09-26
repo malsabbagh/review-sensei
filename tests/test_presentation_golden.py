@@ -93,6 +93,39 @@ class PublishedScenario:
         return split_published_body(self.body)[0]
 
 
+class FakeCheckRuns:
+    """Answer the check-run API the way GitHub does for one repository.
+
+    Every hosted publication attaches the broker's check capability, so the
+    golden scenarios do too: a publication without a check token is the
+    degraded enforcement path that withholds approval and the gate suite
+    covers that separately.
+    """
+
+    def __init__(self, *, app_slug="reviewsensei[bot]", run_id=100):
+        self.app_slug = app_slug
+        self.run_id = run_id
+        self.run: dict[str, object] | None = None
+
+    def matches(self, request) -> bool:
+        return "/check-runs" in request.full_url
+
+    def respond(self, request):
+        if request.method == "GET":
+            return json_response(
+                {"check_runs": [] if self.run is None else [self.run]}
+            )
+        body = json.loads(request.data.decode("utf-8"))
+        if request.method == "POST":
+            self.run = {
+                "id": self.run_id,
+                "name": body["name"],
+                "app": {"slug": self.app_slug},
+            }
+            return json_response({"id": self.run_id}, 201)
+        return json_response({"id": self.run_id}, 200)
+
+
 def _policy(scenario: Mapping[str, object]) -> ReviewConvergencePolicy:
     return ReviewConvergencePolicy(mode=str(scenario.get("policy", "merge-focused")))
 
@@ -149,6 +182,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
     result = _result(scenario)
     candidates = _blocker_candidates(scenario, result.comments)
     facts_required = str(scenario.get("conversation_resolution", "")) == "required"
+    checks = FakeCheckRuns()
     responses: list[object] = [
         json_response(pr_payload(head_sha=HEAD)),
         json_response([]),
@@ -173,7 +207,9 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
             json_response({"id": 6}, 200),
         ]
     )
-    http, calls = make_http(responses)
+    http, calls = make_http(
+        responses, routes=((checks.matches, checks.respond),)
+    )
     outcome = ReviewPublisher(http=http).publish(
         token="token",
         repository="owner/repo",
@@ -185,6 +221,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
         result=result,
         diff=DIFF,
         app_slug="reviewsensei[bot]",
+        check_token="check-token",
         auto_approve=bool(scenario.get("auto_approve", False)),
         convergence_policy=policy,
         allow_retired_legacy_policy=True,

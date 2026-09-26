@@ -667,10 +667,10 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertNotIn(retired, text)
 
         # github.reviews and github.learning travel to the package as explicit
-        # invocation flags instead of being re-derived from a variable.
+        # invocation flags instead of being re-derived from a variable. The
+        # review publish steps carry the approval boolean; reply steps re-read
+        # the persisted eligibility instead.
         self.assertIn('if [[ "$REVIEWS" == "auto-approve" ]]; then', text)
-        self.assertIn("auto_approve_args+=(--enable-auto-approve)", text)
-        self.assertIn("auto_approve_args+=(--no-auto-approve)", text)
         self.assertIn("publish_args+=(--enable-auto-approve)", text)
         self.assertIn("publish_args+=(--no-auto-approve)", text)
         self.assertIn('if [[ "$LEARNING" == "disabled" ]]; then', text)

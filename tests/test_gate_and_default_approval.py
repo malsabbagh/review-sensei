@@ -378,7 +378,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         comment = review_payloads(calls)[0]
         self.assertEqual(comment["comments"], [])
-        self.assertIn("## Advisory observations", comment["body"])
+        self.assertIn("## Findings explained in this review body", comment["body"])
         self.assertIn("Optional follow-up.", comment["body"])
         self.assertEqual(checks.conclusions, [None, "success"])
 
