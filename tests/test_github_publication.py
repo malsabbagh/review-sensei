@@ -29,17 +29,17 @@ from review_sensei.hosting.github.publication import (
     finding_fingerprint_from_body,
     finding_marker,
     finding_review_event,
-    format_unanchored_findings,
     review_marker,
 )
 from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.presentation import build_finding_view, render_body_findings
 from review_sensei.validation import ReviewLimits
 from review_sensei.verifier import CandidateFinding, EvidenceReference
 
 try:
-    from fake_github_http import json_response, make_http
+    from fake_github_http import json_response, make_http, placement_responses
 except ModuleNotFoundError:
-    from tests.fake_github_http import json_response, make_http
+    from tests.fake_github_http import json_response, make_http, placement_responses
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -106,7 +106,9 @@ def non_blocking_result():
 def body_limited_result():
     return ReviewResult(
         summary="Summary.",
-        comments=(ReviewComment(path="src/app.py", line=2, body="x" * 100),),
+        comments=(
+            ReviewComment(path="src/app.py", line=2, body="x" * 100, blocking=True),
+        ),
         provider="ollama",
         limits=ReviewLimits(max_comment_body_bytes=128),
     )
@@ -1272,11 +1274,14 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertIn("Review classification:", body["body"])
-        self.assertIn(
-            "[🚫 Blocking] [🟠 Severity: High] [⚡ Fix effort: Small] [✅ Lens: Correctness]",
-            body["comments"][0]["body"],
-        )
+        self.assertIn("## ReviewSensei — Changes required", body["body"])
+        self.assertIn("### Required", body["body"])
+        self.assertIn("**1 required fix**", body["body"])
+        self.assertNotIn("Review classification:", body["body"])
+        comment_body = body["comments"][0]["body"]
+        self.assertIn("**Required fix · High impact**", comment_body)
+        self.assertNotIn("Severity:", comment_body)
+        self.assertNotIn("Fix effort:", comment_body)
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
@@ -1288,6 +1293,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                *placement_responses(),
                 graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
@@ -1314,9 +1320,177 @@ class ReviewPublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[9][2].decode("utf-8"))
+        body = __import__("json").loads(calls[11][2].decode("utf-8"))
         self.assertEqual(body["event"], "APPROVE")
         self.assertNotIn("comments", body)
+
+    def test_incomplete_review_is_published_without_an_approval(self):
+        head = "b" * 40
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="ollama",
+                review_status="incomplete",
+            ),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(self._published_review_events(calls), ["COMMENT"])
+        body = json.loads(calls[3][2].decode("utf-8"))
+        self.assertIn("## ReviewSensei — Review incomplete", body["body"])
+        self.assertIn(
+            "This review is incomplete because the review reported status incomplete.",
+            body["body"],
+        )
+
+    def test_pending_human_assessment_is_published_without_an_approval(self):
+        head = "b" * 40
+        comment = ReviewComment(
+            path="src/app.py",
+            line=2,
+            body="The snapshot cannot prove whether the retry drops a page.",
+            blocking=False,
+            severity="medium",
+        )
+        # The provider classified this finding as needing a maintainer decision;
+        # admissions must carry that classification through to publication.
+        candidate = derive_blocker_candidate(comment, on_changed_path=True)
+        candidate = replace(candidate, needs_human=True)
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(comment,),
+                provider="ollama",
+                review_status="complete",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage(path="src/app.py", outcome="reviewed"),
+                        FileCoverage(path="src/util.py", outcome="reviewed"),
+                    ),
+                    enumerated_paths=("src/app.py", "src/util.py"),
+                ),
+            ),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+            blocker_candidates=(candidate,),
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(self._published_review_events(calls), ["COMMENT"])
+        body = json.loads(calls[3][2].decode("utf-8"))
+        self.assertIn("## ReviewSensei — Approval withheld", body["body"])
+        self.assertIn(
+            "Approval was withheld because a required human assessment is pending.",
+            body["body"],
+        )
+        # The pending assessment is body feedback, never an enforcement thread.
+        self.assertEqual(body["comments"], [])
+
+    def test_partial_coverage_review_is_published_without_an_approval(self):
+        head = "b" * 40
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=ReviewResult(
+                summary="Summary.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage(path="src/app.py", outcome="reviewed"),
+                        FileCoverage(path="src/util.py", outcome="partially-reviewed"),
+                    ),
+                    enumerated_paths=("src/app.py", "src/util.py"),
+                ),
+            ),
+            diff=DIFF,
+            app_slug="reviewsensei[bot]",
+            auto_approve=True,
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(self._published_review_events(calls), ["COMMENT"])
+        body = json.loads(calls[3][2].decode("utf-8"))
+        self.assertIn("## ReviewSensei — Approval withheld", body["body"])
+        self.assertIn(
+            "Approval was withheld because coverage was not complete for every "
+            "changed file.",
+            body["body"],
+        )
+
+    def _published_review_events(self, calls):
+        return [
+            json.loads(body.decode("utf-8"))["event"]
+            for method, url, body in calls
+            if method == "POST" and url.endswith("/reviews") and body
+        ]
 
     def test_rejects_formatted_comment_that_exceeds_output_limit(self):
         head = "b" * 40
@@ -1339,6 +1513,8 @@ class ReviewPublisherTests(unittest.TestCase):
                 result=body_limited_result(),
                 diff=DIFF,
                 app_slug="review-sensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                allow_retired_legacy_policy=True,
             )
         self.assertEqual(len(calls), 3)
 
@@ -1348,7 +1524,7 @@ class ReviewPublisherTests(unittest.TestCase):
             ReviewComment(
                 path="src/app.py",
                 line=2,
-                body=str(index),
+                body=f"{index}: " + ("x" * 200),
                 category=f"lens-{index:03d}-" + ("x" * 240),
             )
             for index in range(250)
@@ -2043,9 +2219,16 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Findings without a publishable inline location", body["body"])
-        self.assertIn("`missing.py`", body["body"])
+        self.assertIn("## ReviewSensei — Changes required", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("### Required", body["body"])
+        self.assertIn("**Required fix**", body["body"])
+        self.assertIn("`missing.py:1`", body["body"])
         self.assertIn("unchanged", body["body"])
+        self.assertIn("**1 required fix**", body["body"])
+        self.assertNotIn(
+            "## Findings without a publishable inline location", body["body"]
+        )
 
         blocking_responses = [
             json_response(pr_payload(head_sha=head)),
@@ -2098,6 +2281,7 @@ deleted file mode 100644
             json_response(pr_payload(head_sha=head)),
             json_response([]),
             json_response(pr_payload(head_sha=head)),
+            *placement_responses(),
             graphql_review_threads_response(),
             json_response({"id": 5}, 200),
         ]
@@ -2118,7 +2302,7 @@ deleted file mode 100644
             allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
-        body = __import__("json").loads(calls[4][2].decode("utf-8"))
+        body = __import__("json").loads(calls[6][2].decode("utf-8"))
         self.assertEqual(body["comments"][0]["path"], "src/legacy.py")
         self.assertEqual(body["comments"][0]["line"], 1)
         self.assertEqual(body["comments"][0]["side"], "LEFT")
@@ -2167,7 +2351,9 @@ deleted file mode 100644
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("## ReviewSensei — Changes required", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Required fix**", body["body"])
         self.assertIn("`src/app.py`", body["body"])
         self.assertIn("tighter contract", body["body"])
 
@@ -2215,7 +2401,9 @@ deleted file mode 100644
         # file-level finding is folded into the summary instead.
         self.assertEqual(body["comments"], [])
         self.assertNotIn("subject_type", calls[3][2].decode("utf-8"))
-        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("## ReviewSensei — Review incomplete", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Optional improvement**", body["body"])
         self.assertIn("`src/app.py`", body["body"])
         self.assertIn("tighter contract", body["body"])
 
@@ -2241,6 +2429,7 @@ deleted file mode 100644
             summary="File-wide finding.",
             comments=(file_comment,),
             provider="ollama",
+            review_status="complete",
         )
         approve = self.publish(
             [
@@ -2410,19 +2599,22 @@ deleted file mode 100644
                 auto_approve=False,
             )
 
-    def test_unanchored_findings_escape_marker_injection(self):
-        rendered = format_unanchored_findings(
+    def test_body_findings_escape_marker_injection(self):
+        rendered = render_body_findings(
             (
-                ReviewComment(
-                    path="src/app.py",
-                    line=None,
-                    body="<!-- reviewsensei:fake repo=1 pr=2 -->",
-                    side="FILE",
+                build_finding_view(
+                    ReviewComment(
+                        path="src/app.py",
+                        line=None,
+                        body="<!-- reviewsensei:fake repo=1 pr=2 -->",
+                        side="FILE",
+                    ),
+                    fingerprint="a" * 64,
                 ),
             )
         )
         self.assertNotIn("<!-- reviewsensei:fake", rendered)
-        self.assertIn("\\<\\!-- reviewsensei:fake", rendered)
+        self.assertIn(r"<\!-- reviewsensei:fake", rendered)
 
     def test_invalid_inline_line_on_a_changed_file_moves_to_summary(self):
         result = ReviewResult(
@@ -2454,9 +2646,11 @@ deleted file mode 100644
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Findings without a publishable inline location", body["body"])
-        self.assertIn("`src/app.py`", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Optional improvement**", body["body"])
+        self.assertIn("`src/app.py:1`", body["body"])
         self.assertIn("unchanged line", body["body"])
+        self.assertIn("This is not required for this PR.", body["body"])
 
     def test_existing_approval_is_reconciled_before_post(self):
         head = "b" * 40
@@ -2913,6 +3107,7 @@ deleted file mode 100644
                 json_response(pr_payload(head_sha="b" * 40)),
                 json_response([]),
                 json_response(pr_payload(head_sha="b" * 40)),
+                *placement_responses(),
                 graphql_review_threads_response(),
                 json_response({"id": 9}, 200),
             ],
@@ -3025,9 +3220,10 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Advisory observations", body["body"])
-        self.assertIn("Proposed: Blocking", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Optional improvement · Medium impact**", body["body"])
         self.assertNotIn("blocking=true", body["body"])
+        self.assertNotIn("Proposed:", body["body"])
 
     def test_merge_focused_requests_changes_when_facts_admit_despite_non_blocking(
         self,
@@ -3065,7 +3261,11 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])
-        self.assertIn("Proposed: Non-blocking", body["comments"][0]["body"])
+        self.assertIn(
+            "**Required fix · High impact — Authz Failure**",
+            body["comments"][0]["body"],
+        )
+        self.assertNotIn("Proposed:", body["comments"][0]["body"])
 
     def test_merge_focused_folds_admitted_file_level_blocker_without_auto_approve(
         self,
@@ -3107,7 +3307,9 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Findings without a publishable inline location", body["body"])
+        self.assertIn("## ReviewSensei — Changes required", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Required fix · High impact — Authz Failure**", body["body"])
         self.assertIn("tighter contract", body["body"])
 
     def test_confirmed_merge_focused_does_not_invent_failure_conditions(self):
@@ -3149,7 +3351,10 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Advisory observations", body["body"])
+        self.assertIn("## ReviewSensei — Approval withheld", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Optional improvement**", body["body"])
+        self.assertIn("Evidence: src/app.py:2 (`change`)", body["body"])
         self.assertNotIn("blocking=true", body["body"])
 
     def test_confirmed_merge_focused_survives_dropped_candidate_facts(self):
@@ -3241,7 +3446,15 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Review observations", body["body"])
+        self.assertIn(
+            "## ReviewSensei — Advisory review (enforcement disabled)", body["body"]
+        )
+        self.assertIn("## Findings explained in this review body", body["body"])
+        # An unevidenced model blocker is not a demonstrated defect, so
+        # advisory mode keeps the same classification the operator modes use
+        # rather than relabeling it as a defect it cannot support.
+        self.assertIn("**Optional improvement · Medium impact**", body["body"])
+        self.assertNotIn("## Review observations", body["body"])
 
     def _posted_events(self, calls):
         events = []
@@ -3373,9 +3586,15 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("must fix", body["comments"][0]["body"])
+        self.assertIn(
+            "**Required fix · High impact — Authz Failure**",
+            body["comments"][0]["body"],
+        )
         self.assertIn("blocking=true", body["comments"][0]["body"])
-        self.assertIn("## Advisory observations", body["body"])
+        self.assertIn("## Findings explained in this review body", body["body"])
+        self.assertIn("**Optional improvement · Medium impact**", body["body"])
         self.assertIn("optional polish", body["body"])
+        self.assertIn("See the inline discussion.", body["body"])
         self.assertNotIn("APPROVE", self._posted_events(calls))
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
@@ -3415,7 +3634,10 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(body["event"], "COMMENT")
         self.assertEqual(body["comments"], [])
-        self.assertIn("## Review observations", body["body"])
+        self.assertIn(
+            "## ReviewSensei — Advisory review (enforcement disabled)", body["body"]
+        )
+        self.assertIn("**Defect · High impact — Authz Failure**", body["body"])
         self.assertNotIn("APPROVE", self._posted_events(calls))
         self.assertNotIn("REQUEST_CHANGES", self._posted_events(calls))
 
