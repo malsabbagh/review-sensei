@@ -2331,6 +2331,24 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 label="second-verification",
             ),
             SequenceStep(
+                head_sha="e" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="third-verification",
+            ),
+            SequenceStep(
+                head_sha="f" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="fourth-verification",
+            ),
+            SequenceStep(
+                head_sha="1" * 40,
+                blocking_identities=(),
+                independently_approval_eligible=True,
+                label="fifth-verification",
+            ),
+            SequenceStep(
                 head_sha="d" * 40,
                 blocking_identities=(),
                 independently_approval_eligible=True,

@@ -1468,6 +1468,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("dogfood_ref", text)
         self.assertNotIn("refs/pull/", text)
         self.assertIn("installing the verified ReviewSensei workflow commit", text)
+        self.assertEqual(text.count('object_type" == "tag"'), 4)
+        self.assertEqual(
+            text.count('rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}"'),
+            4,
+        )
         self.assertNotIn(
             "git ls-remote https://github.com/malsabbagh/review-sensei.git", text
         )
@@ -1744,10 +1749,11 @@ class ReusablePublishGuardTests(unittest.TestCase):
         head = "a" * 40
         record = {
             "completed_initial_reviews": 1,
-            "completed_verification_rounds": 2,
+            "completed_verification_rounds": 5,
             "failed_attempts": 0,
         }
         self.assertTrue(spent(record, head))
+        self.assertFalse(spent({**record, "completed_verification_rounds": 4}, head))
         self.assertFalse(spent({**record, "completed_verification_rounds": 1}, head))
         self.assertFalse(spent({**record, "operator_paused": True}, head))
         self.assertFalse(spent({**record, "failed_attempts": 6}, head))

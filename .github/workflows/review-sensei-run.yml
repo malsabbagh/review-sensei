@@ -553,6 +553,19 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
+            rm -rf "$source_dir"
+            git init --bare "$source_dir"
+            git --git-dir="$source_dir" fetch --depth=1 \
+              https://github.com/malsabbagh/review-sensei.git \
+              "$REVIEW_SENSEI_WORKFLOW_SHA"
+            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+            if [[ "$object_type" == "tag" ]]; then
+              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+            elif [[ "$object_type" != "commit" ]]; then
+              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
+              exit 1
+            fi
             echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
@@ -748,6 +761,19 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
+            rm -rf "$source_dir"
+            git init --bare "$source_dir"
+            git --git-dir="$source_dir" fetch --depth=1 \
+              https://github.com/malsabbagh/review-sensei.git \
+              "$REVIEW_SENSEI_WORKFLOW_SHA"
+            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+            if [[ "$object_type" == "tag" ]]; then
+              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+            elif [[ "$object_type" != "commit" ]]; then
+              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
+              exit 1
+            fi
             echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
@@ -817,7 +843,7 @@ jobs:
               failed = record.get("failed_attempts", 0)
               if type(initial) is not int or type(verification) is not int or type(failed) is not int:
                   return False
-              if initial < 1 or verification < 2 or failed >= 6:
+              if initial < 1 or verification < 5 or failed >= 6:
                   return False
               grants = record.get("continuation_grants", [])
               if not isinstance(grants, list):
@@ -890,7 +916,7 @@ jobs:
             exit 0
           fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nThe pull request author can allow one more verification pass when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
@@ -1313,6 +1339,19 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
+            rm -rf "$source_dir"
+            git init --bare "$source_dir"
+            git --git-dir="$source_dir" fetch --depth=1 \
+              https://github.com/malsabbagh/review-sensei.git \
+              "$REVIEW_SENSEI_WORKFLOW_SHA"
+            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+            if [[ "$object_type" == "tag" ]]; then
+              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+            elif [[ "$object_type" != "commit" ]]; then
+              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
+              exit 1
+            fi
             echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
@@ -1382,7 +1421,7 @@ jobs:
               failed = record.get("failed_attempts", 0)
               if type(initial) is not int or type(verification) is not int or type(failed) is not int:
                   return False
-              if initial < 1 or verification < 2 or failed >= 6:
+              if initial < 1 or verification < 5 or failed >= 6:
                   return False
               grants = record.get("continuation_grants", [])
               if not isinstance(grants, list):
@@ -1455,7 +1494,7 @@ jobs:
             exit 0
           fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nThe pull request author can allow one more verification pass when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"
@@ -1882,6 +1921,19 @@ jobs:
             install_source="PyPI"
           elif grep -Fq "No matching distribution found for review-sensei==" "$pypi_log" || \
             grep -Fq "Could not find a version that satisfies the requirement review-sensei==" "$pypi_log"; then
+            source_dir="$RUNNER_TEMP/review-sensei-workflow-source"
+            rm -rf "$source_dir"
+            git init --bare "$source_dir"
+            git --git-dir="$source_dir" fetch --depth=1 \
+              https://github.com/malsabbagh/review-sensei.git \
+              "$REVIEW_SENSEI_WORKFLOW_SHA"
+            object_type="$(git --git-dir="$source_dir" cat-file -t "$REVIEW_SENSEI_WORKFLOW_SHA")"
+            if [[ "$object_type" == "tag" ]]; then
+              REVIEW_SENSEI_WORKFLOW_SHA="$(git --git-dir="$source_dir" rev-parse "${REVIEW_SENSEI_WORKFLOW_SHA}^{commit}")"
+            elif [[ "$object_type" != "commit" ]]; then
+              echo "::error::The ReviewSensei workflow SHA is not a commit or an annotated tag." >&2
+              exit 1
+            fi
             echo "::warning::review-sensei==$expected_version is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_SHA."
             "$python_bin" -m pip install --disable-pip-version-check \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_SHA"
@@ -1935,7 +1987,7 @@ jobs:
               failed = record.get("failed_attempts", 0)
               if type(initial) is not int or type(verification) is not int or type(failed) is not int:
                   return False
-              if initial < 1 or verification < 2 or failed >= 6:
+              if initial < 1 or verification < 5 or failed >= 6:
                   return False
               grants = record.get("continuation_grants", [])
               if not isinstance(grants, list):
@@ -2008,7 +2060,7 @@ jobs:
             exit 0
           fi
           notice_file="$RUNNER_TEMP/review-sensei-budget-notice.txt"
-          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nThe pull request author can allow one more verification pass when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
+          HEAD_SHA="$HEAD_SHA" NOTICE_FILE="$notice_file" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import os; from pathlib import Path; head=os.environ["HEAD_SHA"]; marker=f"<!-- reviewsensei:handoff:v1 head={head} reason=round-budget-exhausted -->"; Path(os.environ["NOTICE_FILE"]).write_text("ReviewSensei did not start another automated review. The automatic review budget for this pull request is used up, so the check completed without failing.\n\nA maintainer can allow another review round. The pull request author can do that when they are an owner, member, or collaborator. Comment on this pull request with exactly this line and nothing else:\n\n`@sensei review continue --rounds 1`\n\nThen start that pass with a second comment, exactly:\n\n`@sensei re-scan`\n\n"+marker+"\n", encoding="utf-8")'
           oidc_response="$(curl --fail --silent --show-error -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
           oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,sys; value=json.load(sys.stdin).get("value"); assert isinstance(value,str) and value.strip(); print(value)')"
           broker_body="$(OIDC_TOKEN="$oidc_token" "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json,os; print(json.dumps({"oidc_token": os.environ["OIDC_TOKEN"], "capability": "issue_reply"}))')"

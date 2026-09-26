@@ -717,7 +717,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -757,7 +757,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -800,7 +800,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -853,7 +853,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             lambda current: current.evolve(
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
             ),
             now=FIXED_NOW,
         )
@@ -978,7 +978,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
             now=FIXED_NOW - timedelta(days=31),
             ttl=timedelta(days=30),
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
             failed_attempts=1,
             generation=4,
             convergence_history=history,

@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.8 - 2026-09-26
 
-- When a pull request has used its automatic review budget, the reusable
-  workflow reads the session ledger before starting the review CLI, posts the
-  continue and rescan instructions, and completes the check successfully.
-  The package does not post that notice or decide the check.
+- Allow five automatic verification rounds. When those rounds are used, the
+  reusable workflow reads the session ledger before starting the review CLI,
+  posts the continue and rescan instructions, and completes the check
+  successfully. A maintainer can allow another round, and the pull request
+  author can do that when they are an owner, member, or collaborator.
 
 ## 0.6.7 - 2026-09-23
 

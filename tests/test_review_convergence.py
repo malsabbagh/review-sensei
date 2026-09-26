@@ -89,7 +89,7 @@ class PolicyContractTests(unittest.TestCase):
         document = policy.to_dict()
         self.assertEqual(document["mode"], "merge-focused")
         self.assertEqual(document["enforcement"], "publication")
-        self.assertEqual(document["max_completed_verification_rounds"], 2)
+        self.assertEqual(document["max_completed_verification_rounds"], 5)
         self.assertTrue(document["automatic_github_review_events"])
         self.assertFalse(document["inline_advisory_threads"])
         self.assertEqual(document["policy_digest"], policy.digest())
@@ -499,7 +499,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 "cap hands off without minting approval",
                 RoundSessionState(
                     completed_initial_reviews=1,
-                    completed_verification_rounds=2,
+                    completed_verification_rounds=5,
                     coverage_complete=True,
                     latest_head_reviewed=True,
                 ),
@@ -513,7 +513,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 "eligible last-round result may approve",
                 RoundSessionState(
                     completed_initial_reviews=1,
-                    completed_verification_rounds=2,
+                    completed_verification_rounds=5,
                     independently_approval_eligible=True,
                     coverage_complete=True,
                     latest_head_reviewed=True,
@@ -528,7 +528,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 "incomplete coverage at cap cannot approve",
                 RoundSessionState(
                     completed_initial_reviews=1,
-                    completed_verification_rounds=2,
+                    completed_verification_rounds=5,
                     independently_approval_eligible=True,
                     latest_head_reviewed=True,
                 ),
@@ -542,7 +542,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 "later unreviewed head stays unverified",
                 RoundSessionState(
                     completed_initial_reviews=1,
-                    completed_verification_rounds=2,
+                    completed_verification_rounds=5,
                     independently_approval_eligible=True,
                     coverage_complete=True,
                 ),
@@ -680,7 +680,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         last_round = evaluate_round_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
                 independently_approval_eligible=True,
                 coverage_complete=True,
                 latest_head_reviewed=True,
@@ -696,7 +696,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         exhausted = RoundSessionState(
             completed_initial_reviews=1,
-            completed_verification_rounds=2,
+            completed_verification_rounds=5,
             coverage_complete=True,
             latest_head_reviewed=True,
         )
@@ -714,7 +714,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         decision = evaluate_round_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
                 latest_head_reviewed=False,
             ),
             policy,
@@ -728,7 +728,7 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
         decision = evaluate_round_admission(
             RoundSessionState(
                 completed_initial_reviews=1,
-                completed_verification_rounds=2,
+                completed_verification_rounds=5,
                 coverage_complete=False,
                 independently_approval_eligible=True,
                 latest_head_reviewed=True,
