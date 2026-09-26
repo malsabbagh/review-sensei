@@ -10,12 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei.baseline import (
+    MAX_HISTORY_BASELINE_BYTES,
+    MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
     BaselineFinding,
     ReviewBaseline,
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
     baseline_history_document,
+    plan_verification_scope,
 )
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS, ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
@@ -40,6 +43,7 @@ from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
     MAX_CONVERGENCE_HISTORY_BYTES,
+    MAX_DURABLE_BLOCKER_COUNT,
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
     MAX_SESSION_TTL,
@@ -472,11 +476,131 @@ class SessionRecordTests(unittest.TestCase):
         self.assertEqual(restored.convergence_history, history)
         restored_baseline = restored.convergence_history["baseline"]
         assert isinstance(restored_baseline, dict)
-        self.assertEqual(restored_baseline["reviewed_paths"], list(reviewed))
+        # The persisted projection orders path evidence by value, so the
+        # stored history cannot depend on provider or traversal ordering.
+        self.assertEqual(restored_baseline["reviewed_paths"], sorted(reviewed))
+        self.assertTrue(restored_baseline["coverage_complete"])
         self.assertEqual(len(restored_baseline["findings"]), 2)
         self.assertEqual(
             convergence_progress_blocker_sets(restored.convergence_history),
             blocker_sets,
+        )
+
+    def test_oversized_path_evidence_is_narrowed_within_the_component_bound(self):
+        # A pull request can carry more reviewed-path evidence than the
+        # envelope reserves. Refusing the checkpoint would strand a live
+        # session record that can never advance, so the writer narrows the
+        # persisted projection and reports the narrowed baseline as
+        # incomplete: a dropped path must never read as a complete reviewed
+        # scope, by this engine or by a reader released before the projection
+        # was narrowed (ADR 0053).
+        reviewed = tuple(
+            f"src/review_sensei/generated/package_{index:03d}/module_{index:03d}.py"
+            for index in range(MAX_CACHE_METADATA_ITEMS)
+        )
+        related = tuple(
+            f"src/review_sensei/generated/package_{index:03d}/helper_{index:03d}.py"
+            for index in range(32)
+        )
+        cache_key = ReviewContextCacheKey(
+            repository="owner/repo",
+            pull_request=169,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            engine="anthropic",
+            model="claude-sonnet-4-6",
+            profile="merge-focused",
+            stage_digest="c" * 64,
+            context_digest="d" * 64,
+            learning_digest="e" * 64,
+        )
+        baseline = ReviewBaseline(
+            cache_key=cache_key,
+            policy_digest="f" * 64,
+            complete=True,
+            coverage_complete=True,
+            # The F2 read shape: a rolling upgrade can still carry three.
+            findings=tuple(
+                BaselineFinding(
+                    fingerprint=f"{index:02x}" * 32,
+                    resolution_criterion=f"{index + 16:02x}" * 32,
+                    concern=f"{index + 32:02x}" * 32,
+                    path="src/review_sensei/session.py",
+                    symbol="SessionRecord.from_dict",
+                    defect_kind="bug",
+                    generation=3,
+                    blocking=True,
+                )
+                for index in range(3)
+            ),
+            reviewed_paths=reviewed,
+            related_paths=related,
+        )
+        document = baseline_history_document(baseline)
+        encoded_document = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        self.assertLessEqual(len(encoded_document), MAX_HISTORY_BASELINE_BYTES)
+        self.assertFalse(document["coverage_complete"])
+        retained = document["reviewed_paths"]
+        assert isinstance(retained, list)
+        self.assertLess(len(retained), len(reviewed))
+        self.assertEqual(retained, sorted(reviewed)[: len(retained)])
+        # The projection depends on content, not on call order or retries.
+        self.assertEqual(baseline_history_document(baseline), document)
+        history = {
+            "state": "completed",
+            "baseline": document,
+            "progress": [
+                {
+                    "event": "completed",
+                    "generation": generation,
+                    "blocker_set_sha256": f"{generation:02x}" * 32,
+                    "blocker_count": MAX_DURABLE_BLOCKER_COUNT,
+                    "transaction_id": f"{generation + 16:02x}" * 32,
+                }
+                for generation in range(1, 4)
+            ],
+            "provenance": {"ledger_digest": "12" * 32},
+        }
+        # The narrowed projection plus the envelope's own framing stays inside
+        # the component bound, which is what the reserve is measured against.
+        encoded = json.dumps(history, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        self.assertLessEqual(len(encoded), MAX_CONVERGENCE_HISTORY_BYTES)
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        validate_public_document(record.to_dict(), "session-record")
+        restored = SessionRecord.from_dict(record.to_dict())
+        restored_baseline = baseline_from_history_document(
+            restored.convergence_history["baseline"]
+        )
+        self.assertFalse(restored_baseline.complete)
+        self.assertFalse(restored_baseline.coverage_complete)
+        self.assertEqual(restored_baseline.reviewed_paths, tuple(retained))
+        scope = plan_verification_scope(
+            policy=ReviewConvergencePolicy(mode="merge-focused"),
+            baseline=restored_baseline,
+            current_key=cache_key,
+            changed_paths=("src/review_sensei/session.py",),
+        )
+        self.assertEqual(scope.status, "incomplete-baseline")
+        self.assertEqual(scope.coverage_mode, "fallback-full")
+        self.assertIsNone(scope.incremental)
+        self.assertFalse(scope.late_admission_required)
+
+    def test_small_path_evidence_is_never_narrowed(self):
+        history = self._history()
+        baseline = baseline_from_history_document(history["baseline"])
+        self.assertTrue(baseline.coverage_complete)
+        self.assertEqual(baseline.reviewed_paths, ("src/example.py",))
+
+    def test_history_budget_parity_with_the_session_envelope(self):
+        self.assertEqual(
+            MAX_HISTORY_BASELINE_BYTES + MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
+            MAX_CONVERGENCE_HISTORY_BYTES,
         )
 
     def test_legacy_progress_cannot_supply_blocker_identity(self):
@@ -880,8 +1004,10 @@ class LocalSessionLedgerTests(unittest.TestCase):
         # The constructor bound (MAX_SESSION_RECORD_BYTES) is now enforced on
         # every load, so the largest record the bounds still allow has to keep
         # loading: a record that was storable before the check must not be
-        # stranded by it. Dispositions supply the bulk and the convergence
-        # envelope fills the rest until one of the bounds refuses.
+        # stranded by it. Four maximal dispositions and four retained
+        # continuation grants supply the non-envelope bulk (session.py measures
+        # that combination at 5704 bytes) and the convergence envelope fills
+        # the rest up to the bound its own projection caps.
         dispositions = tuple(
             {
                 "fingerprint": f"{index:016x}" + "0" * 48,
@@ -892,6 +1018,19 @@ class LocalSessionLedgerTests(unittest.TestCase):
                 "expires_at": None,
             }
             for index in range(4)
+        )
+        grants = tuple(
+            {
+                "command_id": f"comment-{index}",
+                "actor": "alice",
+                "head_sha": f"{index + 1:040x}",
+                "policy_digest": "b" * 64,
+                "issued_at": "2026-09-19T12:00:00Z",
+                "expires_at": "2026-09-19T13:30:00Z",
+                "consumed_reservation_id": None,
+                "consumed_generation": None,
+            }
+            for index in range(MAX_STORED_CONTINUATION_GRANTS)
         )
         baseline = ReviewBaseline(
             cache_key=ReviewContextCacheKey(
@@ -927,6 +1066,7 @@ class LocalSessionLedgerTests(unittest.TestCase):
                     IDENTITY,
                     now=FIXED_NOW,
                     dispositions=dispositions,
+                    continuation_grants=grants,
                     convergence_history={
                         "state": "completed",
                         "baseline": baseline_history_document(candidate),

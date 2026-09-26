@@ -136,7 +136,30 @@ Run session-ledger and schema regressions covering round-trip persistence,
 digest tampering, bounded shape rejection, and local/GitHub comment framing.
 The bound tests use repository-realistic identity content and a realistic
 reviewed-path count, because a minimal fixture cannot detect a component bound
-that the reserved F3 writer shape already exceeds.
+that the reserved F3 writer shape already exceeds. Oversized path evidence is
+covered by a narrowing test that pins the writer's reserved budget to the
+envelope bound and proves the narrowed record plans a fallback-full scope, and
+by a guard test that the reader never trusts a narrowed baseline as complete.
+
+## Amendment 2026-09-26: narrowed path projection
+
+The 4096-byte envelope is a hard component bound, but the reviewed-path
+metadata the F3 writer persisted was not bounded by the reserved shape the
+derivation measured. A pull request whose review retained more path evidence
+than the envelope reserves could therefore reach a state where no later
+checkpoint fits: the write path refused the envelope, and a live, readable
+record could never advance, because reenrollment deliberately refuses live
+records.
+
+The writer now narrows the persisted path projection to the budget the
+envelope reserves, deterministically and by value, admitting reviewed evidence
+before related context, and clearing both `complete` and `coverage_complete`
+whenever it drops anything. A narrowed baseline reads as incomplete rather than
+as a truncated complete scope: the current reader plans a fallback-full scope,
+and a reader released before this amendment reaches the same scope through its
+existing incomplete-baseline handling. The runtime baseline, checkpoint gating,
+and approval eligibility are unchanged, and no rollback authorizes publishing
+from a record whose persisted scope was narrowed.
 
 ## Links
 
