@@ -1041,7 +1041,7 @@ Automatic approval defaults to `true` and can be disabled with
 `REVIEWSENSEI_AUTO_APPROVE=false`. When automatic review and GitHub writes are
 enabled, ReviewSensei publishes one exact-head `COMMENT` review and one stable
 `ReviewSensei` check run that is the single enforcement authority for that head
-(ADR 0056): `success` for a complete review with no required fixes, `failure`
+(ADR 0057): `success` for a complete review with no required fixes, `failure`
 when required fixes remain, `action_required` for a partial, incomplete, or
 unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run
 that ended without a conclusion. A new review first writes `in_progress`, so an

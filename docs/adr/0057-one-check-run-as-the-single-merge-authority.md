@@ -1,9 +1,9 @@
-# ADR 0056 - One check run as the single merge authority and evidence-bound default approval
+# ADR 0057 - One check run as the single merge authority and evidence-bound default approval
 
 Status: Proposed
 Date: 2026-09-26
 GitHub Issue: #181
-Pull Request: draft PR to be linked
+Pull Request: [#187](https://github.com/malsabbagh/review-sensei/pull/187)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 

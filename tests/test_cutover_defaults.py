@@ -246,7 +246,7 @@ class CutoverDefaultTests(unittest.TestCase):
             for method, url, body in calls
             if method == "POST" and url.endswith("/pulls/2/reviews")
         ]
-        # The stable check is the only imposed merge gate (ADR 0056), so an
+        # The stable check is the only imposed merge gate (ADR 0057), so an
         # admitted blocker stays an inline finding on the comment review.
         self.assertEqual([body["event"] for body in writes], ["COMMENT"])
         self.assertEqual(len(writes[0]["comments"]), 1)

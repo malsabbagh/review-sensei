@@ -504,7 +504,7 @@ class ReviewApprovalFinalizer:
     This is deliberately independent of a provider result. It reads durable
     per-finding classifications from review-thread roots, so it can be invoked
     both after review publication and after an AI resolution mutation. The
-    stable ReviewSensei check is the only imposed merge gate (ADR 0056): this
+    stable ReviewSensei check is the only imposed merge gate (ADR 0057): this
     finalizer never emits ``REQUEST_CHANGES``, and it emits ``APPROVE`` only
     from a trusted eligibility document whose exact head matches the reviewed
     head and whose live thread state is still clean.
@@ -1632,7 +1632,7 @@ class ReviewPublisher:
                 comment_payload["side"] = "RIGHT"
             comments.append(comment_payload)
         # The stable ReviewSensei check run is the only imposed merge gate
-        # (ADR 0056). The review itself is always published as a COMMENT so a
+        # (ADR 0057). The review itself is always published as a COMMENT so a
         # persistent REQUEST_CHANGES cannot become a second, stale gate, and an
         # empty inline payload can never misrepresent a same-head re-review.
         event, published_state = "COMMENT", "COMMENTED"

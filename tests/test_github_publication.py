@@ -3068,7 +3068,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         ]
 
     def test_legacy_publishes_a_comment_for_an_admitted_blocker(self):
-        # The stable check is the only imposed merge gate (ADR 0056), so even
+        # The stable check is the only imposed merge gate (ADR 0057), so even
         # the retired legacy mode may not post REQUEST_CHANGES: a model
         # blocker is published inline on the comment review instead.
         outcome, calls = self.publish(

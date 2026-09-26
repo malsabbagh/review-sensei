@@ -43,7 +43,7 @@ Process: `docs/process/adr-process.md`
 | [0032](0032-blocking-finding-classification-for-approvals.md) | Proposed | Classify blocking findings for approvals | not configured | Explicit blocking controls approval; a shared finalizer ignores open non-blocking and human threads, while unknown ReviewSensei roots fail closed. |
 | [0033](0033-protection-and-findings-gates.md) | Proposed | Protection drift and deterministic findings gates | #26, #32 | Read-only ruleset contract, JS/TS CodeQL, SARIF baseline gate |
 | [0034](0034-ai-decided-review-thread-resolution.md) | Proposed | Let ReviewSensei decide whether its addressed inline thread can be resolved | not configured | Typed resolve decision with exact-head and ReviewSensei-root guards; a blocking resolution invokes the shared finalizer. |
-| [0035](0035-request-changes-for-blocking-findings.md) | Superseded | Request changes for unresolved blocking findings | #86 | Superseded by ADR 0056; enforcement is the head-bound `ReviewSensei` check run and reviews stay `COMMENT`. |
+| [0035](0035-request-changes-for-blocking-findings.md) | Superseded | Request changes for unresolved blocking findings | #86 | Superseded by ADR 0057; enforcement is the head-bound `ReviewSensei` check run and reviews stay `COMMENT`. |
 | [0036](0036-learning-lifecycle-diagnostics-and-feedback.md) | Proposed | Learning lifecycle diagnostics and opt-in finding feedback | #41 | Advisory stale/conflict signals; feedback is not trusted review context |
 | [0037](0037-symbol-aware-source-context.md) | Proposed | Opt-in deterministic bounded symbol-aware source context from trusted base | #40 | Python AST selector; default remains documents/learnings; #33 evaluation required before default enablement |
 | [0038](0038-release-compatibility-manifest.md) | Proposed | Bind workflow, package, schema, and Worker releases in a compatibility manifest | #35 | Exact digests, PyPI/executing-commit identity, canary binding, and audited workflow-channel promotion/rollback |
@@ -64,7 +64,7 @@ Process: `docs/process/adr-process.md`
 | [0053](0053-bounded-durable-convergence-history.md) | Proposed | Bounded durable convergence history | #146 F2 | Integrity-covered bounded baseline metadata in the existing session ledger |
 | [0054](0054-observed-convergence-acceptance-evidence.md) | Proposed | Observed convergence acceptance evidence | #146 F6 | Real internal seams, bounded fixture edges, explicit unknown metrics |
 | [0055](0055-merge-focused-default-and-legacy-retirement.md) | Proposed | Make merge-focused the default and retire live legacy selection | #146 F7 | Existing legacy state migrates explicitly; release remains operator-controlled |
-| [0056](0056-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
+| [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
 ## Policy
 

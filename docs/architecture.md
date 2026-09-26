@@ -693,7 +693,7 @@ explicit error rather than allowing a stale or ambiguous review.
 The automatic-review and GitHub-writes caller path defaults to automatic
 approval. Review publication is one exact-head `COMMENT` review, and
 enforcement is one stable `ReviewSensei` check run bound to that head and to
-its producing App (ADR 0056). The conclusion is `success` for a complete review
+its producing App (ADR 0057). The conclusion is `success` for a complete review
 with no required fixes, `failure` when required fixes remain, `action_required`
 for a partial, incomplete, or unpublished review, `neutral` in `advisory` mode,
 and `cancelled` for a run that ended without a conclusion. A pending review

@@ -120,11 +120,11 @@ Collect hosted evidence for overlapping same-head executions after rollout.
 - Related issue: #86
 - Pull request: draft PR to be linked
 - Supersedes: none
-- Superseded by: [ADR 0056](0056-one-check-run-as-the-single-merge-authority.md)
+- Superseded by: [ADR 0057](0057-one-check-run-as-the-single-merge-authority.md)
 - Related: [ADR 0032](0032-blocking-finding-classification-for-approvals.md)
 
 The `REQUEST_CHANGES` review event described above is superseded: enforcement
 is now the single head-bound `ReviewSensei` check run, and review publication is
-always a `COMMENT` review (ADR 0056). The concern this record introduced -
+always a `COMMENT` review (ADR 0057). The concern this record introduced -
 that a blocking finding must not be discharged by a racy approval - is carried
 forward by the check conclusion and by the withheld-approval rule.
