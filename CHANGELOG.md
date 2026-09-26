@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.6.9 - 2026-09-26
+
+- Bound the derived related-path set instead of failing a wide review. A
+  pull request whose changed files contribute more than 32 same-directory
+  siblings died at the transaction checkpoint with `related paths exceed
+  MAX_RELATED_PATHS`, after inference and before the convergence baseline
+  was checkpointed, so every retry repeated the failure and the review could
+  never complete. The derived sibling set now truncates at the bound in
+  changed-path order, and explicitly supplied related context still fails
+  closed (#189).
+
+- Add the canonical `.reviewsensei.yml` repository configuration surface
+  (epic #181 slice A, #182). A bounded, dependency-free YAML parser and a
+  versioned typed schema own provider, model, endpoint, credential
+  reference, and routing behavior, and `review-sensei config validate` and
+  `config show --explain` report the effective configuration with per-field
+  provenance. Resolution order stays explicit: command-line options, then
+  the supported `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` overrides,
+  then the selected YAML file, then the documented packaged defaults. This
+  slice adds the surface without rewiring the review path.
+
+- Give the local CLI a standalone review contract (epic #181 slice B,
+  #183). An installed wheel or supported native binary reviews a supplied
+  diff with no GitHub account, pull-request identity, Actions environment,
+  OIDC assertion, app token, or hosted ledger. The default output is
+  readable terminal text with `--format markdown` and `--format json`
+  alternatives, review exits are `0` clean, `1` required fixes remaining,
+  and `2` could not complete with one `review-sensei: reason=<token>` line,
+  and backend selection is canonical through `--provider`/`--model` and
+  their environment overrides. `--local-session` is the one explicit
+  persistent-local-session operation.
+
+- The Python and npm package versions and generated setup defaults advance
+  to `0.6.9`; the movable `v5` reusable-workflow channel is unchanged.
+
 ## 0.6.8 - 2026-09-26
 
 - Allow five automatic verification rounds. The default verification
