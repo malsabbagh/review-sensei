@@ -2133,14 +2133,16 @@ def complete_session_round(
         slot = prepared.record.reserved_slot
         if slot is None:
             raise ReviewInputError("prepared session reservation is invalid")
-        expected_initial = prepared.record.completed_initial_reviews + (
-            1 if slot == "initial" else 0
+        expected_increments = _apply_slot(prepared.record, slot)
+        expected_initial = expected_increments.get(
+            "completed_initial_reviews", prepared.record.completed_initial_reviews
         )
-        expected_verification = prepared.record.completed_verification_rounds + (
-            1 if slot == "verification" else 0
+        expected_verification = expected_increments.get(
+            "completed_verification_rounds",
+            prepared.record.completed_verification_rounds,
         )
-        expected_failed = prepared.record.failed_attempts + (
-            1 if slot == "failed-attempt" else 0
+        expected_failed = expected_increments.get(
+            "failed_attempts", prepared.record.failed_attempts
         )
         if (
             loaded.record.generation == prepared.record.generation + 1

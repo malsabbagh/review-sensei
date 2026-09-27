@@ -31,6 +31,7 @@ from review_sensei.session import (
     LocalSessionLedger,
     SessionIdentity,
     SessionRecord,
+    _apply_slot,
     complete_session_round,
     prepare_session_round,
     session_reservation_id,
@@ -59,6 +60,27 @@ def _reservation(head: str) -> str:
 
 
 class DiagnosticCounterSaturationTests(unittest.TestCase):
+    def test_initial_review_counter_saturates_at_its_storage_ceiling(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        )
+
+        self.assertEqual(
+            _apply_slot(record, "initial"),
+            {"completed_initial_reviews": DIAGNOSTIC_ROUND_CEILING},
+        )
+
+    def test_failed_attempts_still_increment_at_diagnostic_ceiling(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+        )
+
+        self.assertEqual(_apply_slot(record, "failed-attempt"), {"failed_attempts": 1})
+
     def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -95,6 +117,10 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 persisted = (
                     LocalSessionLedger(root).load(IDENTITY, now=FIXED_NOW).record
                 )
+                replayed = complete_session_round(
+                    ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+                )
+                self.assertEqual(replayed, persisted)
                 self.assertEqual(
                     persisted.completed_verification_rounds,
                     DIAGNOSTIC_ROUND_CEILING,
