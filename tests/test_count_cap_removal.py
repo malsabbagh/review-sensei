@@ -92,9 +92,9 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 complete_session_round(
                     ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
                 )
-                persisted = LocalSessionLedger(root).load(
-                    IDENTITY, now=FIXED_NOW
-                ).record
+                persisted = (
+                    LocalSessionLedger(root).load(IDENTITY, now=FIXED_NOW).record
+                )
                 self.assertEqual(
                     persisted.completed_verification_rounds,
                     DIAGNOSTIC_ROUND_CEILING,
