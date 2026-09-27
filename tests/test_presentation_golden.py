@@ -97,9 +97,9 @@ class FakeCheckRuns:
     """Answer the check-run API the way GitHub does for one repository.
 
     Every hosted publication attaches the broker's check capability, so the
-    golden scenarios do too: a publication without a check token is the
-    degraded enforcement path that withholds approval and the gate suite
-    covers that separately.
+    golden scenarios do too: a publication without a check token lacks its
+    merge gate but may still approve an otherwise eligible review; the gate
+    acceptance suite covers that diagnostic path separately.
     """
 
     def __init__(self, *, app_slug="reviewsensei[bot]", run_id=100):

@@ -65,7 +65,7 @@ pass: stages — packaged default stages selected
 pass: categories — packaged default categories selected
 pass: context — no supplemental context configured
 pass: symbol-context — opt-in trusted-base symbol context is disabled by default
-pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei requests no Administration permission and never changes branch protection), the App needs Checks: write, and GitHub never runs required checks on App-authored pull requests
+pass: review-gate — the merge gate is the check 'ReviewSensei' produced by App 'reviewsensei[bot]'; 'ReviewSensei' must be marked required by a repository administrator (ReviewSensei requests no Administration permission and never changes branch protection), the App needs Checks: write to publish the gate (eligible auto-approval may still proceed without it), and GitHub never runs required checks on App-authored pull requests
 unknown: network — not checked (offline mode)
 ```
 
@@ -443,10 +443,11 @@ second gate, and the App needs `Checks: write`. A shared idempotent finalizer ma
 then emit `APPROVE` once no unresolved ReviewSensei root is classified blocking.
 Non-blocking ReviewSensei follow-ups and human threads may remain open. An
 unclassified ReviewSensei root, partial/incomplete/summary-only result,
-incomplete/error thread response, missing check permission, or
-stale/fork/closed/App-authored target withholds approval or fails closed before
-writing, with a bounded diagnostic. All `@sensei` replies remain ordinary
-comments.
+incomplete/error thread response, or stale/fork/closed/App-authored target
+withholds approval or fails closed before writing, with a bounded diagnostic.
+Missing check permission leaves the merge gate unpublished and reports
+`check_permission`, while otherwise eligible reviews can still be approved.
+All `@sensei` replies remain ordinary comments.
 
 The approval marker deduplicates the `APPROVED` state per exact head. The
 finalizer runs immediately after review publication and after an AI reply

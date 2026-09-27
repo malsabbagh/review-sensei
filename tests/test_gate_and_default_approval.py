@@ -518,18 +518,23 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.diagnostic, "app_authored")
         self.assertEqual(checks.writes, [])
 
-    def test_missing_gate_capability_reports_permission_and_withholds(self):
+    def test_missing_gate_capability_reports_permission_but_still_approves(self):
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=HEAD)),
                 json_response([]),
                 json_response(pr_payload(head_sha=HEAD)),
                 json_response({"id": 5}),
+                json_response(pr_payload(head_sha=HEAD)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response({"id": 6}),
             ],
             checks=None,
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         self.assertEqual(outcome.diagnostic, "check_permission")
         self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
 
@@ -743,7 +748,7 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
         patched = [url for method, url, _ in calls if method == "PATCH"]
         self.assertEqual([url.split("/check-runs/")[-1] for url in patched], ["100"])
 
-    def test_gate_permission_failure_still_publishes_the_review(self):
+    def test_gate_permission_failure_still_approves_when_otherwise_eligible(self):
         checks = FakeCheckRuns(denied=True)
         outcome, calls = self.publish(
             [
@@ -751,11 +756,16 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
                 json_response([]),
                 json_response(pr_payload(head_sha=HEAD)),
                 json_response({"id": 5}),
+                json_response(pr_payload(head_sha=HEAD)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response({"id": 6}),
             ],
             checks=checks,
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         self.assertEqual(outcome.diagnostic, "check_permission")
         self.assertEqual(checks.writes, [])
 

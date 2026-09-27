@@ -1225,8 +1225,9 @@ class ReviewPublisher:
 
         ``outcome=None`` publishes the pending state. A missing or unauthorized
         check capability is reported as a ``check_permission`` diagnostic rather
-        than raised: the review itself is still published, and the withheld
-        approval tells the operator that enforcement is not in place.
+        than raised: the review itself is still published, and an otherwise
+        eligible review may still be approved even though the merge gate is
+        unavailable.
         """
 
         if check_token is None:
@@ -1261,11 +1262,11 @@ class ReviewPublisher:
     ) -> str | None:
         """Write one gate state, reporting an unusable capability as a diagnostic.
 
-        A gate that cannot be written must not suppress the review itself: the
-        review content is what the operator needs, and the withheld approval
-        plus the ``check_permission`` diagnostic tell them enforcement is not in
-        place instead of implying it. A pending conclusion left behind by a
-        transient failure is overwritten by the next run for the same head.
+        A gate that cannot be written must not suppress the review itself. The
+        ``check_permission`` diagnostic tells the operator enforcement is not
+        in place; an otherwise eligible review may still be approved. A pending
+        conclusion left behind by a transient failure is overwritten by the
+        next run for the same head.
         """
 
         try:
@@ -1875,7 +1876,8 @@ class ReviewPublisher:
         app-authored pull request withholds here as well: the finalizer reports
         it before any network read. A ``check_diagnostic`` wins over the
         finalizer's reason because an unpublished gate is an enforcement gap
-        that must be reported rather than folded into a quieter explanation.
+        that must remain visible, even when approval succeeds or is withheld for
+        another eligibility reason.
         """
 
         finalized = self.finalizer.finalize(

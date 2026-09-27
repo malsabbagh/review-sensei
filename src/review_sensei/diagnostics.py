@@ -829,7 +829,8 @@ def run_doctor(
                 f"{REVIEW_CHECK_NAME!r} must be marked required by a repository "
                 "administrator (ReviewSensei requests no Administration "
                 "permission and never changes branch protection), the App needs "
-                "Checks: write, and GitHub never runs required checks on "
+                "Checks: write to publish the gate (eligible auto-approval may "
+                "still proceed without it), and GitHub never runs required checks on "
                 "App-authored pull requests"
             ),
         )

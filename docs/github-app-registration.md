@@ -56,7 +56,7 @@ Request only the permissions needed by the features you deploy:
 | Permission | Access | Why |
 | --- | --- | --- |
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
-| `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Without it, reviews are still published and approval is withheld with the `check_permission` diagnostic |
+| `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Without it, the check remains unpublished and `check_permission` is reported; otherwise eligible reviews can still be approved |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
