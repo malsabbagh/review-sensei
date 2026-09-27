@@ -1330,6 +1330,42 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIsNone(approved.diagnostic)
         self.assertEqual(posted_events(approved_calls), ["COMMENT", "APPROVE"])
 
+    def test_missing_gate_warning_does_not_exceed_the_summary_limit(self):
+        """The notice is omitted when its bytes would crowd out the review."""
+
+        head = "b" * 40
+        skipped = ReviewResult(
+            summary="Incremental review: no changed paths since the last accepted review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+            coverage_mode="incremental",
+            limits=ReviewLimits(max_summary_bytes=512),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=()),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ],
+            result=skipped,
+            auto_approve=True,
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
+        self.assertNotIn(
+            "ReviewSensei merge gate unavailable",
+            review_payloads(calls)[0]["body"],
+        )
+
     def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
         """An uncertain sweep must not publish a possible duplicate."""
 

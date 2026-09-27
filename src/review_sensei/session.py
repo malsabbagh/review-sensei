@@ -1267,25 +1267,14 @@ class SessionLedger(Protocol):
 def _expected_after_slot(record: SessionRecord, slot: str) -> tuple[int, int, int]:
     """Return the full counter snapshot used to verify a committed replay."""
 
-    if slot == "initial":
-        return (
-            min(record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING),
-            record.completed_verification_rounds,
-            record.failed_attempts,
-        )
-    if slot == "verification":
-        return (
-            record.completed_initial_reviews,
-            min(record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING),
-            record.failed_attempts,
-        )
-    if slot == "failed-attempt":
-        return (
-            record.completed_initial_reviews,
-            record.completed_verification_rounds,
-            min(record.failed_attempts + 1, MAX_FAILED_ATTEMPTS),
-        )
-    raise ReviewInputError("reserved_slot is invalid")
+    written = _apply_slot(record, slot)
+    return (
+        written.get("completed_initial_reviews", record.completed_initial_reviews),
+        written.get(
+            "completed_verification_rounds", record.completed_verification_rounds
+        ),
+        written.get("failed_attempts", record.failed_attempts),
+    )
 
 
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:

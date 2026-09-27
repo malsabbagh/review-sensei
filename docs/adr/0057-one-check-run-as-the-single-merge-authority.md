@@ -81,6 +81,8 @@ accepts those conclusions for required checks:
 | `auto-approve`, `blocking` | partial, incomplete, or summary-only | `action_required` |
 | `auto-approve`, `blocking` | publication failed | `action_required` |
 | `auto-approve`, `blocking` | run ended without a conclusion | `cancelled` |
+| `auto-approve` | check capability unavailable | no check run (`check_permission`); approval is evaluated independently |
+| `blocking` | check capability unavailable | no check run (`check_permission`); approval remains disabled by policy |
 | `advisory` | any | `neutral` |
 
 The review itself is always published as a `COMMENT` review: one exact-head

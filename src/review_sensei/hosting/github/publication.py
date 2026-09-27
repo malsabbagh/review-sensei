@@ -1650,8 +1650,22 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             )
+            validate_bounded_text(
+                summary,
+                result.limits.max_summary_bytes,
+                label="published review summary",
+                allow_empty=False,
+            )
+
+            def body_for_summary(review_summary: str) -> str:
+                return (
+                    f"{_with_discussion_instruction(review_summary)}\n\n"
+                    f"{marker}\n\n{approval_eligibility_marker(eligibility)}"
+                )
+
+            body = body_for_summary(summary)
             if check_diagnostic == "check_permission":
-                summary = (
+                warning = (
                     "**Warning: ReviewSensei merge gate unavailable.** This run "
                     "could not publish the required `ReviewSensei` check "
                     "(`check_permission`). Missing this check does not itself "
@@ -1659,19 +1673,19 @@ class ReviewPublisher:
                     "be approved under the configured auto-approval policy. "
                     "Grant the App `Checks: write` and broker `check_publish`, "
                     "and mark the check required in branch protection before "
-                    "relying on it to gate merges.\n\n"
-                    f"{summary}"
+                    "relying on it to gate merges."
                 )
-            validate_bounded_text(
-                summary,
-                result.limits.max_summary_bytes,
-                label="published review summary",
-                allow_empty=False,
-            )
-            body = (
-                f"{_with_discussion_instruction(summary)}\n\n{marker}\n\n"
-                f"{approval_eligibility_marker(eligibility)}"
-            )
+                warned_summary = f"{warning}\n\n{summary}"
+                if (
+                    len(warned_summary.encode("utf-8"))
+                    <= result.limits.max_summary_bytes
+                ):
+                    warned_body = body_for_summary(warned_summary)
+                    if (
+                        len(warned_body.encode("utf-8"))
+                        <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+                    ):
+                        body = warned_body
             validate_bounded_text(
                 body,
                 MAX_PUBLISHED_REVIEW_BODY_BYTES,
