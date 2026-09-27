@@ -1265,7 +1265,7 @@ class SessionLedger(Protocol):
 
 
 def _expected_after_slot(record: SessionRecord, slot: str) -> tuple[int, int, int]:
-    """Return counter state after a slot, preserving the diagnostic ceiling."""
+    """Return the full counter snapshot used to verify a committed replay."""
 
     if slot == "initial":
         return (
@@ -1283,23 +1283,30 @@ def _expected_after_slot(record: SessionRecord, slot: str) -> tuple[int, int, in
         return (
             record.completed_initial_reviews,
             record.completed_verification_rounds,
-            record.failed_attempts + 1,
+            min(record.failed_attempts + 1, MAX_FAILED_ATTEMPTS),
         )
     raise ReviewInputError("reserved_slot is invalid")
 
 
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
-    """Return only the counter delta owned by the reserved slot."""
+    """Return the bounded counter value written by the reserved slot."""
 
-    expected_initial, expected_verification, expected_failed = _expected_after_slot(
-        record, slot
-    )
     if slot == "initial":
-        return {"completed_initial_reviews": expected_initial}
+        return {
+            "completed_initial_reviews": min(
+                record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING
+            )
+        }
     if slot == "verification":
-        return {"completed_verification_rounds": expected_verification}
+        return {
+            "completed_verification_rounds": min(
+                record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING
+            )
+        }
     if slot == "failed-attempt":
-        return {"failed_attempts": expected_failed}
+        # The stored count is also the maximum configurable per-head retry
+        # budget, so further failure cleanups remain valid at the bound.
+        return {"failed_attempts": min(record.failed_attempts + 1, MAX_FAILED_ATTEMPTS)}
     raise ReviewInputError("reserved_slot is invalid")
 
 

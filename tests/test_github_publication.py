@@ -1302,6 +1302,13 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(ungated.status, "published")
         self.assertEqual(ungated.diagnostic, "check_permission")
         self.assertEqual(posted_events(ungated_calls), ["COMMENT", "APPROVE"])
+        ungated_review_body = review_payloads(ungated_calls)[0]["body"]
+        self.assertIn("ReviewSensei merge gate unavailable", ungated_review_body)
+        self.assertIn(
+            "an otherwise eligible review can still be approved under the "
+            "configured auto-approval policy.",
+            ungated_review_body,
+        )
 
         approved, approved_calls = self.publish(
             [

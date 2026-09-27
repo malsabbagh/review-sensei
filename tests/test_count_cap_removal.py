@@ -17,6 +17,7 @@ from pathlib import Path
 
 from review_sensei.convergence import (
     DIAGNOSTIC_ROUND_CEILING,
+    MAX_FAILED_ATTEMPTS,
     ReviewConvergencePolicy,
 )
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
@@ -89,6 +90,35 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
             {"completed_initial_reviews": DIAGNOSTIC_ROUND_CEILING},
         )
 
+    def test_initial_review_commit_saturates_from_one_below_the_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(104)
+            reservation_id = _reservation(head)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING - 1,
+                reservation_id=reservation_id,
+                reserved_slot="initial",
+            )
+            ledger._write(IDENTITY, record)
+
+            committed = ledger.commit(
+                IDENTITY,
+                reservation_id=reservation_id,
+                expected_generation=record.generation,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(
+                committed.completed_initial_reviews, DIAGNOSTIC_ROUND_CEILING
+            )
+            self.assertEqual(persisted, committed)
+
     def test_failed_attempts_still_increment_when_diagnostic_count_is_full(self):
         with tempfile.TemporaryDirectory() as raw:
             ledger = LocalSessionLedger(Path(raw))
@@ -118,6 +148,40 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 failed.completed_verification_rounds, DIAGNOSTIC_ROUND_CEILING
             )
             self.assertEqual(persisted, failed)
+
+    def test_failed_attempt_counter_saturates_at_its_storage_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(105)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                failed_attempts=MAX_FAILED_ATTEMPTS - 1,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
+
+            first = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id="a" * 64,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            second = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id="b" * 64,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(first.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(second.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(persisted, second)
 
     def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
         with tempfile.TemporaryDirectory() as raw:

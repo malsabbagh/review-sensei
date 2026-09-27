@@ -1650,6 +1650,18 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             )
+            if check_diagnostic == "check_permission":
+                summary = (
+                    "**Warning: ReviewSensei merge gate unavailable.** This run "
+                    "could not publish the required `ReviewSensei` check "
+                    "(`check_permission`). Missing this check does not itself "
+                    "withhold approval: an otherwise eligible review can still "
+                    "be approved under the configured auto-approval policy. "
+                    "Grant the App `Checks: write` and broker `check_publish`, "
+                    "and mark the check required in branch protection before "
+                    "relying on it to gate merges.\n\n"
+                    f"{summary}"
+                )
             validate_bounded_text(
                 summary,
                 result.limits.max_summary_bytes,
