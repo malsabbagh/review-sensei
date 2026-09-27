@@ -447,6 +447,10 @@ incomplete/error thread response, or stale/fork/closed/App-authored target
 withholds approval or fails closed before writing, with a bounded diagnostic.
 Missing check permission leaves the merge gate unpublished and reports
 `check_permission`, while otherwise eligible reviews can still be approved.
+The review body includes a full or concise gate warning when the configured
+summary and complete-body limits allow it; if neither fits, monitor the
+run-level `check_permission` diagnostic because the body retains its original
+summary.
 All `@sensei` replies remain ordinary comments.
 
 The approval marker deduplicates the `APPROVED` state per exact head. The

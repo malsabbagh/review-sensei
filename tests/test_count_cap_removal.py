@@ -19,6 +19,7 @@ from review_sensei.convergence import (
     DIAGNOSTIC_ROUND_CEILING,
     MAX_FAILED_ATTEMPTS,
     ReviewConvergencePolicy,
+    RoundAdmissionDecision,
 )
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.errors import ReviewInputError
@@ -30,6 +31,7 @@ from review_sensei.sequence import (
 )
 from review_sensei.session import (
     LocalSessionLedger,
+    PreparedSessionRound,
     SessionIdentity,
     SessionRecord,
     _apply_slot,
@@ -104,11 +106,25 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
             )
             ledger._write(IDENTITY, record)
 
-            committed = ledger.commit(
-                IDENTITY,
+            prepared = PreparedSessionRound(
+                record=record,
+                decision=RoundAdmissionDecision(
+                    mode="merge-focused",
+                    admit=True,
+                    count_as_completed_round=True,
+                    round_kind="initial",
+                    handoff=False,
+                    handoff_reason=None,
+                    may_emit_approve=False,
+                ),
                 reservation_id=reservation_id,
-                expected_generation=record.generation,
-                now=FIXED_NOW,
+            )
+
+            committed = complete_session_round(
+                ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+            )
+            replayed = complete_session_round(
+                ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
             )
             persisted = (
                 LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
@@ -117,6 +133,7 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
             self.assertEqual(
                 committed.completed_initial_reviews, DIAGNOSTIC_ROUND_CEILING
             )
+            self.assertEqual(replayed, committed)
             self.assertEqual(persisted, committed)
 
     def test_failed_attempts_still_increment_when_diagnostic_count_is_full(self):
@@ -504,7 +521,7 @@ class PerHeadRetryBoundTests(unittest.TestCase):
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
                 completed_verification_rounds=8,
-                failed_attempts=6,
+                failed_attempts=MAX_FAILED_ATTEMPTS,
                 failed_attempts_head_sha=stale_head,
             )
             ledger._write(IDENTITY, record)

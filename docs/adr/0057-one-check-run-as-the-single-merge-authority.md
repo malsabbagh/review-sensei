@@ -277,6 +277,11 @@ If check publication is unavailable while another approval blocker also
 applies, `check_permission` remains the run-level diagnostic; the separate
 approval decision still enforces all eligibility blockers.
 
+The published review body includes the full or concise unavailable-gate warning
+when the summary and complete-body limits allow it. If neither version fits,
+the body keeps its original summary and operators must use the run-level
+`check_permission` diagnostic to identify the missing gate.
+
 ## Links
 
 - [Epic #181](https://github.com/malsabbagh/review-sensei/issues/181)
