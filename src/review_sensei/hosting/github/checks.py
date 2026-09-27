@@ -5,7 +5,11 @@ authoritative check and reports its identity for administrator setup. The gate
 conclusion never encodes incomplete enforcement as ``neutral`` or ``skipped``:
 GitHub accepts those conclusions for required checks, so they would silently
 disable the gate. ``advisory`` is the one mode that publishes ``neutral``,
-because that mode promises no ReviewSensei-imposed merge gate.
+because that mode promises no ReviewSensei-imposed merge gate. A completed
+``auto-approve`` review publishes ``success`` even when required fixes remain,
+because that mode uses Changes requested and Approve instead of a failing
+check. ``blocking`` publishes ``failure`` only when a completed review still
+has required fixes.
 """
 
 from __future__ import annotations
@@ -98,14 +102,23 @@ def review_check_outcome(
                 "eligible review completes."
             ),
         )
-    if bounded_required:
+    if bounded_required and policy == "blocking":
         return CheckOutcome(
             conclusion="failure",
             title="Required fixes remain",
             summary=(
                 "The completed review reported required fixes for this head. "
-                "They are listed in the ReviewSensei review and its inline "
-                "threads."
+                "They are listed in the ReviewSensei review comments."
+            ),
+        )
+    if bounded_required:
+        return CheckOutcome(
+            conclusion="success",
+            title="Changes requested",
+            summary=(
+                "The completed review requested changes for this head. "
+                "The ReviewSensei check stays successful; Changes requested "
+                "and Approve are the pull request decision."
             ),
         )
     return CheckOutcome(

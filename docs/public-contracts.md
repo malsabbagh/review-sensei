@@ -1134,15 +1134,18 @@ enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are
 enabled, ReviewSensei publishes one exact-head review and one stable
 `ReviewSensei` check run that is the head-bound enforcement authority for that
-head (ADR 0057): `success` for a complete review with no required fixes,
-`failure` when required fixes remain, `action_required` for a partial,
-incomplete, or unpublished review, `neutral` in `advisory` mode, and
-`cancelled` for a run that ended without a conclusion. `github.reviews:
-auto-approve` submits that review as `REQUEST_CHANGES` when required fixes
-remain and as `COMMENT` otherwise; `blocking` and `advisory` stay `COMMENT`.
+head (ADR 0057). A completed `auto-approve` review publishes `success`
+whether or not required fixes remain, and submits `REQUEST_CHANGES` when they
+remain and `COMMENT` otherwise. `blocking` publishes `success` when a complete
+review has no required fixes and `failure` when required fixes remain, and
+stays `COMMENT`. `advisory` publishes `neutral`, stays `COMMENT`, and never
+fails the check. `action_required` covers a partial, incomplete, or
+unpublished review in `auto-approve` and `blocking`, and `cancelled` is a run
+that ended without a conclusion.
 A new review first writes `in_progress`, so an earlier conclusion on the same
 head cannot stand for a review that has not finished. A
-repository administrator must mark the check required for it to gate merges;
+repository administrator must mark the check required for it to gate merges
+in `blocking` mode;
 `review-sensei doctor` reports the expected check identity and producing App,
 and `Checks: write` is a scoped broker capability. A missing permission leaves
 the check unpublished and reports `check_permission`, but does not prevent
