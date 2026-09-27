@@ -127,7 +127,11 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 IDENTITY,
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
-                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING - 1,
+            )
+            self.assertEqual(
+                record.completed_verification_rounds,
+                DIAGNOSTIC_ROUND_CEILING - 1,
             )
             ledger._write(IDENTITY, record)
             previous_prepared = None
