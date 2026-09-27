@@ -538,6 +538,40 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.diagnostic, "check_permission")
         self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
 
+    def test_missing_gate_still_withholds_for_a_blocking_finding(self):
+        result, facts = admitted_blocking_result(body_comment=True)
+        eligibility = approval_eligibility_from_result(
+            result,
+            head_sha=HEAD,
+            enabled=True,
+            app_authored=False,
+            check_published=False,
+        )
+        decision = eligibility.evaluate(
+            app_authored=False,
+            has_open_review_threads=False,
+        )
+
+        self.assertEqual(decision.blockers, ("blocking-findings-open",))
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response({"id": 5}),
+            ],
+            checks=None,
+            result=result,
+            blocker_candidates=(facts,),
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertIn(
+            "This file needs a tighter contract.", review_payloads(calls)[0]["body"]
+        )
+
     def test_writes_disabled_never_reaches_the_api(self):
         class ExplodingBroker:
             def request_oidc_token(self):
