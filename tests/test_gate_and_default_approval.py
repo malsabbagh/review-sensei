@@ -992,6 +992,9 @@ class CheckPublisherContractTests(unittest.TestCase):
         blocked = review_check_outcome(
             policy="blocking", review_status="complete", required_fixes=True
         )
+        blocking_clean = review_check_outcome(
+            policy="blocking", review_status="complete", required_fixes=False
+        )
         advised = review_check_outcome(
             policy="advisory", review_status="complete", required_fixes=True
         )
@@ -1003,6 +1006,8 @@ class CheckPublisherContractTests(unittest.TestCase):
         self.assertEqual(clean.conclusion, "success")
         self.assertEqual(clean.title, "No required fixes")
         self.assertEqual(blocked.conclusion, "failure")
+        self.assertEqual(blocking_clean.conclusion, "success")
+        self.assertEqual(blocking_clean.title, "No required fixes")
         self.assertEqual(advised.conclusion, "neutral")
         self.assertEqual(unfinished.conclusion, "action_required")
 
