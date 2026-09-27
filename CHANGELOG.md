@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.11 - 2026-09-27
+
+- Submit `REQUEST_CHANGES` when automatic approval finds required fixes
+  (#196). With `github.reviews: auto-approve`, a head that still has
+  required fixes is published as GitHub's Changes requested review, and a
+  later eligible clean head is still approved. `blocking` and `advisory`
+  stay `COMMENT`. App-authored pull requests stay comments because GitHub
+  rejects `REQUEST_CHANGES` from the pull request author. The
+  `ReviewSensei` check remains the head-bound merge gate.
+
+- List every packaged default in the installed configuration (#194).
+  Setup was writing a `.reviewsensei.yml` that named only the backend.
+  The generated file now lists each setting an operator can change, with
+  a comment on each value, using the packaged defaults for the
+  local-ollama backend. A repository that still has that exact
+  backend-only file is recognized as managed so it can receive the full
+  list; any other content at that path stays operator-owned and is not
+  migrated.
+
+- Saturate completed review counters at the diagnostic ceiling (#193).
+  Completed initial reviews, verification rounds, and failed attempts now
+  stop at their diagnostic bounds instead of growing past them, and a
+  replay of a reservation that is already at the ceiling still validates.
+  Inability to publish the `ReviewSensei` check no longer withholds an
+  otherwise eligible automatic approval. The published review warns that
+  the merge gate is unavailable until the App has `Checks: write`, the
+  broker grants `check_publish`, and an administrator marks the check
+  required.
+
+- Stop annotating a maintainer handoff as a GitHub Actions error (#195).
+  An `action_required` handoff still fails the run and records that
+  status in the outcome summary, without a `::error` annotation that
+  asked a maintainer to intervene before another automated pass.
+
+- The Python and npm package versions advance to `0.6.11`; the movable
+  `v5` reusable-workflow channel is unchanged.
+
 ## 0.6.10 - 2026-09-26
 
 - Let a session advance again when its persisted path evidence exceeded
