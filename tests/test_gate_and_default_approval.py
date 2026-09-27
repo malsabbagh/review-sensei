@@ -321,7 +321,9 @@ class GateAcceptanceCase(unittest.TestCase):
     def assert_single_event_authority(self, calls):
         """No row may post a second review-event authority or reach a merge API."""
 
-        self.assertLessEqual(set(posted_events(calls)), {"COMMENT", "APPROVE"})
+        events = set(posted_events(calls))
+        self.assertLessEqual(events, {"COMMENT", "APPROVE", "REQUEST_CHANGES"})
+        self.assertFalse({"REQUEST_CHANGES", "APPROVE"} <= events)
         for _method, url, payload in calls:
             self.assertNotIn("/merge", url)
             if payload:
@@ -415,7 +417,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
             blocker_candidates=(facts,),
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
         self.assertEqual(checks.conclusions, [None, "failure"])
         self.assertEqual(review_payloads(calls)[0]["comments"][0]["path"], "src/app.py")
@@ -438,7 +440,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
             blocker_candidates=(facts,),
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
         self.assertEqual(checks.conclusions, [None, "failure"])
         comment = review_payloads(calls)[0]
@@ -585,7 +587,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
 
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.diagnostic, "check_permission")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertIn(
             "This file needs a tighter contract.", review_payloads(calls)[0]["body"]
         )

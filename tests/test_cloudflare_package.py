@@ -169,7 +169,7 @@ class CloudflarePackageTests(unittest.TestCase):
             '"  automatic_reviews: true\\n"',
             '"  # Publish the validated result to GitHub\\n"',
             '"  writes: false\\n"',
-            '"  # auto-approve, blocking, or advisory\\n"',
+            '"  # auto-approve (request changes or approve), blocking, or advisory\\n"',
             '"  reviews: auto-approve\\n"',
             '"  # Reply to authorized @sensei mentions\\n"',
             '"  mentions: true\\n"',
@@ -219,7 +219,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "  automatic_reviews: true\n"
             "  # Publish the validated result to GitHub\n"
             "  writes: false\n"
-            "  # auto-approve, blocking, or advisory\n"
+            "  # auto-approve (request changes or approve), blocking, or advisory\n"
             "  reviews: auto-approve\n"
             "  # Reply to authorized @sensei mentions\n"
             "  mentions: true\n"
@@ -275,7 +275,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(configuration.advanced.resources.timeout_seconds, 900)
         self.assertEqual(configuration.advanced.resources.max_provider_calls, 8)
         self.assertIn("# Configuration version. Leave this at 1.", content)
-        self.assertIn("# auto-approve, blocking, or advisory", content)
+        self.assertIn("# auto-approve (request changes or approve), blocking, or advisory", content)
         self.assertIn("# Maximum provider calls for one review", content)
         for retired in (
             "provider_mode",

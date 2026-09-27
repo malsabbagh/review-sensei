@@ -183,9 +183,10 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `issue_reply` | `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |
 
-The `review_publish` capability covers `COMMENT` and `APPROVE` events;
-ReviewSensei publishes its review as one exact-head `COMMENT` and never emits a
-persistent `REQUEST_CHANGES`. Enforcement is the `ReviewSensei` check run
+The `review_publish` capability covers `COMMENT`, `REQUEST_CHANGES`, and
+`APPROVE` events. `auto-approve` publishes `REQUEST_CHANGES` when required
+fixes remain and `COMMENT` otherwise; `blocking` and `advisory` stay
+`COMMENT`. Enforcement is the `ReviewSensei` check run
 published through the separate `check_publish` capability, which is why
 `checks: write` is requested explicitly: it is not part of review-comment
 permission. If the broker withholds that capability or the App lacks the
