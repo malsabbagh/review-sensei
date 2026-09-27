@@ -61,15 +61,21 @@ def _reservation(head: str) -> str:
 
 
 class DiagnosticCounterSaturationTests(unittest.TestCase):
-    def test_session_record_still_rejects_counts_above_the_storage_ceiling(self):
-        with self.assertRaisesRegex(
-            ReviewInputError, "completed_verification_rounds is out of bounds"
-        ):
-            SessionRecord.create(
-                IDENTITY,
-                now=FIXED_NOW,
-                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING + 1,
-            )
+    def test_session_record_rejects_either_count_above_the_storage_ceiling(self):
+        with self.subTest(counter="completed_initial_reviews"):
+            with self.assertRaisesRegex(ReviewInputError, "is out of bounds"):
+                SessionRecord.create(
+                    IDENTITY,
+                    now=FIXED_NOW,
+                    completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING + 1,
+                )
+        with self.subTest(counter="completed_verification_rounds"):
+            with self.assertRaisesRegex(ReviewInputError, "is out of bounds"):
+                SessionRecord.create(
+                    IDENTITY,
+                    now=FIXED_NOW,
+                    completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING + 1,
+                )
 
     def test_initial_review_counter_saturates_at_its_storage_ceiling(self):
         record = SessionRecord.create(
@@ -124,6 +130,7 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
             )
             ledger._write(IDENTITY, record)
+            previous_prepared = None
 
             for round_number in (1, 2):
                 # Each new head is handled through a fresh ledger instance,
@@ -159,6 +166,18 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                     persisted.completed_verification_rounds,
                     DIAGNOSTIC_ROUND_CEILING,
                 )
+                if previous_prepared is not None:
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "session generation conflict"
+                    ):
+                        complete_session_round(
+                            ledger,
+                            IDENTITY,
+                            previous_prepared,
+                            published=True,
+                            now=FIXED_NOW,
+                        )
+                previous_prepared = prepared
 
 
 class LongSequenceTests(unittest.TestCase):

@@ -1264,23 +1264,42 @@ class SessionLedger(Protocol):
         ...
 
 
-def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
-    # Completed-round counts are diagnostic history, so saturate them at the
-    # storage bound instead of letting bookkeeping refuse an admitted round.
+def _expected_after_slot(record: SessionRecord, slot: str) -> tuple[int, int, int]:
+    """Return counter state after a slot, preserving the diagnostic ceiling."""
+
     if slot == "initial":
-        return {
-            "completed_initial_reviews": min(
-                record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING
-            ),
-        }
+        return (
+            min(record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING),
+            record.completed_verification_rounds,
+            record.failed_attempts,
+        )
     if slot == "verification":
-        return {
-            "completed_verification_rounds": min(
-                record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING
-            ),
-        }
+        return (
+            record.completed_initial_reviews,
+            min(record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING),
+            record.failed_attempts,
+        )
     if slot == "failed-attempt":
-        return {"failed_attempts": record.failed_attempts + 1}
+        return (
+            record.completed_initial_reviews,
+            record.completed_verification_rounds,
+            record.failed_attempts + 1,
+        )
+    raise ReviewInputError("reserved_slot is invalid")
+
+
+def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
+    """Return only the counter delta owned by the reserved slot."""
+
+    expected_initial, expected_verification, expected_failed = _expected_after_slot(
+        record, slot
+    )
+    if slot == "initial":
+        return {"completed_initial_reviews": expected_initial}
+    if slot == "verification":
+        return {"completed_verification_rounds": expected_verification}
+    if slot == "failed-attempt":
+        return {"failed_attempts": expected_failed}
     raise ReviewInputError("reserved_slot is invalid")
 
 
@@ -2133,16 +2152,8 @@ def complete_session_round(
         slot = prepared.record.reserved_slot
         if slot is None:
             raise ReviewInputError("prepared session reservation is invalid")
-        expected_increments = _apply_slot(prepared.record, slot)
-        expected_initial = expected_increments.get(
-            "completed_initial_reviews", prepared.record.completed_initial_reviews
-        )
-        expected_verification = expected_increments.get(
-            "completed_verification_rounds",
-            prepared.record.completed_verification_rounds,
-        )
-        expected_failed = expected_increments.get(
-            "failed_attempts", prepared.record.failed_attempts
+        expected_initial, expected_verification, expected_failed = _expected_after_slot(
+            prepared.record, slot
         )
         if (
             loaded.record.generation == prepared.record.generation + 1
